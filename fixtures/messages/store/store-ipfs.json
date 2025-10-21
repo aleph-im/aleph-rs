@@ -1,0 +1,29 @@
+{
+  "sender": "0x238224C744F4b90b4494516e074D2676ECfC6803",
+  "chain": "ETH",
+  "signature": "0x9c87f5d659b9165be7cbd4b9f0bd5df5c66b9bb9a384a0a33b1277428be21244595a0731697035c4b085064cd3fc088bc5b3cddeb22159e7f462e6e5b5e7e8181c",
+  "type": "STORE",
+  "item_content": "{\"address\":\"0x238224C744F4b90b4494516e074D2676ECfC6803\",\"time\":1761047957.7483068,\"item_type\":\"ipfs\",\"item_hash\":\"QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8\"}",
+  "item_type": "inline",
+  "item_hash": "afe106f1fd70b6b806e0452cc2f9485e518143581ffd046ae19fc64af7b6bbaa",
+  "time": 1761047957.74837,
+  "channel": "ALEPH-CLOUDSOLUTIONS",
+  "content": {
+    "address": "0x238224C744F4b90b4494516e074D2676ECfC6803",
+    "time": 1761047957.7483068,
+    "item_type": "ipfs",
+    "item_hash": "QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8",
+    "size": null,
+    "content_type": null,
+    "ref": null,
+    "metadata": null
+  },
+  "confirmed": true,
+  "confirmations": [
+    {
+      "chain": "ETH",
+      "height": 23626206,
+      "hash": "0x7e73ff97d7920fcfc289a899aeac4bc2898d1482a9876bd2ac4584ae876d22be"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aleph-types",
+]
+
+[workspace.dependencies]
+assert_matches = { version = "1.5.0" }
+chrono = { version = "0.4.42" }
+rstest = { version = "0.26.1" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145" }
+sha2 = { version = "0.10.9" }
+thiserror = { version = "2.0.17" }
