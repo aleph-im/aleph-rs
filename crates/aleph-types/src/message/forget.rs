@@ -48,7 +48,7 @@ mod tests {
             message.item_hash,
             item_hash!("35ea7a4bdd8c631b5ccec84ddf3b0ac65a0da1fbb2942d77eac27577326a8a0f")
         );
-        assert_eq!(message.time, Timestamp::try_from(1762515432.413).unwrap());
+        assert_eq!(message.time, Timestamp::from(1762515432.413));
         assert_eq!(message.channel, Some(channel!("TEST")));
 
         // Check content fields
@@ -56,10 +56,7 @@ mod tests {
             &message.content.address,
             &address!("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef")
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::try_from(1762515432.413).unwrap()
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1762515432.413));
 
         // Check aggregate content fields
         let forget_content = match message.content() {

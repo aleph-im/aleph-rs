@@ -114,7 +114,7 @@ mod tests {
             &message.item_hash.to_string(),
             "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"
         );
-        assert_eq!(message.time, Timestamp::try_from(1757026128.773).unwrap());
+        assert_eq!(message.time, Timestamp::from(1757026128.773));
         assert_eq!(message.channel, Some(channel!("ALEPH-CLOUDSOLUTIONS")));
 
         // Check content fields
@@ -122,10 +122,7 @@ mod tests {
             &message.content.address,
             &Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string())
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::try_from(1757026128.773).unwrap()
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1757026128.773));
 
         // Check program content fields
         let program_content = match message.content() {

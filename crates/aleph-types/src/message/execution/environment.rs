@@ -91,7 +91,7 @@ pub struct CpuProperties {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// GPU device class. See https://admin.pci-ids.ucw.cz/read/PD/03.
+/// GPU device class. See <https://admin.pci-ids.ucw.cz/read/PD/03>.
 pub enum GpuDeviceClass {
     #[serde(rename = "0300")]
     VgaCompatibleController,
@@ -105,7 +105,7 @@ pub struct GpuProperties {
     pub vendor: String,
     /// GPU vendor card name.
     pub device_name: String,
-    /// GPU device class. See https://admin.pci-ids.ucw.cz/read/PD/03.
+    /// GPU device class. See <https://admin.pci-ids.ucw.cz/read/PD/03>.
     pub device_class: GpuDeviceClass,
     /// GPU vendor & device IDs.
     pub device_id: String,

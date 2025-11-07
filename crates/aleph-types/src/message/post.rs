@@ -77,7 +77,7 @@ mod tests {
             message.item_hash,
             item_hash!("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c")
         );
-        assert_eq!(message.time, Timestamp::try_from(1762515431.653).unwrap());
+        assert_eq!(message.time, Timestamp::from(1762515431.653));
         assert_eq!(message.channel, Some(channel!("TEST")));
 
         // Check content fields
@@ -85,10 +85,7 @@ mod tests {
             &message.content.address,
             &address!("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef")
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::try_from(1762515431.653).unwrap()
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1762515431.653));
 
         // Check aggregate content fields
         let post_content = match message.content() {
@@ -141,7 +138,7 @@ mod tests {
             message.item_hash,
             item_hash!("203291b2581b379997b8a0fda43d3afe27573489ca695b711d67fd1a6311b3dd")
         );
-        assert_eq!(message.time, Timestamp::try_from(1762515432.375).unwrap());
+        assert_eq!(message.time, Timestamp::from(1762515432.375));
         assert_eq!(message.channel, Some(channel!("TEST")));
 
         // Check content fields
@@ -149,10 +146,7 @@ mod tests {
             &message.content.address,
             &address!("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef")
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::try_from(1762515432.375).unwrap()
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1762515432.375));
 
         // Check aggregate content fields
         let post_content = match message.content() {
