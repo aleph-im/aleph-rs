@@ -1,0 +1,22 @@
+{
+  "sender": "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef",
+  "chain": "ETH",
+  "signature": "0x2e80006a8e60cb51b1aaa052069d7b86aeea6f4460f7f0fa824f3ed2b6989e4b6ec9cdf8522a257f1fa4e729e3bbec728f75b1cb538b359cbe7340937b336a771b",
+  "type": "FORGET",
+  "item_content": "{\"address\":\"0xB68B9D4f3771c246233823ed1D3Add451055F9Ef\",\"time\":1762515432.413,\"hashes\":[\"ecd3bab3db7b449ad7875336c9a46dbbe6a010b023fc9525d81e8fdf56936ea1\"],\"reason\":\"None\"}",
+  "item_type": "inline",
+  "item_hash": "35ea7a4bdd8c631b5ccec84ddf3b0ac65a0da1fbb2942d77eac27577326a8a0f",
+  "time": 1762515432.413,
+  "channel": "TEST",
+  "content": {
+    "address": "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef",
+    "time": 1762515432.413,
+    "hashes": [
+      "ecd3bab3db7b449ad7875336c9a46dbbe6a010b023fc9525d81e8fdf56936ea1"
+    ],
+    "aggregates": [],
+    "reason": "None"
+  },
+  "confirmed": false,
+  "confirmations": []
+}
