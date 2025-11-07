@@ -107,7 +107,7 @@ pub struct PersistentVolumeSize(MiB);
 
 impl PersistentVolumeSize {
     const MIN: u64 = 1;
-    const MAX: u64 =  gigabyte_to_mebibyte(2048);
+    const MAX: u64 = gigabyte_to_mebibyte(2048);
 }
 
 impl TryFrom<u64> for PersistentVolumeSize {

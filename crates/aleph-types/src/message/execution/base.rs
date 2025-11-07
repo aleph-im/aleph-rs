@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use crate::chain::{Address, Chain};
-use serde::{Deserialize, Serialize};
 use crate::item_hash::ItemHash;
 use crate::message::execution::environment::{HostRequirements, MachineResources};
 use crate::message::execution::volume::MachineVolume;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Code and data can be provided in plain format, as zip or as squashfs partition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -102,7 +102,9 @@ impl Bytes {
 /// Helper macro to declare a new memory unit and implement `MemorySize` + basic From/TryFrom.
 macro_rules! mem_unit {
     ($name:ident, $bytes_per_unit:expr) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
         pub struct $name(u64);
         impl MemorySize for $name {
             #[inline]
@@ -148,7 +150,7 @@ mem_unit!(GB, 1000u64 * 1000 * 1000);
 /// ounds up to ensure that data of a given size will fit in the space allocated.
 pub const fn gigabyte_to_mebibyte(gb: u64) -> u64 {
     let mebibyte = (1 << 20) as f64;
-    let gigabyte= 1_000_000_000f64;
+    let gigabyte = 1_000_000_000f64;
 
     let result = gb as f64 * gigabyte / mebibyte;
     result.ceil() as u64
@@ -192,4 +194,3 @@ mod tests {
         assert_eq!(mib, 19074);
     }
 }
-

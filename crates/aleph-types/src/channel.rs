@@ -19,8 +19,5 @@ impl From<String> for Channel {
 /// ```
 #[macro_export]
 macro_rules! channel {
-    ($channel:expr) => {{
-        $crate::channel::Channel::from($channel.to_string())
-    }};
+    ($channel:expr) => {{ $crate::channel::Channel::from($channel.to_string()) }};
 }
-

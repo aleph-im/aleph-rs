@@ -37,7 +37,7 @@ mod test {
     ));
 
     #[test]
-    fn test_deserialize_program_message() {
+    fn test_deserialize_instance_message() {
         let message: Message = serde_json::from_str(INSTANCE_PAYG_FIXTURE).unwrap();
 
         assert_eq!(
@@ -76,7 +76,7 @@ mod test {
             &Timestamp::try_from(1762349117.833176).unwrap()
         );
 
-        // Check program content fields
+        // Check instance content fields
         let instance_content = match message.content() {
             MessageContentEnum::Instance(content) => content,
             other => {

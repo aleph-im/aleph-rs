@@ -1,0 +1,93 @@
+{
+  "sender": "0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10",
+  "chain": "ETH",
+  "signature": "0x7d14b66772d97f5a7f9915875b34eae3df117f0a2cd6ffada3bfee09313441e853c1fdf813158b3109e1f85aacb8410894e7d76b552a7821d2280aac956528591c",
+  "type": "AGGREGATE",
+  "item_content": null,
+  "item_type": "storage",
+  "item_hash": "3ad7f29b5b451b3e49d6054a8966aa7e728ac0f07dd7ef25f3bd2455f1408190",
+  "time": 1762518461.524221,
+  "channel": "FOUNDATION",
+  "content": {
+    "address": "0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10",
+    "time": 1762518461.4893668,
+    "key": "corechannel",
+    "content": {
+      "nodes": [
+        {
+          "hash": "6c7578899ac475fbdc05c6a4711331c7590aa6b719f0c169941b99a10faf1136",
+          "name": "Moshe",
+          "time": 1608307687.846,
+          "owner": "0xd461cf004EdA0DDB0028B831B62bf38b3a6D1e5A",
+          "score": 0.9585069615986975,
+          "banner": "1138159a870754656e03ae3521d5bee75fbdd5d8d5cdb255d90184c2a3d57cb7",
+          "locked": false,
+          "reward": "0x576817c4CB0e1a9d3FcA08Da87E5235931C6f8B1",
+          "status": "active",
+          "address": "",
+          "manager": "0x25020a5F992a70E61686D21A473f464d86BaF9BD",
+          "picture": "65e0eafc2d2a5350c2e4be794c3faa01b2d9e7ed28104d92a8b9b2dd7ddc6f37",
+          "stakers": {
+            "0x30719B613E44A843239D582E1eAc65A19a0F0B29": 30898.271940365612,
+            "0x3Fb69C31E8f83DF4De59737Ed1763bB20e280a0d": 45758.729108025145,
+            "0x576817c4CB0e1a9d3FcA08Da87E5235931C6f8B1": 290922.5876183355,
+            "0x8398C9737F8CA02b751cafdeA535950df914De93": 72741.4432558079,
+            "0x91931B8A2cA5D51b28c0C52e116240Cd0A5Bf796": 18932.37529559268,
+            "0x988D7dD14120fBCda3ed33feD706ba598E382721": 145034.6738632191,
+            "0xC0B53221A7dbcbcE68441C26ea4DA73266D6bc20": 17271.937271604067,
+            "0xe8eF0d1f1d5a79E52A0cab57f512727D6882a6d2": 10994.701988702262
+          },
+          "has_bonus": true,
+          "authorized": [],
+          "description": "I am the aleph.im project founder, this is my personal node. If there are other nodes in need of stakers, stake there!",
+          "performance": 0,
+          "multiaddress": "/ip4/46.255.204.193/tcp/4025/p2p/Qmb5b2ZwJm9pVWrppf3D3iMF1bXbjZhbJTwGvKEBMZNxa2",
+          "total_staked": 632554.7203416523,
+          "score_updated": true,
+          "stream_reward": "",
+          "inactive_since": null,
+          "resource_nodes": [
+            "fa5e90818bf50f358b642ed31361d83a0c6e94a1e07b055764d7e82789437f82",
+            "b93eaba554318bd074819477e48147bb7bf4121bb771a6074022b0bf412cacc0",
+            "4680d7473e914883839f3b9aa7bb3739cdba83d5f99a4b673b9abd8f8f6c1c97",
+            "0a60c56fcf03eb0cbb087805853ac6ae56385cfca47690a87443495acd417c56",
+            "28f5917fce6a33e2d10602cd547ba591d1f0cddc7858e142bdbe5b83bae43730"
+          ],
+          "decentralization": 0.9745233399079554,
+          "registration_url": "",
+          "terms_and_conditions": ""
+        }
+      ],
+      "resource_nodes": [
+        {
+          "hash": "fa5e90818bf50f358b642ed31361d83a0c6e94a1e07b055764d7e82789437f82",
+          "name": "tokenchain1",
+          "time": 1643038411.233,
+          "type": "compute",
+          "owner": "0x39Fbd6387Ec958FF9829385366AC2bD8DdF65Ef2",
+          "score": 0.0,
+          "banner": "",
+          "locked": false,
+          "parent": "6c7578899ac475fbdc05c6a4711331c7590aa6b719f0c169941b99a10faf1136",
+          "reward": "0x39Fbd6387Ec958FF9829385366AC2bD8DdF65Ef2",
+          "status": "linked",
+          "address": "https://a-node-719754-y.tokenchain.network",
+          "manager": "",
+          "picture": "8606fb5e2117726b82c68196d3dacb1d3e017dc16d15759d31c757dc4f2c29aa",
+          "authorized": "",
+          "description": "",
+          "performance": 0,
+          "multiaddress": "",
+          "score_updated": true,
+          "stream_reward": "",
+          "inactive_since": 19401322,
+          "decentralization": 0.9954562724420193,
+          "registration_url": "",
+          "terms_and_conditions": "d4876d1485a646505a71a29e5152a8960f9abf3483bd106d211a72b40d2b1836"
+        }
+      ]
+    }
+  },
+  "confirmed": false,
+  "confirmations": []
+}

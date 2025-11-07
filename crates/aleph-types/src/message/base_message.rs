@@ -297,6 +297,4 @@ mod tests {
         let result = serde_json::from_str::<ContentSource>(content_source_str);
         assert!(result.is_err());
     }
-
-
 }
