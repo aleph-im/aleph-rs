@@ -122,10 +122,7 @@ mod tests {
             &message.content.address,
             &Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string())
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::from(1757026128.773)
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1757026128.773));
 
         // Check program content fields
         let program_content = match message.content() {

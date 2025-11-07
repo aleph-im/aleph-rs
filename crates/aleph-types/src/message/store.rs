@@ -72,10 +72,7 @@ mod tests {
             &message.content.address,
             &Address::from("0x238224C744F4b90b4494516e074D2676ECfC6803".to_string())
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::from(1761047957.7483068)
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1761047957.7483068));
 
         // Check STORE-specific fields
         match message.content() {

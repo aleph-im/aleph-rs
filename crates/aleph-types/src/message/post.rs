@@ -85,10 +85,7 @@ mod tests {
             &message.content.address,
             &address!("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef")
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::from(1762515431.653)
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1762515431.653));
 
         // Check aggregate content fields
         let post_content = match message.content() {
@@ -149,10 +146,7 @@ mod tests {
             &message.content.address,
             &address!("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef")
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::from(1762515432.375)
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1762515432.375));
 
         // Check aggregate content fields
         let post_content = match message.content() {

@@ -60,10 +60,7 @@ mod test {
             message.item_hash,
             item_hash!("a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564")
         );
-        assert_eq!(
-            message.time,
-            Timestamp::from(1762349117.833245)
-        );
+        assert_eq!(message.time, Timestamp::from(1762349117.833245));
         assert_eq!(message.channel, Some(channel!("ALEPH-CLOUDSOLUTIONS")));
 
         // Check content fields
@@ -71,10 +68,7 @@ mod test {
             &message.content.address,
             &address!("0x238224C744F4b90b4494516e074D2676ECfC6803")
         );
-        assert_eq!(
-            &message.content.time,
-            &Timestamp::from(1762349117.833176)
-        );
+        assert_eq!(&message.content.time, &Timestamp::from(1762349117.833176));
 
         // Check instance content fields
         let instance_content = match message.content() {
