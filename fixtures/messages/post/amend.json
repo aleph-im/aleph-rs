@@ -1,0 +1,22 @@
+{
+  "sender": "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef",
+  "chain": "ETH",
+  "signature": "0xf4a171d2715f2249c6f78160a83a64fb05c21962acdf3729e373fd4f527ed9f570274dedcc468195ba40a26002be0b72aedf260df74032d4ef5a12cb4ea838831c",
+  "type": "POST",
+  "item_content": "{\"type\":\"amend\",\"address\":\"0xB68B9D4f3771c246233823ed1D3Add451055F9Ef\",\"content\":{\"body\":\"New content !\"},\"time\":1762515432.375,\"ref\":\"d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c\"}",
+  "item_type": "inline",
+  "item_hash": "203291b2581b379997b8a0fda43d3afe27573489ca695b711d67fd1a6311b3dd",
+  "time": 1762515432.375,
+  "channel": "TEST",
+  "content": {
+    "address": "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef",
+    "time": 1762515432.375,
+    "content": {
+      "body": "New content !"
+    },
+    "ref": "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c",
+    "type": "amend"
+  },
+  "confirmed": false,
+  "confirmations": []
+}

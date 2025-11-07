@@ -1,0 +1,22 @@
+{
+  "sender": "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef",
+  "chain": "ETH",
+  "signature": "0x636728dbea33fa6064f099045421b980dff3c71932cd89c2bf42387ebb6f53890a24e13f16678463876224772b90838c2b9557cd8fc2cdae45509ce8cb89e3fd1b",
+  "type": "POST",
+  "item_content": "{\"type\":\"05567c5b-0606-4a6e-a639-25734c06e2a0\",\"address\":\"0xB68B9D4f3771c246233823ed1D3Add451055F9Ef\",\"content\":{\"body\":\"Hello World\"},\"time\":1762515431.653}",
+  "item_type": "inline",
+  "item_hash": "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c",
+  "time": 1762515431.653,
+  "channel": "TEST",
+  "content": {
+    "address": "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef",
+    "time": 1762515431.653,
+    "content": {
+      "body": "Hello World"
+    },
+    "ref": null,
+    "type": "05567c5b-0606-4a6e-a639-25734c06e2a0"
+  },
+  "confirmed": false,
+  "confirmations": []
+}
