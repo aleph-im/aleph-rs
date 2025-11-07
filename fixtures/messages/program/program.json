@@ -1,0 +1,71 @@
+{
+  "sender": "0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885",
+  "chain": "ETH",
+  "signature": "0x421c656709851fba752f323a117bc7a07f175a4dd7faf1d8fc1cd9a99028081a6419f9e8b0a7cd454bfef1c52d1f0675a7a59a7d07eb4ebdb22e18bbaf415f881c",
+  "type": "PROGRAM",
+  "item_content": "{\"address\":\"0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885\",\"time\":1757026128.773,\"type\":\"vm-function\",\"allow_amend\":false,\"metadata\":{\"name\":\"Hoymiles\"},\"on\":{\"http\":true,\"persistent\":false},\"environment\":{\"reproducible\":false,\"internet\":true,\"aleph_api\":true,\"shared_cache\":false},\"resources\":{\"vcpus\":2,\"memory\":4096,\"seconds\":30},\"runtime\":{\"ref\":\"63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696\",\"use_latest\":true,\"comment\":\"Aleph Alpine Linux with Python 3.12\"},\"volumes\":[{\"mount\":\"/opt/packages\",\"ref\":\"8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6\",\"use_latest\":true}],\"variables\":{},\"payment\":{\"chain\":\"ETH\",\"type\":\"hold\"},\"code\":{\"encoding\":\"zip\",\"entrypoint\":\"main:app\",\"ref\":\"9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e\",\"use_latest\":true}}",
+  "item_type": "inline",
+  "item_hash": "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c",
+  "time": 1757026128.773,
+  "channel": "ALEPH-CLOUDSOLUTIONS",
+  "content": {
+    "address": "0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885",
+    "time": 1757026128.773,
+    "allow_amend": false,
+    "metadata": {
+      "name": "Hoymiles"
+    },
+    "authorized_keys": null,
+    "variables": {},
+    "environment": {
+      "reproducible": false,
+      "internet": true,
+      "aleph_api": true,
+      "shared_cache": false
+    },
+    "resources": {
+      "vcpus": 2,
+      "memory": 4096,
+      "seconds": 30,
+      "published_ports": null
+    },
+    "payment": {
+      "chain": "ETH",
+      "receiver": null,
+      "type": "hold"
+    },
+    "requirements": null,
+    "volumes": [
+      {
+        "comment": null,
+        "mount": "/opt/packages",
+        "ref": "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6",
+        "use_latest": true
+      }
+    ],
+    "replaces": null,
+    "type": "vm-function",
+    "code": {
+      "encoding": "zip",
+      "entrypoint": "main:app",
+      "ref": "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e",
+      "interface": null,
+      "args": null,
+      "use_latest": true
+    },
+    "runtime": {
+      "ref": "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696",
+      "use_latest": true,
+      "comment": "Aleph Alpine Linux with Python 3.12"
+    },
+    "data": null,
+    "export": null,
+    "on": {
+      "http": true,
+      "message": null,
+      "persistent": false
+    }
+  },
+  "confirmed": false,
+  "confirmations": []
+}

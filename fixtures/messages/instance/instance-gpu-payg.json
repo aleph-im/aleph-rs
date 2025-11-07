@@ -1,0 +1,78 @@
+{
+  "sender": "0x238224C744F4b90b4494516e074D2676ECfC6803",
+  "chain": "ETH",
+  "signature": "0x4f7250efd67d989ac3067358ee657e301cd437fd0b4acb38342402e60125a0a209818f555386cd17b82080aba0a7a5cd83e4e1d8875c58b38f2e64cbe5dd308f1c",
+  "type": "INSTANCE",
+  "item_content": "{\"address\":\"0x238224C744F4b90b4494516e074D2676ECfC6803\",\"time\":1762349117.833176,\"allow_amend\":false,\"metadata\":{\"name\":\"gpu-l40s-2\"},\"authorized_keys\":[\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC068SD08xlTtMxTdmCe3rPVM/uA7SvgDUiQwP0FrIGS Libertai\"],\"environment\":{\"internet\":true,\"aleph_api\":true,\"hypervisor\":\"qemu\",\"reproducible\":false,\"shared_cache\":false},\"resources\":{\"vcpus\":12,\"memory\":73728,\"seconds\":30},\"payment\":{\"chain\":\"BASE\",\"receiver\":\"0xf0c0ddf11a0dCE6618B5DF8d9fAE3D95e72E04a9\",\"type\":\"superfluid\"},\"requirements\":{\"node\":{\"node_hash\":\"dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04\"},\"gpu\":[{\"vendor\":\"NVIDIA\",\"device_name\":\"AD102GL [L40S]\",\"device_class\":\"0302\",\"device_id\":\"10de:26b9\"}]},\"volumes\":[],\"rootfs\":{\"parent\":{\"ref\":\"b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717\",\"use_latest\":true},\"persistence\":\"host\",\"size_mib\":737280}}",
+  "item_type": "inline",
+  "item_hash": "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564",
+  "time": 1762349117.833245,
+  "channel": "ALEPH-CLOUDSOLUTIONS",
+  "content": {
+    "address": "0x238224C744F4b90b4494516e074D2676ECfC6803",
+    "time": 1762349117.833176,
+    "allow_amend": false,
+    "metadata": {
+      "name": "gpu-l40s-2"
+    },
+    "authorized_keys": [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC068SD08xlTtMxTdmCe3rPVM/uA7SvgDUiQwP0FrIGS Libertai"
+    ],
+    "variables": null,
+    "environment": {
+      "internet": true,
+      "aleph_api": true,
+      "hypervisor": "qemu",
+      "trusted_execution": null,
+      "reproducible": false,
+      "shared_cache": false
+    },
+    "resources": {
+      "vcpus": 12,
+      "memory": 73728,
+      "seconds": 30,
+      "published_ports": null
+    },
+    "payment": {
+      "chain": "BASE",
+      "receiver": "0xf0c0ddf11a0dCE6618B5DF8d9fAE3D95e72E04a9",
+      "type": "superfluid"
+    },
+    "requirements": {
+      "cpu": null,
+      "node": {
+        "owner": null,
+        "address_regex": null,
+        "node_hash": "dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04",
+        "terms_and_conditions": null
+      },
+      "gpu": [
+        {
+          "vendor": "NVIDIA",
+          "device_name": "AD102GL [L40S]",
+          "device_class": "0302",
+          "device_id": "10de:26b9"
+        }
+      ]
+    },
+    "volumes": [],
+    "replaces": null,
+    "rootfs": {
+      "parent": {
+        "ref": "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717",
+        "use_latest": true
+      },
+      "persistence": "host",
+      "size_mib": 737280,
+      "forgotten_by": null
+    }
+  },
+  "confirmed": true,
+  "confirmations": [
+    {
+      "chain": "ETH",
+      "height": 23733404,
+      "hash": "0xda1dd1676b5f08cef019172a7b31de303c86aafe8cb209916cf5ffa2bc5871dc"
+    }
+  ]
+}

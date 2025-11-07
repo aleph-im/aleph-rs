@@ -34,7 +34,6 @@ mod tests {
     use crate::message::{ContentSource, MessageType};
     use crate::timestamp::Timestamp;
     use assert_matches::assert_matches;
-    use std::any::Any;
 
     const STORE_IPFS_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -95,10 +94,7 @@ mod tests {
                 assert!(store.metadata.is_none());
             }
             other => {
-                panic!(
-                    "Expected StoreContentEnum::Store, got {:?}",
-                    other.type_id()
-                )
+                panic!("Expected MessageContentEnum::Store, got {:?}", other)
             }
         }
 
@@ -123,6 +119,6 @@ mod tests {
         let serialized_message = serde_json::to_string(&message).unwrap();
         let deserialized_message: Message = serde_json::from_str(&serialized_message).unwrap();
 
-        assert_eq!(message, deserialized_message);       
+        assert_eq!(message, deserialized_message);
     }
 }
