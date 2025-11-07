@@ -77,7 +77,7 @@ mod tests {
         );
         assert_eq!(
             message.time,
-            Timestamp::try_from(1762518461.524221).unwrap()
+            Timestamp::from(1762518461.524221)
         );
         assert_eq!(message.channel, Some(channel!("FOUNDATION")));
 
@@ -88,7 +88,7 @@ mod tests {
         );
         assert_eq!(
             &message.content.time,
-            &Timestamp::try_from(1762518461.4893668).unwrap()
+            &Timestamp::from(1762518461.4893668)
         );
 
         // Check aggregate content fields

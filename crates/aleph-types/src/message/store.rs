@@ -64,7 +64,7 @@ mod tests {
             &message.item_hash.to_string(),
             "afe106f1fd70b6b806e0452cc2f9485e518143581ffd046ae19fc64af7b6bbaa"
         );
-        assert_eq!(message.time, Timestamp::try_from(1761047957.74837).unwrap());
+        assert_eq!(message.time, Timestamp::from(1761047957.74837));
         assert_matches!(message.channel, Some(ref channel) if channel == &Channel::from("ALEPH-CLOUDSOLUTIONS".to_string()));
 
         // Check content fields
@@ -74,7 +74,7 @@ mod tests {
         );
         assert_eq!(
             &message.content.time,
-            &Timestamp::try_from(1761047957.7483068).unwrap()
+            &Timestamp::from(1761047957.7483068)
         );
 
         // Check STORE-specific fields

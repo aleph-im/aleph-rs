@@ -62,7 +62,7 @@ mod test {
         );
         assert_eq!(
             message.time,
-            Timestamp::try_from(1762349117.833245).unwrap()
+            Timestamp::from(1762349117.833245)
         );
         assert_eq!(message.channel, Some(channel!("ALEPH-CLOUDSOLUTIONS")));
 
@@ -73,7 +73,7 @@ mod test {
         );
         assert_eq!(
             &message.content.time,
-            &Timestamp::try_from(1762349117.833176).unwrap()
+            &Timestamp::from(1762349117.833176)
         );
 
         // Check instance content fields
