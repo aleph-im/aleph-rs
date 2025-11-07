@@ -82,6 +82,26 @@ impl<'de> Deserialize<'de> for ItemHash {
     }
 }
 
+/// Macro for creating ItemHash instances from hex string literals.
+///
+/// This macro simplifies creating ItemHash instances in tests and other code
+/// by panicking on invalid input (similar to `vec!` or `format!`).
+///
+/// # Example
+///
+/// ```
+/// use aleph_types::item_hash;
+/// let hash = item_hash!("3c5b05761c8f94a7b8fe6d0d43e5fb91f9689c53c078a870e5e300c7da8a1878");
+/// ```
+#[macro_export]
+macro_rules! item_hash {
+    ($hex:expr) => {{
+        $crate::item_hash::ItemHash::try_from($hex)
+            .expect(concat!("Invalid ItemHash: ", $hex))
+    }};
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

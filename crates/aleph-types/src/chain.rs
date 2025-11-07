@@ -79,6 +79,19 @@ impl From<String> for Address {
     }
 }
 
+/// Macro for creating Address instances from string literals.
+///
+/// # Example
+///
+/// ```
+/// use aleph_types::address;
+/// let address = address!("0x238224C744F4b90b4494516e074D2676ECfC6803");
+/// ```
+#[macro_export]
+macro_rules! address {
+    ($address:expr) => {{ $crate::chain::Address::from($address.to_string()) }};
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Signature(String);
 
@@ -86,4 +99,17 @@ impl From<String> for Signature {
     fn from(value: String) -> Self {
         Self(value)
     }
+}
+
+/// Macro for creating Signature instances from string literals.
+///
+/// # Example
+///
+/// ```
+/// use aleph_types::signature;
+/// let signature = signature!("0x123456789");
+/// ```
+#[macro_export]
+macro_rules! signature {
+    ($signature:expr) => {{ $crate::chain::Signature::from($signature.to_string()) }};
 }
