@@ -63,7 +63,6 @@ pub struct ProgramContent {
     pub export: Option<Export>,
     /// Signals that trigger an execution.
     pub on: FunctionTriggers,
-
 }
 
 impl ProgramContent {
@@ -74,7 +73,6 @@ impl ProgramContent {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use super::*;
     use crate::chain::{Address, Chain, Signature};
     use crate::message::base_message::MessageContentEnum;
@@ -85,6 +83,7 @@ mod tests {
     use crate::timestamp::Timestamp;
     use crate::{channel, item_hash};
     use assert_matches::assert_matches;
+    use std::collections::HashMap;
 
     const PROGRAM_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

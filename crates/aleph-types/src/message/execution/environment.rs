@@ -1,7 +1,7 @@
 use crate::chain::Address;
 use crate::item_hash::ItemHash;
-use serde::{Deserialize, Serialize};
 use crate::storage_size::{MemorySize, MiB};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionTriggers {
@@ -29,7 +29,7 @@ pub struct Port(u16);
 /// IPv4 port to forward from a randomly assigned port on the host to the VM.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublishedPort {
-    #[serde(default="default_tcp")]
+    #[serde(default = "default_tcp")]
     protocol: NetworkProtocol,
     /// Port to expose on the guest.
     port: Port,
@@ -51,13 +51,13 @@ fn default_seconds() -> u32 {
 pub struct MachineResources {
     #[serde(default = "default_vcpus")]
     pub vcpus: u32,
-    #[serde(default="default_memory")]
+    #[serde(default = "default_memory")]
     pub memory: MiB,
     #[serde(default = "default_seconds")]
     pub seconds: u32,
     /// Guest IPv4 ports to map to open ports on the host.
     #[serde(default)]
-    pub published_ports: Option<Vec<PublishedPort>>
+    pub published_ports: Option<Vec<PublishedPort>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

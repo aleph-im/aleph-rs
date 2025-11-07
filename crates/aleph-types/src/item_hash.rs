@@ -95,12 +95,8 @@ impl<'de> Deserialize<'de> for ItemHash {
 /// ```
 #[macro_export]
 macro_rules! item_hash {
-    ($hex:expr) => {{
-        $crate::item_hash::ItemHash::try_from($hex)
-            .expect(concat!("Invalid ItemHash: ", $hex))
-    }};
+    ($hex:expr) => {{ $crate::item_hash::ItemHash::try_from($hex).expect(concat!("Invalid ItemHash: ", $hex)) }};
 }
-
 
 #[cfg(test)]
 mod tests {
