@@ -10,6 +10,7 @@ use crate::message::store::StoreContent;
 use crate::timestamp::Timestamp;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
+use std::fmt::Formatter;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -20,6 +21,45 @@ pub enum MessageType {
     Post,
     Program,
     Store,
+}
+
+impl std::fmt::Display for MessageType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            MessageType::Aggregate => "AGGREGATE",
+            MessageType::Forget => "FORGET",
+            MessageType::Instance => "INSTANCE",
+            MessageType::Post => "POST",
+            MessageType::Program => "PROGRAM",
+            MessageType::Store => "STORE",
+        };
+
+        f.write_str(s)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageStatus {
+    Pending,
+    Processed,
+    Removing,
+    Removed,
+    Forgotten,
+}
+
+impl std::fmt::Display for MessageStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            MessageStatus::Pending => "pending",
+            MessageStatus::Processed => "processed",
+            MessageStatus::Removing => "removing",
+            MessageStatus::Removed => "removed",
+            MessageStatus::Forgotten => "forgotten",
+        };
+
+        f.write_str(s)
+    }
 }
 
 /// Content variants for different message types.
