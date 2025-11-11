@@ -108,13 +108,10 @@ impl std::fmt::Display for SortOrder {
     }
 }
 
-// ======= The filter as pure data + annotations =======
-
 #[skip_serializing_none]
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MessageFilter {
-    // Lists -> "a,b,c"
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, MessageType>>")]
     pub message_types: Option<Vec<MessageType>>,
 
@@ -145,13 +142,14 @@ pub struct MessageFilter {
     pub start_date: Option<Timestamp>,
     pub end_date: Option<Timestamp>,
 
-    // Enums as strings from Display
     pub sort_by: Option<SortBy>,
     pub sort_order: Option<SortOrder>,
 
-    // You had this in __init__ even if not in docstring:
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, MessageStatus>>")]
     pub message_statuses: Option<Vec<MessageStatus>>,
+
+    pub pagination: Option<u32>,
+    pub page: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

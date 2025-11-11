@@ -181,6 +181,11 @@ pub struct MessageFilterCli {
     /// Message statuses. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
     pub message_statuses: Option<Vec<MessageStatusCli>>,
+
+    #[arg(long, default_value = "200")]
+    pub pagination: u32,
+    #[arg(long, default_value = "1")]
+    pub page: u32,
 }
 
 impl From<MessageFilterCli> for MessageFilter {
@@ -204,6 +209,8 @@ impl From<MessageFilterCli> for MessageFilter {
             message_statuses: c
                 .message_statuses
                 .map(|v| v.into_iter().map(Into::into).collect()),
+            pagination: Some(c.pagination),
+            page: Some(c.page),
         }
     }
 }
