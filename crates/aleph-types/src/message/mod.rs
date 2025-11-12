@@ -8,7 +8,7 @@ mod program;
 mod store;
 
 pub use aggregate::AggregateContent;
-pub use base_message::{ContentSource, Message, MessageType};
+pub use base_message::{ContentSource, Message, MessageStatus, MessageType};
 pub use forget::ForgetContent;
 pub use instance::InstanceContent;
 pub use post::PostContent;

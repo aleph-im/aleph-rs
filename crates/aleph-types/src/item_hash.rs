@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 use thiserror::Error;
 
 const HASH_LENGTH: usize = 32;
@@ -51,6 +52,14 @@ impl TryFrom<&str> for ItemHash {
                 .map_err(|_| ItemHashError::InvalidHexDigit)?;
         }
         Ok(Self { bytes })
+    }
+}
+
+impl FromStr for ItemHash {
+    type Err = ItemHashError; // whatever TryFrom<String> returns
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        ItemHash::try_from(s)
     }
 }
 
