@@ -1,6 +1,6 @@
 [package]
 name = "aleph-cli"
-version = "0.1.0-rc5"
+version = "0.1.0"
 edition = "2024"
 description = "Minimal CLI for Aleph Cloud, built in Rust."
 license = "MIT"
