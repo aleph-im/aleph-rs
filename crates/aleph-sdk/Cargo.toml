@@ -1,7 +1,11 @@
 [package]
 name = "aleph-sdk"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 edition = "2024"
+description = "Aleph Cloud SDK for client applications."
+license = "MIT"
+repository = "https://github.com/aleph-im/aleph-rs"
+homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aleph-types = { workspace = true }

@@ -1,7 +1,11 @@
 [package]
 name = "aleph-cli"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 edition = "2024"
+description = "Minimal CLI for Aleph Cloud, built in Rust."
+license = "MIT"
+repository = "https://github.com/aleph-im/aleph-rs"
+homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aleph-sdk = { workspace = true }
