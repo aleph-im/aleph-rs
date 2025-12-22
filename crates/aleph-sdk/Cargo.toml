@@ -1,6 +1,6 @@
 [package]
 name = "aleph-sdk"
-version = "0.1.0-rc2"
+version = "0.1.0-rc3"
 edition = "2024"
 description = "Aleph Cloud SDK for client applications."
 license = "MIT"
