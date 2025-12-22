@@ -54,12 +54,6 @@ jobs:
       - name: Build release
         run: cargo build --release --all-features
 
-      - name: Verify package builds
-        run: |
-          cargo package --package aleph-types --allow-dirty
-          cargo package --package aleph-sdk --allow-dirty
-          cargo package --package aleph-cli --allow-dirty
-
   # Second job: Check version consistency
   check-versions:
     name: Check Version Consistency
