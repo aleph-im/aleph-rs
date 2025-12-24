@@ -1,10 +1,10 @@
+use crate::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use thiserror::Error;
-use crate::cid::Cid;
 
 const HASH_LENGTH: usize = 32;
 
