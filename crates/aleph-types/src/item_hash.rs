@@ -1,3 +1,4 @@
+use crate::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
@@ -7,12 +8,91 @@ use thiserror::Error;
 
 const HASH_LENGTH: usize = 32;
 
+#[derive(Error, Debug)]
+pub enum ItemHashError {
+    #[error("Could not determine hash type: '{0}'")]
+    UnknownHashType(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ItemHash {
+    Native(AlephItemHash),
+    Ipfs(Cid),
+}
+
+impl From<AlephItemHash> for ItemHash {
+    fn from(value: AlephItemHash) -> Self {
+        Self::Native(value)
+    }
+}
+
+impl From<[u8; HASH_LENGTH]> for ItemHash {
+    fn from(value: [u8; HASH_LENGTH]) -> Self {
+        Self::Native(AlephItemHash::new(value))
+    }
+}
+
+impl From<Cid> for ItemHash {
+    fn from(value: Cid) -> Self {
+        Self::Ipfs(value)
+    }
+}
+
+impl TryFrom<&str> for ItemHash {
+    type Error = ItemHashError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if let Ok(native_hash) = AlephItemHash::try_from(value) {
+            return Ok(Self::Native(native_hash));
+        }
+        if let Ok(cid) = Cid::try_from(value) {
+            return Ok(Self::Ipfs(cid));
+        }
+
+        Err(ItemHashError::UnknownHashType(value.to_string()))
+    }
+}
+
+impl FromStr for ItemHash {
+    type Err = ItemHashError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
+    }
+}
+
+impl Display for ItemHash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ItemHash::Native(hash) => write!(f, "{}", hash),
+            ItemHash::Ipfs(cid) => write!(f, "{}", cid),
+        }
+    }
+}
+
+/// Macro for creating ItemHash instances from hex string literals.
+///
+/// This macro simplifies creating ItemHash instances in tests and other code
+/// by panicking on invalid input (similar to `vec!` or `format!`).
+///
+/// # Example
+///
+/// ```
+/// use aleph_types::item_hash;
+/// let hash = item_hash!("3c5b05761c8f94a7b8fe6d0d43e5fb91f9689c53c078a870e5e300c7da8a1878");
+/// ```
+#[macro_export]
+macro_rules! item_hash {
+    ($hash:expr) => {{ $crate::item_hash::ItemHash::try_from($hash).expect(concat!("Invalid ItemHash: ", $hash)) }};
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ItemHash {
+pub struct AlephItemHash {
     bytes: [u8; HASH_LENGTH],
 }
 
-impl ItemHash {
+impl AlephItemHash {
     pub fn new(bytes: [u8; HASH_LENGTH]) -> Self {
         Self { bytes }
     }
@@ -32,38 +112,38 @@ impl ItemHash {
 }
 
 #[derive(Error, Debug)]
-pub enum ItemHashError {
+pub enum AlephItemHashError {
     #[error("{0}: invalid hash length, expected 64 hex characters")]
     InvalidLength(String),
     #[error("invalid hex digit in hash string: {0}")]
     InvalidHexDigit(String),
 }
 
-impl TryFrom<&str> for ItemHash {
-    type Error = ItemHashError;
+impl TryFrom<&str> for AlephItemHash {
+    type Error = AlephItemHashError;
 
     fn try_from(hex: &str) -> Result<Self, Self::Error> {
         if hex.len() != 2 * HASH_LENGTH {
-            return Err(ItemHashError::InvalidLength(hex.to_string()));
+            return Err(AlephItemHashError::InvalidLength(hex.to_string()));
         }
         let mut bytes = [0u8; HASH_LENGTH];
         for i in 0..HASH_LENGTH {
             bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-                .map_err(|_| ItemHashError::InvalidHexDigit(hex.to_string()))?;
+                .map_err(|_| AlephItemHashError::InvalidHexDigit(hex.to_string()))?;
         }
         Ok(Self { bytes })
     }
 }
 
-impl FromStr for ItemHash {
-    type Err = ItemHashError; // whatever TryFrom<String> returns
+impl FromStr for AlephItemHash {
+    type Err = AlephItemHashError; // whatever TryFrom<String> returns
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        ItemHash::try_from(s)
+        AlephItemHash::try_from(s)
     }
 }
 
-impl Display for ItemHash {
+impl Display for AlephItemHash {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         for byte in self.bytes.iter() {
             write!(f, "{:02x}", byte)?;
@@ -72,7 +152,7 @@ impl Display for ItemHash {
     }
 }
 
-impl Serialize for ItemHash {
+impl Serialize for AlephItemHash {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -81,30 +161,14 @@ impl Serialize for ItemHash {
     }
 }
 
-impl<'de> Deserialize<'de> for ItemHash {
+impl<'de> Deserialize<'de> for AlephItemHash {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        ItemHash::try_from(s.as_str()).map_err(serde::de::Error::custom)
+        Self::try_from(s.as_str()).map_err(serde::de::Error::custom)
     }
-}
-
-/// Macro for creating ItemHash instances from hex string literals.
-///
-/// This macro simplifies creating ItemHash instances in tests and other code
-/// by panicking on invalid input (similar to `vec!` or `format!`).
-///
-/// # Example
-///
-/// ```
-/// use aleph_types::item_hash;
-/// let hash = item_hash!("3c5b05761c8f94a7b8fe6d0d43e5fb91f9689c53c078a870e5e300c7da8a1878");
-/// ```
-#[macro_export]
-macro_rules! item_hash {
-    ($hex:expr) => {{ $crate::item_hash::ItemHash::try_from($hex).expect(concat!("Invalid ItemHash: ", $hex)) }};
 }
 
 #[cfg(test)]
@@ -112,21 +176,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new() {
+    fn test_new_aleph_item_hash() {
         let bytes = [0u8; HASH_LENGTH];
-        let hash = ItemHash::new(bytes);
+        let hash = AlephItemHash::new(bytes);
         assert_eq!(hash.as_bytes(), &bytes);
     }
 
     #[test]
-    fn test_from_bytes() {
+    fn test_aleph_item_hash_from_bytes() {
         let input = b"test data";
-        let hash = ItemHash::from_bytes(input);
+        let hash = AlephItemHash::from_bytes(input);
         assert_eq!(hash.as_bytes().len(), HASH_LENGTH);
     }
 
     #[test]
-    fn test_try_from_valid() {
+    fn test_try_from_valid_hex() {
         let hex = "3c5b05761c8f94a7b8fe6d0d43e5fb91f9689c53c078a870e5e300c7da8a1878";
         let hash = ItemHash::try_from(hex).unwrap();
         assert_eq!(format!("{}", hash), hex);
@@ -146,7 +210,7 @@ mod tests {
     #[test]
     fn test_display() {
         let bytes = [0xab; HASH_LENGTH];
-        let hash = ItemHash::new(bytes);
+        let hash = ItemHash::from(bytes);
         assert_eq!(
             format!("{}", hash),
             "abababababababababababababababababababababababababababababababab"
