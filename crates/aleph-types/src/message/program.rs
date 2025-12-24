@@ -90,6 +90,11 @@ mod tests {
         "/../../fixtures/messages/program/program.json"
     ));
 
+    const PROGRAM_WITH_EMPTY_ARRAY_AS_METADATA: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/messages/program/program-with-array-as-metadata.json"
+    ));
+
     #[test]
     fn test_deserialize_program_message() {
         let message: Message = serde_json::from_str(PROGRAM_FIXTURE).unwrap();
@@ -210,5 +215,23 @@ mod tests {
         // No confirmation on this fixture
         assert!(!message.confirmed());
         assert!(message.confirmations.is_empty());
+    }
+
+    #[test]
+    /// Some nodes return old PROGRAM messages where the metadata field is an empty list instead of
+    /// an object. While this should never happen, fixing this server-side is tricky so we support
+    /// it in the SDK by treating it like an empty map.
+    fn load_program_with_empty_array_as_metadata() {
+        let message: Message = serde_json::from_str(PROGRAM_WITH_EMPTY_ARRAY_AS_METADATA).unwrap();
+
+        // Check that the metadata field is empty
+        let program_content = match message.content() {
+            MessageContentEnum::Program(content) => content,
+            other => {
+                panic!("Expected MessageContentEnum::Program, got {:?}", other);
+            }
+        };
+
+        assert_matches!(program_content.base.metadata, Some(ref map) if map.is_empty());
     }
 }
