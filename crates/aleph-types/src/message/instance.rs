@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceContent {
     #[serde(flatten)]
-    base: ExecutableContent,
+    pub base: ExecutableContent,
     /// Properties of the instance execution environment.
-    environment: InstanceEnvironment,
+    pub environment: InstanceEnvironment,
     /// Root filesystem for the instance.
-    rootfs: RootfsVolume,
+    pub rootfs: RootfsVolume,
 }
 
 #[cfg(test)]
