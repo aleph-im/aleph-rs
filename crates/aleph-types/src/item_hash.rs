@@ -33,10 +33,10 @@ impl ItemHash {
 
 #[derive(Error, Debug)]
 pub enum ItemHashError {
-    #[error("invalid hash length, expected 64 hex characters")]
-    InvalidLength,
-    #[error("invalid hex digit in hash string")]
-    InvalidHexDigit,
+    #[error("{0}: invalid hash length, expected 64 hex characters")]
+    InvalidLength(String),
+    #[error("invalid hex digit in hash string: {0}")]
+    InvalidHexDigit(String),
 }
 
 impl TryFrom<&str> for ItemHash {
@@ -44,12 +44,12 @@ impl TryFrom<&str> for ItemHash {
 
     fn try_from(hex: &str) -> Result<Self, Self::Error> {
         if hex.len() != 2 * HASH_LENGTH {
-            return Err(ItemHashError::InvalidLength);
+            return Err(ItemHashError::InvalidLength(hex.to_string()));
         }
         let mut bytes = [0u8; HASH_LENGTH];
         for i in 0..HASH_LENGTH {
             bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-                .map_err(|_| ItemHashError::InvalidHexDigit)?;
+                .map_err(|_| ItemHashError::InvalidHexDigit(hex.to_string()))?;
         }
         Ok(Self { bytes })
     }
