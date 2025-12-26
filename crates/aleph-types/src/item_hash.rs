@@ -87,7 +87,7 @@ macro_rules! item_hash {
     ($hash:expr) => {{ $crate::item_hash::ItemHash::try_from($hash).expect(concat!("Invalid ItemHash: ", $hash)) }};
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AlephItemHash {
     bytes: [u8; HASH_LENGTH],
 }
@@ -149,6 +149,13 @@ impl Display for AlephItemHash {
             write!(f, "{:02x}", byte)?;
         }
         Ok(())
+    }
+}
+
+// Use the Display implementation for debug formatting
+impl std::fmt::Debug for AlephItemHash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
