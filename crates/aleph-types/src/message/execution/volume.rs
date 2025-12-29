@@ -154,7 +154,7 @@ pub struct PersistentVolume {
     pub persistence: Option<VolumePersistence>,
     #[serde(default)]
     pub name: Option<String>,
-    size_mib: PersistentVolumeSize,
+    pub size_mib: PersistentVolumeSize,
 }
 
 impl IsReadOnly for PersistentVolume {
