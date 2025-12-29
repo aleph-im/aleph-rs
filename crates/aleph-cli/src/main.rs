@@ -11,7 +11,7 @@ async fn handle_message_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         MessageCommand::Get(GetMessageArgs { item_hash }) => {
-            let message = aleph_client.get_message(&item_hash).await?;
+            let message = aleph_client.get_message(item_hash).await?;
             let serialized_message = serde_json::to_string_pretty(&message)?;
             println!("{}", serialized_message);
         }
