@@ -74,6 +74,10 @@ pub trait MemorySize: Sized + Copy {
             None
         }
     }
+    
+    fn checked_add(self, rhs: Self) -> Option<Self> {
+        self.units().checked_add(rhs.units()).map(Self::from_units)
+    }
 }
 
 /// Canonical base type: raw bytes.
@@ -192,5 +196,21 @@ mod tests {
     fn test_gigabyte_to_mebibyte() {
         let mib = gigabyte_to_mebibyte(20);
         assert_eq!(mib, 19074);
+    }
+
+
+    #[test]
+    fn test_bytes_checked_add() {
+        let size = Bytes::from_units(100);
+
+        // Test adding zero
+        assert_eq!(size.checked_add(Bytes::from_units(0)), Some(Bytes::from_units(100)));
+
+        // Test adding non-zero
+        assert_eq!(size.checked_add(Bytes::from_units(50)), Some(Bytes::from_units(150)));
+
+        // Test overflow
+        let max_size = Bytes::from_units(u64::MAX);
+        assert_eq!(max_size.checked_add(Bytes::from_units(1)), None);
     }
 }
