@@ -8,41 +8,41 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionRuntime {
     #[serde(rename = "ref")]
-    reference: ItemHash,
+    pub reference: ItemHash,
     #[serde(default = "default_true")]
-    use_latest: bool,
-    comment: String,
+    pub use_latest: bool,
+    pub comment: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeContent {
-    encoding: Encoding,
-    entrypoint: String,
+    pub encoding: Encoding,
+    pub entrypoint: String,
     /// Reference to the STORE message containing the code.
     #[serde(rename = "ref")]
-    reference: ItemHash,
+    pub reference: ItemHash,
     #[serde(default)]
-    interface: Option<Interface>,
+    pub interface: Option<Interface>,
     #[serde(default)]
-    args: Option<Vec<String>>,
+    pub args: Option<Vec<String>>,
     #[serde(default)]
-    use_latest: bool,
+    pub use_latest: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataContent {
-    encoding: Encoding,
-    mount: PathBuf,
+    pub encoding: Encoding,
+    pub mount: PathBuf,
     #[serde(default, rename = "ref")]
-    reference: Option<ItemHash>,
+    pub reference: Option<ItemHash>,
     #[serde(default = "default_some_false")]
-    use_latest: Option<bool>,
+    pub use_latest: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Export {
-    encoding: Encoding,
-    mount: PathBuf,
+    pub encoding: Encoding,
+    pub mount: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
