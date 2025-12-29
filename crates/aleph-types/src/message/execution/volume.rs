@@ -101,7 +101,7 @@ pub enum VolumePersistence {
     Store,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]
 pub struct PersistentVolumeSize(MiB);
 
@@ -135,6 +135,12 @@ impl From<PersistentVolumeSize> for u64 {
 impl From<MiB> for PersistentVolumeSize {
     fn from(size: MiB) -> Self {
         Self(size)
+    }
+}
+
+impl From<PersistentVolumeSize> for MiB {
+    fn from(value: PersistentVolumeSize) -> Self {
+        value.0
     }
 }
 
