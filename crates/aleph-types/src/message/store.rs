@@ -1,8 +1,8 @@
 use crate::cid::Cid;
 use crate::item_hash::ItemHash;
+use crate::storage_size::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::storage_size::Bytes;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "item_type", rename_all = "lowercase")]
