@@ -173,7 +173,7 @@ impl AlephClient {
     /// Returns the message with its corresponding status.
     pub async fn get_message(
         &self,
-        item_hash: ItemHash,
+        item_hash: &ItemHash,
     ) -> Result<MessageWithStatus, MessageError> {
         let url = self
             .ccn_url
@@ -183,7 +183,7 @@ impl AlephClient {
         let response = self.http_client.get(url).send().await?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(MessageError::NotFound(item_hash));
+            return Err(MessageError::NotFound(item_hash.clone()));
         }
         let response = response.error_for_status()?;
 
