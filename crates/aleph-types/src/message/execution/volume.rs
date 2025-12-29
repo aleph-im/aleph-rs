@@ -38,7 +38,7 @@ impl IsReadOnly for ImmutableVolume {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]
 pub struct EphemeralVolumeSize(MiB);
 
@@ -69,13 +69,25 @@ impl From<EphemeralVolumeSize> for u64 {
     }
 }
 
+impl From<MiB> for EphemeralVolumeSize {
+    fn from(size: MiB) -> Self {
+        Self(size)
+    }
+}
+
+impl From<EphemeralVolumeSize> for MiB {
+    fn from(value: EphemeralVolumeSize) -> Self {
+        value.0
+    }
+}
+
 /// Ephemeral volume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EphemeralVolume {
     #[serde(flatten)]
     pub base: BaseVolume,
     ephemeral: bool,
-    size_mib: EphemeralVolumeSize,
+    pub size_mib: EphemeralVolumeSize,
 }
 
 impl IsReadOnly for EphemeralVolume {
