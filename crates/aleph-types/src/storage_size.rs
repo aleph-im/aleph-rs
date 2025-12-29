@@ -77,7 +77,7 @@ pub trait MemorySize: Sized + Copy {
 }
 
 /// Canonical base type: raw bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Bytes(u64);
 
 impl MemorySize for Bytes {
