@@ -16,3 +16,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 serde_with = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
