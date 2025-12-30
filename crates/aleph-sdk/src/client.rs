@@ -2,6 +2,7 @@ use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::{ContentSource, Message, MessageStatus, MessageType};
+use aleph_types::storage_size::{Bytes, MemorySize};
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,14 @@ pub struct AlephClient {
 }
 
 #[derive(thiserror::Error, Debug)]
+pub enum StorageError {
+    #[error("File not found: {0}")]
+    NotFound(ItemHash),
+    #[error("Failed to read file size: {0}")]
+    InvalidSize(String),
+}
+
+#[derive(thiserror::Error, Debug)]
 pub enum MessageError {
     #[error("Message not found: {0}")]
     NotFound(ItemHash),
@@ -24,6 +33,8 @@ pub enum MessageError {
     RemovedMessage(String),
     #[error("Message type does not match")]
     TypeError(String),
+    #[error("Storage error: {0}")]
+    Storage(#[from] StorageError),
     #[error(transparent)]
     HttpError(#[from] reqwest::Error),
 }
@@ -211,7 +222,7 @@ impl AlephClient {
         Ok(get_messages_response.messages)
     }
 
-    pub async fn get_file_size(&self, file_hash: &ItemHash) -> Result<u64, MessageError> {
+    pub async fn get_file_size(&self, file_hash: &ItemHash) -> Result<Bytes, MessageError> {
         let url = self
             .ccn_url
             .join(&format!("/api/v0/storage/raw/{}", file_hash))
@@ -227,9 +238,15 @@ impl AlephClient {
         let content_length = headers
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok());
+
         content_length
-            .map(|s| s.parse::<u64>().unwrap())
-            .ok_or_else(|| MessageError::NotFound(file_hash.clone()))
+            .ok_or_else(|| StorageError::NotFound(file_hash.clone()))
+            .and_then(|s| {
+                s.parse::<u64>()
+                    .map(Bytes::from_units)
+                    .map_err(|_| StorageError::InvalidSize(s.to_string()))
+            })
+            .map_err(MessageError::Storage)
     }
 }
 
@@ -284,6 +301,6 @@ mod tests {
             .get_file_size(&file_hash)
             .await
             .unwrap_or_else(|e| panic!("failed to fetch file: {:?}", e));
-        assert_eq!(size, 297);
+        assert_eq!(size, Bytes::from_units(297));
     }
 }
