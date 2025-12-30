@@ -1,0 +1,18 @@
+{
+  "status": "forgotten",
+  "item_hash": "821d7b01866bdfafc8d07539d6191061ab5858dfbfcab046d7b799e5e01da51f",
+  "reception_time": "2023-04-26T19:48:54.592513Z",
+  "message": {
+    "sender": "0xCBD8c644d5628DB7Fd6D600681E15bcF82d79274",
+    "chain": "ETH",
+    "signature": "0x6e8fd148458a5950610eabfe17e5fa410194f563dd959a81609ae2d3b1a14e7a3fffe4fb57679868839f665fdb1eceb95ac166c1208063fa48887c67f59c4fc51b",
+    "type": "STORE",
+    "item_type": "inline",
+    "item_hash": "821d7b01866bdfafc8d07539d6191061ab5858dfbfcab046d7b799e5e01da51f",
+    "time": "2022-10-06T11:15:54.517756Z",
+    "channel": "TEST"
+  },
+  "forgotten_by": [
+    "3292ebfacccf1315ad21615101661b147dabfb2e1f97d7c46262a528a3e22852"
+  ]
+}
