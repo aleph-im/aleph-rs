@@ -9,6 +9,7 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aleph-types = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

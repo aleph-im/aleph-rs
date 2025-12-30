@@ -21,6 +21,7 @@ name = "aleph-sdk"
 version = "0.2.0"
 dependencies = [
  "aleph-types",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",

@@ -3,6 +3,7 @@ use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::{ContentSource, Message, MessageStatus, MessageType};
 use aleph_types::timestamp::Timestamp;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_with::{StringWithSeparator, formats::CommaSeparator, serde_as, skip_serializing_none};
 use std::collections::HashMap;
@@ -52,9 +53,10 @@ pub struct ForgottenMessage {
     pub sender: Address,
     pub chain: Chain,
     pub signature: Option<Signature>,
+    #[serde(rename = "type")]
     pub message_type: MessageType,
     pub item_hash: ItemHash,
-    pub time: Timestamp,
+    pub time: DateTime<Utc>,
     pub channel: Option<Channel>,
 }
 
@@ -77,7 +79,7 @@ pub enum MessageWithStatus {
         reason: RemovalReason,
     },
     Forgotten {
-        message: Message,
+        message: ForgottenMessage,
         forgotten_by: Vec<ItemHash>,
     },
 }
@@ -207,5 +209,46 @@ impl AlephClient {
 
         let get_messages_response: GetMessagesResponse = response.json().await?;
         Ok(get_messages_response.messages)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aleph_types::{address, channel, item_hash};
+
+    const FORGOTTEN_MESSAGE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/api-responses/forgotten-message.json"
+    ));
+    #[test]
+    fn test_deserialize_forgotten_message() {
+        let message: MessageWithStatus = serde_json::from_str(FORGOTTEN_MESSAGE).unwrap();
+
+        match message {
+            MessageWithStatus::Forgotten {
+                message,
+                forgotten_by,
+            } => {
+                assert_eq!(message.chain, Chain::Ethereum);
+                assert_eq!(
+                    message.item_hash,
+                    item_hash!("821d7b01866bdfafc8d07539d6191061ab5858dfbfcab046d7b799e5e01da51f")
+                );
+                assert_eq!(
+                    message.sender,
+                    address!("0xCBD8c644d5628DB7Fd6D600681E15bcF82d79274")
+                );
+                assert_eq!(message.message_type, MessageType::Store);
+                assert_eq!(message.channel, Some(channel!("TEST")));
+
+                assert_eq!(forgotten_by.len(), 1);
+                assert_eq!(
+                    forgotten_by[0],
+                    item_hash!("3292ebfacccf1315ad21615101661b147dabfb2e1f97d7c46262a528a3e22852")
+                );
+            }
+            _ => panic!("Expected Forgotten variant"),
+        }
     }
 }
