@@ -78,6 +78,18 @@ pub trait MemorySize: Sized + Copy {
     fn checked_add(self, rhs: Self) -> Option<Self> {
         self.units().checked_add(rhs.units()).map(Self::from_units)
     }
+
+    fn checked_sub(self, rhs: Self) -> Option<Self> {
+        self.units().checked_sub(rhs.units()).map(Self::from_units)
+    }
+
+    fn saturating_add(self, rhs: Self) -> Self {
+        Self::from_units(self.units().saturating_add(rhs.units()))
+    }
+
+    fn saturating_sub(self, rhs: Self) -> Self {
+        Self::from_units(self.units().saturating_sub(rhs.units()))
+    }
 }
 
 /// Canonical base type: raw bytes.
@@ -217,5 +229,60 @@ mod tests {
         // Test overflow
         let max_size = Bytes::from_units(u64::MAX);
         assert_eq!(max_size.checked_add(Bytes::from_units(1)), None);
+    }
+
+    #[test]
+    fn test_bytes_checked_sub() {
+        let size = Bytes::from_units(100);
+
+        // Test subtracting zero
+        assert_eq!(
+            size.checked_sub(Bytes::from_units(0)),
+            Some(Bytes::from_units(100))
+        );
+
+        // Test subtracting non-zero
+        assert_eq!(
+            size.checked_sub(Bytes::from_units(50)),
+            Some(Bytes::from_units(50))
+        );
+
+        // Test underflow
+        assert_eq!(size.checked_sub(Bytes::from_units(150)), None);
+    }
+
+    #[test]
+    fn test_bytes_saturating_add() {
+        let size = Bytes::from_units(100);
+
+        // Test normal addition
+        assert_eq!(
+            size.saturating_add(Bytes::from_units(50)),
+            Bytes::from_units(150)
+        );
+
+        // Test overflow
+        let max_size = Bytes::from_units(u64::MAX);
+        assert_eq!(
+            max_size.saturating_add(Bytes::from_units(1)),
+            Bytes::from_units(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn test_bytes_saturating_sub() {
+        let size = Bytes::from_units(100);
+
+        // Test normal subtraction
+        assert_eq!(
+            size.saturating_sub(Bytes::from_units(50)),
+            Bytes::from_units(50)
+        );
+
+        // Test underflow
+        assert_eq!(
+            size.saturating_sub(Bytes::from_units(150)),
+            Bytes::from_units(0)
+        );
     }
 }
