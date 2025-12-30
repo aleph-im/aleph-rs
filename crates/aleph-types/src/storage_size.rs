@@ -24,6 +24,11 @@ pub trait MemorySize: Sized + Copy {
     /// Count of units (e.g., “5 MiB” => 5).
     fn units(self) -> u64;
 
+    /// Convert value to `f64` (for convenience).
+    fn as_f64(self) -> f64 {
+        self.units() as f64
+    }
+
     /// Construct from a count of units (no validation besides overflow domain).
     fn from_units(units: u64) -> Self;
 
