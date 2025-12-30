@@ -217,10 +217,19 @@ impl AlephClient {
             .join(&format!("/api/v0/storage/raw/{}", file_hash))
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let response = self.http_client.head(url).send().await?.error_for_status()?;
+        let response = self
+            .http_client
+            .head(url)
+            .send()
+            .await?
+            .error_for_status()?;
         let headers = response.headers();
-        let content_length = headers.get(reqwest::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok());
-        content_length.map(|s| s.parse::<u64>().unwrap()).ok_or_else(|| MessageError::NotFound(file_hash.clone()))
+        let content_length = headers
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok());
+        content_length
+            .map(|s| s.parse::<u64>().unwrap())
+            .ok_or_else(|| MessageError::NotFound(file_hash.clone()))
     }
 }
 
@@ -265,12 +274,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore="uses a remote CCN"]
+    #[ignore = "uses a remote CCN"]
     async fn test_get_file_size() {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let file_hash = item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
+        let file_hash =
+            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
 
-        let size = client.get_file_size(&file_hash).await.unwrap_or_else(|e| panic!("failed to fetch file: {:?}", e));
+        let size = client
+            .get_file_size(&file_hash)
+            .await
+            .unwrap_or_else(|e| panic!("failed to fetch file: {:?}", e));
         assert_eq!(size, 297);
     }
 }
