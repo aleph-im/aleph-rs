@@ -27,14 +27,17 @@ pub enum StorageError {
 pub enum MessageError {
     #[error("Message not found: {0}")]
     NotFound(ItemHash),
-    #[error("The requested message {0} has been forgotten by {1}")]
-    Forgotten(ItemHash, ItemHash),
-    #[error("Message has been removed")]
-    RemovedMessage(String),
-    #[error("Expected message of type {expected}, got {actual}")]
+    #[error("Expected message {item_hash} to be of type {expected}, got {actual}")]
     InvalidType {
+        item_hash: ItemHash,
         expected: MessageType,
         actual: MessageType,
+    },
+    #[error("Unexpected message status for {item_hash}: {actual}, expected {expected}")]
+    UnexpectedStatus {
+        item_hash: ItemHash,
+        expected: MessageStatus,
+        actual: MessageStatus,
     },
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
