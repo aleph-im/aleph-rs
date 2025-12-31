@@ -12,7 +12,7 @@ use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::fmt::Formatter;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum MessageType {
     Aggregate,
