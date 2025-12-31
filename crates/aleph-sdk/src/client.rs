@@ -101,6 +101,18 @@ pub enum MessageWithStatus {
     },
 }
 
+impl MessageWithStatus {
+    pub fn status(&self) -> MessageStatus {
+        match self {
+            MessageWithStatus::Pending { .. } => MessageStatus::Pending,
+            MessageWithStatus::Processed { .. } => MessageStatus::Processed,
+            MessageWithStatus::Removing { .. } => MessageStatus::Removing,
+            MessageWithStatus::Removed { .. } => MessageStatus::Removed,
+            MessageWithStatus::Forgotten { .. } => MessageStatus::Forgotten,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct GetMessageResponse {
     #[serde(flatten)]
