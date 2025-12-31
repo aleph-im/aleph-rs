@@ -31,8 +31,8 @@ pub struct StoreContent {
 impl StoreContent {
     pub fn file_hash(&self) -> ItemHash {
         match &self.file_hash {
-            StorageBackend::Ipfs { item_hash: cid } => {ItemHash::Ipfs(cid.clone())},
-            StorageBackend::Storage { item_hash } => {ItemHash::Native(item_hash.clone())},
+            StorageBackend::Ipfs { item_hash: cid } => ItemHash::Ipfs(cid.clone()),
+            StorageBackend::Storage { item_hash } => ItemHash::Native(*item_hash),
         }
     }
 }
@@ -42,11 +42,11 @@ mod tests {
     use super::*;
     use crate::chain::{Address, Chain, Signature};
     use crate::channel::Channel;
+    use crate::item_hash;
     use crate::message::base_message::{Message, MessageContentEnum};
     use crate::message::{ContentSource, MessageType};
     use crate::timestamp::Timestamp;
     use assert_matches::assert_matches;
-    use crate::item_hash;
 
     const STORE_IPFS_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -97,7 +97,10 @@ mod tests {
                             .unwrap()
                     }
                 );
-                assert_eq!(store.file_hash(), item_hash!("QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8"));
+                assert_eq!(
+                    store.file_hash(),
+                    item_hash!("QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8")
+                );
 
                 assert!(store.size.is_none());
                 assert!(store.content_type.is_none());
