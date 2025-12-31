@@ -31,8 +31,11 @@ pub enum MessageError {
     Forgotten(ItemHash, ItemHash),
     #[error("Message has been removed")]
     RemovedMessage(String),
-    #[error("Message type does not match")]
-    TypeError(String),
+    #[error("Expected message of type {expected}, got {actual}")]
+    InvalidType {
+        expected: MessageType,
+        actual: MessageType,
+    },
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
     #[error(transparent)]
