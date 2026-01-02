@@ -164,6 +164,18 @@ impl Message {
     pub fn confirmed(&self) -> bool {
         !self.confirmations.is_empty()
     }
+
+    /// Returns the address of the sender of the message. Note that the sender is not necessarily
+    /// the owner of the resources, as the owner may have delegated their authority to create
+    /// specific resources through the permission system.
+    pub fn sender(&self) -> &Address {
+        &self.sender
+    }
+
+    /// Returns the address of the owner of the resources.
+    pub fn owner(&self) -> &Address {
+        &self.content.address
+    }
 }
 
 // Custom deserializer that uses message_type to efficiently deserialize content
