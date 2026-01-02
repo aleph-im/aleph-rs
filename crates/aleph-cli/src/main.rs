@@ -1,5 +1,5 @@
 use crate::cli::{Cli, GetMessageArgs, MessageCommand};
-use aleph_sdk::client::AlephClient;
+use aleph_sdk::client::{AlephClient, AlephMessageClient};
 use clap::Parser;
 use url::Url;
 
