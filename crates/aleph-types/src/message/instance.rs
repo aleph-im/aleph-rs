@@ -17,6 +17,7 @@ pub struct InstanceContent {
 mod test {
     use super::*;
     use crate::chain::Chain;
+    use crate::memory_size::{MemorySize, MiB};
     use crate::message::base_message::{MessageConfirmation, MessageContentEnum};
     use crate::message::execution::base::{Payment, PaymentType};
     use crate::message::execution::environment::{
@@ -25,7 +26,6 @@ mod test {
     };
     use crate::message::execution::volume::{ParentVolume, VolumePersistence};
     use crate::message::{ContentSource, Message, MessageType};
-    use crate::memory_size::{MemorySize, MiB};
     use crate::timestamp::Timestamp;
     use crate::{address, channel, item_hash, signature};
     use assert_matches::assert_matches;
