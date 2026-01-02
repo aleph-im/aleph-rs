@@ -1,6 +1,6 @@
 use crate::chain::Address;
 use crate::item_hash::ItemHash;
-use crate::storage_size::{MemorySize, MiB};
+use crate::memory_size::{MemorySize, MiB};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

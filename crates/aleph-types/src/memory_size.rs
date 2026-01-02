@@ -113,6 +113,12 @@ impl MemorySize for Bytes {
     const BYTES_PER_UNIT: u64 = 1;
 }
 
+impl From<u64> for Bytes {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 impl Bytes {
     /// Additional constructor that can catch domain rules if you ever add them.
     fn from_units_checked(units: u64) -> Result<Self, MemConvError> {
@@ -152,6 +158,11 @@ macro_rules! mem_unit {
                 } else {
                     Err(MemConvError::Overflow) // “not exactly divisible”; reuse Overflow for brevity
                 }
+            }
+        }
+        impl From<u64> for $name {
+            fn from(v: u64) -> Self {
+                Self(v)
             }
         }
     };

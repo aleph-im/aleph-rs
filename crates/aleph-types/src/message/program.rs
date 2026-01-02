@@ -75,11 +75,11 @@ impl ProgramContent {
 mod tests {
     use super::*;
     use crate::chain::{Address, Chain, Signature};
+    use crate::memory_size::{MemorySize, MiB};
     use crate::message::base_message::MessageContentEnum;
     use crate::message::execution::environment::MachineResources;
     use crate::message::execution::volume::{BaseVolume, ImmutableVolume, MachineVolume};
     use crate::message::{ContentSource, Message, MessageType};
-    use crate::storage_size::{MemorySize, MiB};
     use crate::timestamp::Timestamp;
     use crate::{channel, item_hash};
     use assert_matches::assert_matches;
