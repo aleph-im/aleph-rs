@@ -69,6 +69,7 @@ mod test {
             &address!("0x238224C744F4b90b4494516e074D2676ECfC6803")
         );
         assert_eq!(&message.content.time, &Timestamp::from(1762349117.833176));
+        assert_eq!(message.sent_at(), &message.content.time);
 
         // Check instance content fields
         let instance_content = match message.content() {
@@ -163,14 +164,18 @@ mod test {
 
         assert!(message.confirmed());
         assert_eq!(
+            message.confirmed_at(),
+            message.confirmations[0].time.as_ref()
+        );
+        assert_eq!(
             message.confirmations,
             vec![MessageConfirmation {
                 chain: Chain::Ethereum,
                 height: 23733404,
                 hash: "0xda1dd1676b5f08cef019172a7b31de303c86aafe8cb209916cf5ffa2bc5871dc"
                     .to_string(),
-                time: None,
-                publisher: None,
+                time: Some(Timestamp::from(1762349117.833245)),
+                publisher: Some(address!("0x23eC28598DCeB2f7082Cc3a9D670592DfEd6e0dC")),
             }]
         );
     }
