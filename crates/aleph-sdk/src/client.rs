@@ -2,7 +2,7 @@ use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::{ContentSource, Message, MessageStatus, MessageType};
-use aleph_types::storage_size::{Bytes, MemorySize};
+use aleph_types::memory_size::{Bytes, MemorySize};
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

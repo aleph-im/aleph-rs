@@ -25,7 +25,7 @@ mod test {
     };
     use crate::message::execution::volume::{ParentVolume, VolumePersistence};
     use crate::message::{ContentSource, Message, MessageType};
-    use crate::storage_size::{MemorySize, MiB};
+    use crate::memory_size::{MemorySize, MiB};
     use crate::timestamp::Timestamp;
     use crate::{address, channel, item_hash, signature};
     use assert_matches::assert_matches;

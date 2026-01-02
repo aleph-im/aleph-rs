@@ -1,6 +1,6 @@
 use crate::cid::Cid;
 use crate::item_hash::{AlephItemHash, ItemHash};
-use crate::storage_size::Bytes;
+use crate::memory_size::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

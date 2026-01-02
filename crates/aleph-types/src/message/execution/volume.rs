@@ -1,5 +1,5 @@
 use crate::item_hash::ItemHash;
-use crate::storage_size::{MemorySize, MiB, gigabyte_to_mebibyte};
+use crate::memory_size::{MemorySize, MiB, gigabyte_to_mebibyte};
 use crate::toolkit::serde::default_true;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
