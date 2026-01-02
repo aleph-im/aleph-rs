@@ -83,11 +83,11 @@ pub struct CpuFeature(String);
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CpuProperties {
     /// CPU architecture.
-    architecture: Architecture,
+    pub architecture: Architecture,
     /// CPU vendor.
-    vendor: Option<Vendor>,
+    pub vendor: Option<Vendor>,
     /// CPU features required by the virtual machine. Examples: 'sev', 'sev_es', 'sev_snp'.
-    features: Vec<CpuFeature>,
+    pub features: Vec<CpuFeature>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,10 +154,10 @@ fn default_amd_sev_policy() -> u32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustedExecutionEnvironment {
     /// OVMF firmware to use.
-    firmware: Option<ItemHash>,
+    pub firmware: Option<ItemHash>,
     /// SEV Policy. The default value is 0x01 for SEV without debugging.
     #[serde(default = "default_amd_sev_policy")]
-    policy: u32,
+    pub policy: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
