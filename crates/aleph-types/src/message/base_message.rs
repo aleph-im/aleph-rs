@@ -176,6 +176,19 @@ impl Message {
     pub fn owner(&self) -> &Address {
         &self.content.address
     }
+
+    /// Returns the time at which the message was sent.
+    /// Notes:
+    /// * This value is signed by the sender and should not be trusted accordingly.
+    /// * We prefer `content.time` over `time` as `time` is not part of the signed payload.
+    pub fn sent_at(&self) -> &Timestamp {
+        &self.content.time
+    }
+
+    /// Returns the earliest confirmation time of the message.
+    pub fn confirmed_at(&self) -> Option<&Timestamp> {
+        self.confirmations.first().and_then(|c| c.time.as_ref())
+    }
 }
 
 // Custom deserializer that uses message_type to efficiently deserialize content

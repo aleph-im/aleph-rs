@@ -57,6 +57,7 @@ mod tests {
             &address!("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef")
         );
         assert_eq!(&message.content.time, &Timestamp::from(1762515432.413));
+        assert_eq!(message.sent_at(), &message.content.time);
 
         // Check aggregate content fields
         let forget_content = match message.content() {

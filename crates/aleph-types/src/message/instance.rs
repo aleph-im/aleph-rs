@@ -69,6 +69,7 @@ mod test {
             &address!("0x238224C744F4b90b4494516e074D2676ECfC6803")
         );
         assert_eq!(&message.content.time, &Timestamp::from(1762349117.833176));
+        assert_eq!(message.sent_at(), &message.content.time);
 
         // Check instance content fields
         let instance_content = match message.content() {
@@ -162,6 +163,7 @@ mod test {
         );
 
         assert!(message.confirmed());
+        assert_eq!(message.confirmed_at(), Some(&message.content.time));
         assert_eq!(
             message.confirmations,
             vec![MessageConfirmation {

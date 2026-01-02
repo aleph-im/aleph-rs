@@ -128,6 +128,7 @@ mod tests {
             &Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string())
         );
         assert_eq!(&message.content.time, &Timestamp::from(1757026128.773));
+        assert_eq!(message.sent_at(), &message.content.time);
 
         // Check program content fields
         let program_content = match message.content() {
@@ -214,6 +215,7 @@ mod tests {
 
         // No confirmation on this fixture
         assert!(!message.confirmed());
+        assert!(message.confirmed_at().is_none());
         assert!(message.confirmations.is_empty());
     }
 
