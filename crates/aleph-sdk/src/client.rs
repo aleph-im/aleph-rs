@@ -191,6 +191,17 @@ pub struct GetMessagesResponse {
     pub pagination_total: u32,
 }
 
+#[allow(async_fn_in_trait)]
+pub trait AlephMessageClient {
+    async fn get_message(&self, item_hash: &ItemHash) -> Result<MessageWithStatus, MessageError>;
+    async fn get_messages(&self, filter: &MessageFilter) -> Result<Vec<Message>, MessageError>;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait AlephStorageClient {
+    async fn get_file_size(&self, file_hash: &ItemHash) -> Result<Bytes, MessageError>;
+}
+
 impl AlephClient {
     pub fn new(ccn_url: Url) -> Self {
         Self {
@@ -198,14 +209,13 @@ impl AlephClient {
             ccn_url,
         }
     }
+}
 
+impl AlephMessageClient for AlephClient {
     /// Queries a message by item hash.
     ///
     /// Returns the message with its corresponding status.
-    pub async fn get_message(
-        &self,
-        item_hash: &ItemHash,
-    ) -> Result<MessageWithStatus, MessageError> {
+    async fn get_message(&self, item_hash: &ItemHash) -> Result<MessageWithStatus, MessageError> {
         let url = self
             .ccn_url
             .join(&format!("/api/v0/messages/{}", item_hash))
@@ -222,7 +232,7 @@ impl AlephClient {
         Ok(get_message_response.message)
     }
 
-    pub async fn get_messages(&self, filter: &MessageFilter) -> Result<Vec<Message>, MessageError> {
+    async fn get_messages(&self, filter: &MessageFilter) -> Result<Vec<Message>, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v0/messages.json")
@@ -239,8 +249,10 @@ impl AlephClient {
         let get_messages_response: GetMessagesResponse = response.json().await?;
         Ok(get_messages_response.messages)
     }
+}
 
-    pub async fn get_file_size(&self, file_hash: &ItemHash) -> Result<Bytes, MessageError> {
+impl AlephStorageClient for AlephClient {
+    async fn get_file_size(&self, file_hash: &ItemHash) -> Result<Bytes, MessageError> {
         let url = self
             .ccn_url
             .join(&format!("/api/v0/storage/raw/{}", file_hash))
