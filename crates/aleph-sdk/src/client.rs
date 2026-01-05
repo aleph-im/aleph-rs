@@ -5,11 +5,13 @@ use aleph_types::memory_size::{Bytes, MemorySize};
 use aleph_types::message::{ContentSource, Message, MessageStatus, MessageType};
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_with::{StringWithSeparator, formats::CommaSeparator, serde_as, skip_serializing_none};
 use std::collections::HashMap;
 use url::Url;
 
+#[derive(Clone)]
 pub struct AlephClient {
     http_client: reqwest::Client,
     ccn_url: Url,
@@ -191,15 +193,44 @@ pub struct GetMessagesResponse {
     pub pagination_total: u32,
 }
 
-#[allow(async_fn_in_trait)]
 pub trait AlephMessageClient {
-    async fn get_message(&self, item_hash: &ItemHash) -> Result<MessageWithStatus, MessageError>;
-    async fn get_messages(&self, filter: &MessageFilter) -> Result<Vec<Message>, MessageError>;
+    fn get_message(
+        &self,
+        item_hash: &ItemHash,
+    ) -> impl Future<Output = Result<MessageWithStatus, MessageError>> + Send;
+    fn get_messages(
+        &self,
+        filter: &MessageFilter,
+    ) -> impl Future<Output = Result<Vec<Message>, MessageError>> + Send;
 }
 
-#[allow(async_fn_in_trait)]
 pub trait AlephStorageClient {
-    async fn get_file_size(&self, file_hash: &ItemHash) -> Result<Bytes, MessageError>;
+    fn get_file_size(
+        &self,
+        file_hash: &ItemHash,
+    ) -> impl Future<Output = Result<Bytes, MessageError>> + Send;
+}
+
+/// Methods used to query account properties, ex: their balance.
+pub trait AlephAccountClient {
+    /// Gets the balance of an Aleph account, in ALEPH tokens and credits.
+    fn get_balance(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<AccountBalance, MessageError>> + Send;
+
+    /// Gets the total size of all files stored by the user.
+    fn get_total_storage_size(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<Bytes, MessageError>> + Send;
+
+    /// Gets the price of a VM in Aleph tokens using the holder tier, i.e. the minimum amount
+    /// of Aleph tokens that the user needs to hold in his account.
+    fn get_vm_price(
+        &self,
+        item_hash: &ItemHash,
+    ) -> impl Future<Output = Result<f64, MessageError>> + Send;
 }
 
 impl AlephClient {
@@ -277,6 +308,72 @@ impl AlephStorageClient for AlephClient {
                     .map_err(|_| StorageError::InvalidSize(s.to_string()))
             })
             .map_err(MessageError::Storage)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AccountBalance {
+    #[serde(rename = "balance")]
+    pub aleph_tokens: f64,
+    #[serde(rename = "locked_amount")]
+    pub locked_aleph_tokens: f64,
+    #[serde(default, rename = "credit_balance")]
+    pub credits: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetAccountFilesResponse {
+    // We purposefully ignore the files themselves at the moment as the only feature of the client
+    // at this moment is to retrieve the total size, not the files themselves.
+    total_size: Bytes,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetPriceResponse {
+    required_tokens: f64,
+}
+
+impl AlephAccountClient for AlephClient {
+    async fn get_balance(&self, address: &Address) -> Result<AccountBalance, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/addresses/{}/balance", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self.http_client.get(url).send().await?.error_for_status()?;
+        let account_balance: AccountBalance = response.json().await?;
+
+        Ok(account_balance)
+    }
+
+    async fn get_total_storage_size(&self, address: &Address) -> Result<Bytes, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/addresses/{}/files", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self.http_client.get(url).send().await?;
+        // The endpoint returns a 404 if the address has no files.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(Bytes::from_units(0));
+        }
+        // Otherwise, process errors then deserialize the response.
+        let response = response.error_for_status()?;
+        let get_balance_response: GetAccountFilesResponse = response.json().await?;
+
+        Ok(get_balance_response.total_size)
+    }
+
+    async fn get_vm_price(&self, item_hash: &ItemHash) -> Result<f64, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/price/{}", item_hash))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self.http_client.get(url).send().await?.error_for_status()?;
+        let get_price_response: GetPriceResponse = response.json().await?;
+
+        Ok(get_price_response.required_tokens)
     }
 }
 
