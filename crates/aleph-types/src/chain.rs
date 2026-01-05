@@ -73,6 +73,12 @@ pub enum Chain {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Address(String);
 
+impl std::fmt::Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl From<String> for Address {
     fn from(value: String) -> Self {
         Self(value)
