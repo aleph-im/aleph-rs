@@ -113,6 +113,8 @@ mod tests {
         // No confirmation on this fixture
         assert!(!message.confirmed());
         assert!(message.confirmations.is_empty());
+
+        message.verify_item_hash().unwrap();
     }
 
     #[test]
@@ -172,5 +174,7 @@ mod tests {
         // No confirmation on this fixture
         assert!(!message.confirmed());
         assert!(message.confirmations.is_empty());
+
+        message.verify_item_hash().unwrap();
     }
 }

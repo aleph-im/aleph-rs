@@ -1,11 +1,33 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 use thiserror::Error;
 
+fn compute_cidv0(content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let digest = hasher.finalize();
+
+    let mut data = Vec::with_capacity(34);
+    data.push(0x12); // SHA2-256
+    data.push(0x20); // Length 32
+    data.extend_from_slice(&digest);
+
+    bs58::encode(data).into_string()
+}
+
 /// Newtype for IPFS CIDv0 (base58-encoded, starts with "Qm", 46 characters).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CidV0(String);
+
+impl CidV0 {
+    /// Computes the CIDv0 for the given content.
+    pub fn from_bytes(content: &[u8]) -> Self {
+        let cid_str = compute_cidv0(content);
+        Self(cid_str)
+    }
+}
 
 /// Newtype for IPFS CIDv1 (multibase-encoded with various encodings).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

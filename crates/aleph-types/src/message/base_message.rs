@@ -1,6 +1,7 @@
 use crate::chain::{Address, Chain, Signature};
 use crate::channel::Channel;
-use crate::item_hash::ItemHash;
+use crate::cid::{Cid, CidV0};
+use crate::item_hash::{AlephItemHash, ItemHash};
 use crate::message::aggregate::AggregateContent;
 use crate::message::forget::ForgetContent;
 use crate::message::instance::InstanceContent;
@@ -10,7 +11,20 @@ use crate::message::store::StoreContent;
 use crate::timestamp::Timestamp;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt::Formatter;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MessageVerificationError {
+    #[error("Item hash verification failed: expected {expected}, got {actual}")]
+    ItemHashVerificationFailed {
+        expected: ItemHash,
+        actual: ItemHash,
+    },
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -189,6 +203,41 @@ impl Message {
     pub fn confirmed_at(&self) -> Option<&Timestamp> {
         self.confirmations.first().and_then(|c| c.time.as_ref())
     }
+
+    /// Computes the item hash of the message from its content.
+    fn compute_item_hash(&self) -> Result<ItemHash, serde_json::Error> {
+        let serialized_message_content = match &self.content_source {
+            ContentSource::Inline { item_content } => Cow::Borrowed(item_content),
+            ContentSource::Storage | ContentSource::Ipfs => {
+                Cow::Owned(serde_json::to_string(&self.content)?)
+            }
+        };
+
+        let computed_item_hash: ItemHash = match &self.content_source {
+            ContentSource::Inline { .. } | ContentSource::Storage => {
+                AlephItemHash::from_bytes(serialized_message_content.as_bytes()).into()
+            }
+            ContentSource::Ipfs => {
+                Cid::from(CidV0::from_bytes(serialized_message_content.as_bytes())).into()
+            }
+        };
+
+        Ok(computed_item_hash)
+    }
+
+    /// Verifies that the item hash of the message matches its content.
+    pub fn verify_item_hash(&self) -> Result<(), MessageVerificationError> {
+        let actual_hash = self.compute_item_hash()?;
+
+        if actual_hash != self.item_hash {
+            return Err(MessageVerificationError::ItemHashVerificationFailed {
+                expected: self.item_hash.clone(),
+                actual: actual_hash,
+            });
+        }
+
+        Ok(())
+    }
 }
 
 // Custom deserializer that uses message_type to efficiently deserialize content
@@ -347,6 +396,17 @@ mod tests {
         let content_source_str = r#"{"item_type":"ipfs"}"#;
         let content_source: ContentSource = serde_json::from_str(content_source_str).unwrap();
         assert_matches!(content_source, ContentSource::Ipfs);
+    }
+
+    #[test]
+    fn test_message_verify_item_hash() {
+        let json = include_str!("../../../../fixtures/messages/post/post.json");
+        let message: Message = serde_json::from_str(json).unwrap();
+        message.verify_item_hash().unwrap();
+
+        let json = include_str!("../../../../fixtures/messages/store/store-ipfs.json");
+        let message: Message = serde_json::from_str(json).unwrap();
+        message.verify_item_hash().unwrap();
     }
 
     #[test]
