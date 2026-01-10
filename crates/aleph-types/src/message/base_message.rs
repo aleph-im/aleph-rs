@@ -93,7 +93,7 @@ pub struct MessageContent {
     pub address: Address,
     pub time: Timestamp,
     #[serde(flatten)]
-    content: MessageContentEnum,
+    pub content: MessageContentEnum,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -209,7 +209,10 @@ impl Message {
         let serialized_message_content = match &self.content_source {
             ContentSource::Inline { item_content } => Cow::Borrowed(item_content),
             ContentSource::Storage | ContentSource::Ipfs => {
-                Cow::Owned(serde_json::to_string(&self.content)?)
+                let s = serde_json::to_string(&self.content)?;
+                println!("SERIALIZED CONTENT: {:?}", s);
+                println!("SERIALIZED CONTENT BYTES: {:?}", s.as_bytes());
+                Cow::Owned(s)
             }
         };
 
@@ -266,41 +269,30 @@ impl<'de> Deserialize<'de> for Message {
 
         let raw = MessageRaw::deserialize(deserializer)?;
 
-        // Deserialize content based on message_type for efficiency
-        let content_obj = raw
-            .content
-            .as_object()
-            .ok_or_else(|| de::Error::custom("content must be an object"))?;
+        let content_value = raw.content;
 
-        let address = content_obj
-            .get("address")
-            .ok_or_else(|| de::Error::missing_field("content.address"))
-            .and_then(|v| Address::deserialize(v).map_err(de::Error::custom))?;
-
-        let time = content_obj
-            .get("time")
-            .ok_or_else(|| de::Error::missing_field("content.time"))
-            .and_then(|v| Timestamp::deserialize(v).map_err(de::Error::custom))?;
+        let address = Address::deserialize(&content_value["address"]).map_err(de::Error::custom)?;
+        let time = Timestamp::deserialize(&content_value["time"]).map_err(de::Error::custom)?;
 
         // Deserialize the specific variant based on message_type
         let variant = match raw.message_type {
             MessageType::Aggregate => MessageContentEnum::Aggregate(
-                AggregateContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                AggregateContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Forget => MessageContentEnum::Forget(
-                ForgetContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                ForgetContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Instance => MessageContentEnum::Instance(
-                InstanceContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                InstanceContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Post => MessageContentEnum::Post(
-                PostContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                PostContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Program => MessageContentEnum::Program(
-                ProgramContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                ProgramContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Store => MessageContentEnum::Store(
-                StoreContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                StoreContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
         };
 
@@ -331,35 +323,26 @@ impl Serialize for Message {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Message", 9)?;
-        state.serialize_field("chain", &self.chain)?;
+        let mut state = serializer.serialize_struct("Message", 12)?;
         state.serialize_field("sender", &self.sender)?;
-        match &self.content_source {
-            ContentSource::Inline { item_content } => {
-                state.serialize_field("item_type", "inline")?;
-                state.serialize_field("item_content", item_content)?;
-            }
-            ContentSource::Storage => {
-                state.serialize_field("item_type", "storage")?;
-                state.serialize_field("item_content", &None::<String>)?;
-            }
-            ContentSource::Ipfs => {
-                state.serialize_field("item_type", "ipfs")?;
-                state.serialize_field("item_content", &None::<String>)?;
-            }
-        }
+        state.serialize_field("chain", &self.chain)?;
         state.serialize_field("signature", &self.signature)?;
-        state.serialize_field("item_hash", &self.item_hash)?;
-        if self.confirmed() {
-            state.serialize_field("confirmed", &true)?;
-            state.serialize_field("confirmations", &self.confirmations)?;
-        }
-        state.serialize_field("time", &self.time)?;
-        if self.channel.is_some() {
-            state.serialize_field("channel", &self.channel)?;
-        }
         state.serialize_field("type", &self.message_type)?;
+        state.serialize_field("item_content", &match &self.content_source {
+            ContentSource::Inline { item_content } => Some(item_content),
+            ContentSource::Storage | ContentSource::Ipfs => None,
+        })?;
+        state.serialize_field("item_hash", &self.item_hash)?;
+        state.serialize_field("item_type", match &self.content_source {
+            ContentSource::Inline { .. } => "inline",
+            ContentSource::Storage => "storage",
+            ContentSource::Ipfs => "ipfs",
+        })?;
+        state.serialize_field("time", &self.time)?;
+        state.serialize_field("channel", &self.channel)?;
         state.serialize_field("content", &self.content)?;
+        state.serialize_field("confirmed", &self.confirmed())?;
+        state.serialize_field("confirmations", &self.confirmations)?;
         state.end()
     }
 }
