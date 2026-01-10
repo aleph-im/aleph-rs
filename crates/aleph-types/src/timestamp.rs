@@ -1,6 +1,9 @@
 use chrono::{DateTime, TimeZone, Timelike, Utc};
+use serde::de::{self, Visitor};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fmt::Display;
+use std::str::FromStr;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TimestampError {
@@ -15,8 +18,89 @@ pub enum TimestampError {
 /// Time in Aleph messages is usually represented as a floating-point epoch timestamp. This type
 /// keeps the floating point representation for fast serialization/deserialization and to avoid
 /// loss of precision, but provides helpers to convert to datetime for human readability.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Timestamp(f64);
+
+impl Serialize for Timestamp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error;
+        let s = self.0.to_string();
+        let number = serde_json::Number::from_str(&s).map_err(S::Error::custom)?;
+        number.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Timestamp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TimestampVisitor;
+
+        impl<'de> Visitor<'de> for TimestampVisitor {
+            type Value = Timestamp;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a float, integer or string timestamp")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Timestamp(value as f64))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Timestamp(value as f64))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Timestamp(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                value.parse::<f64>().map(Timestamp).map_err(E::custom)
+            }
+
+            fn visit_map<M>(self, _map: M) -> Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                // If arbitrary_precision is enabled, serde_json might deserialize numbers as maps in some contexts
+                // like when using Untagged enums or other complex structures.
+                // The map should have a single key "$serde_json::private::Number"
+                #[derive(Deserialize)]
+                struct NumberWrapper {
+                    #[serde(rename = "$serde_json::private::Number")]
+                    number: String,
+                }
+
+                let wrapper =
+                    NumberWrapper::deserialize(de::value::MapAccessDeserializer::new(_map))?;
+                wrapper
+                    .number
+                    .parse::<f64>()
+                    .map(Timestamp)
+                    .map_err(de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_any(TimestampVisitor)
+    }
+}
 
 impl From<f64> for Timestamp {
     fn from(value: f64) -> Self {
@@ -69,6 +153,7 @@ mod tests {
         let dt = Utc.timestamp_opt(1635789600, 500_000_000).unwrap();
         let timestamp = Timestamp::from(dt);
         let serialized = serde_json::to_string(&timestamp).unwrap();
+        // Since we enabled arbitrary_precision and use Number, it should serialize as a float
         assert_eq!(serialized, "1635789600.5");
     }
 

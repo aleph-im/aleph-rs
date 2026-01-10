@@ -1,4 +1,4 @@
-use crate::cid::Cid;
+use crate::cid::{Cid, CidError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
@@ -12,6 +12,8 @@ const HASH_LENGTH: usize = 32;
 pub enum ItemHashError {
     #[error("Could not determine hash type: '{0}'")]
     UnknownHashType(String),
+    #[error("Invalid IPFS CID: '{0}'")]
+    InvalidCid(#[from] CidError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

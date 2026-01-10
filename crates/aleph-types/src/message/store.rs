@@ -126,13 +126,18 @@ mod tests {
         );
         assert!(confirmation.time.is_none());
         assert!(confirmation.publisher.is_none());
+
+        message.verify_item_hash().unwrap();
     }
 
     #[test]
     fn test_deserialize_serialized_store_message() {
         let message: Message = serde_json::from_str(STORE_IPFS_FIXTURE).unwrap();
+        message.verify_item_hash().unwrap();
+
         let serialized_message = serde_json::to_string(&message).unwrap();
         let deserialized_message: Message = serde_json::from_str(&serialized_message).unwrap();
+        deserialized_message.verify_item_hash().unwrap();
 
         assert_eq!(message, deserialized_message);
     }

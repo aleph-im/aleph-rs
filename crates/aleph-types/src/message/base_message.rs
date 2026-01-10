@@ -1,6 +1,7 @@
 use crate::chain::{Address, Chain, Signature};
 use crate::channel::Channel;
-use crate::item_hash::ItemHash;
+use crate::cid::{Cid, CidV0};
+use crate::item_hash::{AlephItemHash, ItemHash};
 use crate::message::aggregate::AggregateContent;
 use crate::message::forget::ForgetContent;
 use crate::message::instance::InstanceContent;
@@ -10,7 +11,20 @@ use crate::message::store::StoreContent;
 use crate::timestamp::Timestamp;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt::Formatter;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MessageVerificationError {
+    #[error("Item hash verification failed: expected {expected}, got {actual}")]
+    ItemHashVerificationFailed {
+        expected: ItemHash,
+        actual: ItemHash,
+    },
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -79,7 +93,7 @@ pub struct MessageContent {
     pub address: Address,
     pub time: Timestamp,
     #[serde(flatten)]
-    content: MessageContentEnum,
+    pub content: MessageContentEnum,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,6 +203,44 @@ impl Message {
     pub fn confirmed_at(&self) -> Option<&Timestamp> {
         self.confirmations.first().and_then(|c| c.time.as_ref())
     }
+
+    /// Computes the item hash of the message from its content.
+    fn compute_item_hash(&self) -> Result<ItemHash, serde_json::Error> {
+        let serialized_message_content = match &self.content_source {
+            ContentSource::Inline { item_content } => Cow::Borrowed(item_content),
+            ContentSource::Storage | ContentSource::Ipfs => {
+                let s = serde_json::to_string(&self.content)?;
+                println!("SERIALIZED CONTENT: {:?}", s);
+                println!("SERIALIZED CONTENT BYTES: {:?}", s.as_bytes());
+                Cow::Owned(s)
+            }
+        };
+
+        let computed_item_hash: ItemHash = match &self.content_source {
+            ContentSource::Inline { .. } | ContentSource::Storage => {
+                AlephItemHash::from_bytes(serialized_message_content.as_bytes()).into()
+            }
+            ContentSource::Ipfs => {
+                Cid::from(CidV0::from_bytes(serialized_message_content.as_bytes())).into()
+            }
+        };
+
+        Ok(computed_item_hash)
+    }
+
+    /// Verifies that the item hash of the message matches its content.
+    pub fn verify_item_hash(&self) -> Result<(), MessageVerificationError> {
+        let actual_hash = self.compute_item_hash()?;
+
+        if actual_hash != self.item_hash {
+            return Err(MessageVerificationError::ItemHashVerificationFailed {
+                expected: self.item_hash.clone(),
+                actual: actual_hash,
+            });
+        }
+
+        Ok(())
+    }
 }
 
 // Custom deserializer that uses message_type to efficiently deserialize content
@@ -217,41 +269,30 @@ impl<'de> Deserialize<'de> for Message {
 
         let raw = MessageRaw::deserialize(deserializer)?;
 
-        // Deserialize content based on message_type for efficiency
-        let content_obj = raw
-            .content
-            .as_object()
-            .ok_or_else(|| de::Error::custom("content must be an object"))?;
+        let content_value = raw.content;
 
-        let address = content_obj
-            .get("address")
-            .ok_or_else(|| de::Error::missing_field("content.address"))
-            .and_then(|v| Address::deserialize(v).map_err(de::Error::custom))?;
-
-        let time = content_obj
-            .get("time")
-            .ok_or_else(|| de::Error::missing_field("content.time"))
-            .and_then(|v| Timestamp::deserialize(v).map_err(de::Error::custom))?;
+        let address = Address::deserialize(&content_value["address"]).map_err(de::Error::custom)?;
+        let time = Timestamp::deserialize(&content_value["time"]).map_err(de::Error::custom)?;
 
         // Deserialize the specific variant based on message_type
         let variant = match raw.message_type {
             MessageType::Aggregate => MessageContentEnum::Aggregate(
-                AggregateContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                AggregateContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Forget => MessageContentEnum::Forget(
-                ForgetContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                ForgetContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Instance => MessageContentEnum::Instance(
-                InstanceContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                InstanceContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Post => MessageContentEnum::Post(
-                PostContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                PostContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Program => MessageContentEnum::Program(
-                ProgramContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                ProgramContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
             MessageType::Store => MessageContentEnum::Store(
-                StoreContent::deserialize(&raw.content).map_err(de::Error::custom)?,
+                StoreContent::deserialize(&content_value).map_err(de::Error::custom)?,
             ),
         };
 
@@ -282,35 +323,26 @@ impl Serialize for Message {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Message", 9)?;
-        state.serialize_field("chain", &self.chain)?;
+        let mut state = serializer.serialize_struct("Message", 12)?;
         state.serialize_field("sender", &self.sender)?;
-        match &self.content_source {
-            ContentSource::Inline { item_content } => {
-                state.serialize_field("item_type", "inline")?;
-                state.serialize_field("item_content", item_content)?;
-            }
-            ContentSource::Storage => {
-                state.serialize_field("item_type", "storage")?;
-                state.serialize_field("item_content", &None::<String>)?;
-            }
-            ContentSource::Ipfs => {
-                state.serialize_field("item_type", "ipfs")?;
-                state.serialize_field("item_content", &None::<String>)?;
-            }
-        }
+        state.serialize_field("chain", &self.chain)?;
         state.serialize_field("signature", &self.signature)?;
-        state.serialize_field("item_hash", &self.item_hash)?;
-        if self.confirmed() {
-            state.serialize_field("confirmed", &true)?;
-            state.serialize_field("confirmations", &self.confirmations)?;
-        }
-        state.serialize_field("time", &self.time)?;
-        if self.channel.is_some() {
-            state.serialize_field("channel", &self.channel)?;
-        }
         state.serialize_field("type", &self.message_type)?;
+        state.serialize_field("item_content", &match &self.content_source {
+            ContentSource::Inline { item_content } => Some(item_content),
+            ContentSource::Storage | ContentSource::Ipfs => None,
+        })?;
+        state.serialize_field("item_hash", &self.item_hash)?;
+        state.serialize_field("item_type", match &self.content_source {
+            ContentSource::Inline { .. } => "inline",
+            ContentSource::Storage => "storage",
+            ContentSource::Ipfs => "ipfs",
+        })?;
+        state.serialize_field("time", &self.time)?;
+        state.serialize_field("channel", &self.channel)?;
         state.serialize_field("content", &self.content)?;
+        state.serialize_field("confirmed", &self.confirmed())?;
+        state.serialize_field("confirmations", &self.confirmations)?;
         state.end()
     }
 }
@@ -347,6 +379,17 @@ mod tests {
         let content_source_str = r#"{"item_type":"ipfs"}"#;
         let content_source: ContentSource = serde_json::from_str(content_source_str).unwrap();
         assert_matches!(content_source, ContentSource::Ipfs);
+    }
+
+    #[test]
+    fn test_message_verify_item_hash() {
+        let json = include_str!("../../../../fixtures/messages/post/post.json");
+        let message: Message = serde_json::from_str(json).unwrap();
+        message.verify_item_hash().unwrap();
+
+        let json = include_str!("../../../../fixtures/messages/store/store-ipfs.json");
+        let message: Message = serde_json::from_str(json).unwrap();
+        message.verify_item_hash().unwrap();
     }
 
     #[test]
