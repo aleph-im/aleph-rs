@@ -26,8 +26,8 @@ pub struct BaseVolume {
 pub struct ImmutableVolume {
     #[serde(flatten)]
     pub base: BaseVolume,
-    #[serde(default, rename = "ref")]
-    pub reference: Option<ItemHash>,
+    #[serde(rename = "ref")]
+    pub reference: ItemHash,
     #[serde(default = "default_true")]
     pub use_latest: bool,
 }

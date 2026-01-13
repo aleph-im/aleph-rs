@@ -33,8 +33,8 @@ pub struct CodeContent {
 pub struct DataContent {
     pub encoding: Encoding,
     pub mount: PathBuf,
-    #[serde(default, rename = "ref")]
-    pub reference: Option<ItemHash>,
+    #[serde(rename = "ref")]
+    pub reference: ItemHash,
     #[serde(default = "default_some_false")]
     pub use_latest: Option<bool>,
 }
@@ -173,9 +173,9 @@ mod tests {
                     comment: None,
                     mount: Some(PathBuf::from("/opt/packages"))
                 },
-                reference: Some(item_hash!(
+                reference: item_hash!(
                     "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6"
-                )),
+                ),
                 use_latest: true,
             })]
         );
