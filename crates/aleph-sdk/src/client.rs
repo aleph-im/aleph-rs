@@ -108,7 +108,7 @@ pub enum MessageWithStatus {
     Rejected {
         pending_message: PendingMessage,
         error_code: i64,
-    }
+    },
 }
 
 impl MessageWithStatus {
