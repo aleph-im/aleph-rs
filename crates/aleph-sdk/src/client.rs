@@ -105,6 +105,10 @@ pub enum MessageWithStatus {
         message: ForgottenMessage,
         forgotten_by: Vec<ItemHash>,
     },
+    Rejected {
+        pending_message: PendingMessage,
+        error_code: i64,
+    },
 }
 
 impl MessageWithStatus {
@@ -115,6 +119,7 @@ impl MessageWithStatus {
             MessageWithStatus::Removing { .. } => MessageStatus::Removing,
             MessageWithStatus::Removed { .. } => MessageStatus::Removed,
             MessageWithStatus::Forgotten { .. } => MessageStatus::Forgotten,
+            MessageWithStatus::Rejected { .. } => MessageStatus::Rejected,
         }
     }
 }
