@@ -46,6 +46,7 @@ pub enum MessageStatus {
     Removing,
     Removed,
     Forgotten,
+    Rejected,
 }
 
 impl std::fmt::Display for MessageStatus {
@@ -56,6 +57,7 @@ impl std::fmt::Display for MessageStatus {
             MessageStatus::Removing => "removing",
             MessageStatus::Removed => "removed",
             MessageStatus::Forgotten => "forgotten",
+            MessageStatus::Rejected => "rejected",
         };
 
         f.write_str(s)
