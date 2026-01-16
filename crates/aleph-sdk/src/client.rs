@@ -2,7 +2,9 @@ use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::memory_size::{Bytes, MemorySize};
-use aleph_types::message::{ContentSource, Message, MessageStatus, MessageType};
+use aleph_types::message::{
+    ContentSource, FileRef, Message, MessageStatus, MessageType, RawFileRef,
+};
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
@@ -21,6 +23,8 @@ pub struct AlephClient {
 pub enum StorageError {
     #[error("File not found: {0}")]
     NotFound(ItemHash),
+    #[error("File reference not found: {0}")]
+    RefNotFound(FileRef),
     #[error("Failed to read file size: {0}")]
     InvalidSize(String),
 }
@@ -193,6 +197,15 @@ pub struct GetMessagesResponse {
     pub pagination_total: u32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FileMetadata {
+    #[serde(rename = "ref")]
+    pub reference: RawFileRef,
+    pub owner: Address,
+    pub file_hash: ItemHash,
+    pub size: Bytes,
+}
+
 pub trait AlephMessageClient {
     fn get_message(
         &self,
@@ -209,6 +222,16 @@ pub trait AlephStorageClient {
         &self,
         file_hash: &ItemHash,
     ) -> impl Future<Output = Result<Bytes, MessageError>> + Send;
+
+    fn get_file_metadata_by_message_hash(
+        &self,
+        message_hash: &ItemHash,
+    ) -> impl Future<Output = Result<FileMetadata, MessageError>> + Send;
+
+    fn get_file_metadata_by_ref(
+        &self,
+        file_ref: &FileRef,
+    ) -> impl Future<Output = Result<FileMetadata, MessageError>> + Send;
 }
 
 /// Methods used to query account properties, ex: their balance.
@@ -308,6 +331,46 @@ impl AlephStorageClient for AlephClient {
                     .map_err(|_| StorageError::InvalidSize(s.to_string()))
             })
             .map_err(MessageError::Storage)
+    }
+
+    async fn get_file_metadata_by_message_hash(
+        &self,
+        message_hash: &ItemHash,
+    ) -> Result<FileMetadata, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/storage/by-message-hash/{}", message_hash))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self.http_client.get(url).send().await?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(MessageError::NotFound(message_hash.clone()));
+        }
+        let response = response.error_for_status()?;
+
+        let file_metadata: FileMetadata = response.json().await?;
+        Ok(file_metadata)
+    }
+
+    async fn get_file_metadata_by_ref(
+        &self,
+        file_ref: &FileRef,
+    ) -> Result<FileMetadata, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/storage/by-ref/{}", file_ref))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self.http_client.get(url).send().await?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(StorageError::RefNotFound(file_ref.clone()).into());
+        }
+        let response = response.error_for_status()?;
+
+        let file_metadata: FileMetadata = response.json().await?;
+        Ok(file_metadata)
     }
 }
 
