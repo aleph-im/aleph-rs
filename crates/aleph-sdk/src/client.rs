@@ -72,6 +72,19 @@ pub struct PendingMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct RejectedMessage {
+    pub sender: Address,
+    pub chain: Chain,
+    pub signature: Option<Signature>,
+    #[serde(rename = "type")]
+    pub message_type: MessageType,
+    pub item_hash: ItemHash,
+    pub time: Timestamp,
+    pub channel: Option<Channel>,
+    pub content: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ForgottenMessage {
     pub sender: Address,
     pub chain: Chain,
@@ -106,7 +119,7 @@ pub enum MessageWithStatus {
         forgotten_by: Vec<ItemHash>,
     },
     Rejected {
-        pending_message: PendingMessage,
+        message: RejectedMessage,
         error_code: i64,
     },
 }
