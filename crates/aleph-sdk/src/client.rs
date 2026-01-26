@@ -508,7 +508,6 @@ impl AlephAggregateClient for AlephClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggregate};
     use aleph_types::{address, channel, item_hash};
 
     const FORGOTTEN_MESSAGE: &str = include_str!(concat!(
