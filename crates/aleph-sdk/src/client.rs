@@ -1,3 +1,4 @@
+use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggregate};
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
@@ -8,6 +9,7 @@ use aleph_types::message::{
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_with::{StringWithSeparator, formats::CommaSeparator, serde_as, skip_serializing_none};
 use std::collections::HashMap;
@@ -274,6 +276,23 @@ pub trait AlephAccountClient {
     ) -> impl Future<Output = Result<f64, MessageError>> + Send;
 }
 
+pub trait AlephAggregateClient {
+    /// Returns the most recent version of an aggregate.
+    fn get_aggregate<T: DeserializeOwned>(
+        &self,
+        address: &Address,
+        key: &str,
+    ) -> impl Future<Output = Result<T, MessageError>> + Send;
+
+    /// Returns the most recent version of the corechannel aggregate, i.e., the aggregate
+    /// that lists all the nodes on the network.
+    fn get_corechahannel_aggregate(
+        &self,
+    ) -> impl Future<Output = Result<CoreChannelAggregate, MessageError>> + Send {
+        self.get_aggregate(&CORECHANNEL_ADDRESS, "corechannel")
+    }
+}
+
 impl AlephClient {
     pub fn new(ccn_url: Url) -> Self {
         Self {
@@ -458,9 +477,38 @@ impl AlephAccountClient for AlephClient {
     }
 }
 
+impl AlephAggregateClient for AlephClient {
+    async fn get_aggregate<T: DeserializeOwned>(
+        &self,
+        address: &Address,
+        key: &str,
+    ) -> Result<T, MessageError> {
+        #[derive(Deserialize)]
+        struct AggregateResponse<T> {
+            data: T,
+        }
+
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/aggregates/{}.json", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .get(url)
+            .query(&[("key", key)])
+            .send()
+            .await?;
+        let aggregate_response: AggregateResponse<T> = response.json().await?;
+
+        Ok(aggregate_response.data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggregate};
     use aleph_types::{address, channel, item_hash};
 
     const FORGOTTEN_MESSAGE: &str = include_str!(concat!(
