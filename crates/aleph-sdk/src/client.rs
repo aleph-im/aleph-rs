@@ -612,7 +612,7 @@ mod tests {
         };
 
         let query = serde_qs::to_string(&filter).unwrap();
-        assert!(query.contains("message_type=POST"));
+        assert!(query.contains("msgType=POST"));
         assert!(query.contains("addresses=0x1234"));
         assert!(query.contains("channels=TEST"));
     }
