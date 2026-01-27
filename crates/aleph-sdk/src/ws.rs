@@ -1,4 +1,4 @@
-use crate::client::{MessageError, WsMessageFilter};
+use crate::client::{MessageError, MessageFilter};
 use aleph_types::message::Message;
 use futures_util::StreamExt;
 use std::time::Duration;
@@ -11,7 +11,11 @@ const MAX_BACKOFF_MS: u64 = 30_000;
 const CHANNEL_BUFFER_SIZE: usize = 100;
 
 /// Builds the websocket URL with query parameters from the filter.
-fn build_ws_url(base_url: &Url, filter: &WsMessageFilter) -> Result<Url, MessageError> {
+fn build_ws_url(
+    base_url: &Url,
+    filter: &MessageFilter,
+    history: Option<u32>,
+) -> Result<Url, MessageError> {
     let scheme = match base_url.scheme() {
         "https" => "wss",
         "http" => "ws",
@@ -25,9 +29,16 @@ fn build_ws_url(base_url: &Url, filter: &WsMessageFilter) -> Result<Url, Message
 
     ws_url.set_path("/api/ws0/messages");
 
-    let query = serde_qs::to_string(filter).map_err(|e| {
+    let mut query = serde_qs::to_string(filter).map_err(|e| {
         MessageError::WebsocketConnection(format!("Failed to serialize filter: {e}"))
     })?;
+
+    if let Some(history_value) = history {
+        if !query.is_empty() {
+            query.push('&');
+        }
+        query.push_str(&format!("history={}", history_value));
+    }
 
     if !query.is_empty() {
         ws_url.set_query(Some(&query));
@@ -39,9 +50,10 @@ fn build_ws_url(base_url: &Url, filter: &WsMessageFilter) -> Result<Url, Message
 /// Spawns a background task that manages the websocket connection and returns a receiver stream.
 pub async fn subscribe(
     base_url: Url,
-    filter: WsMessageFilter,
+    filter: &MessageFilter,
+    history: Option<u32>,
 ) -> Result<mpsc::Receiver<Result<Message, MessageError>>, MessageError> {
-    let ws_url = build_ws_url(&base_url, &filter)?;
+    let ws_url = build_ws_url(&base_url, filter, history)?;
 
     // Try initial connection to fail fast if URL is invalid
     let (ws_stream, _) = connect_async(ws_url.as_str()).await.map_err(|e| {

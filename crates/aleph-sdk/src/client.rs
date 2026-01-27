@@ -174,26 +174,39 @@ impl std::fmt::Display for SortOrder {
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MessageFilter {
+    #[serde(rename = "msgType")]
+    pub message_type: Option<MessageType>,
+
+    #[serde(rename = "msgTypes")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, MessageType>>")]
     pub message_types: Option<Vec<MessageType>>,
 
+    #[serde(rename = "contentTypes")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub content_types: Option<Vec<String>>,
 
+    #[serde(rename = "contentKeys")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub content_keys: Option<Vec<String>>,
+
+    #[serde(rename = "contentHashes")]
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, ItemHash>>")]
+    pub content_hashes: Option<Vec<ItemHash>>,
 
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub refs: Option<Vec<String>>,
 
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub addresses: Option<Vec<String>>,
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, Address>>")]
+    pub addresses: Option<Vec<Address>>,
+
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, Address>>")]
+    pub owners: Option<Vec<Address>>,
 
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub tags: Option<Vec<String>>,
 
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub hashes: Option<Vec<String>>,
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, ItemHash>>")]
+    pub hashes: Option<Vec<ItemHash>>,
 
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub channels: Option<Vec<String>>,
@@ -201,53 +214,22 @@ pub struct MessageFilter {
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub chains: Option<Vec<String>>,
 
+    #[serde(rename = "startDate")]
     pub start_date: Option<Timestamp>,
+    #[serde(rename = "endDate")]
     pub end_date: Option<Timestamp>,
 
+    #[serde(rename = "sortBy")]
     pub sort_by: Option<SortBy>,
+    #[serde(rename = "sortOrder")]
     pub sort_order: Option<SortOrder>,
 
+    #[serde(rename = "msgStatuses")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, MessageStatus>>")]
     pub message_statuses: Option<Vec<MessageStatus>>,
 
     pub pagination: Option<u32>,
     pub page: Option<u32>,
-}
-
-#[skip_serializing_none]
-#[serde_as]
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct WsMessageFilter {
-    pub message_type: Option<MessageType>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub addresses: Option<Vec<String>>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub channels: Option<Vec<String>>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub chains: Option<Vec<String>>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub hashes: Option<Vec<String>>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub refs: Option<Vec<String>>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub content_types: Option<Vec<String>>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub content_hashes: Option<Vec<String>>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub tags: Option<Vec<String>>,
-
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub owners: Option<Vec<String>>,
-
-    pub history: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,7 +260,8 @@ pub trait AlephMessageClient {
     ) -> impl Future<Output = Result<Vec<Message>, MessageError>> + Send;
     fn subscribe_messages(
         &self,
-        filter: &WsMessageFilter,
+        filter: &MessageFilter,
+        history: Option<u32>,
     ) -> impl Future<
         Output = Result<
             impl Stream<Item = Result<Message, MessageError>> + Send + Unpin,
@@ -393,10 +376,11 @@ impl AlephMessageClient for AlephClient {
 
     async fn subscribe_messages(
         &self,
-        filter: &WsMessageFilter,
+        filter: &MessageFilter,
+        history: Option<u32>,
     ) -> Result<impl Stream<Item = Result<Message, MessageError>> + Send + Unpin, MessageError>
     {
-        let rx = crate::ws::subscribe(self.ccn_url.clone(), filter.clone()).await?;
+        let rx = crate::ws::subscribe(self.ccn_url.clone(), filter, history).await?;
         Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
 }
@@ -620,11 +604,10 @@ mod tests {
 
     #[test]
     fn test_ws_message_filter_serialization() {
-        let filter = WsMessageFilter {
+        let filter = MessageFilter {
             message_type: Some(MessageType::Post),
-            addresses: Some(vec!["0x1234".to_string()]),
+            addresses: Some(vec![address!("0x1234")]),
             channels: Some(vec!["TEST".to_string()]),
-            history: Some(10),
             ..Default::default()
         };
 
@@ -632,7 +615,6 @@ mod tests {
         assert!(query.contains("message_type=POST"));
         assert!(query.contains("addresses=0x1234"));
         assert!(query.contains("channels=TEST"));
-        assert!(query.contains("history=10"));
     }
 
     #[tokio::test]
@@ -641,14 +623,12 @@ mod tests {
         use futures_util::StreamExt;
 
         let client = AlephClient::new(Url::parse("https://api2.aleph.im").expect("valid url"));
-        let filter = WsMessageFilter {
-            message_type: Some(MessageType::Post),
-            history: Some(5),
+        let filter = MessageFilter {
             ..Default::default()
         };
 
         let mut stream = client
-            .subscribe_messages(&filter)
+            .subscribe_messages(&filter, None)
             .await
             .expect("should connect");
 
