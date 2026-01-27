@@ -258,7 +258,7 @@ pub trait AlephMessageClient {
         &self,
         filter: &MessageFilter,
     ) -> impl Future<Output = Result<Vec<Message>, MessageError>> + Send;
-    fn subscribe_messages(
+    fn subscribe_to_messages(
         &self,
         filter: &MessageFilter,
         history: Option<u32>,
@@ -374,7 +374,7 @@ impl AlephMessageClient for AlephClient {
         Ok(get_messages_response.messages)
     }
 
-    async fn subscribe_messages(
+    async fn subscribe_to_messages(
         &self,
         filter: &MessageFilter,
         history: Option<u32>,
@@ -619,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "uses a remote CCN websocket"]
-    async fn test_subscribe_messages() {
+    async fn test_subscribe_to_messages() {
         use futures_util::StreamExt;
 
         let client = AlephClient::new(Url::parse("https://api2.aleph.im").expect("valid url"));
@@ -629,7 +629,7 @@ mod tests {
         };
 
         let mut stream = client
-            .subscribe_messages(&filter, None)
+            .subscribe_to_messages(&filter, None)
             .await
             .expect("should connect");
 
