@@ -624,6 +624,7 @@ mod tests {
 
         let client = AlephClient::new(Url::parse("https://api2.aleph.im").expect("valid url"));
         let filter = MessageFilter {
+            message_type: Some(MessageType::Post),
             ..Default::default()
         };
 
