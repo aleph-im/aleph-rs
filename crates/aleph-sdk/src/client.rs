@@ -8,6 +8,7 @@ use aleph_types::message::{
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
+use futures_util::Stream;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,10 @@ pub enum MessageError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     HttpError(#[from] reqwest::Error),
+    #[error("WebSocket connection error: {0}")]
+    WebsocketConnection(String),
+    #[error("WebSocket message error: {0}")]
+    WebsocketMessage(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -169,26 +174,39 @@ impl std::fmt::Display for SortOrder {
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MessageFilter {
+    #[serde(rename = "msgType")]
+    pub message_type: Option<MessageType>,
+
+    #[serde(rename = "msgTypes")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, MessageType>>")]
     pub message_types: Option<Vec<MessageType>>,
 
+    #[serde(rename = "contentTypes")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub content_types: Option<Vec<String>>,
 
+    #[serde(rename = "contentKeys")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub content_keys: Option<Vec<String>>,
+
+    #[serde(rename = "contentHashes")]
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, ItemHash>>")]
+    pub content_hashes: Option<Vec<ItemHash>>,
 
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub refs: Option<Vec<String>>,
 
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub addresses: Option<Vec<String>>,
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, Address>>")]
+    pub addresses: Option<Vec<Address>>,
+
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, Address>>")]
+    pub owners: Option<Vec<Address>>,
 
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub tags: Option<Vec<String>>,
 
-    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
-    pub hashes: Option<Vec<String>>,
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, ItemHash>>")]
+    pub hashes: Option<Vec<ItemHash>>,
 
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub channels: Option<Vec<String>>,
@@ -196,12 +214,17 @@ pub struct MessageFilter {
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
     pub chains: Option<Vec<String>>,
 
+    #[serde(rename = "startDate")]
     pub start_date: Option<Timestamp>,
+    #[serde(rename = "endDate")]
     pub end_date: Option<Timestamp>,
 
+    #[serde(rename = "sortBy")]
     pub sort_by: Option<SortBy>,
+    #[serde(rename = "sortOrder")]
     pub sort_order: Option<SortOrder>,
 
+    #[serde(rename = "msgStatuses")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, MessageStatus>>")]
     pub message_statuses: Option<Vec<MessageStatus>>,
 
@@ -235,6 +258,16 @@ pub trait AlephMessageClient {
         &self,
         filter: &MessageFilter,
     ) -> impl Future<Output = Result<Vec<Message>, MessageError>> + Send;
+    fn subscribe_to_messages(
+        &self,
+        filter: &MessageFilter,
+        history: Option<u32>,
+    ) -> impl Future<
+        Output = Result<
+            impl Stream<Item = Result<Message, MessageError>> + Send + Unpin,
+            MessageError,
+        >,
+    > + Send;
 }
 
 pub trait AlephStorageClient {
@@ -339,6 +372,16 @@ impl AlephMessageClient for AlephClient {
 
         let get_messages_response: GetMessagesResponse = response.json().await?;
         Ok(get_messages_response.messages)
+    }
+
+    async fn subscribe_to_messages(
+        &self,
+        filter: &MessageFilter,
+        history: Option<u32>,
+    ) -> Result<impl Stream<Item = Result<Message, MessageError>> + Send + Unpin, MessageError>
+    {
+        let rx = crate::ws::subscribe(self.ccn_url.clone(), filter, history).await?;
+        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
 }
 
@@ -557,5 +600,54 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("failed to fetch file: {:?}", e));
         assert_eq!(size, Bytes::from_units(297));
+    }
+
+    #[test]
+    fn test_ws_message_filter_serialization() {
+        let filter = MessageFilter {
+            message_type: Some(MessageType::Post),
+            addresses: Some(vec![address!("0x1234")]),
+            channels: Some(vec!["TEST".to_string()]),
+            ..Default::default()
+        };
+
+        let query = serde_qs::to_string(&filter).unwrap();
+        assert!(query.contains("msgType=POST"));
+        assert!(query.contains("addresses=0x1234"));
+        assert!(query.contains("channels=TEST"));
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN websocket"]
+    async fn test_subscribe_to_messages() {
+        use futures_util::StreamExt;
+
+        let client = AlephClient::new(Url::parse("https://api2.aleph.im").expect("valid url"));
+        let filter = MessageFilter {
+            message_type: Some(MessageType::Post),
+            ..Default::default()
+        };
+
+        let mut stream = client
+            .subscribe_to_messages(&filter, None)
+            .await
+            .expect("should connect");
+
+        // Read up to 5 historical messages
+        let mut count = 0;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(msg) => {
+                    assert_eq!(msg.message_type, MessageType::Post);
+                    count += 1;
+                    if count >= 5 {
+                        break;
+                    }
+                }
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        assert!(count > 0, "should have received at least one message");
     }
 }

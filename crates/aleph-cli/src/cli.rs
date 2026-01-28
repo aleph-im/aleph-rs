@@ -126,6 +126,10 @@ impl From<SortOrderCli> for SortOrder {
 // ---------- CLI filter (mirror of MessageFilter) ----------
 #[derive(Debug, Clone, Args)]
 pub struct MessageFilterCli {
+    /// Filter by message type
+    #[arg(long, value_delimiter = ',', value_enum)]
+    pub message_type: Option<MessageTypeCli>,
+
     /// Filter by message type(s). CSV or repeat the flag.
     #[arg(long, value_delimiter = ',', value_enum)]
     pub message_types: Option<Vec<MessageTypeCli>>,
@@ -137,6 +141,10 @@ pub struct MessageFilterCli {
     /// Filter by content keys. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
     pub content_keys: Option<Vec<String>>,
+
+    /// Filter by content hashes (content.item_hash). CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub content_hashes: Option<Vec<String>>,
 
     /// Only posts that reference these hashes. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
@@ -191,15 +199,22 @@ pub struct MessageFilterCli {
 impl From<MessageFilterCli> for MessageFilter {
     fn from(c: MessageFilterCli) -> Self {
         MessageFilter {
+            message_type: c.message_type.map(Into::into),
             message_types: c
                 .message_types
                 .map(|v| v.into_iter().map(Into::into).collect()),
             content_types: c.content_types,
             content_keys: c.content_keys,
+            content_hashes: c
+                .content_hashes
+                .map(|v| v.into_iter().map(|s| s.parse().unwrap()).collect()),
             refs: c.refs,
-            addresses: c.addresses,
+            addresses: c.addresses.map(|v| v.into_iter().map(Into::into).collect()),
+            owners: None,
             tags: c.tags,
-            hashes: c.hashes,
+            hashes: c
+                .hashes
+                .map(|v| v.into_iter().map(|s| s.parse().unwrap()).collect()),
             channels: c.channels,
             chains: c.chains,
             start_date: c.start_date,

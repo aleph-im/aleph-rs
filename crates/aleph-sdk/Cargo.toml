@@ -10,12 +10,14 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 [dependencies]
 aleph-types = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+futures-util = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-url = { workspace = true }
+serde_qs = { workspace = true }
 serde_with = { workspace = true }
-
-[dev-dependencies]
+thiserror = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-stream = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
