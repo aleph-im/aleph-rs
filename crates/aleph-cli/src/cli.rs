@@ -24,6 +24,31 @@ pub enum MessageCommand {
     // Boxing because of a large enum variant.
     /// List messages (with filters).
     List(Box<MessageFilterCli>),
+    /// Sync messages from one node to another.
+    Sync(Box<SyncArgs>),
+}
+
+#[derive(Args)]
+pub struct SyncArgs {
+    /// URL of the source node (messages are fetched from here).
+    #[arg(long)]
+    pub source: String,
+
+    /// URL of the target node (missing messages are POSTed here).
+    #[arg(long)]
+    pub target: String,
+
+    /// Maximum number of messages to fetch from each node.
+    #[arg(long, default_value = "200")]
+    pub count: u32,
+
+    /// Show what would be synced without actually POSTing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Message filters (same as `message list`).
+    #[command(flatten)]
+    pub filter: MessageFilterCli,
 }
 
 #[derive(Args)]
