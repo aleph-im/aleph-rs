@@ -244,6 +244,63 @@ pub struct GetMessagesResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PublicationStatus {
+    pub status: String,
+    pub failed: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PostMessageResponse {
+    pub publication_status: PublicationStatus,
+    pub message_status: String,
+}
+
+/// Serialization-only struct for POSTing a message to a node.
+/// Contains only the fields accepted by POST /api/v0/messages.
+#[derive(Serialize)]
+struct RawMessage<'a> {
+    sender: &'a Address,
+    chain: &'a Chain,
+    signature: &'a Signature,
+    #[serde(rename = "type")]
+    message_type: &'a MessageType,
+    item_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_content: Option<&'a str>,
+    item_hash: &'a ItemHash,
+    time: &'a Timestamp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<&'a Channel>,
+}
+
+impl<'a> RawMessage<'a> {
+    fn from_message(message: &'a Message) -> Self {
+        let (item_type, item_content) = match &message.content_source {
+            ContentSource::Inline { item_content } => ("inline", Some(item_content.as_str())),
+            ContentSource::Storage => ("storage", None),
+            ContentSource::Ipfs => ("ipfs", None),
+        };
+        RawMessage {
+            sender: &message.sender,
+            chain: &message.chain,
+            signature: &message.signature,
+            message_type: &message.message_type,
+            item_type,
+            item_content,
+            item_hash: &message.item_hash,
+            time: &message.time,
+            channel: message.channel.as_ref(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PostMessageBody<'a> {
+    sync: bool,
+    message: RawMessage<'a>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct FileMetadata {
     #[serde(rename = "ref")]
     pub reference: RawFileRef,
@@ -271,6 +328,12 @@ pub trait AlephMessageClient {
             MessageError,
         >,
     > + Send;
+
+    fn post_message(
+        &self,
+        message: &Message,
+        sync: bool,
+    ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send;
 }
 
 pub trait AlephStorageClient {
@@ -427,6 +490,33 @@ impl AlephMessageClient for AlephClient {
     {
         let rx = crate::ws::subscribe(self.ccn_url.clone(), filter, history).await?;
         Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
+    }
+
+    async fn post_message(
+        &self,
+        message: &Message,
+        sync: bool,
+    ) -> Result<PostMessageResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/messages")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let body = PostMessageBody {
+            sync,
+            message: RawMessage::from_message(message),
+        };
+
+        let response = self
+            .http_client
+            .post(url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let post_response: PostMessageResponse = response.json().await?;
+        Ok(post_response)
     }
 }
 
