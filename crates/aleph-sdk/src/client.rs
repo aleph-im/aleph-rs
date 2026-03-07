@@ -10,15 +10,18 @@ use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
 use futures_util::Stream;
 use reqwest::StatusCode;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_with::{StringWithSeparator, formats::CommaSeparator, serde_as, skip_serializing_none};
 use std::collections::HashMap;
+use std::time::Duration;
 use url::Url;
 
 #[derive(Clone)]
 pub struct AlephClient {
-    http_client: reqwest::Client,
+    http_client: ClientWithMiddleware,
     ccn_url: Url,
 }
 
@@ -51,7 +54,7 @@ pub enum MessageError {
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
     #[error(transparent)]
-    HttpError(#[from] reqwest::Error),
+    HttpError(#[from] reqwest_middleware::Error),
     #[error("WebSocket connection error: {0}")]
     WebsocketConnection(String),
     #[error("WebSocket message error: {0}")]
@@ -326,10 +329,43 @@ pub trait AlephAggregateClient {
     }
 }
 
+/// Configuration for HTTP retry behavior on transient errors (429, 5xx).
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts. Default: 3.
+    pub max_retries: u32,
+    /// Minimum backoff duration between retries. Default: 500ms.
+    pub min_backoff: Duration,
+    /// Maximum backoff duration between retries. Default: 30s.
+    pub max_backoff: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            min_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(30),
+        }
+    }
+}
+
 impl AlephClient {
     pub fn new(ccn_url: Url) -> Self {
+        Self::with_retry_config(ccn_url, RetryConfig::default())
+    }
+
+    pub fn with_retry_config(ccn_url: Url, retry_config: RetryConfig) -> Self {
+        let retry_policy = ExponentialBackoff::builder()
+            .retry_bounds(retry_config.min_backoff, retry_config.max_backoff)
+            .build_with_max_retries(retry_config.max_retries);
+
+        let http_client = ClientBuilder::new(reqwest::Client::new())
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .build();
+
         Self {
-            http_client: reqwest::Client::new(),
+            http_client,
             ccn_url,
         }
     }
@@ -347,12 +383,17 @@ impl AlephMessageClient for AlephClient {
 
         let response = self.http_client.get(url).send().await?;
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             return Err(MessageError::NotFound(item_hash.clone()));
         }
-        let response = response.error_for_status()?;
+        let response = response
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
 
-        let get_message_response: GetMessageResponse = response.json().await?;
+        let get_message_response: GetMessageResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
         Ok(get_message_response.message)
     }
 
@@ -368,9 +409,13 @@ impl AlephMessageClient for AlephClient {
             .query(&filter)
             .send()
             .await?
-            .error_for_status()?;
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
 
-        let get_messages_response: GetMessagesResponse = response.json().await?;
+        let get_messages_response: GetMessagesResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
         Ok(get_messages_response.messages)
     }
 
@@ -397,7 +442,8 @@ impl AlephStorageClient for AlephClient {
             .head(url)
             .send()
             .await?
-            .error_for_status()?;
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
         let headers = response.headers();
         let content_length = headers
             .get(reqwest::header::CONTENT_LENGTH)
@@ -424,12 +470,17 @@ impl AlephStorageClient for AlephClient {
 
         let response = self.http_client.get(url).send().await?;
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             return Err(MessageError::NotFound(message_hash.clone()));
         }
-        let response = response.error_for_status()?;
+        let response = response
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
 
-        let file_metadata: FileMetadata = response.json().await?;
+        let file_metadata: FileMetadata = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
         Ok(file_metadata)
     }
 
@@ -444,12 +495,17 @@ impl AlephStorageClient for AlephClient {
 
         let response = self.http_client.get(url).send().await?;
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             return Err(StorageError::RefNotFound(file_ref.clone()).into());
         }
-        let response = response.error_for_status()?;
+        let response = response
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
 
-        let file_metadata: FileMetadata = response.json().await?;
+        let file_metadata: FileMetadata = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
         Ok(file_metadata)
     }
 }
@@ -483,8 +539,17 @@ impl AlephAccountClient for AlephClient {
             .join(&format!("/api/v0/addresses/{}/balance", address))
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let response = self.http_client.get(url).send().await?.error_for_status()?;
-        let account_balance: AccountBalance = response.json().await?;
+        let response = self
+            .http_client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+        let account_balance: AccountBalance = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
 
         Ok(account_balance)
     }
@@ -501,8 +566,13 @@ impl AlephAccountClient for AlephClient {
             return Ok(Bytes::from_units(0));
         }
         // Otherwise, process errors then deserialize the response.
-        let response = response.error_for_status()?;
-        let get_balance_response: GetAccountFilesResponse = response.json().await?;
+        let response = response
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+        let get_balance_response: GetAccountFilesResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
 
         Ok(get_balance_response.total_size)
     }
@@ -513,8 +583,17 @@ impl AlephAccountClient for AlephClient {
             .join(&format!("/api/v0/price/{}", item_hash))
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let response = self.http_client.get(url).send().await?.error_for_status()?;
-        let get_price_response: GetPriceResponse = response.json().await?;
+        let response = self
+            .http_client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+        let get_price_response: GetPriceResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
 
         Ok(get_price_response.required_tokens)
     }
@@ -542,7 +621,10 @@ impl AlephAggregateClient for AlephClient {
             .query(&[("key", key)])
             .send()
             .await?;
-        let aggregate_response: AggregateResponse<T> = response.json().await?;
+        let aggregate_response: AggregateResponse<T> = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
 
         Ok(aggregate_response.data)
     }
