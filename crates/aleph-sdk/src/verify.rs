@@ -58,17 +58,16 @@ const DAG_PB_CODEC: u64 = 0x70;
 const CHUNK_SIZE: usize = 262144;
 
 /// IPFS default maximum links per node (go-ipfs `helpers.DefaultLinksPerBlock`).
-/// Files larger than MAX_LINKS * CHUNK_SIZE (~44.5 MiB) require multi-level DAGs
-/// which are not yet supported.
 const MAX_LINKS: usize = 174;
 
-/// A completed dag-pb leaf node's metadata.
-pub(crate) struct DagPbLeaf {
+/// A dag-pb node (leaf or internal) used during tree construction.
+pub(crate) struct DagNode {
     /// The multihash bytes: [0x12, 0x20, ...32 bytes SHA-256 digest...]
     multihash_bytes: Vec<u8>,
-    /// The serialized PBNode byte length (used for PBLink.Tsize)
-    node_size: u64,
-    /// The original chunk data length (used for root blocksizes)
+    /// Cumulative size: serialized node bytes + sum of children's cumulative sizes.
+    /// For leaves this equals the serialized PBNode length. Used for PBLink.Tsize.
+    cumulative_size: u64,
+    /// Total file data bytes covered by this subtree.
     data_size: u64,
 }
 
@@ -83,8 +82,7 @@ pub enum HashVerifier {
     },
     DagPb {
         buffer: Vec<u8>,
-        leaves: Vec<DagPbLeaf>,
-        total_size: u64,
+        leaves: Vec<DagNode>,
         expected_cid: Cid,
     },
 }
@@ -102,7 +100,6 @@ impl HashVerifier {
                     return Ok(Self::DagPb {
                         buffer: Vec::with_capacity(CHUNK_SIZE),
                         leaves: Vec::new(),
-                        total_size: 0,
                         expected_cid: cid.clone(),
                     });
                 }
@@ -130,12 +127,8 @@ impl HashVerifier {
         match self {
             Self::Native { hasher, .. } | Self::CidRaw { hasher, .. } => hasher.update(data),
             Self::DagPb {
-                buffer,
-                leaves,
-                total_size,
-                ..
+                buffer, leaves, ..
             } => {
-                *total_size += data.len() as u64;
                 let mut remaining = data;
                 while !remaining.is_empty() {
                     let space = CHUNK_SIZE - buffer.len();
@@ -151,8 +144,8 @@ impl HashVerifier {
         }
     }
 
-    /// Build a dag-pb leaf node from a chunk of data and return its metadata.
-    fn build_leaf(chunk: &[u8]) -> DagPbLeaf {
+    /// Build a dag-pb leaf node from a chunk of data.
+    fn build_leaf(chunk: &[u8]) -> DagNode {
         let unixfs_data = unixfs::Data {
             r#type: unixfs::DataType::File as i32,
             data: if chunk.is_empty() {
@@ -180,10 +173,57 @@ impl HashVerifier {
         let mut multihash_bytes = vec![0x12, 0x20];
         multihash_bytes.extend_from_slice(&digest);
 
-        DagPbLeaf {
+        DagNode {
             multihash_bytes,
-            node_size: node_bytes.len() as u64,
+            cumulative_size: node_bytes.len() as u64,
             data_size: chunk.len() as u64,
+        }
+    }
+
+    /// Build an internal dag-pb node from a list of children.
+    fn build_internal_node(children: &[DagNode]) -> DagNode {
+        let total_data_size: u64 = children.iter().map(|c| c.data_size).sum();
+        let blocksizes: Vec<u64> = children.iter().map(|c| c.data_size).collect();
+
+        let links: Vec<merkledag::PbLink> = children
+            .iter()
+            .map(|c| merkledag::PbLink {
+                hash: Some(c.multihash_bytes.clone()),
+                name: Some(String::new()),
+                tsize: Some(c.cumulative_size),
+            })
+            .collect();
+
+        let root_unixfs = unixfs::Data {
+            r#type: unixfs::DataType::File as i32,
+            data: None,
+            filesize: Some(total_data_size),
+            blocksizes,
+            hash_type: None,
+            fanout: None,
+        };
+        let mut root_unixfs_bytes = Vec::new();
+        root_unixfs
+            .encode(&mut root_unixfs_bytes)
+            .expect("protobuf encoding cannot fail");
+
+        let node = merkledag::PbNode {
+            links,
+            data: Some(root_unixfs_bytes),
+        };
+        let node_bytes = encode_pbnode_canonical(&node);
+
+        let digest = Sha256::digest(&node_bytes);
+        let mut multihash_bytes = vec![0x12, 0x20];
+        multihash_bytes.extend_from_slice(&digest);
+
+        let node_size = node_bytes.len() as u64;
+        let children_cumulative: u64 = children.iter().map(|c| c.cumulative_size).sum();
+
+        DagNode {
+            multihash_bytes,
+            cumulative_size: node_size + children_cumulative,
+            data_size: total_data_size,
         }
     }
 
@@ -224,7 +264,6 @@ impl HashVerifier {
             Self::DagPb {
                 buffer,
                 mut leaves,
-                total_size,
                 expected_cid,
             } => {
                 // Flush any remaining bytes in buffer as the last chunk
@@ -232,58 +271,24 @@ impl HashVerifier {
                     leaves.push(Self::build_leaf(&buffer));
                 }
 
-                if leaves.len() > MAX_LINKS {
-                    return Err(VerifyError::UnsupportedCid(format!(
-                        "file has {} chunks, exceeds single-level dag-pb limit of {MAX_LINKS} \
-                         (~{} MiB); multi-level DAG verification not yet supported",
-                        leaves.len(),
-                        MAX_LINKS * CHUNK_SIZE / (1024 * 1024),
-                    )));
-                }
-
                 let computed_multihash = if leaves.is_empty() {
                     // Empty file: build a leaf from empty data
-                    let leaf = Self::build_leaf(&[]);
-                    leaf.multihash_bytes
+                    Self::build_leaf(&[]).multihash_bytes
                 } else if leaves.len() == 1 {
                     // Single leaf: the CID is directly the leaf's multihash
                     leaves.into_iter().next().unwrap().multihash_bytes
                 } else {
-                    // Multiple leaves: build a root PBNode
-                    let links: Vec<merkledag::PbLink> = leaves
-                        .iter()
-                        .map(|leaf| merkledag::PbLink {
-                            hash: Some(leaf.multihash_bytes.clone()),
-                            name: Some(String::new()),
-                            tsize: Some(leaf.node_size),
-                        })
-                        .collect();
-
-                    let blocksizes: Vec<u64> = leaves.iter().map(|leaf| leaf.data_size).collect();
-
-                    let root_unixfs = unixfs::Data {
-                        r#type: unixfs::DataType::File as i32,
-                        data: None,
-                        filesize: Some(total_size),
-                        blocksizes,
-                        hash_type: None,
-                        fanout: None,
-                    };
-                    let mut root_unixfs_bytes = Vec::new();
-                    root_unixfs
-                        .encode(&mut root_unixfs_bytes)
-                        .expect("protobuf encoding cannot fail");
-
-                    let root_node = merkledag::PbNode {
-                        links,
-                        data: Some(root_unixfs_bytes),
-                    };
-                    let root_bytes = encode_pbnode_canonical(&root_node);
-
-                    let digest = Sha256::digest(&root_bytes);
-                    let mut mh = vec![0x12, 0x20];
-                    mh.extend_from_slice(&digest);
-                    mh
+                    // Build balanced DAG bottom-up: group nodes into batches
+                    // of MAX_LINKS, creating internal nodes at each level,
+                    // until a single root remains.
+                    let mut nodes = leaves;
+                    while nodes.len() > 1 {
+                        nodes = nodes
+                            .chunks(MAX_LINKS)
+                            .map(Self::build_internal_node)
+                            .collect();
+                    }
+                    nodes.into_iter().next().unwrap().multihash_bytes
                 };
 
                 let computed_cid_str = bs58::encode(&computed_multihash).into_string();
