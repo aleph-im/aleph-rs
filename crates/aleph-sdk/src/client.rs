@@ -36,6 +36,8 @@ pub enum StorageError {
     InvalidSize(String),
     #[error("Integrity verification failed: {0}")]
     IntegrityError(#[from] crate::verify::VerifyError),
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(#[from] url::ParseError),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -730,7 +732,7 @@ impl AlephStorageClient for AlephClient {
         let url = self
             .ccn_url
             .join(&format!("/api/v0/storage/raw/{}", file_hash))
-            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+            .map_err(StorageError::InvalidUrl)?;
 
         let response = self.http_client.get(url).send().await?;
 
