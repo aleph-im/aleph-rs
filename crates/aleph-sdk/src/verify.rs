@@ -704,14 +704,14 @@ mod tests {
         // Build all leaves
         let leaves: Vec<DagNode> = data
             .chunks(CHUNK_SIZE)
-            .map(|chunk| test_build_leaf(chunk))
+            .map(test_build_leaf)
             .collect();
         assert_eq!(leaves.len(), num_leaves);
 
         // Build level 1: group into batches of MAX_LINKS
         let level1: Vec<DagNode> = leaves
             .chunks(MAX_LINKS)
-            .map(|batch| test_build_internal(batch))
+            .map(test_build_internal)
             .collect();
         assert_eq!(level1.len(), 2);
 
