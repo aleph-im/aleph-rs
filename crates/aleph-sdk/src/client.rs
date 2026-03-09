@@ -1008,6 +1008,26 @@ mod tests {
         std::fs::remove_file(&tmp_file).ok();
     }
 
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_download_cidv0_with_verification() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let file_hash =
+            item_hash!("QmQKPXPMENCLL7HfyPiTZkmyX5iHp5QrYdWWMeP6pEhiS4");
+
+        let download = client
+            .download_file_by_hash(&file_hash)
+            .await
+            .expect("download should succeed");
+
+        let content = download
+            .with_verification()
+            .bytes()
+            .await
+            .expect("CIDv0 verified download should succeed");
+        assert!(!content.is_empty());
+    }
+
     #[test]
     fn test_ws_message_filter_serialization() {
         let filter = MessageFilter {
