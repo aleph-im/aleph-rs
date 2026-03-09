@@ -126,9 +126,7 @@ impl HashVerifier {
     pub fn update(&mut self, data: &[u8]) {
         match self {
             Self::Native { hasher, .. } | Self::CidRaw { hasher, .. } => hasher.update(data),
-            Self::DagPb {
-                buffer, leaves, ..
-            } => {
+            Self::DagPb { buffer, leaves, .. } => {
                 let mut remaining = data;
                 while !remaining.is_empty() {
                     let space = CHUNK_SIZE - buffer.len();

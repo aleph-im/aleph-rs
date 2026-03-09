@@ -1012,8 +1012,7 @@ mod tests {
     #[ignore = "uses a remote CCN"]
     async fn test_download_cidv0_with_verification() {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let file_hash =
-            item_hash!("QmQKPXPMENCLL7HfyPiTZkmyX5iHp5QrYdWWMeP6pEhiS4");
+        let file_hash = item_hash!("QmQKPXPMENCLL7HfyPiTZkmyX5iHp5QrYdWWMeP6pEhiS4");
 
         let download = client
             .download_file_by_hash(&file_hash)
@@ -1032,8 +1031,7 @@ mod tests {
     #[ignore = "uses a remote CCN"]
     async fn test_download_large_cidv0_with_verification() {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let file_hash =
-            item_hash!("QmdFaKjHBGsU525nHD6fgH7o1YnGZgfNo1x9jspzwCaR9N");
+        let file_hash = item_hash!("QmdFaKjHBGsU525nHD6fgH7o1YnGZgfNo1x9jspzwCaR9N");
 
         let download = client
             .download_file_by_hash(&file_hash)
