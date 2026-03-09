@@ -682,4 +682,52 @@ mod tests {
         // No update() calls — empty file
         verifier.finalize().expect("empty file should verify");
     }
+
+    /// Helper: build a leaf DagNode from raw chunk data (mirrors HashVerifier::build_leaf).
+    fn test_build_leaf(chunk: &[u8]) -> DagNode {
+        HashVerifier::build_leaf(chunk)
+    }
+
+    /// Helper: build an internal DagNode from children (mirrors HashVerifier::build_internal_node).
+    fn test_build_internal(children: &[DagNode]) -> DagNode {
+        HashVerifier::build_internal_node(children)
+    }
+
+    #[test]
+    fn test_verify_cidv0_multi_level_dag() {
+        // 175 leaves (just over MAX_LINKS=174) forces a two-level tree:
+        //   Level 0: 175 leaves
+        //   Level 1: node_a(174 children), node_b(1 child)
+        //   Level 2: root(2 children)
+        let num_leaves = MAX_LINKS + 1;
+        let data = vec![0xEEu8; num_leaves * CHUNK_SIZE];
+
+        // Build all leaves
+        let leaves: Vec<DagNode> = data
+            .chunks(CHUNK_SIZE)
+            .map(|chunk| test_build_leaf(chunk))
+            .collect();
+        assert_eq!(leaves.len(), num_leaves);
+
+        // Build level 1: group into batches of MAX_LINKS
+        let level1: Vec<DagNode> = leaves
+            .chunks(MAX_LINKS)
+            .map(|batch| test_build_internal(batch))
+            .collect();
+        assert_eq!(level1.len(), 2);
+
+        // Build root
+        let root = test_build_internal(&level1);
+        let expected_cid = bs58::encode(&root.multihash_bytes).into_string();
+
+        let our_cid = aleph_types::cid::Cid::try_from(expected_cid.as_str()).unwrap();
+        let expected = ItemHash::Ipfs(our_cid);
+
+        // Feed all data through the verifier
+        let mut verifier = HashVerifier::new(&expected).unwrap();
+        verifier.update(&data);
+        verifier
+            .finalize()
+            .expect("multi-level DAG (175 leaves) should verify");
+    }
 }
