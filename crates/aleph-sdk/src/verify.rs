@@ -4,25 +4,40 @@ use cid::Cid as LibCid;
 use prost::Message;
 use sha2::{Digest, Sha256};
 
+/// Encode a protobuf varint (LEB128).
+fn encode_varint(mut value: u64, buf: &mut Vec<u8>) {
+    while value >= 0x80 {
+        buf.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    buf.push(value as u8);
+}
+
+/// Encode a protobuf field tag (field number + wire type).
+fn encode_tag(field_number: u32, wire_type: u8, buf: &mut Vec<u8>) {
+    encode_varint(((field_number as u64) << 3) | wire_type as u64, buf);
+}
+
+/// Wire type 2: length-delimited.
+const WIRE_TYPE_LEN: u8 = 2;
+
 /// Encode a PBNode in canonical dag-pb order (Links before Data).
 /// IPFS requires this non-standard field ordering for CID compatibility.
 fn encode_pbnode_canonical(node: &merkledag::PbNode) -> Vec<u8> {
-    use prost::encoding::{WireType, encode_key, encode_varint};
-
     let mut buf = Vec::new();
 
     // Links (field 2) first
     for link in &node.links {
         let mut link_buf = Vec::new();
         prost::Message::encode(link, &mut link_buf).expect("encoding PBLink");
-        encode_key(2, WireType::LengthDelimited, &mut buf);
+        encode_tag(2, WIRE_TYPE_LEN, &mut buf);
         encode_varint(link_buf.len() as u64, &mut buf);
         buf.extend_from_slice(&link_buf);
     }
 
     // Data (field 1) second
     if let Some(data) = &node.data {
-        encode_key(1, WireType::LengthDelimited, &mut buf);
+        encode_tag(1, WIRE_TYPE_LEN, &mut buf);
         encode_varint(data.len() as u64, &mut buf);
         buf.extend_from_slice(data);
     }
