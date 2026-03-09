@@ -311,9 +311,8 @@ impl HashVerifier {
                     Err(VerifyError::IntegrityMismatch {
                         expected: ItemHash::Ipfs(expected_cid),
                         actual: ItemHash::Ipfs(
-                            Cid::try_from(computed_cid_str.as_str()).unwrap_or_else(|_| {
-                                aleph_types::cid::CidV1::new(computed_cid_str).into()
-                            }),
+                            Cid::try_from(computed_cid_str.as_str())
+                                .expect("computed base58 multihash is always a valid CIDv0"),
                         ),
                     })
                 }
