@@ -22,7 +22,6 @@ fn encode_tag(field_number: u32, wire_type: u8, buf: &mut Vec<u8>) {
 const WIRE_TYPE_LEN: u8 = 2;
 
 /// Encode a PBNode in canonical dag-pb order (Links before Data).
-/// Encode a dag-pb node with IPFS-canonical field ordering.
 ///
 /// Standard prost encoding emits fields in field-number order (Data=1 before
 /// Links=2), but the IPFS dag-pb spec mandates Links before Data. Without this
