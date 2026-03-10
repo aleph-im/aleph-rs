@@ -124,4 +124,38 @@ mod tests {
         assert!(matches!(waiting, CrnStatus::Waiting));
         assert!(matches!(waiting_with_explicit_parent, CrnStatus::Waiting));
     }
+
+    #[derive(Debug, Deserialize)]
+    struct OptionalAddressWrapper {
+        #[serde(default, deserialize_with = "deserialize_optional_address")]
+        addr: Option<Address>,
+    }
+
+    #[test]
+    fn test_deserialize_optional_address_with_value() {
+        let json = r#"{"addr": "0x1234"}"#;
+        let wrapper: OptionalAddressWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.addr, Some(address!("0x1234")));
+    }
+
+    #[test]
+    fn test_deserialize_optional_address_empty_string() {
+        let json = r#"{"addr": ""}"#;
+        let wrapper: OptionalAddressWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.addr, None);
+    }
+
+    #[test]
+    fn test_deserialize_optional_address_null() {
+        let json = r#"{"addr": null}"#;
+        let wrapper: OptionalAddressWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.addr, None);
+    }
+
+    #[test]
+    fn test_deserialize_optional_address_missing() {
+        let json = r#"{}"#;
+        let wrapper: OptionalAddressWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.addr, None);
+    }
 }
