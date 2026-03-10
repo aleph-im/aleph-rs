@@ -513,9 +513,13 @@ impl AlephMessageClient for AlephClient {
             .json(&body)
             .send()
             .await?
-            .error_for_status()?;
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
 
-        let post_response: PostMessageResponse = response.json().await?;
+        let post_response: PostMessageResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
         Ok(post_response)
     }
 }
