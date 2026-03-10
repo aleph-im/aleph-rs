@@ -385,7 +385,7 @@ pub trait AlephAggregateClient {
 
     /// Returns the most recent version of the corechannel aggregate, i.e., the aggregate
     /// that lists all the nodes on the network.
-    fn get_corechahannel_aggregate(
+    fn get_corechannel_aggregate(
         &self,
     ) -> impl Future<Output = Result<CoreChannelAggregate, MessageError>> + Send {
         self.get_aggregate(&CORECHANNEL_ADDRESS, "corechannel")
@@ -799,7 +799,7 @@ mod tests {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
 
         let aggregate = client
-            .get_corechahannel_aggregate()
+            .get_corechannel_aggregate()
             .await
             .unwrap_or_else(|e| panic!("failed to fetch corechannel aggregate: {:?}", e));
 
