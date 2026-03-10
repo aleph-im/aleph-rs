@@ -73,6 +73,22 @@ pub struct CrnInfo {
     pub address: String,
     #[serde(flatten)]
     pub status: CrnStatus,
+    /// Stream reward address. Only used for PAYG.
+    #[serde(default, deserialize_with = "deserialize_optional_address")]
+    pub stream_reward: Option<Address>,
+}
+
+/// Deserialize an address that may be an empty string. Empty strings are treated as `None`.
+fn deserialize_optional_address<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    match s {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => Ok(Some(Address::from(s))),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,5 +123,39 @@ mod tests {
         );
         assert!(matches!(waiting, CrnStatus::Waiting));
         assert!(matches!(waiting_with_explicit_parent, CrnStatus::Waiting));
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct OptionalAddressWrapper {
+        #[serde(default, deserialize_with = "deserialize_optional_address")]
+        addr: Option<Address>,
+    }
+
+    #[test]
+    fn test_deserialize_optional_address_with_value() {
+        let json = r#"{"addr": "0x1234"}"#;
+        let wrapper: OptionalAddressWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.addr, Some(address!("0x1234")));
+    }
+
+    #[test]
+    fn test_deserialize_optional_address_empty_string() {
+        let json = r#"{"addr": ""}"#;
+        let wrapper: OptionalAddressWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.addr, None);
+    }
+
+    #[test]
+    fn test_deserialize_optional_address_null() {
+        let json = r#"{"addr": null}"#;
+        let wrapper: OptionalAddressWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.addr, None);
+    }
+
+    #[test]
+    fn test_deserialize_optional_address_missing() {
+        let json = r#"{}"#;
+        let wrapper: OptionalAddressWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.addr, None);
     }
 }
