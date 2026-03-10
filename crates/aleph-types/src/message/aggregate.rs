@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AggregateKeyDict {
@@ -25,9 +24,9 @@ impl AggregateKey {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AggregateContent {
     /// The aggregate key can be either a string of a dict containing the key in field 'name'.
-    key: AggregateKey,
-    /// The content of the aggregate. The only restriction is that this must be a dictionary.
-    content: HashMap<serde_json::Value, serde_json::Value>,
+    pub key: AggregateKey,
+    /// The content of the aggregate, always a JSON object.
+    pub content: serde_json::Map<String, serde_json::Value>,
 }
 
 impl AggregateContent {
@@ -94,16 +93,8 @@ mod tests {
             }
         };
         assert_eq!(aggregate_content.key(), "corechannel");
-        assert!(
-            aggregate_content
-                .content
-                .contains_key(&serde_json::Value::String("nodes".to_string()))
-        );
-        assert!(
-            aggregate_content
-                .content
-                .contains_key(&serde_json::Value::String("resource_nodes".to_string()))
-        );
+        assert!(aggregate_content.content.contains_key("nodes"));
+        assert!(aggregate_content.content.contains_key("resource_nodes"));
 
         // No confirmation on this fixture
         assert!(!message.confirmed());

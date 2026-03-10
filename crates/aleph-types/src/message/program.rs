@@ -217,6 +217,8 @@ mod tests {
         assert!(!message.confirmed());
         assert!(message.confirmed_at().is_none());
         assert!(message.confirmations.is_empty());
+
+        message.verify_item_hash().unwrap();
     }
 
     #[test]
