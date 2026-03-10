@@ -73,6 +73,8 @@ pub struct CrnInfo {
     pub address: String,
     #[serde(flatten)]
     pub status: CrnStatus,
+    /// Stream reward address. Only used for PAYG.
+    pub stream_reward: Address,
 }
 
 #[derive(Debug, Clone, Deserialize)]

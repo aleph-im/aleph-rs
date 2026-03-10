@@ -794,6 +794,26 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_get_corechannel_aggregate() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+
+        let aggregate = client
+            .get_corechahannel_aggregate()
+            .await
+            .unwrap_or_else(|e| panic!("failed to fetch corechannel aggregate: {:?}", e));
+
+        assert!(
+            !aggregate.corechannel.nodes.is_empty(),
+            "should have at least one CCN"
+        );
+        assert!(
+            !aggregate.corechannel.resource_nodes.is_empty(),
+            "should have at least one CRN"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "uses a remote CCN websocket"]
     async fn test_subscribe_to_messages() {
         use futures_util::StreamExt;
