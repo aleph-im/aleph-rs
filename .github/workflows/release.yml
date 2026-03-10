@@ -27,6 +27,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -173,6 +178,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -218,6 +228,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

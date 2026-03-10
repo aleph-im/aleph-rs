@@ -8,7 +8,7 @@ use aleph_types::message::{
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use reqwest::StatusCode;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{StringWithSeparator, formats::CommaSeparator, serde_as, skip_serializing_none};
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 #[derive(Clone)]
@@ -33,6 +34,10 @@ pub enum StorageError {
     RefNotFound(FileRef),
     #[error("Failed to read file size: {0}")]
     InvalidSize(String),
+    #[error("Integrity verification failed: {0}")]
+    IntegrityError(#[from] crate::verify::VerifyError),
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(#[from] url::ParseError),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -55,6 +60,8 @@ pub enum MessageError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     HttpError(#[from] reqwest_middleware::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("WebSocket connection error: {0}")]
     WebsocketConnection(String),
     #[error("WebSocket message error: {0}")]
@@ -309,6 +316,93 @@ pub struct FileMetadata {
     pub size: Bytes,
 }
 
+pub struct FileDownload {
+    response: reqwest::Response,
+    expected_hash: ItemHash,
+    verify: bool,
+}
+
+impl FileDownload {
+    pub(crate) fn new(response: reqwest::Response, expected_hash: ItemHash) -> Self {
+        Self {
+            response,
+            expected_hash,
+            verify: false,
+        }
+    }
+
+    /// Enables integrity verification for this download.
+    ///
+    /// When enabled, [`bytes()`](Self::bytes) and [`to_file()`](Self::to_file) will verify the
+    /// downloaded content matches the expected hash. Note that [`to_file()`](Self::to_file) writes
+    /// data to disk as it streams — if verification fails, the partial file remains on disk and the
+    /// caller is responsible for cleanup.
+    ///
+    /// Verification is **not** applied by [`into_stream()`](Self::into_stream).
+    pub fn with_verification(mut self) -> Self {
+        self.verify = true;
+        self
+    }
+
+    pub async fn bytes(self) -> Result<bytes::Bytes, MessageError> {
+        let content = self
+            .response
+            .bytes()
+            .await
+            .map_err(reqwest_middleware::Error::from)
+            .map_err(MessageError::from)?;
+
+        if self.verify {
+            let mut verifier = crate::verify::HashVerifier::new(&self.expected_hash)
+                .map_err(StorageError::IntegrityError)?;
+            verifier.update(&content);
+            verifier.finalize().map_err(StorageError::IntegrityError)?;
+        }
+
+        Ok(content)
+    }
+
+    pub async fn to_file(self, path: impl AsRef<std::path::Path>) -> Result<(), MessageError> {
+        let mut file = tokio::fs::File::create(path)
+            .await
+            .map_err(MessageError::Io)?;
+        let mut stream = self.response.bytes_stream();
+
+        let mut verifier = if self.verify {
+            Some(
+                crate::verify::HashVerifier::new(&self.expected_hash)
+                    .map_err(StorageError::IntegrityError)?,
+            )
+        } else {
+            None
+        };
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(reqwest_middleware::Error::from)?;
+            if let Some(ref mut v) = verifier {
+                v.update(&chunk);
+            }
+            file.write_all(&chunk).await.map_err(MessageError::Io)?;
+        }
+        file.flush().await.map_err(MessageError::Io)?;
+
+        if let Some(v) = verifier {
+            v.finalize().map_err(StorageError::IntegrityError)?;
+        }
+
+        Ok(())
+    }
+
+    /// Returns the raw response body as a byte stream.
+    ///
+    /// Verification is **not** performed; the `with_verification()` flag is ignored.
+    pub fn into_stream(
+        self,
+    ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> {
+        self.response.bytes_stream()
+    }
+}
+
 pub trait AlephMessageClient {
     fn get_message(
         &self,
@@ -351,6 +445,37 @@ pub trait AlephStorageClient {
         &self,
         file_ref: &FileRef,
     ) -> impl Future<Output = Result<FileMetadata, MessageError>> + Send;
+
+    fn download_file_by_hash(
+        &self,
+        file_hash: &ItemHash,
+    ) -> impl Future<Output = Result<FileDownload, MessageError>> + Send;
+
+    fn download_file_by_ref(
+        &self,
+        file_ref: &FileRef,
+    ) -> impl Future<Output = Result<FileDownload, MessageError>> + Send
+    where
+        Self: Sync,
+    {
+        async {
+            let metadata = self.get_file_metadata_by_ref(file_ref).await?;
+            self.download_file_by_hash(&metadata.file_hash).await
+        }
+    }
+
+    fn download_file_by_message_hash(
+        &self,
+        message_hash: &ItemHash,
+    ) -> impl Future<Output = Result<FileDownload, MessageError>> + Send
+    where
+        Self: Sync,
+    {
+        async {
+            let metadata = self.get_file_metadata_by_message_hash(message_hash).await?;
+            self.download_file_by_hash(&metadata.file_hash).await
+        }
+    }
 }
 
 /// Methods used to query account properties, ex: their balance.
@@ -602,6 +727,27 @@ impl AlephStorageClient for AlephClient {
             .map_err(reqwest_middleware::Error::from)?;
         Ok(file_metadata)
     }
+
+    async fn download_file_by_hash(
+        &self,
+        file_hash: &ItemHash,
+    ) -> Result<FileDownload, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/storage/raw/{}", file_hash))
+            .map_err(StorageError::InvalidUrl)?;
+
+        let response = self.http_client.get(url).send().await?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(StorageError::NotFound(file_hash.clone()).into());
+        }
+        let response = response
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        Ok(FileDownload::new(response, file_hash.clone()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -776,6 +922,133 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("failed to fetch file: {:?}", e));
         assert_eq!(size, Bytes::from_units(297));
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_download_file_by_hash() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let file_hash =
+            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
+
+        let download = client
+            .download_file_by_hash(&file_hash)
+            .await
+            .expect("download should succeed");
+
+        let content = download.bytes().await.expect("should read bytes");
+        assert_eq!(content.len(), 297);
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_download_file_to_disk() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let file_hash =
+            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
+
+        let tmp_dir = std::env::temp_dir();
+        let tmp_file = tmp_dir.join("aleph-test-download");
+
+        let download = client
+            .download_file_by_hash(&file_hash)
+            .await
+            .expect("download should succeed");
+
+        download
+            .to_file(&tmp_file)
+            .await
+            .expect("should write to file");
+
+        let metadata = std::fs::metadata(&tmp_file).expect("file should exist");
+        assert_eq!(metadata.len(), 297);
+
+        std::fs::remove_file(&tmp_file).ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_download_file_with_verification() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let file_hash =
+            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
+
+        let download = client
+            .download_file_by_hash(&file_hash)
+            .await
+            .expect("download should succeed");
+
+        let content = download
+            .with_verification()
+            .bytes()
+            .await
+            .expect("verified download should succeed");
+        assert_eq!(content.len(), 297);
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_download_file_to_disk_with_verification() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let file_hash =
+            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
+
+        let tmp_dir = std::env::temp_dir();
+        let tmp_file = tmp_dir.join("aleph-test-download-verified");
+
+        let download = client
+            .download_file_by_hash(&file_hash)
+            .await
+            .expect("download should succeed");
+
+        download
+            .with_verification()
+            .to_file(&tmp_file)
+            .await
+            .expect("verified write to file should succeed");
+
+        let metadata = std::fs::metadata(&tmp_file).expect("file should exist");
+        assert_eq!(metadata.len(), 297);
+
+        std::fs::remove_file(&tmp_file).ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_download_cidv0_with_verification() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let file_hash = item_hash!("QmQKPXPMENCLL7HfyPiTZkmyX5iHp5QrYdWWMeP6pEhiS4");
+
+        let download = client
+            .download_file_by_hash(&file_hash)
+            .await
+            .expect("download should succeed");
+
+        let content = download
+            .with_verification()
+            .bytes()
+            .await
+            .expect("CIDv0 verified download should succeed");
+        assert!(!content.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_download_large_cidv0_with_verification() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let file_hash = item_hash!("QmdFaKjHBGsU525nHD6fgH7o1YnGZgfNo1x9jspzwCaR9N");
+
+        let download = client
+            .download_file_by_hash(&file_hash)
+            .await
+            .expect("download should succeed");
+
+        let content = download
+            .with_verification()
+            .bytes()
+            .await
+            .expect("large CIDv0 verified download should succeed");
+        assert!(!content.is_empty());
     }
 
     #[test]
