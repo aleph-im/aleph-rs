@@ -393,6 +393,9 @@ impl FileDownload {
         Ok(())
     }
 
+    /// Returns the raw response body as a byte stream.
+    ///
+    /// Verification is **not** performed; the `with_verification()` flag is ignored.
     pub fn into_stream(
         self,
     ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> {

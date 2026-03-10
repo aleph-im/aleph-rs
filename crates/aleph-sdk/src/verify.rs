@@ -22,7 +22,12 @@ fn encode_tag(field_number: u32, wire_type: u8, buf: &mut Vec<u8>) {
 const WIRE_TYPE_LEN: u8 = 2;
 
 /// Encode a PBNode in canonical dag-pb order (Links before Data).
-/// IPFS requires this non-standard field ordering for CID compatibility.
+/// Encode a dag-pb node with IPFS-canonical field ordering.
+///
+/// Standard prost encoding emits fields in field-number order (Data=1 before
+/// Links=2), but the IPFS dag-pb spec mandates Links before Data. Without this
+/// ordering the SHA-256 digest — and therefore the CID — will differ from what
+/// IPFS computes.
 fn encode_pbnode_canonical(node: &merkledag::PbNode) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -75,12 +80,23 @@ const CHUNK_SIZE: usize = 262144;
 /// IPFS default maximum links per node (go-ipfs `helpers.DefaultLinksPerBlock`).
 const MAX_LINKS: usize = 174;
 
+/// Encode a SHA-256 digest as a multihash: [0x12, 0x20, ...32 bytes...]
+fn encode_multihash(digest: &[u8]) -> Vec<u8> {
+    let mut mh = Vec::with_capacity(2 + digest.len());
+    mh.push(0x12); // SHA-256 code
+    mh.push(0x20); // 32 bytes
+    mh.extend_from_slice(digest);
+    mh
+}
+
 /// A dag-pb node (leaf or internal) used during tree construction.
 pub(crate) struct DagNode {
-    /// The multihash bytes: [0x12, 0x20, ...32 bytes SHA-256 digest...]
-    multihash_bytes: Vec<u8>,
+    /// The CID bytes stored in PBLink.Hash.
+    /// For CIDv0: bare multihash [0x12, 0x20, ...32 bytes SHA-256 digest...]
+    /// For CIDv1: full CID binary (varint version + varint codec + multihash)
+    cid_bytes: Vec<u8>,
     /// Cumulative size: serialized node bytes + sum of children's cumulative sizes.
-    /// For leaves this equals the serialized PBNode length. Used for PBLink.Tsize.
+    /// For raw leaves this equals the raw chunk size. Used for PBLink.Tsize.
     cumulative_size: u64,
     /// Total file data bytes covered by this subtree.
     data_size: u64,
@@ -99,6 +115,7 @@ pub enum HashVerifier {
         buffer: Vec<u8>,
         leaves: Vec<DagNode>,
         expected_cid: Cid,
+        raw_leaves: bool,
     },
 }
 
@@ -111,11 +128,12 @@ impl HashVerifier {
             }),
             ItemHash::Ipfs(cid) => {
                 if cid.is_v0() {
-                    // CIDv0 is always dag-pb codec
+                    // CIDv0 is always dag-pb codec with wrapped leaves
                     return Ok(Self::DagPb {
                         buffer: Vec::with_capacity(CHUNK_SIZE),
                         leaves: Vec::new(),
                         expected_cid: cid.clone(),
+                        raw_leaves: false,
                     });
                 }
 
@@ -127,9 +145,12 @@ impl HashVerifier {
                         hasher: Sha256::new(),
                         expected_cid: cid.clone(),
                     }),
-                    DAG_PB_CODEC => Err(VerifyError::UnsupportedCid(format!(
-                        "{cid}: CIDv1 dag-pb not yet supported"
-                    ))),
+                    DAG_PB_CODEC => Ok(Self::DagPb {
+                        buffer: Vec::with_capacity(CHUNK_SIZE),
+                        leaves: Vec::new(),
+                        expected_cid: cid.clone(),
+                        raw_leaves: true,
+                    }),
                     other => Err(VerifyError::UnsupportedCid(format!(
                         "{cid}: unsupported codec 0x{other:x}"
                     ))),
@@ -141,7 +162,13 @@ impl HashVerifier {
     pub fn update(&mut self, data: &[u8]) {
         match self {
             Self::Native { hasher, .. } | Self::CidRaw { hasher, .. } => hasher.update(data),
-            Self::DagPb { buffer, leaves, .. } => {
+            Self::DagPb {
+                buffer,
+                leaves,
+                raw_leaves,
+                ..
+            } => {
+                let raw = *raw_leaves;
                 let mut remaining = data;
                 while !remaining.is_empty() {
                     let space = CHUNK_SIZE - buffer.len();
@@ -149,7 +176,12 @@ impl HashVerifier {
                     buffer.extend_from_slice(&remaining[..take]);
                     remaining = &remaining[take..];
                     if buffer.len() == CHUNK_SIZE {
-                        leaves.push(Self::build_leaf(buffer));
+                        let leaf = if raw {
+                            Self::build_raw_leaf(buffer)
+                        } else {
+                            Self::build_leaf(buffer)
+                        };
+                        leaves.push(leaf);
                         buffer.clear();
                     }
                 }
@@ -183,25 +215,43 @@ impl HashVerifier {
         let node_bytes = encode_pbnode_canonical(&node);
 
         let digest = Sha256::digest(&node_bytes);
-        let mut multihash_bytes = vec![0x12, 0x20];
-        multihash_bytes.extend_from_slice(&digest);
+        let cid_bytes = encode_multihash(&digest);
 
         DagNode {
-            multihash_bytes,
+            cid_bytes,
             cumulative_size: node_bytes.len() as u64,
             data_size: chunk.len() as u64,
         }
     }
 
+    /// Build a raw leaf node: hash the chunk directly without dag-pb/UnixFS wrapping.
+    /// Used for CIDv1 dag-pb which defaults to raw leaves.
+    fn build_raw_leaf(chunk: &[u8]) -> DagNode {
+        let digest = Sha256::digest(chunk);
+        let mh = encode_multihash(&digest);
+        // CIDv1 raw binary: varint(1) + varint(RAW_CODEC) + multihash
+        let mut cid_bytes = Vec::with_capacity(2 + mh.len());
+        cid_bytes.push(0x01); // CID version 1
+        cid_bytes.push(RAW_CODEC as u8); // 0x55
+        cid_bytes.extend_from_slice(&mh);
+
+        DagNode {
+            cid_bytes,
+            cumulative_size: chunk.len() as u64,
+            data_size: chunk.len() as u64,
+        }
+    }
+
     /// Build an internal dag-pb node from a list of children.
-    fn build_internal_node(children: &[DagNode]) -> DagNode {
+    /// When `v1` is true, produces CIDv1 dag-pb binary; otherwise bare multihash (CIDv0).
+    fn build_internal_node(children: &[DagNode], v1: bool) -> DagNode {
         let total_data_size: u64 = children.iter().map(|c| c.data_size).sum();
         let blocksizes: Vec<u64> = children.iter().map(|c| c.data_size).collect();
 
         let links: Vec<merkledag::PbLink> = children
             .iter()
             .map(|c| merkledag::PbLink {
-                hash: Some(c.multihash_bytes.clone()),
+                hash: Some(c.cid_bytes.clone()),
                 name: Some(String::new()),
                 tsize: Some(c.cumulative_size),
             })
@@ -227,14 +277,23 @@ impl HashVerifier {
         let node_bytes = encode_pbnode_canonical(&node);
 
         let digest = Sha256::digest(&node_bytes);
-        let mut multihash_bytes = vec![0x12, 0x20];
-        multihash_bytes.extend_from_slice(&digest);
+        let mh = encode_multihash(&digest);
+
+        let cid_bytes = if v1 {
+            let mut cid = Vec::with_capacity(2 + mh.len());
+            cid.push(0x01); // CID version 1
+            cid.push(DAG_PB_CODEC as u8); // 0x70
+            cid.extend_from_slice(&mh);
+            cid
+        } else {
+            mh
+        };
 
         let node_size = node_bytes.len() as u64;
         let children_cumulative: u64 = children.iter().map(|c| c.cumulative_size).sum();
 
         DagNode {
-            multihash_bytes,
+            cid_bytes,
             cumulative_size: node_size + children_cumulative,
             data_size: total_data_size,
         }
@@ -278,33 +337,46 @@ impl HashVerifier {
                 buffer,
                 mut leaves,
                 expected_cid,
+                raw_leaves,
             } => {
+                let make_leaf = |chunk: &[u8]| {
+                    if raw_leaves {
+                        Self::build_raw_leaf(chunk)
+                    } else {
+                        Self::build_leaf(chunk)
+                    }
+                };
+
                 // Flush any remaining bytes in buffer as the last chunk
                 if !buffer.is_empty() {
-                    leaves.push(Self::build_leaf(&buffer));
+                    leaves.push(make_leaf(&buffer));
                 }
 
-                let computed_multihash = if leaves.is_empty() {
-                    // Empty file: build a leaf from empty data
-                    Self::build_leaf(&[]).multihash_bytes
+                let v1 = !expected_cid.is_v0();
+
+                let root_cid_bytes = if leaves.is_empty() {
+                    make_leaf(&[]).cid_bytes
                 } else if leaves.len() == 1 {
-                    // Single leaf: the CID is directly the leaf's multihash
-                    leaves.into_iter().next().unwrap().multihash_bytes
+                    leaves.into_iter().next().unwrap().cid_bytes
                 } else {
-                    // Build balanced DAG bottom-up: group nodes into batches
-                    // of MAX_LINKS, creating internal nodes at each level,
-                    // until a single root remains.
                     let mut nodes = leaves;
                     while nodes.len() > 1 {
                         nodes = nodes
                             .chunks(MAX_LINKS)
-                            .map(Self::build_internal_node)
+                            .map(|c| Self::build_internal_node(c, v1))
                             .collect();
                     }
-                    nodes.into_iter().next().unwrap().multihash_bytes
+                    nodes.into_iter().next().unwrap().cid_bytes
                 };
 
-                let computed_cid_str = bs58::encode(&computed_multihash).into_string();
+                let computed_cid_str = if v1 {
+                    let lib_cid =
+                        LibCid::try_from(&root_cid_bytes[..]).expect("valid CIDv1 from build");
+                    lib_cid.to_string()
+                } else {
+                    bs58::encode(&root_cid_bytes).into_string()
+                };
+
                 if computed_cid_str == expected_cid.as_str() {
                     Ok(())
                 } else {
@@ -312,7 +384,7 @@ impl HashVerifier {
                         expected: ItemHash::Ipfs(expected_cid),
                         actual: ItemHash::Ipfs(
                             Cid::try_from(computed_cid_str.as_str())
-                                .expect("computed base58 multihash is always a valid CIDv0"),
+                                .expect("computed CID is always valid"),
                         ),
                     })
                 }
@@ -681,46 +753,35 @@ mod tests {
         // No update() calls — empty file
         verifier.finalize().expect("empty file should verify");
     }
+    #[test]
+    fn test_verify_cidv0_multi_level_dag() {
+        // "deadbeef" repeated 16Mi times (128 MiB total) — CID obtained from IPFS directly
+        let expected_cid = "QmcYKke22MG2rnu4nPVj8Z3hMPi2wtVMKzqLcJwYRThYif";
+        let data = "deadbeef".repeat(16 * 1024 * 1024);
 
-    /// Helper: build a leaf DagNode from raw chunk data (mirrors HashVerifier::build_leaf).
-    fn test_build_leaf(chunk: &[u8]) -> DagNode {
-        HashVerifier::build_leaf(chunk)
-    }
+        let our_cid = aleph_types::cid::Cid::try_from(expected_cid).unwrap();
+        let expected = ItemHash::Ipfs(our_cid);
 
-    /// Helper: build an internal DagNode from children (mirrors HashVerifier::build_internal_node).
-    fn test_build_internal(children: &[DagNode]) -> DagNode {
-        HashVerifier::build_internal_node(children)
+        let mut verifier = HashVerifier::new(&expected).unwrap();
+        verifier.update(data.as_bytes());
+        verifier
+            .finalize()
+            .expect("multi-level DAG should verify against known IPFS CID");
     }
 
     #[test]
-    fn test_verify_cidv0_multi_level_dag() {
-        // 175 leaves (just over MAX_LINKS=174) forces a two-level tree:
-        //   Level 0: 175 leaves
-        //   Level 1: node_a(174 children), node_b(1 child)
-        //   Level 2: root(2 children)
-        let num_leaves = MAX_LINKS + 1;
-        let data = vec![0xEEu8; num_leaves * CHUNK_SIZE];
+    fn test_verify_cidv1_dagpb_multi_level_dag() {
+        // Same data as the CIDv0 test, CIDv1 dag-pb CID obtained from IPFS directly
+        let expected_cid = "bafybeiawhayvhrtunmsazigmne75kqyyb2z7oqlvky3abpk4tbkqyzv6iu";
+        let data = "deadbeef".repeat(16 * 1024 * 1024);
 
-        // Build all leaves
-        let leaves: Vec<DagNode> = data.chunks(CHUNK_SIZE).map(test_build_leaf).collect();
-        assert_eq!(leaves.len(), num_leaves);
-
-        // Build level 1: group into batches of MAX_LINKS
-        let level1: Vec<DagNode> = leaves.chunks(MAX_LINKS).map(test_build_internal).collect();
-        assert_eq!(level1.len(), 2);
-
-        // Build root
-        let root = test_build_internal(&level1);
-        let expected_cid = bs58::encode(&root.multihash_bytes).into_string();
-
-        let our_cid = aleph_types::cid::Cid::try_from(expected_cid.as_str()).unwrap();
+        let our_cid = aleph_types::cid::Cid::try_from(expected_cid).unwrap();
         let expected = ItemHash::Ipfs(our_cid);
 
-        // Feed all data through the verifier
         let mut verifier = HashVerifier::new(&expected).unwrap();
-        verifier.update(&data);
+        verifier.update(data.as_bytes());
         verifier
             .finalize()
-            .expect("multi-level DAG (175 leaves) should verify");
+            .expect("CIDv1 dag-pb multi-level DAG should verify against known IPFS CID");
     }
 }
