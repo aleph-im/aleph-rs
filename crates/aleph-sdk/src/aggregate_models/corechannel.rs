@@ -74,7 +74,21 @@ pub struct CrnInfo {
     #[serde(flatten)]
     pub status: CrnStatus,
     /// Stream reward address. Only used for PAYG.
-    pub stream_reward: Address,
+    #[serde(default, deserialize_with = "deserialize_optional_address")]
+    pub stream_reward: Option<Address>,
+}
+
+/// Deserialize an address that may be an empty string. Empty strings are treated as `None`.
+fn deserialize_optional_address<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    match s {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => Ok(Some(Address::from(s))),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
