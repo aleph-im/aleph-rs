@@ -118,6 +118,22 @@ pub struct InvalidMessage {
     pub error: IntegrityError,
 }
 
+impl std::fmt::Display for InvalidMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "integrity check failed for {}: {}",
+            self.header.item_hash, self.error
+        )
+    }
+}
+
+impl std::error::Error for InvalidMessage {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Internal error type for `verify_message_header` that distinguishes fetch failures
 /// (which should abort the batch) from integrity failures (which are per-message).
 #[derive(Debug)]
