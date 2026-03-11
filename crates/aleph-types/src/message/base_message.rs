@@ -301,10 +301,7 @@ impl<'de> Deserialize<'de> for Message {
     }
 }
 
-// Manual Serialize for Message.
-// Note: this serializer always emits all fields (including confirmed, confirmations, channel)
-// to match the format returned by the Aleph API. This does NOT affect item hash computation,
-// which is based on the item_content string (inline) or the raw stored content (non-inline).
+// Manual Serialize for Message
 impl Serialize for Message {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -312,32 +309,35 @@ impl Serialize for Message {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Message", 12)?;
-        state.serialize_field("sender", &self.sender)?;
+        let mut state = serializer.serialize_struct("Message", 9)?;
         state.serialize_field("chain", &self.chain)?;
+        state.serialize_field("sender", &self.sender)?;
+        match &self.content_source {
+            ContentSource::Inline { item_content } => {
+                state.serialize_field("item_type", "inline")?;
+                state.serialize_field("item_content", item_content)?;
+            }
+            ContentSource::Storage => {
+                state.serialize_field("item_type", "storage")?;
+                state.serialize_field("item_content", &None::<String>)?;
+            }
+            ContentSource::Ipfs => {
+                state.serialize_field("item_type", "ipfs")?;
+                state.serialize_field("item_content", &None::<String>)?;
+            }
+        }
         state.serialize_field("signature", &self.signature)?;
-        state.serialize_field("type", &self.message_type)?;
-        state.serialize_field(
-            "item_content",
-            &match &self.content_source {
-                ContentSource::Inline { item_content } => Some(item_content),
-                ContentSource::Storage | ContentSource::Ipfs => None,
-            },
-        )?;
         state.serialize_field("item_hash", &self.item_hash)?;
-        state.serialize_field(
-            "item_type",
-            match &self.content_source {
-                ContentSource::Inline { .. } => "inline",
-                ContentSource::Storage => "storage",
-                ContentSource::Ipfs => "ipfs",
-            },
-        )?;
+        if self.confirmed() {
+            state.serialize_field("confirmed", &true)?;
+            state.serialize_field("confirmations", &self.confirmations)?;
+        }
         state.serialize_field("time", &self.time)?;
-        state.serialize_field("channel", &self.channel)?;
+        if self.channel.is_some() {
+            state.serialize_field("channel", &self.channel)?;
+        }
+        state.serialize_field("type", &self.message_type)?;
         state.serialize_field("content", &self.content)?;
-        state.serialize_field("confirmed", &self.confirmed())?;
-        state.serialize_field("confirmations", &self.confirmations)?;
         state.end()
     }
 }
