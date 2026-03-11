@@ -114,17 +114,37 @@ impl std::fmt::Display for Chain {
 impl Chain {
     /// Returns true if this chain uses EVM-compatible signature verification
     /// (secp256k1 + EIP-191 personal sign).
+    ///
+    /// Uses an allow-list so that new chains added to the enum default to
+    /// unsupported rather than silently attempting EVM verification.
     pub fn is_evm(&self) -> bool {
-        !matches!(
+        matches!(
             self,
-            Chain::Csdk
-                | Chain::Eclipse
-                | Chain::Neo
-                | Chain::Nuls
-                | Chain::Nuls2
-                | Chain::Polkadot
-                | Chain::Sol
-                | Chain::Tezos
+            Chain::Arbitrum
+                | Chain::Aurora
+                | Chain::Avax
+                | Chain::Base
+                | Chain::Blast
+                | Chain::Bob
+                | Chain::Bsc
+                | Chain::Cyber
+                | Chain::Ethereum
+                | Chain::Etherlink
+                | Chain::Fraxtal
+                | Chain::Hype
+                | Chain::Ink
+                | Chain::Lens
+                | Chain::Linea
+                | Chain::Lisk
+                | Chain::Metis
+                | Chain::Mode
+                | Chain::Optimism
+                | Chain::Pol
+                | Chain::Somnia
+                | Chain::Sonic
+                | Chain::Unichain
+                | Chain::Worldchain
+                | Chain::Zora
         )
     }
 }
