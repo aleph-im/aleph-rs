@@ -210,3 +210,60 @@ impl From<String> for Signature {
 macro_rules! signature {
     ($signature:expr) => {{ $crate::chain::Signature::from($signature.to_string()) }};
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensures Display output matches serde serialization for every Chain variant.
+    /// If these drift, the verification buffer will be signed against a different
+    /// string than what the protocol expects.
+    #[test]
+    fn test_chain_display_matches_serde() {
+        let chains = [
+            Chain::Arbitrum,
+            Chain::Aurora,
+            Chain::Avax,
+            Chain::Base,
+            Chain::Blast,
+            Chain::Bob,
+            Chain::Bsc,
+            Chain::Csdk,
+            Chain::Cyber,
+            Chain::Polkadot,
+            Chain::Eclipse,
+            Chain::Ethereum,
+            Chain::Etherlink,
+            Chain::Fraxtal,
+            Chain::Hype,
+            Chain::Ink,
+            Chain::Lens,
+            Chain::Linea,
+            Chain::Lisk,
+            Chain::Metis,
+            Chain::Mode,
+            Chain::Neo,
+            Chain::Nuls,
+            Chain::Nuls2,
+            Chain::Optimism,
+            Chain::Pol,
+            Chain::Sol,
+            Chain::Somnia,
+            Chain::Sonic,
+            Chain::Tezos,
+            Chain::Unichain,
+            Chain::Worldchain,
+            Chain::Zora,
+        ];
+
+        for chain in &chains {
+            let display = chain.to_string();
+            let serde = serde_json::to_string(chain).unwrap();
+            let serde_unquoted = serde.trim_matches('"');
+            assert_eq!(
+                display, serde_unquoted,
+                "Display and serde disagree for {chain:?}: Display={display}, serde={serde_unquoted}"
+            );
+        }
+    }
+}
