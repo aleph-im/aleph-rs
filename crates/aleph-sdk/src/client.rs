@@ -96,7 +96,6 @@ pub struct VerifiedMessage {
     message: Message,
 }
 
-// Downcast to message
 impl From<VerifiedMessage> for Message {
     fn from(v: VerifiedMessage) -> Self {
         v.message
