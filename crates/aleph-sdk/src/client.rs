@@ -137,7 +137,7 @@ impl std::error::Error for InvalidMessage {
 /// Internal error type for `verify_message_header` that distinguishes fetch failures
 /// (which should abort the batch) from integrity failures (which are per-message).
 #[derive(Debug)]
-enum VerifyHeaderError {
+enum VerifyMessageError {
     /// The data could not be fetched (network error, 404, etc.).
     Fetch(MessageError),
     /// The data was fetched but failed integrity checks.
@@ -149,12 +149,12 @@ enum VerifyHeaderError {
 fn build_verified(
     header: MessageHeader,
     content: Result<MessageContent, serde_json::Error>,
-) -> Result<VerifiedMessage, VerifyHeaderError> {
+) -> Result<VerifiedMessage, VerifyMessageError> {
     match content {
         Ok(content) => Ok(VerifiedMessage {
             message: header.with_content(content),
         }),
-        Err(e) => Err(VerifyHeaderError::Integrity(InvalidMessage {
+        Err(e) => Err(VerifyMessageError::Integrity(InvalidMessage {
             header,
             error: IntegrityError::ContentDeserializationFailed(e.to_string()),
         })),
@@ -579,7 +579,7 @@ pub trait AlephMessageClient {
     fn verify_message_header(
         &self,
         header: MessageHeader,
-    ) -> impl Future<Output = Result<VerifiedMessage, VerifyHeaderError>> + Send
+    ) -> impl Future<Output = Result<VerifiedMessage, VerifyMessageError>> + Send
     where
         Self: AlephStorageClient + Sync,
     {
@@ -589,7 +589,7 @@ pub trait AlephMessageClient {
                     if let Some(Err((expected, actual))) =
                         header.content_source.verify_inline_hash(&header.item_hash)
                     {
-                        return Err(VerifyHeaderError::Integrity(InvalidMessage {
+                        return Err(VerifyMessageError::Integrity(InvalidMessage {
                             header,
                             error: IntegrityError::HashMismatch { expected, actual },
                         }));
@@ -606,18 +606,18 @@ pub trait AlephMessageClient {
                     let download = self
                         .download_file_by_hash(&header.item_hash)
                         .await
-                        .map_err(VerifyHeaderError::Fetch)?;
+                        .map_err(VerifyMessageError::Fetch)?;
                     let raw_bytes = match download.with_verification().bytes().await {
                         Ok(bytes) => bytes,
                         Err(MessageError::Storage(StorageError::IntegrityError(
                             crate::verify::VerifyError::IntegrityMismatch { expected, actual },
                         ))) => {
-                            return Err(VerifyHeaderError::Integrity(InvalidMessage {
+                            return Err(VerifyMessageError::Integrity(InvalidMessage {
                                 header,
                                 error: IntegrityError::HashMismatch { expected, actual },
                             }));
                         }
-                        Err(e) => return Err(VerifyHeaderError::Fetch(e)),
+                        Err(e) => return Err(VerifyMessageError::Fetch(e)),
                     };
                     let content = MessageContent::deserialize_with_type(
                         header.message_type,
@@ -643,8 +643,8 @@ pub trait AlephMessageClient {
     {
         self.verify_message_header(MessageHeader::from(message))
             .map_err(|e| match e {
-                VerifyHeaderError::Fetch(e) => e,
-                VerifyHeaderError::Integrity(invalid) => invalid.error.into(),
+                VerifyMessageError::Fetch(e) => e,
+                VerifyMessageError::Integrity(invalid) => invalid.error.into(),
             })
     }
 
@@ -939,10 +939,10 @@ impl AlephMessageClient for AlephClient {
         for header in headers {
             match self.verify_message_header(header).await {
                 Ok(verified) => results.push(Ok(verified)),
-                Err(VerifyHeaderError::Integrity(invalid)) => {
+                Err(VerifyMessageError::Integrity(invalid)) => {
                     results.push(Err(invalid));
                 }
-                Err(VerifyHeaderError::Fetch(e)) => return Err(e),
+                Err(VerifyMessageError::Fetch(e)) => return Err(e),
             }
         }
         Ok(results)
