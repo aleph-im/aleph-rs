@@ -157,6 +157,17 @@ jobs:
       - name: Build release binary
         run: cargo build --release --package aleph-cli --target ${{ matrix.target }}
 
+      - name: Verify release exists
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ needs.check-versions.outputs.version }}"
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "::error::Release with tag $TAG not found. Please create the release manually before triggering this workflow."
+            exit 1
+          fi
+
       - name: Upload Release Asset
         shell: bash
         env:
