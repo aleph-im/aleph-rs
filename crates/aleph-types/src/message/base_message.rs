@@ -401,6 +401,20 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_inline_message_detects_tampered_content() {
+        let json = include_str!("../../../../fixtures/messages/post/post.json");
+        let mut message: Message = serde_json::from_str(json).unwrap();
+        // Corrupt the item_content while keeping the original item_hash
+        if let ContentSource::Inline { ref mut item_content } = message.content_source {
+            item_content.push('!');
+        }
+        assert_matches!(
+            message.verify_item_hash(),
+            Err(MessageVerificationError::ItemHashVerificationFailed { .. })
+        );
+    }
+
+    #[test]
     fn test_verify_non_inline_message_returns_error() {
         let json = include_str!("../../../../fixtures/messages/aggregate/aggregate.json");
         let message: Message = serde_json::from_str(json).unwrap();

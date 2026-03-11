@@ -80,9 +80,10 @@ pub enum IntegrityError {
         expected: ItemHash,
         actual: ItemHash,
     },
-    /// The raw content could not be downloaded for verification (non-inline messages only).
-    #[error("Failed to download raw content for verification: {0}")]
-    DownloadFailed(Box<MessageError>),
+    /// Verification could not be completed: either the raw content download failed (network/404)
+    /// or the hash format is unsupported.
+    #[error("Verification failed: {0}")]
+    VerificationFailed(Box<MessageError>),
 }
 
 /// A message paired with the result of its integrity verification.
@@ -470,7 +471,9 @@ pub trait AlephMessageClient {
     ///
     /// For inline messages, verification is done locally by hashing the `item_content` string.
     /// For non-inline messages (storage/ipfs), the raw content is downloaded from
-    /// `/api/v0/storage/raw/{item_hash}` and its hash is verified.
+    /// `/api/v0/storage/raw/{item_hash}` and its hash is verified. The full content is buffered
+    /// in memory; this is fine for typical message content (small JSON) but callers dealing with
+    /// unusually large non-inline messages should be aware of the memory cost.
     fn verify_message(
         &self,
         message: &Message,
@@ -484,7 +487,9 @@ pub trait AlephMessageClient {
                     MessageVerificationError::ItemHashVerificationFailed { expected, actual } => {
                         IntegrityError::HashMismatch { expected, actual }
                     }
-                    MessageVerificationError::NonInlineMessage => unreachable!(),
+                    MessageVerificationError::NonInlineMessage => {
+                        unreachable!("already matched ContentSource::Inline")
+                    }
                 }),
                 ContentSource::Storage | ContentSource::Ipfs => {
                     match async {
@@ -498,7 +503,7 @@ pub trait AlephMessageClient {
                         Err(MessageError::Storage(StorageError::IntegrityError(
                             crate::verify::VerifyError::IntegrityMismatch { expected, actual },
                         ))) => Err(IntegrityError::HashMismatch { expected, actual }),
-                        Err(e) => Err(IntegrityError::DownloadFailed(Box::new(e))),
+                        Err(e) => Err(IntegrityError::VerificationFailed(Box::new(e))),
                     }
                 }
             }
