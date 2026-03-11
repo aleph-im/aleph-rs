@@ -4,7 +4,8 @@ use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::memory_size::{Bytes, MemorySize};
 use aleph_types::message::{
-    ContentSource, FileRef, Message, MessageStatus, MessageType, RawFileRef,
+    ContentSource, FileRef, Message, MessageStatus, MessageType, MessageVerificationError,
+    RawFileRef,
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
@@ -58,6 +59,8 @@ pub enum MessageError {
     },
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
+    #[error("Integrity verification failed: {0}")]
+    Integrity(#[from] IntegrityError),
     #[error(transparent)]
     HttpError(#[from] reqwest_middleware::Error),
     #[error("I/O error: {0}")]
@@ -66,6 +69,41 @@ pub enum MessageError {
     WebsocketConnection(String),
     #[error("WebSocket message error: {0}")]
     WebsocketMessage(String),
+}
+
+/// Error during message integrity verification.
+#[derive(Debug, thiserror::Error)]
+pub enum IntegrityError {
+    /// The computed hash doesn't match the expected item hash.
+    #[error("Hash mismatch: expected {expected}, computed {actual}")]
+    HashMismatch {
+        expected: ItemHash,
+        actual: ItemHash,
+    },
+    /// Verification could not be completed: either the raw content download failed (network/404)
+    /// or the hash format is unsupported.
+    #[error("Verification failed: {0}")]
+    VerificationFailed(Box<MessageError>),
+}
+
+/// A message paired with the result of its integrity verification.
+///
+/// Returned by [`AlephMessageClient::get_messages_and_verify`] to let callers
+/// decide how to handle per-message verification failures.
+#[derive(Debug)]
+pub struct VerifiedMessage {
+    pub message: Message,
+    /// `Ok(())` if the item hash was successfully verified, or an error describing the failure.
+    pub integrity: Result<(), IntegrityError>,
+}
+
+impl VerifiedMessage {
+    /// Consumes self, returning the message only if verification passed.
+    #[must_use = "this returns a Result that may contain an IntegrityError"]
+    pub fn into_message(self) -> Result<Message, IntegrityError> {
+        self.integrity?;
+        Ok(self.message)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -428,6 +466,117 @@ pub trait AlephMessageClient {
         message: &Message,
         sync: bool,
     ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send;
+
+    /// Verifies the integrity of an already-fetched message.
+    ///
+    /// For inline messages, verification is done locally by hashing the `item_content` string.
+    /// For non-inline messages (storage/ipfs), the raw content is downloaded from
+    /// `/api/v0/storage/raw/{item_hash}` and its hash is verified. The full content is buffered
+    /// in memory; this is fine for typical message content (small JSON) but callers dealing with
+    /// unusually large non-inline messages should be aware of the memory cost.
+    fn verify_message(
+        &self,
+        message: &Message,
+    ) -> impl Future<Output = Result<(), IntegrityError>> + Send
+    where
+        Self: AlephStorageClient + Sync,
+    {
+        async {
+            match &message.content_source {
+                ContentSource::Inline { .. } => message.verify_item_hash().map_err(|e| match e {
+                    MessageVerificationError::ItemHashVerificationFailed { expected, actual } => {
+                        IntegrityError::HashMismatch { expected, actual }
+                    }
+                    MessageVerificationError::NonInlineMessage => {
+                        unreachable!("already matched ContentSource::Inline")
+                    }
+                }),
+                ContentSource::Storage | ContentSource::Ipfs => {
+                    match async {
+                        let download = self.download_file_by_hash(&message.item_hash).await?;
+                        download.with_verification().bytes().await?;
+                        Ok::<(), MessageError>(())
+                    }
+                    .await
+                    {
+                        Ok(()) => Ok(()),
+                        Err(MessageError::Storage(StorageError::IntegrityError(
+                            crate::verify::VerifyError::IntegrityMismatch { expected, actual },
+                        ))) => Err(IntegrityError::HashMismatch { expected, actual }),
+                        Err(e) => Err(IntegrityError::VerificationFailed(Box::new(e))),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fetches a single message and verifies its integrity.
+    ///
+    /// Returns `Err(MessageError::Integrity(..))` if verification fails. Verification is only
+    /// performed for statuses that carry a full [`Message`] (Processed, Removing, Removed);
+    /// other statuses (Pending, Forgotten, Rejected) are returned as-is.
+    fn get_message_and_verify(
+        &self,
+        item_hash: &ItemHash,
+    ) -> impl Future<Output = Result<MessageWithStatus, MessageError>> + Send
+    where
+        Self: AlephStorageClient + Sync,
+    {
+        async {
+            let status = self.get_message(item_hash).await?;
+            match &status {
+                MessageWithStatus::Processed { message }
+                | MessageWithStatus::Removing { message, .. }
+                | MessageWithStatus::Removed { message, .. } => {
+                    self.verify_message(message).await?;
+                }
+                _ => {}
+            }
+            Ok(status)
+        }
+    }
+
+    /// Fetches messages matching the filter and verifies each one's integrity.
+    ///
+    /// The outer `Result` only fails if the initial message fetch fails. Per-message verification
+    /// results (including download failures for non-inline messages) are stored in
+    /// [`VerifiedMessage::integrity`], letting callers decide how to handle failures.
+    ///
+    /// **Note:** Non-inline messages require a sequential HTTP round-trip each to
+    /// `/storage/raw/{item_hash}`, so verifying a page of N non-inline messages incurs N
+    /// additional requests.
+    ///
+    /// ```ignore
+    /// let results = client.get_messages_and_verify(&filter).await?;
+    ///
+    /// // Fail on any bad message
+    /// for vm in &results {
+    ///     vm.integrity.as_ref()?;
+    /// }
+    ///
+    /// // Or skip unverified messages
+    /// let verified: Vec<Message> = results
+    ///     .into_iter()
+    ///     .filter_map(|vm| vm.into_message().ok())
+    ///     .collect();
+    /// ```
+    fn get_messages_and_verify(
+        &self,
+        filter: &MessageFilter,
+    ) -> impl Future<Output = Result<Vec<VerifiedMessage>, MessageError>> + Send
+    where
+        Self: AlephStorageClient + Sync,
+    {
+        async {
+            let messages = self.get_messages(filter).await?;
+            let mut verified = Vec::with_capacity(messages.len());
+            for message in messages {
+                let integrity = self.verify_message(&message).await;
+                verified.push(VerifiedMessage { message, integrity });
+            }
+            Ok(verified)
+        }
+    }
 }
 
 pub trait AlephStorageClient {

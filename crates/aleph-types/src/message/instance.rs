@@ -178,5 +178,7 @@ mod test {
                 publisher: Some(address!("0x23eC28598DCeB2f7082Cc3a9D670592DfEd6e0dC")),
             }]
         );
+
+        message.verify_item_hash().unwrap();
     }
 }
