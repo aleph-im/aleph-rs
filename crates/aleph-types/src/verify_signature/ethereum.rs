@@ -43,9 +43,17 @@ fn decode_signature(hex_str: &str) -> Result<[u8; 65], SignatureVerificationErro
     })
 }
 
-/// Normalizes the `v` byte: values 27/28 are mapped to 0/1.
+/// Normalizes the `v` byte: only accepts 0, 1, 27, or 28.
 fn normalize_v(v: u8) -> Result<RecoveryId, SignatureVerificationError> {
-    let id = if v >= 27 { v - 27 } else { v };
+    let id = match v {
+        0 | 1 => v,
+        27 | 28 => v - 27,
+        _ => {
+            return Err(SignatureVerificationError::InvalidSignature(format!(
+                "unexpected recovery id byte: {v}"
+            )));
+        }
+    };
     RecoveryId::try_from(id)
         .map_err(|e| SignatureVerificationError::InvalidSignature(e.to_string()))
 }
