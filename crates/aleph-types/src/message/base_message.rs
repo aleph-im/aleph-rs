@@ -187,6 +187,29 @@ impl<'de> Deserialize<'de> for ContentSource {
     }
 }
 
+impl ContentSource {
+    /// For inline messages, verifies that `item_content` hashes to `expected_hash`.
+    ///
+    /// Returns `Some(Ok(()))` if the hash matches, `Some(Err((expected, actual)))` on mismatch,
+    /// or `None` for non-inline messages (which require network-based verification).
+    pub fn verify_inline_hash(
+        &self,
+        expected_hash: &ItemHash,
+    ) -> Option<Result<(), (ItemHash, ItemHash)>> {
+        match self {
+            ContentSource::Inline { item_content } => {
+                let computed = AlephItemHash::from_bytes(item_content.as_bytes());
+                if ItemHash::Native(computed) != *expected_hash {
+                    Some(Err((expected_hash.clone(), computed.into())))
+                } else {
+                    Some(Ok(()))
+                }
+            }
+            ContentSource::Storage | ContentSource::Ipfs => None,
+        }
+    }
+}
+
 /// A message without its deserialized content.
 ///
 /// Used by the verified message path: the client fetches message headers, then downloads
@@ -314,21 +337,12 @@ impl Message {
     /// For non-inline messages (storage/ipfs), use the client's `verify_message()` method
     /// instead, which downloads the raw content from `/storage/raw/` for verification.
     pub fn verify_item_hash(&self) -> Result<(), MessageVerificationError> {
-        match &self.content_source {
-            ContentSource::Inline { item_content } => {
-                // Inline messages always use SHA-256 (Native) hashes per the Aleph protocol.
-                let computed = AlephItemHash::from_bytes(item_content.as_bytes());
-                if ItemHash::Native(computed) != self.item_hash {
-                    return Err(MessageVerificationError::ItemHashVerificationFailed {
-                        expected: self.item_hash.clone(),
-                        actual: computed.into(),
-                    });
-                }
-                Ok(())
+        match self.content_source.verify_inline_hash(&self.item_hash) {
+            Some(Ok(())) => Ok(()),
+            Some(Err((expected, actual))) => {
+                Err(MessageVerificationError::ItemHashVerificationFailed { expected, actual })
             }
-            ContentSource::Storage | ContentSource::Ipfs => {
-                Err(MessageVerificationError::NonInlineMessage)
-            }
+            None => Err(MessageVerificationError::NonInlineMessage),
         }
     }
 }

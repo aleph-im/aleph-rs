@@ -1,7 +1,7 @@
 use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggregate};
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
-use aleph_types::item_hash::{AlephItemHash, ItemHash};
+use aleph_types::item_hash::ItemHash;
 use aleph_types::memory_size::{Bytes, MemorySize};
 use aleph_types::message::{
     ContentSource, FileRef, Message, MessageContent, MessageContentEnum, MessageHeader,
@@ -569,16 +569,12 @@ pub trait AlephMessageClient {
         async {
             let raw_bytes = match &header.content_source {
                 ContentSource::Inline { item_content } => {
-                    // Inline messages always use SHA-256 (Native) hashes per the Aleph protocol.
-                    let computed = AlephItemHash::from_bytes(item_content.as_bytes());
-                    if ItemHash::Native(computed) != header.item_hash {
-                        let expected_item_hash = header.item_hash.clone();
+                    if let Some(Err((expected, actual))) =
+                        header.content_source.verify_inline_hash(&header.item_hash)
+                    {
                         return Err(VerifyHeaderError::Integrity(InvalidMessage {
                             header,
-                            error: IntegrityError::HashMismatch {
-                                expected: expected_item_hash,
-                                actual: computed.into(),
-                            },
+                            error: IntegrityError::HashMismatch { expected, actual },
                         }));
                     }
                     bytes::Bytes::from(item_content.clone().into_bytes())
