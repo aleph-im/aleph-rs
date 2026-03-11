@@ -164,7 +164,8 @@ jobs:
         run: |
           gh release upload "v${{ needs.check-versions.outputs.version }}" \
             "./target/${{ matrix.target }}/release/${{ matrix.artifact_name }}#${{ matrix.asset_name }}" \
-            --repo "${{ github.repository }}"
+            --repo "${{ github.repository }}" \
+            --clobber
 
   # Fourth job: Manual approval step before publishing to crates.io
   request-publish-approval:
