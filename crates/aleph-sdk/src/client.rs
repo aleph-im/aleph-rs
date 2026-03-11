@@ -1,15 +1,15 @@
 use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggregate};
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
-use aleph_types::item_hash::ItemHash;
+use aleph_types::item_hash::{AlephItemHash, ItemHash};
 use aleph_types::memory_size::{Bytes, MemorySize};
 use aleph_types::message::{
-    ContentSource, FileRef, Message, MessageContent, MessageHeader, MessageStatus, MessageType,
-    RawFileRef,
+    ContentSource, FileRef, Message, MessageContent, MessageContentEnum, MessageHeader,
+    MessageStatus, MessageType, RawFileRef,
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryFutureExt};
 use reqwest::StatusCode;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
@@ -80,39 +80,53 @@ pub enum IntegrityError {
         expected: ItemHash,
         actual: ItemHash,
     },
-    /// Verification could not be completed: either the raw content download failed (network/404)
-    /// or the hash format is unsupported.
-    #[error("Verification failed: {0}")]
-    VerificationFailed(Box<MessageError>),
+
     /// The raw content passed hash verification but could not be deserialized as MessageContent.
     #[error("Failed to deserialize verified content: {0}")]
     ContentDeserializationFailed(String),
 }
 
-/// A message header paired with the result of its integrity verification.
+/// A message that passed verification.
 ///
-/// Returned by [`AlephMessageClient::get_messages_and_verify`] to let callers
-/// decide how to handle per-message verification failures. The header is always
-/// available (for logging, inspecting `item_hash`, etc.); the verified content
-/// is only available when verification succeeded.
+/// Simple wrapper around Message. This type forces callers to verify the integrity of the message
+/// before calling other functions.
 #[derive(Debug)]
 pub struct VerifiedMessage {
-    /// The message header (metadata), always available regardless of verification outcome.
-    pub header: MessageHeader,
-    /// The verified content, or an error if verification failed.
-    pub content: Result<MessageContent, IntegrityError>,
+    /// The message
+    message: Message,
+}
+
+// Downcast to message
+impl From<VerifiedMessage> for Message {
+    fn from(v: VerifiedMessage) -> Self {
+        v.message
+    }
 }
 
 impl VerifiedMessage {
-    /// Consumes self, returning a [`Message`] only if verification passed.
-    ///
-    /// The returned message's content is deserialized from the verified raw bytes,
-    /// not from the CCN's pre-deserialized `content` field.
-    #[must_use = "this returns a Result that may contain an IntegrityError"]
-    pub fn into_message(self) -> Result<Message, IntegrityError> {
-        let content = self.content?;
-        Ok(self.header.with_content(content))
+    pub fn message(&self) -> &Message {
+        &self.message
     }
+
+    pub fn content(&self) -> &MessageContentEnum {
+        self.message.content()
+    }
+}
+
+#[derive(Debug)]
+pub struct InvalidMessage {
+    pub header: MessageHeader,
+    pub error: IntegrityError,
+}
+
+/// Internal error type for `verify_message_header` that distinguishes fetch failures
+/// (which should abort the batch) from integrity failures (which are per-message).
+#[derive(Debug)]
+enum VerifyHeaderError {
+    /// The data could not be fetched (network error, 404, etc.).
+    Fetch(MessageError),
+    /// The data was fetched but failed integrity checks.
+    Integrity(InvalidMessage),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -162,20 +176,20 @@ pub struct ForgottenMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
-pub enum MessageWithStatus {
+pub enum MessageWithStatus<M> {
     // More than one message with the same item hash can be pending at the same time.
     Pending {
         messages: Vec<PendingMessage>,
     },
     Processed {
-        message: Message,
+        message: M,
     },
     Removing {
-        message: Message,
+        message: M,
         reason: RemovalReason,
     },
     Removed {
-        message: Message,
+        message: M,
         reason: RemovalReason,
     },
     Forgotten {
@@ -188,7 +202,7 @@ pub enum MessageWithStatus {
     },
 }
 
-impl MessageWithStatus {
+impl<M> MessageWithStatus<M> {
     pub fn status(&self) -> MessageStatus {
         match self {
             MessageWithStatus::Pending { .. } => MessageStatus::Pending,
@@ -204,7 +218,7 @@ impl MessageWithStatus {
 #[derive(Debug, Deserialize)]
 struct GetMessageResponse {
     #[serde(flatten)]
-    message: MessageWithStatus,
+    message: MessageWithStatus<Message>,
 }
 
 #[derive(Debug, Copy, Clone, Serialize)]
@@ -459,7 +473,7 @@ pub trait AlephMessageClient {
     fn get_message(
         &self,
         item_hash: &ItemHash,
-    ) -> impl Future<Output = Result<MessageWithStatus, MessageError>> + Send;
+    ) -> impl Future<Output = Result<MessageWithStatus<Message>, MessageError>> + Send;
     fn get_messages(
         &self,
         filter: &MessageFilter,
@@ -492,7 +506,7 @@ pub trait AlephMessageClient {
         sync: bool,
     ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send;
 
-    /// Verifies raw content and builds a [`Message`] from a [`MessageHeader`].
+    /// Verifies raw content and builds a [`VerifiedMessage`] from a [`MessageHeader`].
     ///
     /// For inline messages, verification is done locally by hashing the `item_content` string.
     /// For non-inline messages (storage/ipfs), the raw content is downloaded from
@@ -503,7 +517,7 @@ pub trait AlephMessageClient {
     fn verify_message_header(
         &self,
         header: MessageHeader,
-    ) -> impl Future<Output = Result<Message, IntegrityError>> + Send
+    ) -> impl Future<Output = Result<VerifiedMessage, VerifyHeaderError>> + Send
     where
         Self: AlephStorageClient + Sync,
     {
@@ -511,13 +525,16 @@ pub trait AlephMessageClient {
             let raw_bytes = match &header.content_source {
                 ContentSource::Inline { item_content } => {
                     // Inline messages always use SHA-256 (Native) hashes per the Aleph protocol.
-                    let computed =
-                        aleph_types::item_hash::AlephItemHash::from_bytes(item_content.as_bytes());
+                    let computed = AlephItemHash::from_bytes(item_content.as_bytes());
                     if ItemHash::Native(computed) != header.item_hash {
-                        return Err(IntegrityError::HashMismatch {
-                            expected: header.item_hash.clone(),
-                            actual: computed.into(),
-                        });
+                        let expected_item_hash = header.item_hash.clone();
+                        return Err(VerifyHeaderError::Integrity(InvalidMessage {
+                            header,
+                            error: IntegrityError::HashMismatch {
+                                expected: expected_item_hash,
+                                actual: computed.into(),
+                            },
+                        }));
                     }
                     bytes::Bytes::from(item_content.clone().into_bytes())
                 }
@@ -531,32 +548,50 @@ pub trait AlephMessageClient {
                         Ok(bytes) => bytes,
                         Err(MessageError::Storage(StorageError::IntegrityError(
                             crate::verify::VerifyError::IntegrityMismatch { expected, actual },
-                        ))) => return Err(IntegrityError::HashMismatch { expected, actual }),
-                        Err(e) => return Err(IntegrityError::VerificationFailed(Box::new(e))),
+                        ))) => {
+                            return Err(VerifyHeaderError::Integrity(InvalidMessage {
+                                header,
+                                error: IntegrityError::HashMismatch { expected, actual },
+                            }));
+                        }
+                        Err(e) => {
+                            return Err(VerifyHeaderError::Fetch(e));
+                        }
                     }
                 }
             };
 
             let content = MessageContent::deserialize_with_type(header.message_type, &raw_bytes)
-                .map_err(|e| IntegrityError::ContentDeserializationFailed(e.to_string()))?;
+                .map_err(|e| {
+                    VerifyHeaderError::Integrity(InvalidMessage {
+                        header: header.clone(),
+                        error: IntegrityError::ContentDeserializationFailed(e.to_string()),
+                    })
+                })?;
 
-            Ok(header.with_content(content))
+            Ok(VerifiedMessage {
+                message: header.with_content(content),
+            })
         }
     }
 
     /// Verifies a fully-fetched [`Message`] by re-checking its raw content.
     ///
     /// Takes ownership of the message, verifies the raw content hash, and returns
-    /// a new [`Message`] whose content is deserialized from the verified raw bytes
+    /// a [`VerifiedMessage`] whose content is deserialized from the verified raw bytes
     /// (discarding the original content from the CCN).
     fn verify_message(
         &self,
         message: Message,
-    ) -> impl Future<Output = Result<Message, IntegrityError>> + Send
+    ) -> impl Future<Output = Result<VerifiedMessage, MessageError>> + Send
     where
         Self: AlephStorageClient + Sync,
     {
         self.verify_message_header(MessageHeader::from(message))
+            .map_err(|e| match e {
+                VerifyHeaderError::Fetch(e) => e,
+                VerifyHeaderError::Integrity(invalid) => invalid.error.into(),
+            })
     }
 
     /// Fetches a single message and verifies its integrity.
@@ -569,33 +604,47 @@ pub trait AlephMessageClient {
     fn get_message_and_verify(
         &self,
         item_hash: &ItemHash,
-    ) -> impl Future<Output = Result<MessageWithStatus, MessageError>> + Send
+    ) -> impl Future<Output = Result<MessageWithStatus<VerifiedMessage>, MessageError>> + Send
     where
         Self: AlephStorageClient + Sync,
     {
         async {
             let status = self.get_message(item_hash).await?;
-            match status {
+            Ok(match status {
                 MessageWithStatus::Processed { message } => {
                     let verified = self.verify_message(message).await?;
-                    Ok(MessageWithStatus::Processed { message: verified })
+                    MessageWithStatus::Processed { message: verified }
                 }
                 MessageWithStatus::Removing { message, reason } => {
                     let verified = self.verify_message(message).await?;
-                    Ok(MessageWithStatus::Removing {
+                    MessageWithStatus::Removing {
                         message: verified,
                         reason,
-                    })
+                    }
                 }
                 MessageWithStatus::Removed { message, reason } => {
                     let verified = self.verify_message(message).await?;
-                    Ok(MessageWithStatus::Removed {
+                    MessageWithStatus::Removed {
                         message: verified,
                         reason,
-                    })
+                    }
                 }
-                other => Ok(other),
-            }
+                MessageWithStatus::Pending { messages } => MessageWithStatus::Pending { messages },
+                MessageWithStatus::Forgotten {
+                    message,
+                    forgotten_by,
+                } => MessageWithStatus::Forgotten {
+                    message,
+                    forgotten_by,
+                },
+                MessageWithStatus::Rejected {
+                    message,
+                    error_code,
+                } => MessageWithStatus::Rejected {
+                    message,
+                    error_code,
+                },
+            })
         }
     }
 
@@ -606,9 +655,10 @@ pub trait AlephMessageClient {
     /// - Inline messages: verified locally from `item_content`
     /// - Non-inline messages: downloaded from `/api/v0/storage/raw/{item_hash}`
     ///
-    /// The outer `Result` only fails if the initial fetch fails. Per-message verification
-    /// results are stored in [`VerifiedMessage::content`], letting callers decide how to
-    /// handle failures.
+    /// The outer `Result` fails on fetch errors (network, 404, etc.) — these abort the
+    /// entire batch since they likely indicate a systemic issue. Per-message integrity
+    /// failures (hash mismatch, deserialization errors) are returned as `Err(InvalidMessage)`
+    /// in the inner `Result`, letting callers decide how to handle them.
     ///
     /// **Note:** Non-inline messages require a sequential HTTP round-trip each to
     /// `/storage/raw/{item_hash}`, so verifying a page of N non-inline messages incurs N
@@ -617,35 +667,38 @@ pub trait AlephMessageClient {
     /// ```ignore
     /// let results = client.get_messages_and_verify(&filter).await?;
     ///
-    /// // Fail on any bad message
-    /// let messages: Result<Vec<Message>, _> = results
+    /// // Collect only verified messages, logging integrity failures
+    /// let messages: Vec<Message> = results
     ///     .into_iter()
-    ///     .map(|vm| vm.into_message())
-    ///     .collect();
-    /// let messages = messages?;
-    ///
-    /// // Or skip unverified messages
-    /// let verified: Vec<Message> = results
-    ///     .into_iter()
-    ///     .filter_map(|vm| vm.into_message().ok())
+    ///     .filter_map(|r| match r {
+    ///         Ok(vm) => Some(vm.into()),
+    ///         Err(invalid) => {
+    ///             log::warn!("integrity check failed for {}: {}", invalid.header.item_hash, invalid.error);
+    ///             None
+    ///         }
+    ///     })
     ///     .collect();
     /// ```
     fn get_messages_and_verify(
         &self,
         filter: &MessageFilter,
-    ) -> impl Future<Output = Result<Vec<VerifiedMessage>, MessageError>> + Send
+    ) -> impl Future<Output = Result<Vec<Result<VerifiedMessage, InvalidMessage>>, MessageError>> + Send
     where
         Self: AlephStorageClient + Sync,
     {
         async {
             let headers = self.get_message_headers(filter).await?;
-            let mut verified = Vec::with_capacity(headers.len());
+            let mut results = Vec::with_capacity(headers.len());
             for header in headers {
-                let result = self.verify_message_header(header.clone()).await;
-                let content = result.map(|message| message.content);
-                verified.push(VerifiedMessage { header, content });
+                match self.verify_message_header(header).await {
+                    Ok(verified) => results.push(Ok(verified)),
+                    Err(VerifyHeaderError::Integrity(invalid)) => {
+                        results.push(Err(invalid));
+                    }
+                    Err(VerifyHeaderError::Fetch(e)) => return Err(e),
+                }
             }
-            Ok(verified)
+            Ok(results)
         }
     }
 }
@@ -783,7 +836,10 @@ impl AlephMessageClient for AlephClient {
     /// Queries a message by item hash.
     ///
     /// Returns the message with its corresponding status.
-    async fn get_message(&self, item_hash: &ItemHash) -> Result<MessageWithStatus, MessageError> {
+    async fn get_message(
+        &self,
+        item_hash: &ItemHash,
+    ) -> Result<MessageWithStatus<Message>, MessageError> {
         let url = self
             .ccn_url
             .join(&format!("/api/v0/messages/{}", item_hash))
@@ -1126,7 +1182,7 @@ mod tests {
     ));
     #[test]
     fn test_deserialize_forgotten_message() {
-        let message: MessageWithStatus = serde_json::from_str(FORGOTTEN_MESSAGE).unwrap();
+        let message: MessageWithStatus<Message> = serde_json::from_str(FORGOTTEN_MESSAGE).unwrap();
 
         match message {
             MessageWithStatus::Forgotten {
