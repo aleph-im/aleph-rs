@@ -141,7 +141,7 @@ enum VerifyMessageError {
     /// The data could not be fetched (network error, 404, etc.).
     Fetch(MessageError),
     /// The data was fetched but failed integrity checks.
-    Integrity(InvalidMessage),
+    Integrity(Box<InvalidMessage>),
 }
 
 /// Assembles a [`VerifiedMessage`] from a header and deserialization result,
@@ -154,10 +154,10 @@ fn build_verified(
         Ok(content) => Ok(VerifiedMessage {
             message: header.with_content(content),
         }),
-        Err(e) => Err(VerifyMessageError::Integrity(InvalidMessage {
+        Err(e) => Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
             header,
             error: IntegrityError::ContentDeserializationFailed(e.to_string()),
-        })),
+        }))),
     }
 }
 
@@ -586,10 +586,10 @@ pub trait AlephMessageClient {
                     if let Some(Err((expected, actual))) =
                         header.content_source.verify_inline_hash(&header.item_hash)
                     {
-                        return Err(VerifyMessageError::Integrity(InvalidMessage {
+                        return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
                             header,
                             error: IntegrityError::HashMismatch { expected, actual },
-                        }));
+                        })));
                     }
                     // NLL: the borrow of item_content ends after this call since
                     // the returned MessageContent owns its data.
@@ -609,10 +609,10 @@ pub trait AlephMessageClient {
                         Err(MessageError::Storage(StorageError::IntegrityError(
                             crate::verify::VerifyError::IntegrityMismatch { expected, actual },
                         ))) => {
-                            return Err(VerifyMessageError::Integrity(InvalidMessage {
+                            return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
                                 header,
                                 error: IntegrityError::HashMismatch { expected, actual },
-                            }));
+                            })));
                         }
                         Err(e) => return Err(VerifyMessageError::Fetch(e)),
                     };
@@ -935,7 +935,7 @@ impl AlephMessageClient for AlephClient {
             match self.verify_message_header(header).await {
                 Ok(verified) => results.push(Ok(verified)),
                 Err(VerifyMessageError::Integrity(invalid)) => {
-                    results.push(Err(invalid));
+                    results.push(Err(*invalid));
                 }
                 Err(VerifyMessageError::Fetch(e)) => return Err(e),
             }
