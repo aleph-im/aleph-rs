@@ -212,6 +212,7 @@ impl Message {
     pub fn verify_item_hash(&self) -> Result<(), MessageVerificationError> {
         match &self.content_source {
             ContentSource::Inline { item_content } => {
+                // Inline messages always use SHA-256 (Native) hashes per the Aleph protocol.
                 let computed = AlephItemHash::from_bytes(item_content.as_bytes());
                 if ItemHash::Native(computed) != self.item_hash {
                     return Err(MessageVerificationError::ItemHashVerificationFailed {
