@@ -12,6 +12,8 @@ pub use base_message::{
     ContentSource, Message, MessageContent, MessageContentEnum, MessageHeader, MessageStatus,
     MessageType, MessageVerificationError,
 };
+#[cfg(feature = "signature")]
+pub use crate::verify_signature::SignatureVerificationError;
 pub use forget::ForgetContent;
 pub use instance::InstanceContent;
 pub use post::PostContent;
