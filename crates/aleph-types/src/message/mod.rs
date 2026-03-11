@@ -9,8 +9,8 @@ mod store;
 
 pub use aggregate::AggregateContent;
 pub use base_message::{
-    ContentSource, Message, MessageContentEnum, MessageStatus, MessageType,
-    MessageVerificationError,
+    ContentSource, Message, MessageContent, MessageContentEnum, MessageHeader, MessageStatus,
+    MessageType, MessageVerificationError,
 };
 pub use forget::ForgetContent;
 pub use instance::InstanceContent;

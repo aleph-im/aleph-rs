@@ -96,6 +96,48 @@ pub struct MessageContent {
     pub content: MessageContentEnum,
 }
 
+impl MessageContent {
+    /// Deserializes message content from raw JSON bytes, using `message_type` to select
+    /// the correct content variant. This is the type-directed deserialization used by
+    /// the verified message path.
+    pub fn deserialize_with_type(
+        message_type: MessageType,
+        raw: &[u8],
+    ) -> Result<Self, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_slice(raw)?;
+        Self::from_json_value(message_type, &value)
+    }
+
+    fn from_json_value(
+        message_type: MessageType,
+        value: &serde_json::Value,
+    ) -> Result<Self, serde_json::Error> {
+        let address = Address::deserialize(&value["address"])?;
+        let time = Timestamp::deserialize(&value["time"])?;
+
+        let variant = match message_type {
+            MessageType::Aggregate => {
+                MessageContentEnum::Aggregate(AggregateContent::deserialize(value)?)
+            }
+            MessageType::Forget => MessageContentEnum::Forget(ForgetContent::deserialize(value)?),
+            MessageType::Instance => {
+                MessageContentEnum::Instance(InstanceContent::deserialize(value)?)
+            }
+            MessageType::Post => MessageContentEnum::Post(PostContent::deserialize(value)?),
+            MessageType::Program => {
+                MessageContentEnum::Program(ProgramContent::deserialize(value)?)
+            }
+            MessageType::Store => MessageContentEnum::Store(StoreContent::deserialize(value)?),
+        };
+
+        Ok(MessageContent {
+            address,
+            time,
+            content: variant,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageConfirmation {
     pub chain: Chain,
@@ -141,6 +183,72 @@ impl<'de> Deserialize<'de> for ContentSource {
                 other,
                 &["inline", "storage", "ipfs"],
             )),
+        }
+    }
+}
+
+/// A message without its deserialized content.
+///
+/// Used by the verified message path: the client fetches message headers, then downloads
+/// and verifies raw content separately before deserializing it. This avoids trusting
+/// the CCN's pre-deserialized `content` field.
+#[derive(PartialEq, Debug, Clone)]
+pub struct MessageHeader {
+    /// Blockchain used for this message.
+    pub chain: Chain,
+    /// Sender address.
+    pub sender: Address,
+    /// Cryptographic signature of the message by the sender.
+    pub signature: Signature,
+    /// Content of the message as created by the sender. Can either be inline or stored
+    /// on Aleph Cloud.
+    pub content_source: ContentSource,
+    /// Hash of the content (SHA2-256).
+    pub item_hash: ItemHash,
+    /// List of confirmations for the message.
+    pub confirmations: Vec<MessageConfirmation>,
+    /// Unix timestamp or datetime when the message was published.
+    pub time: Timestamp,
+    /// Channel of the message, one application ideally has one channel.
+    pub channel: Option<Channel>,
+    /// Message type. (aggregate, forget, instance, post, program, store).
+    pub message_type: MessageType,
+}
+
+impl MessageHeader {
+    pub fn confirmed(&self) -> bool {
+        !self.confirmations.is_empty()
+    }
+
+    /// Assembles a full [`Message`] by combining this header with deserialized content.
+    pub fn with_content(self, content: MessageContent) -> Message {
+        Message {
+            chain: self.chain,
+            sender: self.sender,
+            signature: self.signature,
+            content_source: self.content_source,
+            item_hash: self.item_hash,
+            confirmations: self.confirmations,
+            time: self.time,
+            channel: self.channel,
+            message_type: self.message_type,
+            content,
+        }
+    }
+}
+
+impl From<Message> for MessageHeader {
+    fn from(message: Message) -> Self {
+        MessageHeader {
+            chain: message.chain,
+            sender: message.sender,
+            signature: message.signature,
+            content_source: message.content_source,
+            item_hash: message.item_hash,
+            confirmations: message.confirmations,
+            time: message.time,
+            channel: message.channel,
+            message_type: message.message_type,
         }
     }
 }
@@ -229,6 +337,50 @@ impl Message {
     }
 }
 
+/// Shared helper struct for deserializing message header fields.
+/// Used by both `Message` and `MessageHeader` Deserialize impls.
+#[derive(Deserialize)]
+struct MessageHeaderRaw {
+    chain: Chain,
+    sender: Address,
+    signature: Signature,
+    #[serde(flatten)]
+    content_source: ContentSource,
+    item_hash: ItemHash,
+    #[serde(default)]
+    confirmations: Option<Vec<MessageConfirmation>>,
+    time: Timestamp,
+    #[serde(default)]
+    channel: Option<Channel>,
+    #[serde(rename = "type")]
+    message_type: MessageType,
+}
+
+impl MessageHeaderRaw {
+    fn into_header(self) -> MessageHeader {
+        MessageHeader {
+            chain: self.chain,
+            sender: self.sender,
+            signature: self.signature,
+            content_source: self.content_source,
+            item_hash: self.item_hash,
+            confirmations: self.confirmations.unwrap_or_default(),
+            time: self.time,
+            channel: self.channel,
+            message_type: self.message_type,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageHeader {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        MessageHeaderRaw::deserialize(deserializer).map(MessageHeaderRaw::into_header)
+    }
+}
+
 // Custom deserializer that uses message_type to efficiently deserialize content
 impl<'de> Deserialize<'de> for Message {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -237,67 +389,17 @@ impl<'de> Deserialize<'de> for Message {
     {
         #[derive(Deserialize)]
         struct MessageRaw {
-            chain: Chain,
-            sender: Address,
-            signature: Signature,
             #[serde(flatten)]
-            content_source: ContentSource,
-            item_hash: ItemHash,
-            #[serde(default)]
-            confirmations: Option<Vec<MessageConfirmation>>,
-            time: Timestamp,
-            #[serde(default)]
-            channel: Option<Channel>,
-            #[serde(rename = "type")]
-            message_type: MessageType,
+            header: MessageHeaderRaw,
             content: serde_json::Value,
         }
 
         let raw = MessageRaw::deserialize(deserializer)?;
 
-        let content_value = raw.content;
+        let content = MessageContent::from_json_value(raw.header.message_type, &raw.content)
+            .map_err(de::Error::custom)?;
 
-        let address = Address::deserialize(&content_value["address"]).map_err(de::Error::custom)?;
-        let time = Timestamp::deserialize(&content_value["time"]).map_err(de::Error::custom)?;
-
-        // Deserialize the specific variant based on message_type
-        let variant = match raw.message_type {
-            MessageType::Aggregate => MessageContentEnum::Aggregate(
-                AggregateContent::deserialize(&content_value).map_err(de::Error::custom)?,
-            ),
-            MessageType::Forget => MessageContentEnum::Forget(
-                ForgetContent::deserialize(&content_value).map_err(de::Error::custom)?,
-            ),
-            MessageType::Instance => MessageContentEnum::Instance(
-                InstanceContent::deserialize(&content_value).map_err(de::Error::custom)?,
-            ),
-            MessageType::Post => MessageContentEnum::Post(
-                PostContent::deserialize(&content_value).map_err(de::Error::custom)?,
-            ),
-            MessageType::Program => MessageContentEnum::Program(
-                ProgramContent::deserialize(&content_value).map_err(de::Error::custom)?,
-            ),
-            MessageType::Store => MessageContentEnum::Store(
-                StoreContent::deserialize(&content_value).map_err(de::Error::custom)?,
-            ),
-        };
-
-        Ok(Message {
-            chain: raw.chain,
-            sender: raw.sender,
-            signature: raw.signature,
-            content_source: raw.content_source,
-            item_hash: raw.item_hash,
-            confirmations: raw.confirmations.unwrap_or_default(),
-            time: raw.time,
-            channel: raw.channel,
-            message_type: raw.message_type,
-            content: MessageContent {
-                address,
-                time,
-                content: variant,
-            },
-        })
+        Ok(raw.header.into_header().with_content(content))
     }
 }
 
@@ -426,6 +528,53 @@ mod tests {
             message.verify_item_hash(),
             Err(MessageVerificationError::NonInlineMessage)
         );
+    }
+
+    #[test]
+    fn test_deserialize_message_header() {
+        let json = include_str!("../../../../fixtures/messages/post/post.json");
+        let header: MessageHeader = serde_json::from_str(json).unwrap();
+        let message: Message = serde_json::from_str(json).unwrap();
+
+        // Header fields should match Message fields
+        assert_eq!(header.chain, message.chain);
+        assert_eq!(header.sender, message.sender);
+        assert_eq!(header.signature, message.signature);
+        assert_eq!(header.content_source, message.content_source);
+        assert_eq!(header.item_hash, message.item_hash);
+        assert_eq!(header.time, message.time);
+        assert_eq!(header.channel, message.channel);
+        assert_eq!(header.message_type, message.message_type);
+    }
+
+    #[test]
+    fn test_message_header_with_content_roundtrip() {
+        let json = include_str!("../../../../fixtures/messages/post/post.json");
+        let message: Message = serde_json::from_str(json).unwrap();
+
+        // Convert to header, then reassemble with original content
+        let content = message.content.clone();
+        let header = MessageHeader::from(message.clone());
+        let reassembled = header.with_content(content);
+        assert_eq!(reassembled, message);
+    }
+
+    #[test]
+    fn test_deserialize_content_with_type() {
+        let json = include_str!("../../../../fixtures/messages/post/post.json");
+        let message: Message = serde_json::from_str(json).unwrap();
+
+        // For inline messages, deserialize_with_type from item_content should match
+        if let ContentSource::Inline { ref item_content } = message.content_source {
+            let content = MessageContent::deserialize_with_type(
+                message.message_type,
+                item_content.as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(content, message.content);
+        } else {
+            panic!("Expected inline message");
+        }
     }
 
     #[test]
