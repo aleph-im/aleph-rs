@@ -405,7 +405,10 @@ mod tests {
         let json = include_str!("../../../../fixtures/messages/post/post.json");
         let mut message: Message = serde_json::from_str(json).unwrap();
         // Corrupt the item_content while keeping the original item_hash
-        if let ContentSource::Inline { ref mut item_content } = message.content_source {
+        if let ContentSource::Inline {
+            ref mut item_content,
+        } = message.content_source
+        {
             item_content.push('!');
         }
         assert_matches!(
