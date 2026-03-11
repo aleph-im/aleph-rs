@@ -216,10 +216,6 @@ pub struct MessageHeader {
 }
 
 impl MessageHeader {
-    pub fn confirmed(&self) -> bool {
-        !self.confirmations.is_empty()
-    }
-
     /// Assembles a full [`Message`] by combining this header with deserialized content.
     pub fn with_content(self, content: MessageContent) -> Message {
         Message {
