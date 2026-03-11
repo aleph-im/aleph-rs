@@ -7,12 +7,18 @@ license = "MIT"
 repository = "https://github.com/aleph-im/aleph-rs"
 homepage = "https://github.com/aleph-im/aleph-rs"
 
+[features]
+signature = ["dep:k256", "dep:sha3", "dep:hex"]
+
 [dependencies]
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+k256 = { workspace = true, optional = true }
+sha3 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

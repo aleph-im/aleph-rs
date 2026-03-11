@@ -70,12 +70,77 @@ pub enum Chain {
     Zora,
 }
 
+impl std::fmt::Display for Chain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Chain::Arbitrum => "ARB",
+            Chain::Aurora => "AURORA",
+            Chain::Avax => "AVAX",
+            Chain::Base => "BASE",
+            Chain::Blast => "BLAST",
+            Chain::Bob => "BOB",
+            Chain::Bsc => "BSC",
+            Chain::Csdk => "CSDK",
+            Chain::Cyber => "CYBER",
+            Chain::Polkadot => "DOT",
+            Chain::Eclipse => "ES",
+            Chain::Ethereum => "ETH",
+            Chain::Etherlink => "ETHERLINK",
+            Chain::Fraxtal => "FRAX",
+            Chain::Hype => "HYPE",
+            Chain::Ink => "INK",
+            Chain::Lens => "LENS",
+            Chain::Linea => "LINEA",
+            Chain::Lisk => "LISK",
+            Chain::Metis => "METIS",
+            Chain::Mode => "MODE",
+            Chain::Neo => "NEO",
+            Chain::Nuls => "NULS",
+            Chain::Nuls2 => "NULS2",
+            Chain::Optimism => "OP",
+            Chain::Pol => "POL",
+            Chain::Sol => "SOL",
+            Chain::Somnia => "STT",
+            Chain::Sonic => "SONIC",
+            Chain::Tezos => "TEZOS",
+            Chain::Unichain => "UNICHAIN",
+            Chain::Worldchain => "WLD",
+            Chain::Zora => "ZORA",
+        };
+        f.write_str(s)
+    }
+}
+
+impl Chain {
+    /// Returns true if this chain uses EVM-compatible signature verification
+    /// (secp256k1 + EIP-191 personal sign).
+    pub fn is_evm(&self) -> bool {
+        !matches!(
+            self,
+            Chain::Csdk
+                | Chain::Eclipse
+                | Chain::Neo
+                | Chain::Nuls
+                | Chain::Nuls2
+                | Chain::Polkadot
+                | Chain::Sol
+                | Chain::Tezos
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Address(String);
 
 impl std::fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl Address {
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -100,6 +165,12 @@ macro_rules! address {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Signature(String);
+
+impl Signature {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl From<String> for Signature {
     fn from(value: String) -> Self {
