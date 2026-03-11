@@ -248,10 +248,7 @@ impl<M> MessageWithStatus<M> {
 
     /// Applies a fallible transformation to the message in variants that carry one
     /// (Processed, Removing, Removed). Other variants are passed through unchanged.
-    pub async fn try_map_message_async<N, E, F, Fut>(
-        self,
-        f: F,
-    ) -> Result<MessageWithStatus<N>, E>
+    pub async fn try_map_message_async<N, E, F, Fut>(self, f: F) -> Result<MessageWithStatus<N>, E>
     where
         F: FnOnce(M) -> Fut,
         Fut: Future<Output = Result<N, E>>,
@@ -619,10 +616,8 @@ pub trait AlephMessageClient {
                         }
                         Err(e) => return Err(VerifyMessageError::Fetch(e)),
                     };
-                    let content = MessageContent::deserialize_with_type(
-                        header.message_type,
-                        &raw_bytes,
-                    );
+                    let content =
+                        MessageContent::deserialize_with_type(header.message_type, &raw_bytes);
                     build_verified(header, content)
                 }
             }
