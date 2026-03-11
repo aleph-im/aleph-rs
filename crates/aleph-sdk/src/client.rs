@@ -494,16 +494,6 @@ pub trait AlephMessageClient {
         filter: &MessageFilter,
     ) -> impl Future<Output = Result<Vec<Message>, MessageError>> + Send;
 
-    /// Fetches messages matching the filter, returning only the headers (without content).
-    ///
-    /// Used internally by [`get_messages_and_verify`](Self::get_messages_and_verify) to avoid
-    /// deserializing the CCN's `content` field, which is discarded in favor of content
-    /// deserialized from verified raw bytes.
-    fn get_message_headers(
-        &self,
-        filter: &MessageFilter,
-    ) -> impl Future<Output = Result<Vec<MessageHeader>, MessageError>> + Send;
-
     fn subscribe_to_messages(
         &self,
         filter: &MessageFilter,
@@ -699,23 +689,7 @@ pub trait AlephMessageClient {
         filter: &MessageFilter,
     ) -> impl Future<Output = Result<Vec<Result<VerifiedMessage, InvalidMessage>>, MessageError>> + Send
     where
-        Self: AlephStorageClient + Sync,
-    {
-        async {
-            let headers = self.get_message_headers(filter).await?;
-            let mut results = Vec::with_capacity(headers.len());
-            for header in headers {
-                match self.verify_message_header(header).await {
-                    Ok(verified) => results.push(Ok(verified)),
-                    Err(VerifyHeaderError::Integrity(invalid)) => {
-                        results.push(Err(invalid));
-                    }
-                    Err(VerifyHeaderError::Fetch(e)) => return Err(e),
-                }
-            }
-            Ok(results)
-        }
-    }
+        Self: AlephStorageClient + Sync;
 }
 
 pub trait AlephStorageClient {
@@ -898,31 +872,6 @@ impl AlephMessageClient for AlephClient {
         Ok(get_messages_response.messages)
     }
 
-    async fn get_message_headers(
-        &self,
-        filter: &MessageFilter,
-    ) -> Result<Vec<MessageHeader>, MessageError> {
-        let url = self
-            .ccn_url
-            .join("/api/v0/messages.json")
-            .unwrap_or_else(|e| panic!("invalid url: {e}"));
-
-        let response = self
-            .http_client
-            .get(url)
-            .query(&filter)
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(reqwest_middleware::Error::from)?;
-
-        let response: GetMessageHeadersResponse = response
-            .json()
-            .await
-            .map_err(reqwest_middleware::Error::from)?;
-        Ok(response.messages)
-    }
-
     async fn subscribe_to_messages(
         &self,
         filter: &MessageFilter,
@@ -962,6 +911,56 @@ impl AlephMessageClient for AlephClient {
             .await
             .map_err(reqwest_middleware::Error::from)?;
         Ok(post_response)
+    }
+
+    async fn get_messages_and_verify(
+        &self,
+        filter: &MessageFilter,
+    ) -> Result<Vec<Result<VerifiedMessage, InvalidMessage>>, MessageError> {
+        let headers = self.get_message_headers(filter).await?;
+        let mut results = Vec::with_capacity(headers.len());
+        for header in headers {
+            match self.verify_message_header(header).await {
+                Ok(verified) => results.push(Ok(verified)),
+                Err(VerifyHeaderError::Integrity(invalid)) => {
+                    results.push(Err(invalid));
+                }
+                Err(VerifyHeaderError::Fetch(e)) => return Err(e),
+            }
+        }
+        Ok(results)
+    }
+}
+
+impl AlephClient {
+    /// Fetches messages matching the filter, returning only the headers (without content).
+    ///
+    /// Used by [`get_messages_and_verify`](AlephMessageClient::get_messages_and_verify) to avoid
+    /// deserializing the CCN's `content` field, which is discarded in favor of content
+    /// deserialized from verified raw bytes.
+    async fn get_message_headers(
+        &self,
+        filter: &MessageFilter,
+    ) -> Result<Vec<MessageHeader>, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/messages.json")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let response: GetMessageHeadersResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(response.messages)
     }
 }
 
