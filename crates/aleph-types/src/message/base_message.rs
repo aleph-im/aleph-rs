@@ -650,9 +650,8 @@ mod tests {
         #[test]
         fn test_verify_signature_tampered_item_hash() {
             let mut message = post_message();
-            message.item_hash = item_hash!(
-                "0000000000000000000000000000000000000000000000000000000000000000"
-            );
+            message.item_hash =
+                item_hash!("0000000000000000000000000000000000000000000000000000000000000000");
             assert_matches!(
                 message.verify_signature(),
                 Err(SignatureVerificationError::SignatureMismatch { .. })
@@ -690,10 +689,8 @@ mod tests {
             // May recover to a different address or fail to recover entirely
             assert_matches!(
                 message.verify_signature(),
-                Err(
-                    SignatureVerificationError::SignatureMismatch { .. }
-                        | SignatureVerificationError::InvalidSignature(_)
-                )
+                Err(SignatureVerificationError::SignatureMismatch { .. }
+                    | SignatureVerificationError::InvalidSignature(_))
             );
         }
 

@@ -8,7 +8,9 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum SignatureVerificationError {
     /// The recovered signer address doesn't match the message sender.
-    #[error("Signature mismatch: message sender is {expected}, but signature was produced by {recovered}")]
+    #[error(
+        "Signature mismatch: message sender is {expected}, but signature was produced by {recovered}"
+    )]
     SignatureMismatch {
         expected: Address,
         recovered: Address,
