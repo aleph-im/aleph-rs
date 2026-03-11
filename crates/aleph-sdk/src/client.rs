@@ -228,6 +228,46 @@ impl<M> MessageWithStatus<M> {
             MessageWithStatus::Rejected { .. } => MessageStatus::Rejected,
         }
     }
+
+    /// Applies a fallible transformation to the message in variants that carry one
+    /// (Processed, Removing, Removed). Other variants are passed through unchanged.
+    pub async fn try_map_message_async<N, E, F, Fut>(
+        self,
+        f: F,
+    ) -> Result<MessageWithStatus<N>, E>
+    where
+        F: FnOnce(M) -> Fut,
+        Fut: Future<Output = Result<N, E>>,
+    {
+        Ok(match self {
+            MessageWithStatus::Processed { message } => MessageWithStatus::Processed {
+                message: f(message).await?,
+            },
+            MessageWithStatus::Removing { message, reason } => MessageWithStatus::Removing {
+                message: f(message).await?,
+                reason,
+            },
+            MessageWithStatus::Removed { message, reason } => MessageWithStatus::Removed {
+                message: f(message).await?,
+                reason,
+            },
+            MessageWithStatus::Pending { messages } => MessageWithStatus::Pending { messages },
+            MessageWithStatus::Forgotten {
+                message,
+                forgotten_by,
+            } => MessageWithStatus::Forgotten {
+                message,
+                forgotten_by,
+            },
+            MessageWithStatus::Rejected {
+                message,
+                error_code,
+            } => MessageWithStatus::Rejected {
+                message,
+                error_code,
+            },
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -614,42 +654,10 @@ pub trait AlephMessageClient {
         Self: AlephStorageClient + Sync,
     {
         async {
-            let status = self.get_message(item_hash).await?;
-            Ok(match status {
-                MessageWithStatus::Processed { message } => {
-                    let verified = self.verify_message(message).await?;
-                    MessageWithStatus::Processed { message: verified }
-                }
-                MessageWithStatus::Removing { message, reason } => {
-                    let verified = self.verify_message(message).await?;
-                    MessageWithStatus::Removing {
-                        message: verified,
-                        reason,
-                    }
-                }
-                MessageWithStatus::Removed { message, reason } => {
-                    let verified = self.verify_message(message).await?;
-                    MessageWithStatus::Removed {
-                        message: verified,
-                        reason,
-                    }
-                }
-                MessageWithStatus::Pending { messages } => MessageWithStatus::Pending { messages },
-                MessageWithStatus::Forgotten {
-                    message,
-                    forgotten_by,
-                } => MessageWithStatus::Forgotten {
-                    message,
-                    forgotten_by,
-                },
-                MessageWithStatus::Rejected {
-                    message,
-                    error_code,
-                } => MessageWithStatus::Rejected {
-                    message,
-                    error_code,
-                },
-            })
+            self.get_message(item_hash)
+                .await?
+                .try_map_message_async(|msg| self.verify_message(msg))
+                .await
         }
     }
 
