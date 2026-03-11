@@ -254,6 +254,24 @@ impl MessageHeader {
             content,
         }
     }
+
+    /// Verifies that the message signature was produced by the sender.
+    ///
+    /// Signature verification only depends on header fields (chain, sender,
+    /// signature, message_type, item_hash), so it can run before content is
+    /// downloaded or deserialized.
+    #[cfg(feature = "signature")]
+    pub fn verify_signature(
+        &self,
+    ) -> Result<(), crate::verify_signature::SignatureVerificationError> {
+        crate::verify_signature::verify(
+            &self.chain,
+            &self.sender,
+            &self.signature,
+            self.message_type,
+            &self.item_hash,
+        )
+    }
 }
 
 impl From<Message> for MessageHeader {

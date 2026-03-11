@@ -5,7 +5,7 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::memory_size::{Bytes, MemorySize};
 use aleph_types::message::{
     ContentSource, FileRef, Message, MessageContent, MessageContentEnum, MessageHeader,
-    MessageStatus, MessageType, RawFileRef,
+    MessageStatus, MessageType, RawFileRef, SignatureVerificationError,
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
@@ -84,6 +84,10 @@ pub enum IntegrityError {
     /// The raw content passed hash verification but could not be deserialized as MessageContent.
     #[error("Failed to deserialize verified content: {0}")]
     ContentDeserializationFailed(String),
+
+    /// The cryptographic signature does not match the message sender.
+    #[error("Signature verification failed: {0}")]
+    SignatureVerificationFailed(#[from] SignatureVerificationError),
 }
 
 /// A message that passed verification.
@@ -581,6 +585,15 @@ pub trait AlephMessageClient {
         Self: AlephStorageClient + Sync,
     {
         async {
+            // Verify signature first — it's cheap (no I/O) and catches forgeries
+            // before we spend time downloading or hashing content.
+            if let Err(e) = header.verify_signature() {
+                return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
+                    header,
+                    error: IntegrityError::SignatureVerificationFailed(e),
+                })));
+            }
+
             match &header.content_source {
                 ContentSource::Inline { item_content } => {
                     if let Some(Err((expected, actual))) =
