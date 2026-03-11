@@ -144,6 +144,23 @@ enum VerifyHeaderError {
     Integrity(InvalidMessage),
 }
 
+/// Assembles a [`VerifiedMessage`] from a header and deserialization result,
+/// mapping deserialization failures to integrity errors.
+fn build_verified(
+    header: MessageHeader,
+    content: Result<MessageContent, serde_json::Error>,
+) -> Result<VerifiedMessage, VerifyHeaderError> {
+    match content {
+        Ok(content) => Ok(VerifiedMessage {
+            message: header.with_content(content),
+        }),
+        Err(e) => Err(VerifyHeaderError::Integrity(InvalidMessage {
+            header,
+            error: IntegrityError::ContentDeserializationFailed(e.to_string()),
+        })),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovalReason {
@@ -567,7 +584,7 @@ pub trait AlephMessageClient {
         Self: AlephStorageClient + Sync,
     {
         async {
-            let raw_bytes = match &header.content_source {
+            match &header.content_source {
                 ContentSource::Inline { item_content } => {
                     if let Some(Err((expected, actual))) =
                         header.content_source.verify_inline_hash(&header.item_hash)
@@ -577,15 +594,20 @@ pub trait AlephMessageClient {
                             error: IntegrityError::HashMismatch { expected, actual },
                         }));
                     }
-                    bytes::Bytes::from(item_content.clone().into_bytes())
+                    // NLL: the borrow of item_content ends after this call since
+                    // the returned MessageContent owns its data.
+                    let content = MessageContent::deserialize_with_type(
+                        header.message_type,
+                        item_content.as_bytes(),
+                    );
+                    build_verified(header, content)
                 }
                 ContentSource::Storage | ContentSource::Ipfs => {
-                    match async {
-                        let download = self.download_file_by_hash(&header.item_hash).await?;
-                        download.with_verification().bytes().await
-                    }
-                    .await
-                    {
+                    let download = self
+                        .download_file_by_hash(&header.item_hash)
+                        .await
+                        .map_err(VerifyHeaderError::Fetch)?;
+                    let raw_bytes = match download.with_verification().bytes().await {
                         Ok(bytes) => bytes,
                         Err(MessageError::Storage(StorageError::IntegrityError(
                             crate::verify::VerifyError::IntegrityMismatch { expected, actual },
@@ -595,24 +617,15 @@ pub trait AlephMessageClient {
                                 error: IntegrityError::HashMismatch { expected, actual },
                             }));
                         }
-                        Err(e) => {
-                            return Err(VerifyHeaderError::Fetch(e));
-                        }
-                    }
+                        Err(e) => return Err(VerifyHeaderError::Fetch(e)),
+                    };
+                    let content = MessageContent::deserialize_with_type(
+                        header.message_type,
+                        &raw_bytes,
+                    );
+                    build_verified(header, content)
                 }
-            };
-
-            let content = MessageContent::deserialize_with_type(header.message_type, &raw_bytes)
-                .map_err(|e| {
-                    VerifyHeaderError::Integrity(InvalidMessage {
-                        header: header.clone(),
-                        error: IntegrityError::ContentDeserializationFailed(e.to_string()),
-                    })
-                })?;
-
-            Ok(VerifiedMessage {
-                message: header.with_content(content),
-            })
+            }
         }
     }
 
