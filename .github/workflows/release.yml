@@ -114,10 +114,26 @@ jobs:
           
           echo "✓ All versions are consistent: $VERSION"
 
-  # Third job: Build release binaries and attach to existing release
+  # Third job: Verify the GitHub release exists before building binaries
+  check-release:
+    name: Verify Release Exists
+    needs: [check-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify release exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ needs.check-versions.outputs.version }}"
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "::error::Release with tag $TAG not found. Please create the release manually before triggering this workflow."
+            exit 1
+          fi
+
+  # Fourth job: Build release binaries and attach to existing release
   build-binaries:
     name: Build Release Binaries
-    needs: [verify, check-versions]
+    needs: [verify, check-versions, check-release]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -157,17 +173,6 @@ jobs:
       - name: Build release binary
         run: cargo build --release --package aleph-cli --target ${{ matrix.target }}
 
-      - name: Verify release exists
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="v${{ needs.check-versions.outputs.version }}"
-          if ! gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "::error::Release with tag $TAG not found. Please create the release manually before triggering this workflow."
-            exit 1
-          fi
-
       - name: Upload Release Asset
         shell: bash
         env:
@@ -178,7 +183,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --clobber
 
-  # Fourth job: Manual approval step before publishing to crates.io
+  # Fifth job: Manual approval step before publishing to crates.io
   request-publish-approval:
     name: Request Publish Approval
     runs-on: ubuntu-latest
@@ -197,7 +202,7 @@ jobs:
           echo "  - aleph-sdk v${{ needs.check-versions.outputs.version }}"
           echo "  - aleph-cli v${{ needs.check-versions.outputs.version }}"
 
-  # Fifth job: Publish to crates.io (only runs after manual approval)
+  # Sixth job: Publish to crates.io (only runs after manual approval)
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
