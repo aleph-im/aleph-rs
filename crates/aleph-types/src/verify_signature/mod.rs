@@ -6,6 +6,7 @@ use crate::message::MessageType;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum SignatureVerificationError {
     /// The recovered signer address doesn't match the message sender.
     #[error(
