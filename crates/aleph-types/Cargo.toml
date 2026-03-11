@@ -8,6 +8,7 @@ repository = "https://github.com/aleph-im/aleph-rs"
 homepage = "https://github.com/aleph-im/aleph-rs"
 
 [features]
+default = ["signature"]
 signature = ["dep:k256", "dep:sha3", "dep:hex"]
 
 [dependencies]
