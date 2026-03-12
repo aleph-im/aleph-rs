@@ -148,6 +148,15 @@ impl Chain {
                 | Chain::Zora
         )
     }
+
+    /// Returns true if this chain uses SVM-compatible signature verification
+    /// (Ed25519).
+    ///
+    /// Uses an allow-list so that new chains added to the enum default to
+    /// unsupported rather than silently attempting Ed25519 verification.
+    pub fn is_svm(&self) -> bool {
+        matches!(self, Chain::Eclipse | Chain::Sol)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

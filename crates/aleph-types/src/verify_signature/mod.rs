@@ -63,8 +63,8 @@ pub(crate) fn verify(
         return Ok(());
     }
 
-    if matches!(chain, Chain::Sol) {
-        // For Solana, the sender address is the base58-encoded public key.
+    if chain.is_svm() {
+        // For SVM chains, the sender address is the base58-encoded Ed25519 public key.
         return solana::verify(buffer.as_bytes(), signature.as_str(), sender.as_str());
     }
 
