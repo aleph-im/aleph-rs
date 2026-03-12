@@ -852,7 +852,13 @@ impl AlephClientBuilder {
         self
     }
 
+    /// Sets the maximum number of concurrent HTTP requests. Default: 16.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is 0 (would deadlock all requests).
     pub fn max_concurrent_requests(mut self, n: usize) -> Self {
+        assert!(n > 0, "max_concurrent_requests must be > 0");
         self.max_concurrent_requests = n;
         self
     }
@@ -1507,5 +1513,51 @@ mod tests {
         }
 
         assert!(count > 0, "should have received at least one message");
+    }
+
+    #[test]
+    #[should_panic(expected = "max_concurrent_requests must be > 0")]
+    fn test_builder_rejects_zero_concurrency() {
+        AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
+            .max_concurrent_requests(0)
+            .build();
+    }
+
+    #[tokio::test]
+    async fn test_semaphore_limits_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let max_concurrency: usize = 3;
+        let total_tasks: usize = 20;
+
+        let semaphore = Arc::new(Semaphore::new(max_concurrency));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_observed = Arc::new(AtomicUsize::new(0));
+
+        let futures = (0..total_tasks).map(|_| {
+            let semaphore = semaphore.clone();
+            let active = active.clone();
+            let max_observed = max_observed.clone();
+            async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_observed.fetch_max(current, Ordering::SeqCst);
+                // Simulate work
+                tokio::task::yield_now().await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            }
+        });
+
+        futures_util::stream::iter(futures)
+            .buffer_unordered(usize::MAX)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(
+            max_observed.load(Ordering::SeqCst) <= max_concurrency,
+            "observed {} concurrent tasks, expected at most {}",
+            max_observed.load(Ordering::SeqCst),
+            max_concurrency,
+        );
     }
 }
