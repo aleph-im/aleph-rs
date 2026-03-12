@@ -7,7 +7,7 @@ mod post;
 mod program;
 mod store;
 
-#[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
+#[cfg(feature = "signature-evm")]
 pub use crate::verify_signature::SignatureVerificationError;
 pub use aggregate::AggregateContent;
 pub use base_message::{

@@ -1,7 +1,4 @@
-#[cfg(feature = "signature-evm")]
 mod ethereum;
-#[cfg(feature = "signature-sol")]
-mod solana;
 
 use crate::chain::{Address, Chain, Signature};
 use crate::item_hash::ItemHash;
@@ -48,7 +45,6 @@ pub(crate) fn verify(
 ) -> Result<(), SignatureVerificationError> {
     let buffer = verification_buffer(chain, sender, message_type, item_hash);
 
-    #[cfg(feature = "signature-evm")]
     if chain.is_evm() {
         let recovered = ethereum::recover_address(buffer.as_bytes(), signature.as_str())?;
         let recovered_addr = Address::from(recovered);
@@ -64,12 +60,6 @@ pub(crate) fn verify(
         }
 
         return Ok(());
-    }
-
-    #[cfg(feature = "signature-sol")]
-    if chain.is_svm() {
-        // For SVM chains, the sender address is the base58-encoded Ed25519 public key.
-        return solana::verify(buffer.as_bytes(), signature.as_str(), sender.as_str());
     }
 
     Err(SignatureVerificationError::UnsupportedChain(chain.clone()))
@@ -115,7 +105,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "signature-evm")]
     #[test]
     fn test_verify_with_v_zero_format() {
         // The fixture signature ends with 1b (v=27). Replacing the last byte

@@ -9,9 +9,8 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [features]
 default = ["signature"]
-signature = ["signature-evm", "signature-sol"]
+signature = ["signature-evm"]
 signature-evm = ["dep:k256", "dep:sha3", "dep:hex"]
-signature-sol = ["dep:ed25519-dalek", "dep:bs58"]
 
 [dependencies]
 chrono = { workspace = true }
@@ -22,8 +21,6 @@ thiserror = { workspace = true }
 k256 = { workspace = true, optional = true }
 sha3 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
-ed25519-dalek = { workspace = true, optional = true }
-bs58 = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

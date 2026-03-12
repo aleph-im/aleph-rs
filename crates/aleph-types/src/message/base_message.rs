@@ -260,7 +260,7 @@ impl MessageHeader {
     /// Signature verification only depends on header fields (chain, sender,
     /// signature, message_type, item_hash), so it can run before content is
     /// downloaded or deserialized.
-    #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
+    #[cfg(feature = "signature-evm")]
     pub fn verify_signature(
         &self,
     ) -> Result<(), crate::verify_signature::SignatureVerificationError> {
@@ -368,9 +368,8 @@ impl Message {
     ///
     /// Constructs the verification buffer from the message fields, then
     /// dispatches to the chain-specific verification algorithm. Currently
-    /// supports EVM-compatible chains (Ethereum, Arbitrum, etc.) and SVM
-    /// chains (Solana, Eclipse).
-    #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
+    /// supports EVM-compatible chains (Ethereum, Arbitrum, etc.).
+    #[cfg(feature = "signature-evm")]
     pub fn verify_signature(
         &self,
     ) -> Result<(), crate::verify_signature::SignatureVerificationError> {
@@ -638,7 +637,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
+    #[cfg(feature = "signature-evm")]
     mod signature_tests {
         use super::*;
         use crate::verify_signature::SignatureVerificationError;
@@ -731,51 +730,5 @@ mod tests {
             }
         }
 
-        #[cfg(feature = "signature-sol")]
-        mod sol {
-            use super::*;
-
-            fn sol_post_message() -> Message {
-                let json = include_str!("../../../../fixtures/messages/post/post-sol.json");
-                serde_json::from_str(json).unwrap()
-            }
-
-            #[test]
-            fn test_verify_sol_signature_valid() {
-                let message = sol_post_message();
-                message.verify_signature().unwrap();
-            }
-
-            #[test]
-            fn test_verify_sol_signature_tampered_sender() {
-                let mut message = sol_post_message();
-                message.sender = Address::from("11111111111111111111111111111111".to_string());
-                assert_matches!(
-                    message.verify_signature(),
-                    Err(SignatureVerificationError::InvalidSignature(_))
-                );
-            }
-
-            #[test]
-            fn test_verify_sol_signature_tampered_item_hash() {
-                let mut message = sol_post_message();
-                message.item_hash =
-                    item_hash!("0000000000000000000000000000000000000000000000000000000000000000");
-                assert_matches!(
-                    message.verify_signature(),
-                    Err(SignatureVerificationError::InvalidSignature(_))
-                );
-            }
-
-            #[test]
-            fn test_deserialize_sol_signature_format() {
-                let message = sol_post_message();
-                assert!(message.signature.public_key().is_some());
-                assert_eq!(
-                    message.signature.public_key().unwrap(),
-                    "5SwCeHbZ9oY3556YFBEhPTHyy9t4yse26v7MUyGm2bHS"
-                );
-            }
-        }
     }
 }

@@ -15,7 +15,7 @@ This repository is a mono-repo for everything related to Aleph Cloud written in 
 
 - **Type-safe** - Strongly typed Rust implementation of the Aleph Cloud protocol
 - **Async** - Built on Tokio for efficient async operations
-- **Signature verification** - Verify message signatures for EVM chains (Ethereum, Arbitrum, Base, ...) and SVM chains (Solana, Eclipse)
+- **Signature verification** - Verify message signatures for EVM chains (Ethereum, Arbitrum, Base, ...)
 - **Message integrity** - Verify item hashes and content integrity, with parallel verification and per-client concurrency control
 - **File storage** - Download files with optional integrity verification, stream to disk or memory
 - **Real-time** - Subscribe to messages via WebSocket with automatic reconnection
@@ -60,9 +60,8 @@ async fn main() -> anyhow::Result<()> {
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `signature` | Enables both `signature-evm` and `signature-sol` | Yes |
+| `signature` | Enables `signature-evm` | Yes |
 | `signature-evm` | Ethereum/EVM signature verification (secp256k1, EIP-191) | Yes |
-| `signature-sol` | Solana/SVM signature verification (Ed25519) | Yes |
 
 To disable signature verification (e.g. to reduce dependencies):
 
