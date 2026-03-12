@@ -10,8 +10,9 @@ use aleph_types::message::{
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt, TryFutureExt, TryStreamExt};
-use reqwest::StatusCode;
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use http::Extensions;
+use reqwest::{Request, Response, StatusCode};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -23,11 +24,35 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use url::Url;
 
+/// Middleware that limits the number of concurrent HTTP requests.
+///
+/// Placed inside the retry middleware so that permits are held only during actual network I/O,
+/// not during backoff sleeps between retries.
+struct ConcurrencyLimit {
+    semaphore: Arc<Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl Middleware for ConcurrencyLimit {
+    async fn handle(
+        &self,
+        req: Request,
+        extensions: &mut Extensions,
+        next: Next<'_>,
+    ) -> reqwest_middleware::Result<Response> {
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .expect("semaphore is never closed");
+        next.run(req, extensions).await
+    }
+}
+
 #[derive(Clone)]
 pub struct AlephClient {
     http_client: ClientWithMiddleware,
     ccn_url: Url,
-    request_semaphore: Arc<Semaphore>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -868,14 +893,21 @@ impl AlephClientBuilder {
             .retry_bounds(self.retry_config.min_backoff, self.retry_config.max_backoff)
             .build_with_max_retries(self.retry_config.max_retries);
 
+        let concurrency_limit = ConcurrencyLimit {
+            semaphore: Arc::new(Semaphore::new(self.max_concurrent_requests)),
+        };
+
+        // Retry is the outer middleware: it decides whether to retry.
+        // ConcurrencyLimit is the inner middleware: each attempt (including retries)
+        // acquires a permit only for the duration of actual network I/O.
         let http_client = ClientBuilder::new(reqwest::Client::new())
             .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .with(concurrency_limit)
             .build();
 
         AlephClient {
             http_client,
             ccn_url: self.ccn_url,
-            request_semaphore: Arc::new(Semaphore::new(self.max_concurrent_requests)),
         }
     }
 }
@@ -993,11 +1025,6 @@ impl AlephMessageClient for AlephClient {
         let headers = self.get_message_headers(filter).await?;
 
         let verify_futures = headers.into_iter().map(|header| async {
-            let _permit = self
-                .request_semaphore
-                .acquire()
-                .await
-                .expect("semaphore is never closed");
             match self.verify_message_header(header).await {
                 Ok(verified) => Ok(Ok(verified)),
                 Err(VerifyMessageError::Integrity(invalid)) => Ok(Err(*invalid)),
@@ -1005,6 +1032,8 @@ impl AlephMessageClient for AlephClient {
             }
         });
 
+        // All verifications run concurrently. Inline messages complete instantly (no I/O);
+        // non-inline downloads are gated by the ConcurrencyLimit middleware.
         futures_util::stream::iter(verify_futures)
             .buffer_unordered(usize::MAX)
             .try_collect()
