@@ -9,7 +9,9 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [features]
 default = ["signature"]
-signature = ["dep:k256", "dep:sha3", "dep:hex", "dep:ed25519-dalek", "dep:bs58"]
+signature = ["signature-evm", "signature-sol"]
+signature-evm = ["dep:k256", "dep:sha3", "dep:hex"]
+signature-sol = ["dep:ed25519-dalek", "dep:bs58"]
 
 [dependencies]
 chrono = { workspace = true }
