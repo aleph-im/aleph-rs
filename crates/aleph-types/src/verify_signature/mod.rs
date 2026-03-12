@@ -1,4 +1,5 @@
 mod ethereum;
+mod solana;
 
 use crate::chain::{Address, Chain, Signature};
 use crate::item_hash::ItemHash;
@@ -43,25 +44,31 @@ pub(crate) fn verify(
     message_type: MessageType,
     item_hash: &ItemHash,
 ) -> Result<(), SignatureVerificationError> {
-    if !chain.is_evm() {
-        return Err(SignatureVerificationError::UnsupportedChain(chain.clone()));
-    }
-
     let buffer = verification_buffer(chain, sender, message_type, item_hash);
-    let recovered = ethereum::recover_address(buffer.as_bytes(), signature.as_str())?;
-    let recovered_addr = Address::from(recovered);
 
-    if !sender
-        .as_str()
-        .eq_ignore_ascii_case(recovered_addr.as_str())
-    {
-        return Err(SignatureVerificationError::SignatureMismatch {
-            expected: sender.clone(),
-            recovered: recovered_addr,
-        });
+    if chain.is_evm() {
+        let recovered = ethereum::recover_address(buffer.as_bytes(), signature.as_str())?;
+        let recovered_addr = Address::from(recovered);
+
+        if !sender
+            .as_str()
+            .eq_ignore_ascii_case(recovered_addr.as_str())
+        {
+            return Err(SignatureVerificationError::SignatureMismatch {
+                expected: sender.clone(),
+                recovered: recovered_addr,
+            });
+        }
+
+        return Ok(());
     }
 
-    Ok(())
+    if matches!(chain, Chain::Sol) {
+        // For Solana, the sender address is the base58-encoded public key.
+        return solana::verify(buffer.as_bytes(), signature.as_str(), sender.as_str());
+    }
+
+    Err(SignatureVerificationError::UnsupportedChain(chain.clone()))
 }
 
 #[cfg(test)]
