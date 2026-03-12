@@ -6,5 +6,5 @@ pub mod memory_size;
 pub mod message;
 pub mod timestamp;
 pub(crate) mod toolkit;
-#[cfg(feature = "signature")]
+#[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
 pub mod verify_signature;
