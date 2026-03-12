@@ -368,7 +368,8 @@ impl Message {
     ///
     /// Constructs the verification buffer from the message fields, then
     /// dispatches to the chain-specific verification algorithm. Currently
-    /// supports Ethereum and EVM-compatible chains.
+    /// supports EVM-compatible chains (Ethereum, Arbitrum, etc.) and SVM
+    /// chains (Solana, Eclipse).
     #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
     pub fn verify_signature(
         &self,
