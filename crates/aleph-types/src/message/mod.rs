@@ -7,6 +7,8 @@ mod post;
 mod program;
 mod store;
 
+#[cfg(feature = "signature")]
+pub use crate::verify_signature::SignatureVerificationError;
 pub use aggregate::AggregateContent;
 pub use base_message::{
     ContentSource, Message, MessageContent, MessageContentEnum, MessageHeader, MessageStatus,

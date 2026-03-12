@@ -35,3 +35,6 @@ multihash = { version = "0.19" }
 multihash-codetable = { version = "0.1", features = ["sha2"] }
 prost = { version = "0.13" }
 prost-build = { version = "0.13" }
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = { version = "0.10" }
+hex = { version = "0.4" }
