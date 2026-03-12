@@ -1,3 +1,4 @@
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -147,6 +148,15 @@ impl Chain {
                 | Chain::Zora
         )
     }
+
+    /// Returns true if this chain uses SVM-compatible signature verification
+    /// (Ed25519).
+    ///
+    /// Uses an allow-list so that new chains added to the enum default to
+    /// unsupported rather than silently attempting Ed25519 verification.
+    pub fn is_svm(&self) -> bool {
+        matches!(self, Chain::Eclipse | Chain::Sol)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -183,18 +193,89 @@ macro_rules! address {
     ($address:expr) => {{ $crate::chain::Address::from($address.to_string()) }};
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Signature(String);
+/// Cryptographic signature of a message.
+///
+/// Handles two formats:
+/// - **Plain string** (EVM chains): `"0x636728db..."` — a hex-encoded ECDSA signature.
+/// - **Structured object** (Solana): `{"signature": "5HH5Z...", "publicKey": "5SwCe..."}`
+///   — a base58-encoded Ed25519 signature plus the signer's public key.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Signature {
+    /// The signature value (hex for EVM, base58 for Solana).
+    value: String,
+    /// The signer's public key, present for chains that include it
+    /// alongside the signature (e.g., Solana).
+    public_key: Option<String>,
+}
 
 impl Signature {
+    /// Returns the signature value as a string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.value
+    }
+
+    /// Returns the embedded public key, if present (e.g., Solana signatures).
+    pub fn public_key(&self) -> Option<&str> {
+        self.public_key.as_deref()
     }
 }
 
 impl From<String> for Signature {
     fn from(value: String) -> Self {
-        Self(value)
+        Self {
+            value,
+            public_key: None,
+        }
+    }
+}
+
+impl Serialize for Signature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match &self.public_key {
+            None => serializer.serialize_str(&self.value),
+            Some(pk) => {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("Signature", 2)?;
+                state.serialize_field("signature", &self.value)?;
+                state.serialize_field("publicKey", pk)?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Signature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct StructuredSig {
+            signature: String,
+            #[serde(rename = "publicKey")]
+            public_key: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum SigFormat {
+            Plain(String),
+            Structured(StructuredSig),
+        }
+
+        match SigFormat::deserialize(deserializer)? {
+            SigFormat::Plain(s) => Ok(Signature {
+                value: s,
+                public_key: None,
+            }),
+            SigFormat::Structured(s) => Ok(Signature {
+                value: s.signature,
+                public_key: Some(s.public_key),
+            }),
+        }
     }
 }
 

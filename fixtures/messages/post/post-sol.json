@@ -1,0 +1,31 @@
+{
+  "sender": "5SwCeHbZ9oY3556YFBEhPTHyy9t4yse26v7MUyGm2bHS",
+  "chain": "SOL",
+  "signature": {
+    "signature": "5HH5Z9jpWMicA8iGYnucQmDhGszvxmz76L14nDyRYTH7QrjQXFh7C1p7BG62UfpDbRfhhzGSESGX5dw6ef25V3GT",
+    "publicKey": "5SwCeHbZ9oY3556YFBEhPTHyy9t4yse26v7MUyGm2bHS"
+  },
+  "type": "POST",
+  "item_content": "{\"type\":\"solana\",\"address\":\"5SwCeHbZ9oY3556YFBEhPTHyy9t4yse26v7MUyGm2bHS\",\"content\":{\"body\":\"This message was posted from the typescript-SDK test suite with SOL\"},\"time\":1773291768.546}",
+  "item_type": "inline",
+  "item_hash": "a5498c4c81d0bec9ab7c7fd6a78228eb6ac530ea387ae2878c64d376769dbb79",
+  "time": 1773291768.546,
+  "channel": "TEST",
+  "content": {
+    "address": "5SwCeHbZ9oY3556YFBEhPTHyy9t4yse26v7MUyGm2bHS",
+    "time": 1773291768.546,
+    "content": {
+      "body": "This message was posted from the typescript-SDK test suite with SOL"
+    },
+    "ref": null,
+    "type": "solana"
+  },
+  "confirmed": true,
+  "confirmations": [
+    {
+      "chain": "ETH",
+      "height": 24639270,
+      "hash": "e89b8730127d409940c1f7462044b40b3c0bc06937e1eeed1c877455c5802763"
+    }
+  ]
+}
