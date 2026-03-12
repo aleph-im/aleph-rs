@@ -30,11 +30,13 @@ name = "aleph-sdk"
 version = "0.6.0"
 dependencies = [
  "aleph-types",
+ "async-trait",
  "bs58",
  "bytes",
  "chrono",
  "cid",
  "futures-util",
+ "http",
  "multihash",
  "multihash-codetable",
  "prost",
