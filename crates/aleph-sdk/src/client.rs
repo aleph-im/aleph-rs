@@ -9,7 +9,7 @@ use aleph_types::message::{
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
-use futures_util::{Stream, StreamExt, TryFutureExt};
+use futures_util::{Stream, StreamExt, TryFutureExt, TryStreamExt};
 use reqwest::StatusCode;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
@@ -17,14 +17,17 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_with::{StringWithSeparator, formats::CommaSeparator, serde_as, skip_serializing_none};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Semaphore;
 use url::Url;
 
 #[derive(Clone)]
 pub struct AlephClient {
     http_client: ClientWithMiddleware,
     ccn_url: Url,
+    request_semaphore: Arc<Semaphore>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -825,23 +828,68 @@ impl Default for RetryConfig {
     }
 }
 
-impl AlephClient {
-    pub fn new(ccn_url: Url) -> Self {
-        Self::with_retry_config(ccn_url, RetryConfig::default())
+const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 16;
+
+/// Builder for [`AlephClient`].
+///
+/// ```
+/// # use url::Url;
+/// # use aleph_sdk::client::{AlephClient, RetryConfig};
+/// let client = AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
+///     .max_concurrent_requests(32)
+///     .retry_config(RetryConfig { max_retries: 5, ..Default::default() })
+///     .build();
+/// ```
+pub struct AlephClientBuilder {
+    ccn_url: Url,
+    retry_config: RetryConfig,
+    max_concurrent_requests: usize,
+}
+
+impl AlephClientBuilder {
+    pub fn retry_config(mut self, config: RetryConfig) -> Self {
+        self.retry_config = config;
+        self
     }
 
-    pub fn with_retry_config(ccn_url: Url, retry_config: RetryConfig) -> Self {
+    /// Sets the maximum number of concurrent HTTP requests. Default: 16.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is 0 (would deadlock all requests).
+    pub fn max_concurrent_requests(mut self, n: usize) -> Self {
+        assert!(n > 0, "max_concurrent_requests must be > 0");
+        self.max_concurrent_requests = n;
+        self
+    }
+
+    pub fn build(self) -> AlephClient {
         let retry_policy = ExponentialBackoff::builder()
-            .retry_bounds(retry_config.min_backoff, retry_config.max_backoff)
-            .build_with_max_retries(retry_config.max_retries);
+            .retry_bounds(self.retry_config.min_backoff, self.retry_config.max_backoff)
+            .build_with_max_retries(self.retry_config.max_retries);
 
         let http_client = ClientBuilder::new(reqwest::Client::new())
             .with(RetryTransientMiddleware::new_with_policy(retry_policy))
             .build();
 
-        Self {
+        AlephClient {
             http_client,
+            ccn_url: self.ccn_url,
+            request_semaphore: Arc::new(Semaphore::new(self.max_concurrent_requests)),
+        }
+    }
+}
+
+impl AlephClient {
+    pub fn new(ccn_url: Url) -> Self {
+        Self::builder(ccn_url).build()
+    }
+
+    pub fn builder(ccn_url: Url) -> AlephClientBuilder {
+        AlephClientBuilder {
             ccn_url,
+            retry_config: RetryConfig::default(),
+            max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
         }
     }
 }
@@ -943,17 +991,24 @@ impl AlephMessageClient for AlephClient {
         filter: &MessageFilter,
     ) -> Result<Vec<Result<VerifiedMessage, InvalidMessage>>, MessageError> {
         let headers = self.get_message_headers(filter).await?;
-        let mut results = Vec::with_capacity(headers.len());
-        for header in headers {
+
+        let verify_futures = headers.into_iter().map(|header| async {
+            let _permit = self
+                .request_semaphore
+                .acquire()
+                .await
+                .expect("semaphore is never closed");
             match self.verify_message_header(header).await {
-                Ok(verified) => results.push(Ok(verified)),
-                Err(VerifyMessageError::Integrity(invalid)) => {
-                    results.push(Err(*invalid));
-                }
-                Err(VerifyMessageError::Fetch(e)) => return Err(e),
+                Ok(verified) => Ok(Ok(verified)),
+                Err(VerifyMessageError::Integrity(invalid)) => Ok(Err(*invalid)),
+                Err(VerifyMessageError::Fetch(e)) => Err(e),
             }
-        }
-        Ok(results)
+        });
+
+        futures_util::stream::iter(verify_futures)
+            .buffer_unordered(usize::MAX)
+            .try_collect()
+            .await
     }
 }
 
@@ -1458,5 +1513,51 @@ mod tests {
         }
 
         assert!(count > 0, "should have received at least one message");
+    }
+
+    #[test]
+    #[should_panic(expected = "max_concurrent_requests must be > 0")]
+    fn test_builder_rejects_zero_concurrency() {
+        AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
+            .max_concurrent_requests(0)
+            .build();
+    }
+
+    #[tokio::test]
+    async fn test_semaphore_limits_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let max_concurrency: usize = 3;
+        let total_tasks: usize = 20;
+
+        let semaphore = Arc::new(Semaphore::new(max_concurrency));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_observed = Arc::new(AtomicUsize::new(0));
+
+        let futures = (0..total_tasks).map(|_| {
+            let semaphore = semaphore.clone();
+            let active = active.clone();
+            let max_observed = max_observed.clone();
+            async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_observed.fetch_max(current, Ordering::SeqCst);
+                // Simulate work
+                tokio::task::yield_now().await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            }
+        });
+
+        futures_util::stream::iter(futures)
+            .buffer_unordered(usize::MAX)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(
+            max_observed.load(Ordering::SeqCst) <= max_concurrency,
+            "observed {} concurrent tasks, expected at most {}",
+            max_observed.load(Ordering::SeqCst),
+            max_concurrency,
+        );
     }
 }
