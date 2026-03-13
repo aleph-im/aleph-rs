@@ -15,6 +15,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: MessageCommand,
     },
+    /// Work with posts (merged view of POST messages)
+    Post {
+        #[clap(subcommand)]
+        command: PostCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -57,7 +62,13 @@ pub struct GetMessageArgs {
     pub item_hash: ItemHash,
 }
 
-use aleph_sdk::client::{MessageFilter, SortBy, SortOrder};
+#[derive(Subcommand)]
+pub enum PostCommand {
+    /// List posts (with filters).
+    List(Box<PostFilterCli>),
+}
+
+use aleph_sdk::client::{MessageFilter, PostFilter, SortBy, SortOrder};
 use aleph_types::message::{MessageStatus, MessageType};
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, FixedOffset};
@@ -249,6 +260,76 @@ impl From<MessageFilterCli> for MessageFilter {
             message_statuses: c
                 .message_statuses
                 .map(|v| v.into_iter().map(Into::into).collect()),
+            pagination: Some(c.pagination),
+            page: Some(c.page),
+        }
+    }
+}
+
+// ---------- CLI filter for posts ----------
+#[derive(Debug, Clone, Args)]
+pub struct PostFilterCli {
+    /// Filter by sender address(es). CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub addresses: Option<Vec<String>>,
+
+    /// Filter by item hash(es). CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub hashes: Option<Vec<String>>,
+
+    /// Filter by reference hash(es). CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub refs: Option<Vec<String>>,
+
+    /// Filter by post type(s) (e.g., "corechan-operation"). CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub post_types: Option<Vec<String>>,
+
+    /// Filter by tag(s). CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub tags: Option<Vec<String>>,
+
+    /// Filter by channel(s). CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub channels: Option<Vec<String>>,
+
+    /// Earliest date (RFC3339 or unix seconds).
+    #[arg(long, value_parser = parse_timestamp)]
+    pub start_date: Option<Timestamp>,
+
+    /// Latest date (RFC3339 or unix seconds).
+    #[arg(long, value_parser = parse_timestamp)]
+    pub end_date: Option<Timestamp>,
+
+    /// Sort key.
+    #[arg(long, value_enum)]
+    pub sort_by: Option<SortByCli>,
+
+    /// Sort order.
+    #[arg(long, value_enum)]
+    pub sort_order: Option<SortOrderCli>,
+
+    #[arg(long, default_value = "200")]
+    pub pagination: u32,
+    #[arg(long, default_value = "1")]
+    pub page: u32,
+}
+
+impl From<PostFilterCli> for PostFilter {
+    fn from(c: PostFilterCli) -> Self {
+        PostFilter {
+            addresses: c.addresses.map(|v| v.into_iter().map(Into::into).collect()),
+            hashes: c
+                .hashes
+                .map(|v| v.into_iter().map(|s| s.parse().unwrap()).collect()),
+            refs: c.refs,
+            post_types: c.post_types,
+            tags: c.tags,
+            channels: c.channels,
+            start_date: c.start_date,
+            end_date: c.end_date,
+            sort_by: c.sort_by.map(Into::into),
+            sort_order: c.sort_order.map(Into::into),
             pagination: Some(c.pagination),
             page: Some(c.page),
         }
