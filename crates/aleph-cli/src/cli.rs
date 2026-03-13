@@ -65,7 +65,17 @@ pub struct GetMessageArgs {
 #[derive(Subcommand)]
 pub enum PostCommand {
     /// List posts (with filters).
-    List(Box<PostFilterCli>),
+    List(Box<PostListArgs>),
+}
+
+#[derive(Args)]
+pub struct PostListArgs {
+    /// API version to use (0 for legacy format with full message envelope, 1 for lean format).
+    #[arg(long, default_value = "1")]
+    pub api_version: u8,
+
+    #[command(flatten)]
+    pub filter: PostFilterCli,
 }
 
 use aleph_sdk::client::{MessageFilter, PostFilter, SortBy, SortOrder};

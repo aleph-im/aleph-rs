@@ -69,10 +69,23 @@ async fn handle_post_command(
     command: PostCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        PostCommand::List(post_filter) => {
-            let response = aleph_client.get_posts(&(*post_filter).into()).await?;
-            let serialized = serde_json::to_string_pretty(&response.posts)?;
-            println!("{}", serialized);
+        PostCommand::List(args) => {
+            let filter = args.filter.into();
+            match args.api_version {
+                0 => {
+                    let response = aleph_client.get_posts_v0(&filter).await?;
+                    let serialized = serde_json::to_string_pretty(&response.posts)?;
+                    println!("{}", serialized);
+                }
+                1 => {
+                    let response = aleph_client.get_posts_v1(&filter).await?;
+                    let serialized = serde_json::to_string_pretty(&response.posts)?;
+                    println!("{}", serialized);
+                }
+                v => {
+                    return Err(format!("unsupported API version: {v} (expected 0 or 1)").into());
+                }
+            }
         }
     }
 
