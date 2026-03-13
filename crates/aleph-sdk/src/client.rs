@@ -412,7 +412,7 @@ pub struct GetMessagesResponse {
     pub pagination_total: u32,
 }
 
-/// Query filter for GET /api/v0/posts.json.
+/// Query filter for GET /api/v0/posts.json and /api/v1/posts.json.
 ///
 /// Posts are a higher-level view of POST messages: when a post is amended, the endpoint
 /// returns the merged result with the latest content and metadata from the amendment,
@@ -471,10 +471,11 @@ pub struct PostFilter {
 
 /// A merged post as returned by GET /api/v0/posts.json.
 ///
-/// When a post has been amended, the response shows the latest version
-/// with `original_item_hash` pointing to the original post.
+/// This is the legacy format that includes the full message envelope (chain, signature,
+/// confirmations, etc.). When a post has been amended, the response shows the latest
+/// version with `original_item_hash` pointing to the original post.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Post {
+pub struct PostV0 {
     /// The blockchain used for this post.
     pub chain: Chain,
     /// Hash of the current version (may be an amendment).
@@ -511,7 +512,7 @@ pub struct Post {
     pub reference: Option<String>,
 }
 
-impl Post {
+impl PostV0 {
     /// Deserializes the content into a typed struct.
     pub fn content_as<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_value(self.content.clone())
@@ -519,8 +520,52 @@ impl Post {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct GetPostsResponse {
-    pub posts: Vec<Post>,
+pub struct GetPostsV0Response {
+    pub posts: Vec<PostV0>,
+    pub pagination_per_page: u32,
+    pub pagination_page: u32,
+    pub pagination_total: u32,
+}
+
+/// A merged post as returned by GET /api/v1/posts.json.
+///
+/// This is the leaner format that omits message-level fields (chain, signature,
+/// confirmations, etc.) and uses ISO 8601 timestamps instead of unix floats.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PostV1 {
+    /// Hash of the current version (may be an amendment).
+    pub item_hash: ItemHash,
+    /// The user-defined content of the post (arbitrary JSON).
+    pub content: serde_json::Value,
+    /// Hash of the original post (before any amendments).
+    pub original_item_hash: ItemHash,
+    /// Type of the original post.
+    #[serde(default)]
+    pub original_type: Option<String>,
+    /// Address of the post owner.
+    pub address: Address,
+    /// Reference hash (for amendments, points to the amended post).
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// Channel of the message.
+    #[serde(default)]
+    pub channel: Option<Channel>,
+    /// When the post was first created (ISO 8601).
+    pub created: DateTime<Utc>,
+    /// When the post was last updated (ISO 8601), i.e. the time of the latest amendment.
+    pub last_updated: DateTime<Utc>,
+}
+
+impl PostV1 {
+    /// Deserializes the content into a typed struct.
+    pub fn content_as<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_value(self.content.clone())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetPostsV1Response {
+    pub posts: Vec<PostV1>,
     pub pagination_per_page: u32,
     pub pagination_page: u32,
     pub pagination_total: u32,
@@ -947,14 +992,23 @@ pub trait AlephAggregateClient {
 }
 
 pub trait AlephPostClient {
-    /// Queries posts matching the given filter.
+    /// Queries posts matching the given filter using the v0 (legacy) format.
     ///
-    /// Returns the full response including pagination metadata. Access
-    /// the posts via the `posts` field.
-    fn get_posts(
+    /// The v0 format includes the full message envelope (chain, signature,
+    /// confirmations, etc.). Returns the full response including pagination metadata.
+    fn get_posts_v0(
         &self,
         filter: &PostFilter,
-    ) -> impl Future<Output = Result<GetPostsResponse, MessageError>> + Send;
+    ) -> impl Future<Output = Result<GetPostsV0Response, MessageError>> + Send;
+
+    /// Queries posts matching the given filter using the v1 format.
+    ///
+    /// The v1 format is leaner: it omits message-level fields and uses ISO 8601
+    /// timestamps (`created`, `last_updated`) instead of unix floats.
+    fn get_posts_v1(
+        &self,
+        filter: &PostFilter,
+    ) -> impl Future<Output = Result<GetPostsV1Response, MessageError>> + Send;
 }
 
 /// Configuration for HTTP retry behavior on transient errors (429, 5xx).
@@ -1420,7 +1474,10 @@ impl AlephAggregateClient for AlephClient {
 }
 
 impl AlephPostClient for AlephClient {
-    async fn get_posts(&self, filter: &PostFilter) -> Result<GetPostsResponse, MessageError> {
+    async fn get_posts_v0(
+        &self,
+        filter: &PostFilter,
+    ) -> Result<GetPostsV0Response, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v0/posts.json")
@@ -1435,7 +1492,32 @@ impl AlephPostClient for AlephClient {
             .error_for_status()
             .map_err(reqwest_middleware::Error::from)?;
 
-        let posts_response: GetPostsResponse = response
+        let posts_response: GetPostsV0Response = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(posts_response)
+    }
+
+    async fn get_posts_v1(
+        &self,
+        filter: &PostFilter,
+    ) -> Result<GetPostsV1Response, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v1/posts.json")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let posts_response: GetPostsV1Response = response
             .json()
             .await
             .map_err(reqwest_middleware::Error::from)?;
