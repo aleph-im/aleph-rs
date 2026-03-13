@@ -1474,10 +1474,7 @@ impl AlephAggregateClient for AlephClient {
 }
 
 impl AlephPostClient for AlephClient {
-    async fn get_posts_v0(
-        &self,
-        filter: &PostFilter,
-    ) -> Result<GetPostsV0Response, MessageError> {
+    async fn get_posts_v0(&self, filter: &PostFilter) -> Result<GetPostsV0Response, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v0/posts.json")
@@ -1499,10 +1496,7 @@ impl AlephPostClient for AlephClient {
         Ok(posts_response)
     }
 
-    async fn get_posts_v1(
-        &self,
-        filter: &PostFilter,
-    ) -> Result<GetPostsV1Response, MessageError> {
+    async fn get_posts_v1(&self, filter: &PostFilter) -> Result<GetPostsV1Response, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v1/posts.json")
