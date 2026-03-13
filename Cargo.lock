@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-cli"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aleph-sdk",
  "aleph-types",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-sdk"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aleph-types",
  "async-trait",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-types"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "assert_matches",
  "bs58",
@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "system-configuration"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
 dependencies = [
