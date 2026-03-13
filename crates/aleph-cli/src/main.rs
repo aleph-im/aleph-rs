@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use crate::cli::{Cli, GetMessageArgs, MessageCommand};
-use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageError};
+use crate::cli::{Cli, GetMessageArgs, MessageCommand, PostCommand};
+use aleph_sdk::client::{AlephClient, AlephMessageClient, AlephPostClient, MessageError};
 use aleph_types::message::{Message, MessageStatus};
 use clap::Parser;
 use url::Url;
@@ -58,6 +58,21 @@ async fn handle_message_command(
         }
         MessageCommand::Sync(sync_args) => {
             handle_sync(*sync_args).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_post_command(
+    aleph_client: &AlephClient,
+    command: PostCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        PostCommand::List(post_filter) => {
+            let response = aleph_client.get_posts(&(*post_filter).into()).await?;
+            let serialized = serde_json::to_string_pretty(&response.posts)?;
+            println!("{}", serialized);
         }
     }
 
@@ -209,6 +224,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Message {
             command: message_command,
         } => handle_message_command(&aleph_client, message_command).await?,
+        cli::Commands::Post {
+            command: post_command,
+        } => handle_post_command(&aleph_client, post_command).await?,
     }
 
     Ok(())

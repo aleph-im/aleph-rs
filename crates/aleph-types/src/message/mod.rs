@@ -11,8 +11,8 @@ mod store;
 pub use crate::verify_signature::SignatureVerificationError;
 pub use aggregate::AggregateContent;
 pub use base_message::{
-    ContentSource, Message, MessageContent, MessageContentEnum, MessageHeader, MessageStatus,
-    MessageType, MessageVerificationError,
+    ContentSource, Message, MessageConfirmation, MessageContent, MessageContentEnum, MessageHeader,
+    MessageStatus, MessageType, MessageVerificationError,
 };
 pub use forget::ForgetContent;
 pub use instance::InstanceContent;

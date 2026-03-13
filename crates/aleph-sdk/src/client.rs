@@ -4,8 +4,8 @@ use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::memory_size::{Bytes, MemorySize};
 use aleph_types::message::{
-    ContentSource, FileRef, Message, MessageContent, MessageContentEnum, MessageHeader,
-    MessageStatus, MessageType, RawFileRef, SignatureVerificationError,
+    ContentSource, FileRef, Message, MessageConfirmation, MessageContent, MessageContentEnum,
+    MessageHeader, MessageStatus, MessageType, RawFileRef, SignatureVerificationError,
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
@@ -407,6 +407,120 @@ pub struct MessageFilter {
 #[derive(Debug, Deserialize)]
 pub struct GetMessagesResponse {
     pub messages: Vec<Message>,
+    pub pagination_per_page: u32,
+    pub pagination_page: u32,
+    pub pagination_total: u32,
+}
+
+/// Query filter for GET /api/v0/posts.json.
+///
+/// Posts are a higher-level view of POST messages: when a post is amended, the endpoint
+/// returns the merged result with the latest content and metadata from the amendment,
+/// while preserving a reference to the original post via `original_item_hash`.
+#[skip_serializing_none]
+#[serde_as]
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PostFilter {
+    /// Filter by sender address.
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, Address>>")]
+    pub addresses: Option<Vec<Address>>,
+
+    /// Filter by item hash.
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, ItemHash>>")]
+    pub hashes: Option<Vec<ItemHash>>,
+
+    /// Filter by reference hash.
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
+    pub refs: Option<Vec<String>>,
+
+    /// Filter by post type (e.g., `"corechan-operation"`).
+    #[serde(rename = "types")]
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
+    pub post_types: Option<Vec<String>>,
+
+    /// Filter by tag.
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
+    pub tags: Option<Vec<String>>,
+
+    /// Filter by channel.
+    #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, String>>")]
+    pub channels: Option<Vec<String>>,
+
+    /// Start date filter (inclusive).
+    #[serde(rename = "startDate")]
+    pub start_date: Option<Timestamp>,
+
+    /// End date filter (exclusive).
+    #[serde(rename = "endDate")]
+    pub end_date: Option<Timestamp>,
+
+    /// Maximum number of posts to return per page.
+    pub pagination: Option<u32>,
+
+    /// Page number (starts at 1).
+    pub page: Option<u32>,
+
+    /// Sort key.
+    #[serde(rename = "sortBy")]
+    pub sort_by: Option<SortBy>,
+
+    /// Sort order.
+    #[serde(rename = "sortOrder")]
+    pub sort_order: Option<SortOrder>,
+}
+
+/// A merged post as returned by GET /api/v0/posts.json.
+///
+/// When a post has been amended, the response shows the latest version
+/// with `original_item_hash` pointing to the original post.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Post {
+    /// The blockchain used for this post.
+    pub chain: Chain,
+    /// Hash of the current version (may be an amendment).
+    pub item_hash: ItemHash,
+    /// Address of the sender.
+    pub sender: Address,
+    /// Post type (e.g., `"corechan-operation"`).
+    #[serde(rename = "type")]
+    pub post_type: String,
+    /// Channel of the message.
+    #[serde(default)]
+    pub channel: Option<Channel>,
+    /// Whether the post has on-chain confirmations.
+    #[serde(default)]
+    pub confirmed: bool,
+    /// The user-defined content of the post (arbitrary JSON).
+    pub content: serde_json::Value,
+    /// Timestamp of the post.
+    pub time: Timestamp,
+    /// On-chain confirmations.
+    #[serde(default)]
+    pub confirmations: Vec<MessageConfirmation>,
+    /// Hash of the original post (before any amendments).
+    pub original_item_hash: ItemHash,
+    /// Type of the original post.
+    #[serde(default)]
+    pub original_type: Option<String>,
+    /// Alias for `original_item_hash`.
+    pub hash: ItemHash,
+    /// Address of the post owner.
+    pub address: Address,
+    /// Reference hash (for amendments, points to the amended post).
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+}
+
+impl Post {
+    /// Deserializes the content into a typed struct.
+    pub fn content_as<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_value(self.content.clone())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetPostsResponse {
+    pub posts: Vec<Post>,
     pub pagination_per_page: u32,
     pub pagination_page: u32,
     pub pagination_total: u32,
@@ -830,6 +944,17 @@ pub trait AlephAggregateClient {
     ) -> impl Future<Output = Result<CoreChannelAggregate, MessageError>> + Send {
         self.get_aggregate(&CORECHANNEL_ADDRESS, "corechannel")
     }
+}
+
+pub trait AlephPostClient {
+    /// Queries posts matching the given filter.
+    ///
+    /// Returns the full response including pagination metadata. Access
+    /// the posts via the `posts` field.
+    fn get_posts(
+        &self,
+        filter: &PostFilter,
+    ) -> impl Future<Output = Result<GetPostsResponse, MessageError>> + Send;
 }
 
 /// Configuration for HTTP retry behavior on transient errors (429, 5xx).
@@ -1291,6 +1416,30 @@ impl AlephAggregateClient for AlephClient {
             .map_err(reqwest_middleware::Error::from)?;
 
         Ok(aggregate_response.data)
+    }
+}
+
+impl AlephPostClient for AlephClient {
+    async fn get_posts(&self, filter: &PostFilter) -> Result<GetPostsResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/posts.json")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let posts_response: GetPostsResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(posts_response)
     }
 }
 
