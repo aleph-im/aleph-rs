@@ -1,6 +1,7 @@
 use crate::item_hash::ItemHash;
-use crate::memory_size::{MemorySize, MiB, gigabyte_to_mebibyte};
+use crate::memory_size::gigabyte_to_mebibyte;
 use crate::toolkit::serde::default_true;
+use memsizes::MiB;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -52,7 +53,7 @@ impl TryFrom<u64> for EphemeralVolumeSize {
 
     fn try_from(size: u64) -> Result<Self, Self::Error> {
         if (Self::MIN..=Self::MAX).contains(&size) {
-            Ok(Self(MiB::from_units(size)))
+            Ok(Self(MiB::from(size)))
         } else {
             Err(VolumeError::OutOfRange {
                 size,
@@ -65,7 +66,7 @@ impl TryFrom<u64> for EphemeralVolumeSize {
 
 impl From<EphemeralVolumeSize> for u64 {
     fn from(size: EphemeralVolumeSize) -> Self {
-        size.0.units()
+        size.0.count()
     }
 }
 
@@ -127,7 +128,7 @@ impl TryFrom<u64> for PersistentVolumeSize {
 
     fn try_from(size: u64) -> Result<Self, Self::Error> {
         if (Self::MIN..=Self::MAX).contains(&size) {
-            Ok(Self(MiB::from_units(size)))
+            Ok(Self(MiB::from(size)))
         } else {
             Err(VolumeError::OutOfRange {
                 size,
@@ -140,7 +141,7 @@ impl TryFrom<u64> for PersistentVolumeSize {
 
 impl From<PersistentVolumeSize> for u64 {
     fn from(size: PersistentVolumeSize) -> Self {
-        size.0.units()
+        size.0.count()
     }
 }
 

@@ -75,7 +75,6 @@ impl ProgramContent {
 mod tests {
     use super::*;
     use crate::chain::{Address, Chain, Signature};
-    use crate::memory_size::{MemorySize, MiB};
     use crate::message::base_message::MessageContentEnum;
     use crate::message::execution::environment::MachineResources;
     use crate::message::execution::volume::{BaseVolume, ImmutableVolume, MachineVolume};
@@ -83,6 +82,7 @@ mod tests {
     use crate::timestamp::Timestamp;
     use crate::{channel, item_hash};
     use assert_matches::assert_matches;
+    use memsizes::MiB;
     use std::collections::HashMap;
 
     const PROGRAM_FIXTURE: &str = include_str!(concat!(
@@ -151,7 +151,7 @@ mod tests {
             program_content.base.resources,
             MachineResources {
                 vcpus: 2,
-                memory: MiB::from_units(4096),
+                memory: MiB::from(4096),
                 seconds: 30,
                 published_ports: None,
             }

@@ -2,7 +2,6 @@ use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggre
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::memory_size::{Bytes, MemorySize};
 use aleph_types::message::{
     ContentSource, FileRef, Message, MessageConfirmation, MessageContent, MessageContentEnum,
     MessageHeader, MessageStatus, MessageType, RawFileRef, SignatureVerificationError,
@@ -11,6 +10,7 @@ use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt, TryFutureExt, TryStreamExt};
 use http::Extensions;
+use memsizes::Bytes;
 use reqwest::{Request, Response, StatusCode};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
@@ -1275,7 +1275,7 @@ impl AlephStorageClient for AlephClient {
             .ok_or_else(|| StorageError::NotFound(file_hash.clone()))
             .and_then(|s| {
                 s.parse::<u64>()
-                    .map(Bytes::from_units)
+                    .map(Bytes::from)
                     .map_err(|_| StorageError::InvalidSize(s.to_string()))
             })
             .map_err(MessageError::Storage)
@@ -1406,7 +1406,7 @@ impl AlephAccountClient for AlephClient {
         let response = self.http_client.get(url).send().await?;
         // The endpoint returns a 404 if the address has no files.
         if response.status() == StatusCode::NOT_FOUND {
-            return Ok(Bytes::from_units(0));
+            return Ok(Bytes::from(0));
         }
         // Otherwise, process errors then deserialize the response.
         let response = response
@@ -1570,7 +1570,7 @@ mod tests {
             .get_file_size(&file_hash)
             .await
             .unwrap_or_else(|e| panic!("failed to fetch file: {:?}", e));
-        assert_eq!(size, Bytes::from_units(297));
+        assert_eq!(size, Bytes::from(297));
     }
 
     #[tokio::test]

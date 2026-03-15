@@ -37,6 +37,7 @@ dependencies = [
  "cid",
  "futures-util",
  "http",
+ "memsizes",
  "multihash",
  "multihash-codetable",
  "prost",
@@ -1472,9 +1473,9 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "memsizes"
-version = "0.1.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba208f0f62435b4bbe9f6a10ebdfeb3d553c28d1baebf7ab4655d48e8e8fa10c"
+checksum = "2b8737fceea2c0392b3962ea2d12cefd60ef9b86c1a84ea82b306785984f00e1"
 dependencies = [
  "serde",
  "thiserror 2.0.18",

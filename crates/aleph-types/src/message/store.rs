@@ -1,7 +1,7 @@
 use crate::chain::Address;
 use crate::cid::Cid;
 use crate::item_hash::{AlephItemHash, ItemHash};
-use crate::memory_size::Bytes;
+use memsizes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
