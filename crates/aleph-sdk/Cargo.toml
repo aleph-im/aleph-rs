@@ -18,6 +18,7 @@ multihash-codetable = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 futures-util = { workspace = true }
 http = { workspace = true }
+memsizes = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }
 reqwest-retry = { workspace = true }

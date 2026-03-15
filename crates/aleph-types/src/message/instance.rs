@@ -17,7 +17,6 @@ pub struct InstanceContent {
 mod test {
     use super::*;
     use crate::chain::Chain;
-    use crate::memory_size::{MemorySize, MiB};
     use crate::message::base_message::{MessageConfirmation, MessageContentEnum};
     use crate::message::execution::base::{Payment, PaymentType};
     use crate::message::execution::environment::{
@@ -29,6 +28,7 @@ mod test {
     use crate::timestamp::Timestamp;
     use crate::{address, channel, item_hash, signature};
     use assert_matches::assert_matches;
+    use memsizes::MiB;
     use std::collections::HashMap;
 
     const INSTANCE_PAYG_FIXTURE: &str = include_str!(concat!(
@@ -92,7 +92,7 @@ mod test {
             instance_content.base.resources,
             MachineResources {
                 vcpus: 12,
-                memory: MiB::from_units(73728),
+                memory: MiB::from(73728),
                 seconds: 30,
                 published_ports: None,
             }
@@ -157,7 +157,7 @@ mod test {
                     use_latest: true
                 },
                 persistence: VolumePersistence::Host,
-                size_mib: MiB::from_units(737280).into(),
+                size_mib: MiB::from(737280).into(),
                 forgotten_by: None,
             }
         );

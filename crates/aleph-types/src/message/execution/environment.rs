@@ -1,6 +1,6 @@
 use crate::chain::Address;
 use crate::item_hash::ItemHash;
-use crate::memory_size::{MemorySize, MiB};
+use memsizes::MiB;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ fn default_vcpus() -> u32 {
 }
 
 fn default_memory() -> MiB {
-    MiB::from_units(128)
+    MiB::from(128)
 }
 
 fn default_seconds() -> u32 {
