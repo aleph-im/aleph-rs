@@ -15,6 +15,7 @@ signature-sol = ["dep:ed25519-dalek", "dep:bs58"]
 
 [dependencies]
 chrono = { workspace = true }
+memsizes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
