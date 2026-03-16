@@ -2,6 +2,8 @@ use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggre
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::item_type::ItemType;
+use aleph_types::message::pending::PendingMessage as SignedPendingMessage;
 use aleph_types::message::{
     ContentSource, FileRef, Message, MessageConfirmation, MessageContent, MessageContentEnum,
     MessageHeader, MessageStatus, MessageType, RawFileRef, SignatureVerificationError,
@@ -625,6 +627,25 @@ impl<'a> RawMessage<'a> {
             channel: message.channel.as_ref(),
         }
     }
+
+    fn from_pending(msg: &'a SignedPendingMessage) -> Self {
+        let (item_type, item_content) = match msg.item_type {
+            ItemType::Inline => ("inline", Some(msg.item_content.as_str())),
+            ItemType::Storage => ("storage", None),
+            ItemType::Ipfs => ("ipfs", None),
+        };
+        RawMessage {
+            sender: &msg.sender,
+            chain: &msg.chain,
+            signature: &msg.signature,
+            message_type: &msg.message_type,
+            item_type,
+            item_content,
+            item_hash: &msg.item_hash,
+            time: &msg.time,
+            channel: msg.channel.as_ref(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -753,6 +774,12 @@ pub trait AlephMessageClient {
     fn post_message(
         &self,
         message: &Message,
+        sync: bool,
+    ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send;
+
+    fn post_pending_message(
+        &self,
+        message: &SignedPendingMessage,
         sync: bool,
     ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send;
 
@@ -1171,30 +1198,17 @@ impl AlephMessageClient for AlephClient {
         message: &Message,
         sync: bool,
     ) -> Result<PostMessageResponse, MessageError> {
-        let url = self
-            .ccn_url
-            .join("/api/v0/messages")
-            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+        let raw = RawMessage::from_message(message);
+        self.post_raw_message(raw, sync).await
+    }
 
-        let body = PostMessageBody {
-            sync,
-            message: RawMessage::from_message(message),
-        };
-
-        let response = self
-            .http_client
-            .post(url)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(reqwest_middleware::Error::from)?;
-
-        let post_response: PostMessageResponse = response
-            .json()
-            .await
-            .map_err(reqwest_middleware::Error::from)?;
-        Ok(post_response)
+    async fn post_pending_message(
+        &self,
+        message: &SignedPendingMessage,
+        sync: bool,
+    ) -> Result<PostMessageResponse, MessageError> {
+        let raw = RawMessage::from_pending(message);
+        self.post_raw_message(raw, sync).await
     }
 
     async fn get_messages_and_verify(
@@ -1221,6 +1235,37 @@ impl AlephMessageClient for AlephClient {
 }
 
 impl AlephClient {
+    async fn post_raw_message(
+        &self,
+        raw: RawMessage<'_>,
+        sync: bool,
+    ) -> Result<PostMessageResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/messages")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let body = PostMessageBody {
+            sync,
+            message: raw,
+        };
+
+        let response = self
+            .http_client
+            .post(url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let post_response: PostMessageResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(post_response)
+    }
+
     /// Fetches messages matching the filter, returning only the headers (without content).
     ///
     /// Used by [`get_messages_and_verify`](AlephMessageClient::get_messages_and_verify) to avoid

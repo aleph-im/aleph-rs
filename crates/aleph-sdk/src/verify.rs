@@ -89,16 +89,16 @@ fn encode_multihash(digest: &[u8]) -> Vec<u8> {
 }
 
 /// A dag-pb node (leaf or internal) used during tree construction.
-pub(crate) struct DagNode {
+pub struct DagNode {
     /// The CID bytes stored in PBLink.Hash.
     /// For CIDv0: bare multihash [0x12, 0x20, ...32 bytes SHA-256 digest...]
     /// For CIDv1: full CID binary (varint version + varint codec + multihash)
-    cid_bytes: Vec<u8>,
+    pub(crate) cid_bytes: Vec<u8>,
     /// Cumulative size: serialized node bytes + sum of children's cumulative sizes.
     /// For raw leaves this equals the raw chunk size. Used for PBLink.Tsize.
-    cumulative_size: u64,
+    pub(crate) cumulative_size: u64,
     /// Total file data bytes covered by this subtree.
-    data_size: u64,
+    pub(crate) data_size: u64,
 }
 
 pub enum HashVerifier {
@@ -189,7 +189,7 @@ impl HashVerifier {
     }
 
     /// Build a dag-pb leaf node from a chunk of data.
-    fn build_leaf(chunk: &[u8]) -> DagNode {
+    pub(crate) fn build_leaf(chunk: &[u8]) -> DagNode {
         let unixfs_data = unixfs::Data {
             r#type: unixfs::DataType::File as i32,
             data: if chunk.is_empty() {
@@ -225,7 +225,7 @@ impl HashVerifier {
 
     /// Build a raw leaf node: hash the chunk directly without dag-pb/UnixFS wrapping.
     /// Used for CIDv1 dag-pb which defaults to raw leaves.
-    fn build_raw_leaf(chunk: &[u8]) -> DagNode {
+    pub(crate) fn build_raw_leaf(chunk: &[u8]) -> DagNode {
         let digest = Sha256::digest(chunk);
         let mh = encode_multihash(&digest);
         // CIDv1 raw binary: varint(1) + varint(RAW_CODEC) + multihash
@@ -243,7 +243,7 @@ impl HashVerifier {
 
     /// Build an internal dag-pb node from a list of children.
     /// When `v1` is true, produces CIDv1 dag-pb binary; otherwise bare multihash (CIDv0).
-    fn build_internal_node(children: &[DagNode], v1: bool) -> DagNode {
+    pub(crate) fn build_internal_node(children: &[DagNode], v1: bool) -> DagNode {
         let total_data_size: u64 = children.iter().map(|c| c.data_size).sum();
         let blocksizes: Vec<u64> = children.iter().map(|c| c.data_size).collect();
 
@@ -390,6 +390,42 @@ impl HashVerifier {
             }
         }
     }
+}
+
+/// Computes a SHA-256 item hash for the given data.
+pub fn compute_hash(data: &[u8]) -> ItemHash {
+    ItemHash::Native(AlephItemHash::from_bytes(data))
+}
+
+/// Computes an IPFS CIDv0 (dag-pb) for the given data.
+///
+/// Uses the same chunking and tree construction as IPFS's default settings
+/// (256 KiB chunks, balanced DAG, wrapped leaves).
+pub fn compute_cid(data: &[u8]) -> Cid {
+    let mut leaves: Vec<DagNode> = data
+        .chunks(CHUNK_SIZE)
+        .map(HashVerifier::build_leaf)
+        .collect();
+
+    if leaves.is_empty() {
+        leaves.push(HashVerifier::build_leaf(&[]));
+    }
+
+    let root_cid_bytes = if leaves.len() == 1 {
+        leaves.into_iter().next().unwrap().cid_bytes
+    } else {
+        let mut nodes = leaves;
+        while nodes.len() > 1 {
+            nodes = nodes
+                .chunks(MAX_LINKS)
+                .map(|c| HashVerifier::build_internal_node(c, false))
+                .collect();
+        }
+        nodes.into_iter().next().unwrap().cid_bytes
+    };
+
+    let cid_str = bs58::encode(&root_cid_bytes).into_string();
+    Cid::try_from(cid_str.as_str()).expect("computed CID is always valid")
 }
 
 #[cfg(test)]
@@ -782,5 +818,35 @@ mod tests {
         verifier
             .finalize()
             .expect("CIDv1 dag-pb multi-level DAG should verify against known IPFS CID");
+    }
+
+    #[test]
+    fn test_compute_native_hash() {
+        let data = b"hello world";
+        let hash = compute_hash(data);
+        let expected = AlephItemHash::from_bytes(data);
+        assert_eq!(hash, ItemHash::Native(expected));
+    }
+
+    #[test]
+    fn test_compute_cid_small_file() {
+        let data = b"hello dag-pb world";
+        let cid = compute_cid(data);
+
+        let expected = ItemHash::Ipfs(cid);
+        let mut verifier = HashVerifier::new(&expected).unwrap();
+        verifier.update(data);
+        verifier.finalize().expect("computed CID should verify");
+    }
+
+    #[test]
+    fn test_compute_cid_large_file() {
+        let data = vec![0xABu8; 262144 + 100];
+        let cid = compute_cid(&data);
+
+        let expected = ItemHash::Ipfs(cid);
+        let mut verifier = HashVerifier::new(&expected).unwrap();
+        verifier.update(&data);
+        verifier.finalize().expect("computed CID should verify");
     }
 }

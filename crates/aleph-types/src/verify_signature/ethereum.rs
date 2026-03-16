@@ -17,12 +17,7 @@ pub(super) fn recover_address(
     let signature = Signature::from_slice(r_s)
         .map_err(|e| SignatureVerificationError::InvalidSignature(e.to_string()))?;
 
-    // EIP-191: "\x19Ethereum Signed Message:\n{len}{message}"
-    let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
-    let mut hasher = Keccak256::new();
-    hasher.update(prefix.as_bytes());
-    hasher.update(message);
-    let digest = hasher.finalize();
+    let digest = eip191_hash(message);
 
     let verifying_key = VerifyingKey::recover_from_prehash(&digest, &signature, recovery_id)
         .map_err(|e| SignatureVerificationError::InvalidSignature(e.to_string()))?;
@@ -58,9 +53,18 @@ fn normalize_v(v: u8) -> Result<RecoveryId, SignatureVerificationError> {
         .map_err(|e| SignatureVerificationError::InvalidSignature(e.to_string()))
 }
 
+/// Applies the EIP-191 personal message prefix and hashes with Keccak-256.
+pub(crate) fn eip191_hash(message: &[u8]) -> [u8; 32] {
+    let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
+    let mut hasher = Keccak256::new();
+    hasher.update(prefix.as_bytes());
+    hasher.update(message);
+    hasher.finalize().into()
+}
+
 /// Derives an Ethereum address from a secp256k1 public key.
 /// Address = "0x" + last 20 bytes of keccak256(uncompressed_pubkey[1..])
-fn public_key_to_address(key: &VerifyingKey) -> String {
+pub(crate) fn public_key_to_address(key: &VerifyingKey) -> String {
     let uncompressed = key.to_encoded_point(false);
     let public_key_bytes = &uncompressed.as_bytes()[1..]; // skip 0x04 prefix
     let hash = Keccak256::digest(public_key_bytes);

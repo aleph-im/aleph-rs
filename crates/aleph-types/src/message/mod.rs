@@ -3,7 +3,10 @@ mod base_message;
 pub mod execution;
 mod forget;
 mod instance;
+pub mod item_type;
+pub mod pending;
 mod post;
+pub mod unsigned;
 mod program;
 mod store;
 

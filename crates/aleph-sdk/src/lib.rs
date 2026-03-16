@@ -1,4 +1,5 @@
 pub mod aggregate_models;
+pub mod builder;
 pub mod client;
-pub(crate) mod verify;
+pub mod verify;
 pub mod ws;
