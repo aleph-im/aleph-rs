@@ -1,6 +1,5 @@
-use aleph_types::account::{sign_message, Account};
 use aleph_types::message::MessageType;
-use aleph_sdk::builder::UnsignedMessageBuilder;
+use aleph_sdk::builder::MessageBuilder;
 
 #[cfg(feature = "account-evm")]
 use aleph_types::account::EvmAccount;
@@ -34,14 +33,9 @@ fn test_evm_end_to_end() {
     let account = EvmAccount::new(EvmChain::Ethereum, &EVM_TEST_KEY).unwrap();
     let content = serde_json::json!({"type": "test", "content": {"body": "Hello from Rust SDK"}});
 
-    let unsigned = UnsignedMessageBuilder::new(
-        MessageType::Post,
-        content,
-        account.address().clone(),
-    )
-    .build();
-
-    let pending = sign_message(&account, unsigned).unwrap();
+    let pending = MessageBuilder::new(&account, MessageType::Post, content)
+        .build()
+        .unwrap();
 
     aleph_types::verify_signature::verify(
         &pending.chain,
@@ -59,14 +53,9 @@ fn test_solana_end_to_end() {
     let account = SolanaAccount::new(SolChain::Sol, &SOL_TEST_KEY).unwrap();
     let content = serde_json::json!({"type": "test", "content": {"body": "Hello from Rust SDK"}});
 
-    let unsigned = UnsignedMessageBuilder::new(
-        MessageType::Post,
-        content,
-        account.address().clone(),
-    )
-    .build();
-
-    let pending = sign_message(&account, unsigned).unwrap();
+    let pending = MessageBuilder::new(&account, MessageType::Post, content)
+        .build()
+        .unwrap();
 
     aleph_types::verify_signature::verify(
         &pending.chain,
@@ -84,14 +73,9 @@ fn test_pending_message_serialization_inline() {
     let account = EvmAccount::new(EvmChain::Ethereum, &EVM_TEST_KEY).unwrap();
     let content = serde_json::json!({"type": "test", "content": {"body": "Hello"}});
 
-    let unsigned = UnsignedMessageBuilder::new(
-        MessageType::Post,
-        content,
-        account.address().clone(),
-    )
-    .build();
-
-    let pending = sign_message(&account, unsigned).unwrap();
+    let pending = MessageBuilder::new(&account, MessageType::Post, content)
+        .build()
+        .unwrap();
     let json = serde_json::to_value(&pending).unwrap();
 
     assert!(json.get("sender").is_some());
@@ -111,19 +95,13 @@ fn test_pending_message_storage_omits_content() {
     let account = EvmAccount::new(EvmChain::Ethereum, &EVM_TEST_KEY).unwrap();
     let content = serde_json::json!({"type": "test", "content": {"body": "Hello"}});
 
-    let unsigned = UnsignedMessageBuilder::new(
-        MessageType::Post,
-        content,
-        account.address().clone(),
-    )
-    .allow_inlining(false)
-    .build();
-
-    let pending = sign_message(&account, unsigned).unwrap();
+    let pending = MessageBuilder::new(&account, MessageType::Post, content)
+        .allow_inlining(false)
+        .build()
+        .unwrap();
     let json = serde_json::to_value(&pending).unwrap();
 
     assert_eq!(json["item_type"], "storage");
     assert!(json.get("item_content").is_none());
-    // But item_content is still accessible on the struct
     assert!(!pending.item_content.is_empty());
 }
