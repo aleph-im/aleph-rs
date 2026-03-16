@@ -392,11 +392,6 @@ impl HashVerifier {
     }
 }
 
-/// Computes a SHA-256 item hash for the given data.
-pub fn compute_hash(data: &[u8]) -> ItemHash {
-    ItemHash::Native(AlephItemHash::from_bytes(data))
-}
-
 /// Computes an IPFS CIDv0 (dag-pb) for the given data.
 ///
 /// Uses the same chunking and tree construction as IPFS's default settings
@@ -818,14 +813,6 @@ mod tests {
         verifier
             .finalize()
             .expect("CIDv1 dag-pb multi-level DAG should verify against known IPFS CID");
-    }
-
-    #[test]
-    fn test_compute_native_hash() {
-        let data = b"hello world";
-        let hash = compute_hash(data);
-        let expected = AlephItemHash::from_bytes(data);
-        assert_eq!(hash, ItemHash::Native(expected));
     }
 
     #[test]
