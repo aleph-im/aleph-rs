@@ -207,7 +207,8 @@ async fn handle_sync(args: cli::SyncArgs) -> Result<(), Box<dyn std::error::Erro
             truly_missing.len(),
             msg.item_hash
         );
-        match with_retry(|| target_client.post_message(msg, false)).await {
+        let pending = aleph_types::message::pending::PendingMessage::from(*msg);
+        match with_retry(|| target_client.post_message(&pending, false)).await {
             Ok(resp) => {
                 eprintln!("{}", resp.message_status);
                 success += 1;

@@ -2,11 +2,16 @@ use crate::chain::{Address, Chain, Signature};
 use crate::channel::Channel;
 use crate::item_hash::ItemHash;
 use crate::message::item_type::ItemType;
-use crate::message::MessageType;
+use crate::message::{ContentSource, Message, MessageType};
 use crate::timestamp::Timestamp;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
+/// A signed message ready for submission to the Aleph network.
+///
+/// The `item_content` field is always present in memory (needed for uploading
+/// storage/IPFS content), but the custom `Serialize` implementation only emits
+/// it when `item_type == Inline`.
 #[derive(Debug, Clone)]
 pub struct PendingMessage {
     pub chain: Chain,
@@ -41,6 +46,29 @@ impl Serialize for PendingMessage {
             state.serialize_field("channel", channel)?;
         }
         state.end()
+    }
+}
+
+impl From<&Message> for PendingMessage {
+    fn from(message: &Message) -> Self {
+        let (item_type, item_content) = match &message.content_source {
+            ContentSource::Inline { item_content } => {
+                (ItemType::Inline, item_content.clone())
+            }
+            ContentSource::Storage => (ItemType::Storage, String::new()),
+            ContentSource::Ipfs => (ItemType::Ipfs, String::new()),
+        };
+        PendingMessage {
+            chain: message.chain.clone(),
+            sender: message.sender.clone(),
+            signature: message.signature.clone(),
+            message_type: message.message_type,
+            item_type,
+            item_content,
+            item_hash: message.item_hash.clone(),
+            time: message.time.clone(),
+            channel: message.channel.clone(),
+        }
     }
 }
 

@@ -2,8 +2,7 @@ use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggre
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::message::item_type::ItemType;
-use aleph_types::message::pending::PendingMessage as SignedPendingMessage;
+use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
     ContentSource, FileRef, Message, MessageConfirmation, MessageContent, MessageContentEnum,
     MessageHeader, MessageStatus, MessageType, RawFileRef, SignatureVerificationError,
@@ -202,8 +201,11 @@ pub enum RemovalReason {
     CreditInsufficient,
 }
 
+/// A pending message as returned by the CCN API (message status endpoint).
+/// Not to be confused with `aleph_types::message::pending::PendingMessage`
+/// which is the outgoing message type used for submission.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PendingMessage {
+pub struct RawPendingMessage {
     pub sender: Address,
     pub chain: Chain,
     pub signature: Option<Signature>,
@@ -245,7 +247,7 @@ pub struct ForgottenMessage {
 pub enum MessageWithStatus<M> {
     // More than one message with the same item hash can be pending at the same time.
     Pending {
-        messages: Vec<PendingMessage>,
+        messages: Vec<RawPendingMessage>,
     },
     Processed {
         message: M,
@@ -590,68 +592,11 @@ pub struct PostMessageResponse {
     pub message_status: String,
 }
 
-/// Serialization-only struct for POSTing a message to a node.
-/// Contains only the fields accepted by POST /api/v0/messages.
-#[derive(Serialize)]
-struct RawMessage<'a> {
-    sender: &'a Address,
-    chain: &'a Chain,
-    signature: &'a Signature,
-    #[serde(rename = "type")]
-    message_type: &'a MessageType,
-    item_type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    item_content: Option<&'a str>,
-    item_hash: &'a ItemHash,
-    time: &'a Timestamp,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    channel: Option<&'a Channel>,
-}
-
-impl<'a> RawMessage<'a> {
-    fn from_message(message: &'a Message) -> Self {
-        let (item_type, item_content) = match &message.content_source {
-            ContentSource::Inline { item_content } => ("inline", Some(item_content.as_str())),
-            ContentSource::Storage => ("storage", None),
-            ContentSource::Ipfs => ("ipfs", None),
-        };
-        RawMessage {
-            sender: &message.sender,
-            chain: &message.chain,
-            signature: &message.signature,
-            message_type: &message.message_type,
-            item_type,
-            item_content,
-            item_hash: &message.item_hash,
-            time: &message.time,
-            channel: message.channel.as_ref(),
-        }
-    }
-
-    fn from_pending(msg: &'a SignedPendingMessage) -> Self {
-        let (item_type, item_content) = match msg.item_type {
-            ItemType::Inline => ("inline", Some(msg.item_content.as_str())),
-            ItemType::Storage => ("storage", None),
-            ItemType::Ipfs => ("ipfs", None),
-        };
-        RawMessage {
-            sender: &msg.sender,
-            chain: &msg.chain,
-            signature: &msg.signature,
-            message_type: &msg.message_type,
-            item_type,
-            item_content,
-            item_hash: &msg.item_hash,
-            time: &msg.time,
-            channel: msg.channel.as_ref(),
-        }
-    }
-}
-
+/// Body for POSTing a message to a node via POST /api/v0/messages.
 #[derive(Serialize)]
 struct PostMessageBody<'a> {
     sync: bool,
-    message: RawMessage<'a>,
+    message: &'a PendingMessage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -773,13 +718,7 @@ pub trait AlephMessageClient {
 
     fn post_message(
         &self,
-        message: &Message,
-        sync: bool,
-    ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send;
-
-    fn post_pending_message(
-        &self,
-        message: &SignedPendingMessage,
+        message: &PendingMessage,
         sync: bool,
     ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send;
 
@@ -1195,20 +1134,31 @@ impl AlephMessageClient for AlephClient {
 
     async fn post_message(
         &self,
-        message: &Message,
+        message: &PendingMessage,
         sync: bool,
     ) -> Result<PostMessageResponse, MessageError> {
-        let raw = RawMessage::from_message(message);
-        self.post_raw_message(raw, sync).await
-    }
+        let body = PostMessageBody {
+            sync,
+            message,
+        };
 
-    async fn post_pending_message(
-        &self,
-        message: &SignedPendingMessage,
-        sync: bool,
-    ) -> Result<PostMessageResponse, MessageError> {
-        let raw = RawMessage::from_pending(message);
-        self.post_raw_message(raw, sync).await
+        let url = self
+            .ccn_url
+            .join("/api/v0/messages")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .post(url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(response)
     }
 
     async fn get_messages_and_verify(
@@ -1235,37 +1185,6 @@ impl AlephMessageClient for AlephClient {
 }
 
 impl AlephClient {
-    async fn post_raw_message(
-        &self,
-        raw: RawMessage<'_>,
-        sync: bool,
-    ) -> Result<PostMessageResponse, MessageError> {
-        let url = self
-            .ccn_url
-            .join("/api/v0/messages")
-            .unwrap_or_else(|e| panic!("invalid url: {e}"));
-
-        let body = PostMessageBody {
-            sync,
-            message: raw,
-        };
-
-        let response = self
-            .http_client
-            .post(url)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(reqwest_middleware::Error::from)?;
-
-        let post_response: PostMessageResponse = response
-            .json()
-            .await
-            .map_err(reqwest_middleware::Error::from)?;
-        Ok(post_response)
-    }
-
     /// Fetches messages matching the filter, returning only the headers (without content).
     ///
     /// Used by [`get_messages_and_verify`](AlephMessageClient::get_messages_and_verify) to avoid
