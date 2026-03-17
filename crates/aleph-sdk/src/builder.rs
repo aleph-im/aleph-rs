@@ -9,7 +9,7 @@ use aleph_types::timestamp::Timestamp;
 
 use crate::verify::compute_cid;
 
-const DEFAULT_INLINE_CUTOFF: usize = 50_000;
+const DEFAULT_INLINE_CUTOFF: usize = 200_000;
 const DEFAULT_IPFS_CUTOFF: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// Builder for constructing and signing Aleph messages.
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn test_builder_storage_large_content() {
         let account = TestAccount::new();
-        let big_body = "x".repeat(60_000);
+        let big_body = "x".repeat(210_000);
         let content = serde_json::json!({"type": "test", "content": {"body": big_body}});
         let pending = MessageBuilder::new(&account, MessageType::Post, content)
             .build()
