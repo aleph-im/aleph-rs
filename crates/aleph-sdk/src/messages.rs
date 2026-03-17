@@ -22,6 +22,7 @@ pub struct PostBuilder<'a, A: Account> {
     account: &'a A,
     post_type: PostType,
     content: serde_json::Value,
+    reference: Option<String>,
     channel: Option<Channel>,
 }
 
@@ -37,6 +38,7 @@ impl<'a, A: Account> PostBuilder<'a, A> {
                 post_type: post_type.into(),
             },
             content: serde_json::to_value(content)?,
+            reference: None,
             channel: None,
         })
     }
@@ -52,8 +54,17 @@ impl<'a, A: Account> PostBuilder<'a, A> {
                 reference: reference.to_string(),
             },
             content: serde_json::to_value(content)?,
+            reference: None,
             channel: None,
         })
+    }
+
+    /// Set a reference hash on the post. This is independent of amend semantics —
+    /// it sets the `ref` field in the POST content, used e.g. by corechannel operations
+    /// to point at a target node.
+    pub fn reference(mut self, reference: impl Into<String>) -> Self {
+        self.reference = Some(reference.into());
+        self
     }
 
     pub fn channel(mut self, channel: Channel) -> Self {
@@ -66,7 +77,13 @@ impl<'a, A: Account> PostBuilder<'a, A> {
             post_type: self.post_type,
             content: Some(self.content),
         };
-        let value = serde_json::to_value(post_content)?;
+        let mut value = serde_json::to_value(post_content)?;
+        if let Some(reference) = self.reference {
+            value
+                .as_object_mut()
+                .expect("PostContent serializes to an object")
+                .insert("ref".to_string(), serde_json::Value::String(reference));
+        }
         let mut builder = MessageBuilder::new(self.account, MessageType::Post, value);
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
@@ -237,6 +254,31 @@ mod tests {
         );
         assert_eq!(parsed["content"]["body"], "edited");
         assert!(parsed.get("type").is_none());
+    }
+
+    #[test]
+    fn test_post_builder_with_reference() {
+        let account = TestAccount::new();
+        let msg = PostBuilder::new(
+            &account,
+            "corechan-operation",
+            serde_json::json!({"action": "link", "tags": ["link", "mainnet"]}),
+        )
+        .unwrap()
+        .reference("a75e0d10aec10614553ed00070147dd288aa4f510346cf4f5c13a826ae9f2d77")
+        .build()
+        .unwrap();
+
+        assert_eq!(msg.message_type, MessageType::Post);
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        // Has both type AND ref
+        assert_eq!(parsed["type"], "corechan-operation");
+        assert_eq!(
+            parsed["ref"],
+            "a75e0d10aec10614553ed00070147dd288aa4f510346cf4f5c13a826ae9f2d77"
+        );
+        assert_eq!(parsed["content"]["action"], "link");
     }
 
     #[test]
