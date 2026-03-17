@@ -1,3 +1,4 @@
+use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_types::item_hash::ItemHash;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -32,6 +33,11 @@ pub enum Commands {
     Aggregate {
         #[clap(subcommand)]
         command: AggregateCommand,
+    },
+    /// Work with network nodes (CCN/CRN operations)
+    Node {
+        #[clap(subcommand)]
+        command: NodeCommand,
     },
 }
 
@@ -524,6 +530,102 @@ pub struct ForgetArgs {
     /// Channel name.
     #[arg(long)]
     pub channel: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum NodeCommand {
+    /// Register a new Core Channel Node (CCN).
+    CreateCcn(CreateCcnArgs),
+    /// Register a new Compute Resource Node (CRN).
+    CreateCrn(CreateCrnArgs),
+    /// Link a CRN to one of your CCNs.
+    Link(LinkCrnArgs),
+    /// Unlink a CRN from your CCN.
+    Unlink(UnlinkCrnArgs),
+    /// Stake ALEPH tokens on a node.
+    Stake(StakeArgs),
+    /// Remove your stake from a node.
+    Unstake(UnstakeArgs),
+    /// Remove a node from the network.
+    Drop(DropNodeArgs),
+}
+
+#[derive(Args)]
+pub struct CreateCcnArgs {
+    /// Human-readable node name.
+    #[arg(long)]
+    pub name: String,
+
+    /// libp2p multiaddress (e.g. /ip4/1.2.3.4/tcp/4025/p2p/Qm...).
+    #[arg(long)]
+    pub multiaddress: String,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct CreateCrnArgs {
+    /// Human-readable node name.
+    #[arg(long)]
+    pub name: String,
+
+    /// HTTPS URL of the CRN API endpoint.
+    #[arg(long)]
+    pub address: String,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct LinkCrnArgs {
+    /// Hash of the CRN to link.
+    #[arg(long)]
+    pub crn: NodeHash,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct UnlinkCrnArgs {
+    /// Hash of the CRN to unlink.
+    #[arg(long)]
+    pub crn: NodeHash,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct StakeArgs {
+    /// Hash of the node to stake on.
+    #[arg(long)]
+    pub node: NodeHash,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct UnstakeArgs {
+    /// Hash of the node to unstake from.
+    #[arg(long)]
+    pub node: NodeHash,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct DropNodeArgs {
+    /// Hash of the node to remove.
+    #[arg(long)]
+    pub node: NodeHash,
 
     #[command(flatten)]
     pub signing: SigningArgs,
