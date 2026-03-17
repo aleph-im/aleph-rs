@@ -4,6 +4,7 @@ members = [
     "crates/aleph-cli",
     "crates/aleph-sdk",
     "crates/aleph-types",
+    "crates/heph",
 ]
 
 [workspace.dependencies]
