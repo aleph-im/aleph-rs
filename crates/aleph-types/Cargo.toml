@@ -13,8 +13,8 @@ signature = ["signature-evm", "signature-sol"]
 signature-evm = ["dep:k256", "dep:sha3", "dep:hex"]
 signature-sol = ["dep:ed25519-dalek", "dep:bs58"]
 account = ["account-evm", "account-sol"]
-account-evm = ["signature-evm", "dep:secrecy", "dep:zeroize"]
-account-sol = ["signature-sol", "dep:secrecy", "dep:zeroize"]
+account-evm = ["signature-evm"]
+account-sol = ["signature-sol"]
 
 [dependencies]
 chrono = { workspace = true }
@@ -28,8 +28,7 @@ sha3 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 bs58 = { workspace = true, optional = true }
-secrecy = { workspace = true, optional = true }
-zeroize = { workspace = true, optional = true }
+
 
 [dev-dependencies]
 assert_matches = { workspace = true }

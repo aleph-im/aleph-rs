@@ -3,13 +3,15 @@ use crate::chain::{Address, Chain, Signature};
 use crate::verify_signature::ethereum::{eip191_hash, public_key_to_address};
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::{RecoveryId, SigningKey, VerifyingKey};
-use secrecy::{ExposeSecret, SecretBox};
 
 /// An Aleph account backed by a secp256k1 private key for EVM-compatible chains.
+///
+/// The signing key implements `ZeroizeOnDrop`, so it is securely wiped from
+/// memory when this account is dropped.
 pub struct EvmAccount {
     chain: Chain,
     address: Address,
-    signing_key: SecretBox<[u8; 32]>,
+    signing_key: SigningKey,
 }
 
 impl EvmAccount {
@@ -35,7 +37,7 @@ impl EvmAccount {
         Ok(Self {
             chain,
             address,
-            signing_key: SecretBox::new(Box::new(key_bytes)),
+            signing_key,
         })
     }
 }
@@ -52,10 +54,8 @@ impl Account for EvmAccount {
     fn sign_raw(&self, buffer: &[u8]) -> Result<Signature, SignError> {
         let digest = eip191_hash(buffer);
 
-        let signing_key = SigningKey::from_bytes(self.signing_key.expose_secret().into())
-            .map_err(|e| SignError::SigningFailed(e.to_string()))?;
-
-        let (sig, recovery_id): (k256::ecdsa::Signature, RecoveryId) = signing_key
+        let (sig, recovery_id): (k256::ecdsa::Signature, RecoveryId) = self
+            .signing_key
             .sign_prehash(&digest)
             .map_err(|e| SignError::SigningFailed(e.to_string()))?;
 

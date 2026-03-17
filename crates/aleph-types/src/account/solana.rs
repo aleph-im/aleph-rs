@@ -1,13 +1,15 @@
 use crate::account::{Account, AccountError, SignError};
 use crate::chain::{Address, Chain, Signature};
 use ed25519_dalek::Signer;
-use secrecy::{ExposeSecret, SecretBox};
 
 /// An Aleph account backed by an Ed25519 private key for Solana-compatible chains.
+///
+/// The signing key implements `ZeroizeOnDrop`, so it is securely wiped from
+/// memory when this account is dropped.
 pub struct SolanaAccount {
     chain: Chain,
     address: Address,
-    private_key: SecretBox<[u8; 32]>,
+    signing_key: ed25519_dalek::SigningKey,
 }
 
 impl SolanaAccount {
@@ -38,7 +40,7 @@ impl SolanaAccount {
         Ok(Self {
             chain,
             address,
-            private_key: SecretBox::new(Box::new(key_bytes)),
+            signing_key,
         })
     }
 }
@@ -53,8 +55,7 @@ impl Account for SolanaAccount {
     }
 
     fn sign_raw(&self, buffer: &[u8]) -> Result<Signature, SignError> {
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(self.private_key.expose_secret());
-        let sig = signing_key.sign(buffer);
+        let sig = self.signing_key.sign(buffer);
         let sig_b58 = bs58::encode(sig.to_bytes()).into_string();
 
         Ok(Signature::with_public_key(
