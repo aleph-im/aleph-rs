@@ -12,13 +12,13 @@ pub mod unsigned;
 
 #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
 pub use crate::verify_signature::SignatureVerificationError;
-pub use aggregate::AggregateContent;
+pub use aggregate::{AggregateContent, AggregateKey};
 pub use base_message::{
     ContentSource, Message, MessageConfirmation, MessageContent, MessageContentEnum, MessageHeader,
     MessageStatus, MessageType, MessageVerificationError,
 };
 pub use forget::ForgetContent;
 pub use instance::InstanceContent;
-pub use post::PostContent;
+pub use post::{PostContent, PostType};
 pub use program::ProgramContent;
 pub use store::{FileRef, RawFileRef, StoreContent};
