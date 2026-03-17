@@ -1,10 +1,10 @@
 use aleph_types::account::{Account, SignError, sign_message};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::{AlephItemHash, ItemHash};
+use aleph_types::message::MessageType;
 use aleph_types::message::item_type::ItemType;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::unsigned::UnsignedMessage;
-use aleph_types::message::MessageType;
 use aleph_types::timestamp::Timestamp;
 
 use crate::verify::compute_cid;
@@ -91,8 +91,7 @@ impl<'a, A: Account> MessageBuilder<'a, A> {
             }
         }
 
-        let item_content =
-            serde_json::to_string(&serde_json::Value::Object(envelope)).unwrap();
+        let item_content = serde_json::to_string(&serde_json::Value::Object(envelope)).unwrap();
         let len = item_content.len();
 
         let (item_type, item_hash) = if self.allow_inlining && len < self.inline_cutoff {
@@ -124,8 +123,8 @@ mod tests {
     use super::*;
     use aleph_types::account::{Account, SignError};
     use aleph_types::chain::{Address, Chain, Signature};
-    use aleph_types::message::item_type::ItemType;
     use aleph_types::message::MessageType;
+    use aleph_types::message::item_type::ItemType;
 
     /// Minimal test account that produces a dummy signature.
     struct TestAccount {
@@ -164,7 +163,10 @@ mod tests {
         assert_eq!(pending.message_type, MessageType::Post);
         assert!(!pending.item_content.is_empty());
         let parsed: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
-        assert_eq!(parsed["address"], "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef");
+        assert_eq!(
+            parsed["address"],
+            "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef"
+        );
         assert!(parsed["time"].is_number());
     }
 
@@ -225,7 +227,10 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(pending.channel, Some(Channel::from("MY_CHANNEL".to_string())));
+        assert_eq!(
+            pending.channel,
+            Some(Channel::from("MY_CHANNEL".to_string()))
+        );
     }
 
     #[test]

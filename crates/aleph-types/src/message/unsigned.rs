@@ -1,7 +1,7 @@
 use crate::channel::Channel;
 use crate::item_hash::ItemHash;
-use crate::message::item_type::ItemType;
 use crate::message::MessageType;
+use crate::message::item_type::ItemType;
 use crate::timestamp::Timestamp;
 
 #[derive(Debug, Clone)]

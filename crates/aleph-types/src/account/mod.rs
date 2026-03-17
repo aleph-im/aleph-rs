@@ -10,9 +10,9 @@ pub use solana::SolanaAccount;
 
 use crate::chain::{Address, Chain, Signature};
 use crate::item_hash::ItemHash;
+use crate::message::MessageType;
 use crate::message::pending::PendingMessage;
 use crate::message::unsigned::UnsignedMessage;
-use crate::message::MessageType;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -81,8 +81,7 @@ mod tests {
         let chain = Chain::Ethereum;
         let sender = address!("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef");
         let message_type = MessageType::Post;
-        let hash =
-            item_hash!("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c");
+        let hash = item_hash!("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c");
 
         let buffer = verification_buffer(&chain, &sender, message_type, &hash);
 

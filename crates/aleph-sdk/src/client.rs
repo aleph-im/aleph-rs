@@ -1137,10 +1137,7 @@ impl AlephMessageClient for AlephClient {
         message: &PendingMessage,
         sync: bool,
     ) -> Result<PostMessageResponse, MessageError> {
-        let body = PostMessageBody {
-            sync,
-            message,
-        };
+        let body = PostMessageBody { sync, message };
 
         let url = self
             .ccn_url

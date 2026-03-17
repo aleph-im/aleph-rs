@@ -358,10 +358,7 @@ mod tests {
 
     #[test]
     fn test_signature_with_public_key() {
-        let sig = Signature::with_public_key(
-            "5HH5Z".to_string(),
-            "5SwCe".to_string(),
-        );
+        let sig = Signature::with_public_key("5HH5Z".to_string(), "5SwCe".to_string());
         assert_eq!(sig.as_str(), "5HH5Z");
         assert_eq!(sig.public_key(), Some("5SwCe"));
 

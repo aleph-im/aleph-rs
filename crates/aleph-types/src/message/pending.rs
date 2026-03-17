@@ -52,9 +52,7 @@ impl Serialize for PendingMessage {
 impl From<&Message> for PendingMessage {
     fn from(message: &Message) -> Self {
         let (item_type, item_content) = match &message.content_source {
-            ContentSource::Inline { item_content } => {
-                (ItemType::Inline, item_content.clone())
-            }
+            ContentSource::Inline { item_content } => (ItemType::Inline, item_content.clone()),
             ContentSource::Storage => (ItemType::Storage, String::new()),
             ContentSource::Ipfs => (ItemType::Ipfs, String::new()),
         };
@@ -85,7 +83,9 @@ mod tests {
             message_type: MessageType::Post,
             item_type,
             item_content: r#"{"type":"test","address":"0xABCD","time":1234.0}"#.to_string(),
-            item_hash: item_hash!("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"),
+            item_hash: item_hash!(
+                "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+            ),
             time: Timestamp::from(1234.0),
             channel: None,
         }

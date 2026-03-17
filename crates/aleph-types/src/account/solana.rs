@@ -27,7 +27,7 @@ impl SolanaAccount {
             n => {
                 return Err(AccountError::InvalidKey(format!(
                     "expected 32 or 64 bytes, got {n}"
-                )))
+                )));
             }
         };
 
@@ -67,14 +67,14 @@ impl Account for SolanaAccount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::{verification_buffer, Account};
+    use crate::account::{Account, verification_buffer};
     use crate::chain::Chain;
     use crate::message::MessageType;
 
     const TEST_KEY: [u8; 32] = [
-        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
-        0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
-        0x1c, 0xae, 0x7f, 0x60,
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
     ];
 
     #[test]
@@ -121,13 +121,16 @@ mod tests {
     #[test]
     fn test_solana_sign_and_verify_roundtrip() {
         let account = SolanaAccount::new(Chain::Sol, &TEST_KEY).unwrap();
-        let item_hash = crate::item_hash!(
-            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
-        );
+        let item_hash =
+            crate::item_hash!("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c");
         let message_type = MessageType::Post;
 
-        let buffer =
-            verification_buffer(&account.chain(), account.address(), message_type, &item_hash);
+        let buffer = verification_buffer(
+            &account.chain(),
+            account.address(),
+            message_type,
+            &item_hash,
+        );
         let signature = account.sign_raw(buffer.as_bytes()).unwrap();
 
         crate::verify_signature::verify(

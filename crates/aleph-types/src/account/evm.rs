@@ -22,12 +22,9 @@ impl EvmAccount {
             return Err(AccountError::UnsupportedChain(chain));
         }
 
-        let key_bytes: [u8; 32] = private_key
-            .try_into()
-            .map_err(|_| AccountError::InvalidKey(format!(
-                "expected 32 bytes, got {}",
-                private_key.len()
-            )))?;
+        let key_bytes: [u8; 32] = private_key.try_into().map_err(|_| {
+            AccountError::InvalidKey(format!("expected 32 bytes, got {}", private_key.len()))
+        })?;
 
         let signing_key = SigningKey::from_bytes((&key_bytes).into())
             .map_err(|e| AccountError::InvalidKey(e.to_string()))?;
@@ -74,15 +71,14 @@ impl Account for EvmAccount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::{verification_buffer, Account};
+    use crate::account::{Account, verification_buffer};
     use crate::chain::Chain;
     use crate::message::MessageType;
 
     const TEST_KEY: [u8; 32] = [
-        0xac, 0x09, 0x74, 0xbe, 0xc3, 0x9a, 0x17, 0xe3,
-        0x6b, 0xa4, 0xa6, 0xb4, 0xd2, 0x38, 0xff, 0x94,
-        0x4b, 0xac, 0xb4, 0x78, 0xcb, 0xed, 0x5e, 0xfb,
-        0xba, 0x0f, 0x2d, 0x1d, 0xb7, 0x44, 0xce, 0x06,
+        0xac, 0x09, 0x74, 0xbe, 0xc3, 0x9a, 0x17, 0xe3, 0x6b, 0xa4, 0xa6, 0xb4, 0xd2, 0x38, 0xff,
+        0x94, 0x4b, 0xac, 0xb4, 0x78, 0xcb, 0xed, 0x5e, 0xfb, 0xba, 0x0f, 0x2d, 0x1d, 0xb7, 0x44,
+        0xce, 0x06,
     ];
 
     #[test]
@@ -108,13 +104,16 @@ mod tests {
     #[test]
     fn test_evm_sign_and_verify_roundtrip() {
         let account = EvmAccount::new(Chain::Ethereum, &TEST_KEY).unwrap();
-        let item_hash = crate::item_hash!(
-            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
-        );
+        let item_hash =
+            crate::item_hash!("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c");
         let message_type = MessageType::Post;
 
-        let buffer =
-            verification_buffer(&account.chain(), account.address(), message_type, &item_hash);
+        let buffer = verification_buffer(
+            &account.chain(),
+            account.address(),
+            message_type,
+            &item_hash,
+        );
         let signature = account.sign_raw(buffer.as_bytes()).unwrap();
 
         // Verify using existing verification infrastructure
