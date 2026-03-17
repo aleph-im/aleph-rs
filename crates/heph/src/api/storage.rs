@@ -20,10 +20,7 @@ fn is_valid_hex(s: &str) -> bool {
 // GET /api/v0/storage/raw/{hash}   (also HEAD)   spec 9.10
 // ---------------------------------------------------------------------------
 
-pub async fn get_raw(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-) -> impl Responder {
+pub async fn get_raw(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
     let hash = path.into_inner();
 
     if !is_valid_hex(&hash) {
