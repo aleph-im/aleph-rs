@@ -2,6 +2,7 @@ use crate::aggregate_models::corechannel::CoreChannelAggregate;
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::item_type::ItemType;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
     ContentSource, FileRef, Message, MessageConfirmation, MessageContent, MessageContentEnum,
@@ -113,6 +114,11 @@ pub enum MessageError {
     WebsocketConnection(String),
     #[error("WebSocket message error: {0}")]
     WebsocketMessage(String),
+    #[error("upload hash mismatch: expected {expected}, got {actual}")]
+    HashMismatch {
+        expected: ItemHash,
+        actual: ItemHash,
+    },
 }
 
 /// Error during message integrity verification.
@@ -736,6 +742,48 @@ pub trait AlephMessageClient {
         message: &PendingMessage,
         sync: bool,
     ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send;
+
+    /// Submits a signed message to the network, uploading content to storage
+    /// or IPFS first if the message is non-inline.
+    ///
+    /// Prefer this over [`post_message`](Self::post_message) for messages built
+    /// with [`MessageBuilder`](crate::builder::MessageBuilder) or the typed builders,
+    /// as it handles the content upload step transparently.
+    fn submit_message(
+        &self,
+        message: &PendingMessage,
+        sync: bool,
+    ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send
+    where
+        Self: AlephStorageClient + Sync,
+    {
+        async move {
+            match message.item_type {
+                ItemType::Inline => {}
+                ItemType::Storage => {
+                    let uploaded = self
+                        .upload_to_storage(message.item_content.as_bytes())
+                        .await?;
+                    if uploaded != message.item_hash {
+                        return Err(MessageError::HashMismatch {
+                            expected: message.item_hash.clone(),
+                            actual: uploaded,
+                        });
+                    }
+                }
+                ItemType::Ipfs => {
+                    let uploaded = self.upload_to_ipfs(message.item_content.as_bytes()).await?;
+                    if uploaded != message.item_hash {
+                        return Err(MessageError::HashMismatch {
+                            expected: message.item_hash.clone(),
+                            actual: uploaded,
+                        });
+                    }
+                }
+            }
+            self.post_message(message, sync).await
+        }
+    }
 
     /// Verifies raw content and builds a [`VerifiedMessage`] from a [`MessageHeader`].
     ///
@@ -1846,5 +1894,208 @@ mod tests {
             .await
             .expect("file should exist");
         assert_eq!(size, Bytes::from(data.len() as u64));
+    }
+
+    mod submit_message_tests {
+        use super::*;
+        use aleph_types::address;
+        use aleph_types::chain::{Chain, Signature};
+        use aleph_types::item_hash::{AlephItemHash, ItemHash};
+        use aleph_types::message::MessageType;
+        use aleph_types::message::item_type::ItemType;
+        use aleph_types::message::pending::PendingMessage;
+        use aleph_types::timestamp::Timestamp;
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const TEST_CONTENT: &str = r#"{"type":"test","address":"0xABCD","time":1234.0}"#;
+
+        fn make_pending(item_type: ItemType, item_hash: ItemHash) -> PendingMessage {
+            PendingMessage {
+                chain: Chain::Ethereum,
+                sender: address!("0xABCD"),
+                signature: Signature::from("0xSIG".to_string()),
+                message_type: MessageType::Post,
+                item_type,
+                item_content: TEST_CONTENT.to_string(),
+                item_hash,
+                time: Timestamp::from(1234.0),
+                channel: None,
+            }
+        }
+
+        struct MockClient {
+            upload_storage_called: AtomicBool,
+            upload_ipfs_called: AtomicBool,
+            post_called: AtomicBool,
+            /// Hash returned by upload_to_storage / upload_to_ipfs
+            upload_hash: ItemHash,
+        }
+
+        impl MockClient {
+            fn new(upload_hash: ItemHash) -> Self {
+                Self {
+                    upload_storage_called: AtomicBool::new(false),
+                    upload_ipfs_called: AtomicBool::new(false),
+                    post_called: AtomicBool::new(false),
+                    upload_hash,
+                }
+            }
+        }
+
+        impl AlephMessageClient for MockClient {
+            async fn get_message(
+                &self,
+                _item_hash: &ItemHash,
+            ) -> Result<MessageWithStatus<Message>, MessageError> {
+                unimplemented!()
+            }
+
+            async fn get_messages(
+                &self,
+                _filter: &MessageFilter,
+            ) -> Result<Vec<Message>, MessageError> {
+                unimplemented!()
+            }
+
+            async fn subscribe_to_messages(
+                &self,
+                _filter: &MessageFilter,
+                _history: Option<u32>,
+            ) -> Result<
+                impl Stream<Item = Result<Message, MessageError>> + Send + Unpin,
+                MessageError,
+            > {
+                Ok(tokio_stream::empty())
+            }
+
+            async fn post_message(
+                &self,
+                _message: &PendingMessage,
+                _sync: bool,
+            ) -> Result<PostMessageResponse, MessageError> {
+                self.post_called.store(true, Ordering::SeqCst);
+
+                Ok(PostMessageResponse {
+                    publication_status: PublicationStatus {
+                        status: "success".to_string(),
+                        failed: vec![],
+                    },
+                    message_status: "processed".to_string(),
+                })
+            }
+
+            async fn get_messages_and_verify(
+                &self,
+                _filter: &MessageFilter,
+            ) -> Result<Vec<Result<VerifiedMessage, InvalidMessage>>, MessageError>
+            where
+                Self: AlephStorageClient + Sync,
+            {
+                unimplemented!()
+            }
+        }
+
+        impl AlephStorageClient for MockClient {
+            async fn get_file_size(&self, _file_hash: &ItemHash) -> Result<Bytes, MessageError> {
+                unimplemented!()
+            }
+
+            async fn get_file_metadata_by_message_hash(
+                &self,
+                _message_hash: &ItemHash,
+            ) -> Result<FileMetadata, MessageError> {
+                unimplemented!()
+            }
+
+            async fn get_file_metadata_by_ref(
+                &self,
+                _file_ref: &FileRef,
+            ) -> Result<FileMetadata, MessageError> {
+                unimplemented!()
+            }
+
+            async fn download_file_by_hash(
+                &self,
+                _file_hash: &ItemHash,
+            ) -> Result<FileDownload, MessageError> {
+                unimplemented!()
+            }
+
+            fn upload_to_storage(
+                &self,
+                _data: &[u8],
+            ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send {
+                self.upload_storage_called.store(true, Ordering::SeqCst);
+                let hash = self.upload_hash.clone();
+                async move { Ok(hash) }
+            }
+
+            fn upload_to_ipfs(
+                &self,
+                _data: &[u8],
+            ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send {
+                self.upload_ipfs_called.store(true, Ordering::SeqCst);
+                let hash = self.upload_hash.clone();
+                async move { Ok(hash) }
+            }
+        }
+
+        #[tokio::test]
+        async fn submit_inline_skips_upload() {
+            let inline_hash = ItemHash::from(AlephItemHash::from_bytes(TEST_CONTENT.as_bytes()));
+            let client = MockClient::new(inline_hash.clone());
+            let msg = make_pending(ItemType::Inline, inline_hash);
+
+            let resp = client.submit_message(&msg, false).await.unwrap();
+            assert_eq!(resp.message_status, "processed");
+            assert!(client.post_called.load(Ordering::SeqCst));
+            assert!(!client.upload_storage_called.load(Ordering::SeqCst));
+            assert!(!client.upload_ipfs_called.load(Ordering::SeqCst));
+        }
+
+        #[tokio::test]
+        async fn submit_storage_uploads_then_posts() {
+            let storage_hash = ItemHash::from(AlephItemHash::from_bytes(TEST_CONTENT.as_bytes()));
+            let client = MockClient::new(storage_hash.clone());
+            let msg = make_pending(ItemType::Storage, storage_hash);
+
+            let resp = client.submit_message(&msg, false).await.unwrap();
+            assert_eq!(resp.message_status, "processed");
+            assert!(client.upload_storage_called.load(Ordering::SeqCst));
+            assert!(client.post_called.load(Ordering::SeqCst));
+        }
+
+        #[tokio::test]
+        async fn submit_ipfs_uploads_then_posts() {
+            let cid = crate::verify::compute_cid(TEST_CONTENT.as_bytes());
+            let ipfs_hash = ItemHash::Ipfs(cid);
+            let client = MockClient::new(ipfs_hash.clone());
+            let msg = make_pending(ItemType::Ipfs, ipfs_hash);
+
+            let resp = client.submit_message(&msg, false).await.unwrap();
+            assert_eq!(resp.message_status, "processed");
+            assert!(client.upload_ipfs_called.load(Ordering::SeqCst));
+            assert!(client.post_called.load(Ordering::SeqCst));
+        }
+
+        #[tokio::test]
+        async fn submit_storage_hash_mismatch_returns_error() {
+            let expected_hash = ItemHash::from(AlephItemHash::from_bytes(TEST_CONTENT.as_bytes()));
+            // Mock returns a different hash
+            let wrong_hash = ItemHash::from(AlephItemHash::from_bytes(b"wrong content"));
+            let client = MockClient::new(wrong_hash.clone());
+            let msg = make_pending(ItemType::Storage, expected_hash.clone());
+
+            let err = client.submit_message(&msg, false).await.unwrap_err();
+            match err {
+                MessageError::HashMismatch { expected, actual } => {
+                    assert_eq!(expected, expected_hash);
+                    assert_eq!(actual, wrong_hash);
+                }
+                other => panic!("expected HashMismatch, got: {other:?}"),
+            }
+            assert!(!client.post_called.load(Ordering::SeqCst));
+        }
     }
 }

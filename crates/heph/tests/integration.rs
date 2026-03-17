@@ -451,3 +451,83 @@ async fn test_aggregate_404_for_unknown_address() {
 
     assert_eq!(resp.status().as_u16(), 404);
 }
+
+/// Test submit_message with inline content (small message).
+/// Uses the SDK's AlephClient + PostBuilder instead of raw HTTP.
+#[tokio::test]
+async fn test_submit_message_inline() {
+    use aleph_sdk::client::{AlephClient, AlephMessageClient};
+    use aleph_sdk::messages::PostBuilder;
+    use aleph_types::message::MessageStatus;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+
+    let pending = PostBuilder::new(
+        &account,
+        "test-post",
+        serde_json::json!({"body": "hello via SDK"}),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    assert_eq!(pending.item_type, ItemType::Inline);
+
+    let resp = client.submit_message(&pending, true).await.unwrap();
+    assert_eq!(resp.message_status, "processed");
+
+    // Verify we can fetch the message back
+    let fetched = client.get_message(&pending.item_hash).await.unwrap();
+    assert_eq!(fetched.status(), MessageStatus::Processed);
+}
+
+/// Test submit_message with storage-routed content (large message).
+/// Verifies that submit_message transparently uploads content before posting.
+#[tokio::test]
+async fn test_submit_message_storage() {
+    use aleph_sdk::client::{AlephClient, AlephMessageClient, AlephStorageClient};
+    use aleph_sdk::messages::PostBuilder;
+    use aleph_types::message::MessageStatus;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+
+    // Create content large enough to exceed the 50KB inline cutoff
+    let big_body = "x".repeat(210_000);
+    let pending = PostBuilder::new(&account, "test-post", serde_json::json!({"body": big_body}))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    assert_eq!(pending.item_type, ItemType::Storage);
+
+    let resp = client.submit_message(&pending, true).await.unwrap();
+    assert_eq!(resp.message_status, "processed");
+
+    // Verify the content is retrievable from storage
+    let download = client
+        .download_file_by_hash(&pending.item_hash)
+        .await
+        .unwrap();
+    let bytes = download.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), pending.item_content.as_bytes());
+
+    // Verify we can fetch the message back
+    let fetched = client.get_message(&pending.item_hash).await.unwrap();
+    assert_eq!(fetched.status(), MessageStatus::Processed);
+}
+
+#[tokio::test]
+#[ignore = "heph does not support IPFS upload; enable when IPFS endpoint is available"]
+async fn test_submit_message_ipfs() {
+    todo!()
+}

@@ -86,7 +86,7 @@ async fn submit_or_preview(
         return Ok(());
     }
 
-    let response = match client.post_message(pending, true).await {
+    let response = match client.submit_message(pending, true).await {
         Ok(r) => r,
         Err(MessageError::ApiError { status, body }) => {
             return Err(format_api_error(status, &body, json).into());
