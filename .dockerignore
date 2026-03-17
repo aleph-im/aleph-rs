@@ -1,0 +1,12 @@
+target
+.git
+.github
+.gitignore
+.dockerignore
+.worktrees
+.idea
+.claude
+docs
+**/*.rs.bk
+**/*.pdb
+**/mutants.out*
