@@ -94,7 +94,7 @@ jobs:
 
       - name: Start heph
         run: |
-          ./target/release/heph &
+          ./target/release/heph > /tmp/heph.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:4024/api/v0/version > /dev/null 2>&1; then
               echo "heph is ready"
@@ -104,12 +104,17 @@ jobs:
             sleep 1
           done
           echo "heph did not start in time"
+          cat /tmp/heph.log
           exit 1
 
       - name: Run integration tests
         run: cargo test --verbose --all-features --test heph_integration -p aleph-sdk -- --include-ignored
         env:
           ALEPH_TEST_CCN_URL: http://127.0.0.1:4024
+
+      - name: Show heph logs on failure
+        if: failure()
+        run: cat /tmp/heph.log
 
   fmt:
     name: Format
