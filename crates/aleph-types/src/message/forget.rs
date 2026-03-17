@@ -10,8 +10,19 @@ pub struct ForgetContent {
     reason: Option<String>,
 }
 
+impl ForgetContent {
+    pub fn new(hashes: Vec<ItemHash>, aggregates: Vec<ItemHash>, reason: Option<String>) -> Self {
+        Self {
+            hashes,
+            aggregates,
+            reason,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::chain::Chain;
     use crate::message::base_message::MessageContentEnum;
     use crate::message::{ContentSource, Message, MessageType};
@@ -81,5 +92,21 @@ mod tests {
         assert!(message.confirmations.is_empty());
 
         message.verify_item_hash().unwrap();
+    }
+
+    #[test]
+    fn test_forget_content_new() {
+        let hashes = vec![item_hash!(
+            "ecd3bab3db7b449ad7875336c9a46dbbe6a010b023fc9525d81e8fdf56936ea1"
+        )];
+        let content = ForgetContent::new(hashes.clone(), vec![], Some("test reason".to_string()));
+        assert_eq!(
+            serde_json::to_value(&content).unwrap(),
+            serde_json::json!({
+                "hashes": ["ecd3bab3db7b449ad7875336c9a46dbbe6a010b023fc9525d81e8fdf56936ea1"],
+                "aggregates": [],
+                "reason": "test reason"
+            })
+        );
     }
 }
