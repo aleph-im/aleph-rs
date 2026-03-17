@@ -3,9 +3,12 @@ mod base_message;
 pub mod execution;
 mod forget;
 mod instance;
+pub mod item_type;
+pub mod pending;
 mod post;
 mod program;
 mod store;
+pub mod unsigned;
 
 #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
 pub use crate::verify_signature::SignatureVerificationError;

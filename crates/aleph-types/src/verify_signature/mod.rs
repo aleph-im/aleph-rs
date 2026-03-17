@@ -1,5 +1,5 @@
 #[cfg(feature = "signature-evm")]
-mod ethereum;
+pub(crate) mod ethereum;
 #[cfg(feature = "signature-sol")]
 mod solana;
 
@@ -39,7 +39,7 @@ fn verification_buffer(
 }
 
 /// Verifies the cryptographic signature of a message.
-pub(crate) fn verify(
+pub fn verify(
     chain: &Chain,
     sender: &Address,
     signature: &Signature,

@@ -31,6 +31,14 @@ impl From<DateTime<Utc>> for Timestamp {
 }
 
 impl Timestamp {
+    pub fn now() -> Self {
+        Self::from(chrono::Utc::now())
+    }
+
+    pub fn as_f64(&self) -> f64 {
+        self.0
+    }
+
     pub fn to_datetime(&self) -> Result<DateTime<Utc>, TimestampError> {
         let secs = self.0.floor() as i64;
         let nsecs = ((self.0.fract() * 1_000_000_000.0).round() as u32).min(999_999_999);
@@ -77,6 +85,17 @@ mod tests {
         let json = "1635789600.5";
         let timestamp: Timestamp = serde_json::from_str(json).unwrap();
         assert_eq!(timestamp.0, 1635789600.5);
+    }
+
+    #[test]
+    fn test_timestamp_now() {
+        let before = chrono::Utc::now().timestamp() as f64;
+        let ts = Timestamp::now();
+        let after = chrono::Utc::now().timestamp() as f64;
+
+        let ts_f64 = ts.as_f64();
+        assert!(ts_f64 >= before);
+        assert!(ts_f64 <= after + 1.0);
     }
 
     #[test]

@@ -34,5 +34,10 @@ tokio = { workspace = true }
 url = { workspace = true }
 prost = { workspace = true }
 
+[features]
+default = []
+account-evm = ["aleph-types/account-evm"]
+account-sol = ["aleph-types/account-sol"]
+
 [build-dependencies]
 prost-build = { workspace = true }

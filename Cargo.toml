@@ -39,6 +39,6 @@ multihash-codetable = { version = "0.1", features = ["sha2"] }
 prost = { version = "0.13" }
 prost-build = { version = "0.13" }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
-k256 = { version = "0.13", features = ["ecdsa"] }
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 sha3 = { version = "0.10" }
 hex = { version = "0.4" }

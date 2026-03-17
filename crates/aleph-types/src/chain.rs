@@ -218,6 +218,14 @@ impl Signature {
     pub fn public_key(&self) -> Option<&str> {
         self.public_key.as_deref()
     }
+
+    /// Creates a new Signature with an associated public key (e.g., for Solana).
+    pub fn with_public_key(value: String, public_key: String) -> Self {
+        Self {
+            value,
+            public_key: Some(public_key),
+        }
+    }
 }
 
 impl From<String> for Signature {
@@ -346,5 +354,16 @@ mod tests {
                 "Display and serde disagree for {chain:?}: Display={display}, serde={serde_unquoted}"
             );
         }
+    }
+
+    #[test]
+    fn test_signature_with_public_key() {
+        let sig = Signature::with_public_key("5HH5Z".to_string(), "5SwCe".to_string());
+        assert_eq!(sig.as_str(), "5HH5Z");
+        assert_eq!(sig.public_key(), Some("5SwCe"));
+
+        let json = serde_json::to_value(&sig).unwrap();
+        assert_eq!(json["signature"], "5HH5Z");
+        assert_eq!(json["publicKey"], "5SwCe");
     }
 }
