@@ -20,11 +20,7 @@ fn is_valid_hex(s: &str) -> bool {
 // GET /api/v0/storage/raw/{hash}   (also HEAD)   spec 9.10
 // ---------------------------------------------------------------------------
 
-pub async fn get_raw(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-    req: HttpRequest,
-) -> impl Responder {
+pub async fn get_raw(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
     let hash = path.into_inner();
 
     if !is_valid_hex(&hash) {
@@ -38,16 +34,6 @@ pub async fn get_raw(
         return HttpResponse::NotFound().json(serde_json::json!({
             "error": "File not found"
         }));
-    }
-
-    // For HEAD requests actix-web will strip the body automatically, but we
-    // avoid reading the file unnecessarily.
-    if req.method() == actix_web::http::Method::HEAD {
-        let size = file_store.size(&hash).unwrap_or(0);
-        return HttpResponse::Ok()
-            .content_type("application/octet-stream")
-            .insert_header(("Content-Length", size.to_string()))
-            .finish();
     }
 
     match file_store.read(&hash) {
