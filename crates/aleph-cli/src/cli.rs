@@ -4,6 +4,14 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Parser)]
 #[command(name = "aleph", version, about = "Aleph CLI")]
 pub struct Cli {
+    /// CCN endpoint URL.
+    #[arg(long, default_value = "https://api3.aleph.im")]
+    pub ccn_url: String,
+
+    /// Output results as JSON (for scripting/tooling).
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -20,6 +28,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: PostCommand,
     },
+    /// Work with aggregates
+    Aggregate {
+        #[clap(subcommand)]
+        command: AggregateCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -31,6 +44,8 @@ pub enum MessageCommand {
     List(Box<MessageFilterCli>),
     /// Sync messages from one node to another.
     Sync(Box<SyncArgs>),
+    /// Forget messages by their item hashes.
+    Forget(ForgetArgs),
 }
 
 #[derive(Args)]
@@ -66,6 +81,10 @@ pub struct GetMessageArgs {
 pub enum PostCommand {
     /// List posts (with filters).
     List(Box<PostListArgs>),
+    /// Create a new post message.
+    Create(PostCreateArgs),
+    /// Amend an existing post message.
+    Amend(PostAmendArgs),
 }
 
 #[derive(Args)]
@@ -167,6 +186,89 @@ impl From<SortOrderCli> for SortOrder {
             SortOrderCli::Desc => SortOrder::Desc,
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum ChainCli {
+    // EVM chains
+    Arb,
+    Aurora,
+    Avax,
+    Base,
+    Blast,
+    Bob,
+    Bsc,
+    Cyber,
+    Eth,
+    Etherlink,
+    Frax,
+    Hype,
+    Ink,
+    Lens,
+    Linea,
+    Lisk,
+    Metis,
+    Mode,
+    Op,
+    Pol,
+    Stt,
+    Sonic,
+    Unichain,
+    Wld,
+    Zora,
+    // SVM chains
+    Sol,
+    Es,
+}
+
+impl From<ChainCli> for aleph_types::chain::Chain {
+    fn from(v: ChainCli) -> Self {
+        use aleph_types::chain::Chain;
+        match v {
+            ChainCli::Arb => Chain::Arbitrum,
+            ChainCli::Aurora => Chain::Aurora,
+            ChainCli::Avax => Chain::Avax,
+            ChainCli::Base => Chain::Base,
+            ChainCli::Blast => Chain::Blast,
+            ChainCli::Bob => Chain::Bob,
+            ChainCli::Bsc => Chain::Bsc,
+            ChainCli::Cyber => Chain::Cyber,
+            ChainCli::Eth => Chain::Ethereum,
+            ChainCli::Etherlink => Chain::Etherlink,
+            ChainCli::Frax => Chain::Fraxtal,
+            ChainCli::Hype => Chain::Hype,
+            ChainCli::Ink => Chain::Ink,
+            ChainCli::Lens => Chain::Lens,
+            ChainCli::Linea => Chain::Linea,
+            ChainCli::Lisk => Chain::Lisk,
+            ChainCli::Metis => Chain::Metis,
+            ChainCli::Mode => Chain::Mode,
+            ChainCli::Op => Chain::Optimism,
+            ChainCli::Pol => Chain::Pol,
+            ChainCli::Stt => Chain::Somnia,
+            ChainCli::Sonic => Chain::Sonic,
+            ChainCli::Unichain => Chain::Unichain,
+            ChainCli::Wld => Chain::Worldchain,
+            ChainCli::Zora => Chain::Zora,
+            ChainCli::Sol => Chain::Sol,
+            ChainCli::Es => Chain::Eclipse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SigningArgs {
+    /// Hex-encoded private key. Falls back to ALEPH_PRIVATE_KEY env var.
+    #[arg(long)]
+    pub private_key: Option<String>,
+
+    /// Signing chain.
+    #[arg(long, value_enum, default_value = "eth")]
+    pub chain: ChainCli,
+
+    /// Build and sign the message but don't submit it.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 // ---------- CLI filter (mirror of MessageFilter) ----------
@@ -344,4 +446,85 @@ impl From<PostFilterCli> for PostFilter {
             page: Some(c.page),
         }
     }
+}
+
+#[derive(Args)]
+pub struct PostCreateArgs {
+    /// Post type (e.g. "chat", "note").
+    #[arg(long = "type")]
+    pub post_type: String,
+
+    /// JSON content. If absent, reads from stdin.
+    #[arg(long)]
+    pub content: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct PostAmendArgs {
+    /// Item hash of the post to amend.
+    #[arg(long = "ref")]
+    pub reference: ItemHash,
+
+    /// JSON content. If absent, reads from stdin.
+    #[arg(long)]
+    pub content: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum AggregateCommand {
+    /// Create a new aggregate message.
+    Create(AggregateCreateArgs),
+}
+
+#[derive(Args)]
+pub struct AggregateCreateArgs {
+    /// Aggregate key.
+    #[arg(long)]
+    pub key: String,
+
+    /// JSON object content. If absent, reads from stdin.
+    #[arg(long)]
+    pub content: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct ForgetArgs {
+    /// Item hashes to forget.
+    pub hashes: Vec<ItemHash>,
+
+    /// Aggregate hashes to forget.
+    #[arg(long, value_delimiter = ',')]
+    pub aggregates: Option<Vec<ItemHash>>,
+
+    /// Reason for forgetting.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }

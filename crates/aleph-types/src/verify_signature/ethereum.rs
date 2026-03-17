@@ -62,12 +62,41 @@ pub(crate) fn eip191_hash(message: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Derives an Ethereum address from a secp256k1 public key.
-/// Address = "0x" + last 20 bytes of keccak256(uncompressed_pubkey[1..])
+/// Derives an EIP-55 checksummed Ethereum address from a secp256k1 public key.
+/// Address = "0x" + last 20 bytes of keccak256(uncompressed_pubkey[1..]),
+/// with mixed-case checksum per EIP-55.
 pub(crate) fn public_key_to_address(key: &VerifyingKey) -> String {
     let uncompressed = key.to_encoded_point(false);
     let public_key_bytes = &uncompressed.as_bytes()[1..]; // skip 0x04 prefix
     let hash = Keccak256::digest(public_key_bytes);
     let address_bytes = &hash[12..]; // last 20 bytes
-    format!("0x{}", hex::encode(address_bytes))
+    eip55_checksum(address_bytes)
+}
+
+/// Encodes raw address bytes as an EIP-55 checksummed hex string.
+fn eip55_checksum(address_bytes: &[u8]) -> String {
+    let hex_addr = hex::encode(address_bytes);
+    let hash = Keccak256::digest(hex_addr.as_bytes());
+
+    let mut checksummed = String::with_capacity(42);
+    checksummed.push_str("0x");
+    for (i, c) in hex_addr.chars().enumerate() {
+        if c.is_ascii_alphabetic() {
+            // High nibble of the hash byte determines case
+            let hash_byte = hash[i / 2];
+            let nibble = if i % 2 == 0 {
+                hash_byte >> 4
+            } else {
+                hash_byte & 0x0f
+            };
+            if nibble >= 8 {
+                checksummed.push(c.to_ascii_uppercase());
+            } else {
+                checksummed.push(c);
+            }
+        } else {
+            checksummed.push(c);
+        }
+    }
+    checksummed
 }

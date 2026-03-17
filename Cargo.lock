@@ -20,6 +20,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "hex",
  "serde_json",
  "tokio",
  "url",
