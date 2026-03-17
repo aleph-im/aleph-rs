@@ -90,6 +90,8 @@ pub enum MessageError {
     Storage(#[from] StorageError),
     #[error("Integrity verification failed: {0}")]
     Integrity(#[from] IntegrityError),
+    #[error("API error (HTTP {status}): {body}")]
+    ApiError { status: u16, body: String },
     #[error(transparent)]
     HttpError(#[from] reqwest_middleware::Error),
     #[error("I/O error: {0}")]
@@ -580,13 +582,13 @@ struct GetMessageHeadersResponse {
     messages: Vec<MessageHeader>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PublicationStatus {
     pub status: String,
     pub failed: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PostMessageResponse {
     pub publication_status: PublicationStatus,
     pub message_status: String,
@@ -1145,14 +1147,18 @@ impl AlephMessageClient for AlephClient {
             .join("/api/v0/messages")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let response = self
-            .http_client
-            .post(url)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(reqwest_middleware::Error::from)?
+        let response = self.http_client.post(url).json(&body).send().await?;
+
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(MessageError::ApiError {
+                status: status.as_u16(),
+                body: body_text,
+            });
+        }
+
+        let response: PostMessageResponse = response
             .json()
             .await
             .map_err(reqwest_middleware::Error::from)?;

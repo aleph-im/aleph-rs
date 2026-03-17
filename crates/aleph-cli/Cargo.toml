@@ -8,11 +8,12 @@ repository = "https://github.com/aleph-im/aleph-rs"
 homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
-aleph-sdk = { workspace = true }
-aleph-types = { workspace = true }
+aleph-sdk = { workspace = true, features = ["account-evm", "account-sol"] }
+aleph-types = { workspace = true, features = ["account"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+hex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }

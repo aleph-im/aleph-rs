@@ -1,0 +1,145 @@
+use aleph_types::account::{Account, EvmAccount, SignError, SolanaAccount};
+use aleph_types::chain::{Address, Chain, Signature};
+use anyhow::{Context, Result, bail};
+
+/// Account wrapper that dispatches to the correct signing implementation
+/// based on the chain type. This exists because the SDK builders are generic
+/// over `A: Account` and need a concrete type, not a trait object.
+pub enum CliAccount {
+    Evm(EvmAccount),
+    Sol(SolanaAccount),
+}
+
+impl std::fmt::Debug for CliAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliAccount::Evm(a) => write!(f, "CliAccount::Evm({})", a.address()),
+            CliAccount::Sol(a) => write!(f, "CliAccount::Sol({})", a.address()),
+        }
+    }
+}
+
+impl Account for CliAccount {
+    fn chain(&self) -> Chain {
+        match self {
+            CliAccount::Evm(a) => a.chain(),
+            CliAccount::Sol(a) => a.chain(),
+        }
+    }
+
+    fn address(&self) -> &Address {
+        match self {
+            CliAccount::Evm(a) => a.address(),
+            CliAccount::Sol(a) => a.address(),
+        }
+    }
+
+    fn sign_raw(&self, buffer: &[u8]) -> Result<Signature, SignError> {
+        match self {
+            CliAccount::Evm(a) => a.sign_raw(buffer),
+            CliAccount::Sol(a) => a.sign_raw(buffer),
+        }
+    }
+}
+
+/// Load an account from a hex-encoded private key and chain.
+///
+/// The private key is read from `private_key` if provided, otherwise
+/// from the `ALEPH_PRIVATE_KEY` environment variable.
+///
+/// The hex string may optionally have a `0x` prefix.
+pub fn load_account(private_key: Option<&str>, chain: Chain) -> Result<CliAccount> {
+    let key_hex = match private_key {
+        Some(k) => k.to_string(),
+        None => std::env::var("ALEPH_PRIVATE_KEY")
+            .context("no private key provided; use --private-key or set ALEPH_PRIVATE_KEY")?,
+    };
+
+    let key_hex = key_hex.strip_prefix("0x").unwrap_or(&key_hex);
+    let key_bytes = hex::decode(key_hex).context("invalid hex in private key")?;
+
+    if chain.is_evm() {
+        let account = EvmAccount::new(chain, &key_bytes).map_err(|e| anyhow::anyhow!(e))?;
+        Ok(CliAccount::Evm(account))
+    } else if chain.is_svm() {
+        let account = SolanaAccount::new(chain, &key_bytes).map_err(|e| anyhow::anyhow!(e))?;
+        Ok(CliAccount::Sol(account))
+    } else {
+        bail!("chain {chain} is not supported for signing (only EVM and SVM chains)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 32-byte test key (not a real funded key)
+    const TEST_KEY_HEX: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efbba0f2d1db744ce06";
+
+    #[test]
+    fn load_evm_account() {
+        let account = load_account(Some(TEST_KEY_HEX), Chain::Ethereum).unwrap();
+        assert!(matches!(account, CliAccount::Evm(_)));
+        assert_eq!(account.chain(), Chain::Ethereum);
+        assert!(account.address().as_str().starts_with("0x"));
+    }
+
+    #[test]
+    fn load_evm_account_with_0x_prefix() {
+        let prefixed = format!("0x{TEST_KEY_HEX}");
+        let account = load_account(Some(&prefixed), Chain::Ethereum).unwrap();
+        // Same key with or without prefix should produce the same address
+        let account_no_prefix = load_account(Some(TEST_KEY_HEX), Chain::Ethereum).unwrap();
+        assert_eq!(account.address(), account_no_prefix.address());
+    }
+
+    #[test]
+    fn load_evm_account_other_chain() {
+        let account = load_account(Some(TEST_KEY_HEX), Chain::Base).unwrap();
+        assert!(matches!(account, CliAccount::Evm(_)));
+        assert_eq!(account.chain(), Chain::Base);
+    }
+
+    #[test]
+    fn load_sol_account() {
+        let account = load_account(Some(TEST_KEY_HEX), Chain::Sol).unwrap();
+        assert!(matches!(account, CliAccount::Sol(_)));
+        assert_eq!(account.chain(), Chain::Sol);
+        // Solana addresses are base58, not 0x-prefixed
+        assert!(!account.address().as_str().starts_with("0x"));
+    }
+
+    #[test]
+    fn load_account_invalid_hex() {
+        let err = load_account(Some("not-valid-hex!"), Chain::Ethereum).unwrap_err();
+        assert!(err.to_string().contains("invalid hex"));
+    }
+
+    #[test]
+    fn load_account_wrong_key_length() {
+        let err = load_account(Some("abcd"), Chain::Ethereum).unwrap_err();
+        assert!(err.to_string().contains("expected 32 bytes"));
+    }
+
+    #[test]
+    fn load_account_unsupported_chain() {
+        let err = load_account(Some(TEST_KEY_HEX), Chain::Tezos).unwrap_err();
+        assert!(err.to_string().contains("not supported for signing"));
+    }
+
+    #[test]
+    fn load_account_no_key_no_env() {
+        // Only test when env var is not set (avoid unsafe set_var/remove_var)
+        if std::env::var("ALEPH_PRIVATE_KEY").is_err() {
+            let err = load_account(None, Chain::Ethereum).unwrap_err();
+            assert!(err.to_string().contains("no private key provided"));
+        }
+    }
+
+    #[test]
+    fn cli_account_can_sign() {
+        let account = load_account(Some(TEST_KEY_HEX), Chain::Ethereum).unwrap();
+        let sig = account.sign_raw(b"test message").unwrap();
+        assert!(sig.as_str().starts_with("0x"));
+    }
+}
