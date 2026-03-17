@@ -1,4 +1,4 @@
-use crate::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CoreChannelAggregate};
+use crate::aggregate_models::corechannel::CoreChannelAggregate;
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
@@ -986,8 +986,9 @@ pub trait AlephAggregateClient {
     /// that lists all the nodes on the network.
     fn get_corechannel_aggregate(
         &self,
+        address: &Address,
     ) -> impl Future<Output = Result<CoreChannelAggregate, MessageError>> + Send {
-        self.get_aggregate(&CORECHANNEL_ADDRESS, "corechannel")
+        self.get_aggregate(address, "corechannel")
     }
 }
 
@@ -1522,6 +1523,7 @@ impl AlephPostClient for AlephClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aggregate_models::corechannel::CORECHANNEL_ADDRESS;
     use aleph_types::{address, channel, item_hash};
 
     const FORGOTTEN_MESSAGE: &str = include_str!(concat!(
@@ -1721,7 +1723,7 @@ mod tests {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
 
         let aggregate = client
-            .get_corechannel_aggregate()
+            .get_corechannel_aggregate(&CORECHANNEL_ADDRESS)
             .await
             .unwrap_or_else(|e| panic!("failed to fetch corechannel aggregate: {:?}", e));
 
