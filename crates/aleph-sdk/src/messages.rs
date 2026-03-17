@@ -16,6 +16,8 @@ pub enum MessageBuildError {
     Serialization(#[from] serde_json::Error),
     #[error("message signing failed: {0}")]
     Signing(#[from] SignError),
+    #[error("forget message must target at least one hash or aggregate")]
+    EmptyForget,
 }
 
 pub struct PostBuilder<'a, A: Account> {
@@ -167,6 +169,9 @@ impl<'a, A: Account> ForgetBuilder<'a, A> {
     }
 
     pub fn build(self) -> Result<PendingMessage, MessageBuildError> {
+        if self.hashes.is_empty() && self.aggregates.is_empty() {
+            return Err(MessageBuildError::EmptyForget);
+        }
         let forget_content = ForgetContent::new(self.hashes, self.aggregates, self.reason);
         let value = serde_json::to_value(forget_content)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::Forget, value);
@@ -313,6 +318,21 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_builder_with_channel() {
+        let account = TestAccount::new();
+        let mut content = serde_json::Map::new();
+        content.insert("setting".into(), serde_json::json!("value"));
+        let channel = aleph_types::channel::Channel::from("TEST".to_string());
+
+        let msg = AggregateBuilder::new(&account, "my_settings", content)
+            .channel(channel.clone())
+            .build()
+            .unwrap();
+
+        assert_eq!(msg.channel, Some(channel));
+    }
+
+    #[test]
     fn test_forget_builder() {
         let account = TestAccount::new();
         let hash = aleph_types::item_hash!(
@@ -354,5 +374,12 @@ mod tests {
             parsed["aggregates"][0],
             "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
         );
+    }
+
+    #[test]
+    fn test_forget_builder_empty_rejects() {
+        let account = TestAccount::new();
+        let err = ForgetBuilder::new(&account, vec![]).build().unwrap_err();
+        assert!(matches!(err, MessageBuildError::EmptyForget));
     }
 }
