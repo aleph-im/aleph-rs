@@ -68,6 +68,16 @@ pub enum StorageError {
     IntegrityError(#[from] crate::verify::VerifyError),
     #[error("Invalid URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
+    #[error("Insufficient balance")]
+    InsufficientBalance,
+    #[error("IPFS is disabled on this node")]
+    IpfsDisabled,
+    #[error("File too large")]
+    FileTooLarge,
+    #[error("Upload failed: {0}")]
+    UploadFailed(reqwest_middleware::Error),
+    #[error("Invalid response from node: {0}")]
+    InvalidResponse(String),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -918,6 +928,24 @@ pub trait AlephStorageClient {
             self.download_file_by_hash(&metadata.file_hash).await
         }
     }
+
+    /// Uploads raw bytes to the node's storage backend.
+    ///
+    /// Sends a `POST /api/v0/storage/add_file` multipart request and returns
+    /// the SHA-256 hash of the uploaded content.
+    fn upload_to_storage(
+        &self,
+        data: &[u8],
+    ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
+
+    /// Uploads raw bytes to the node's IPFS backend.
+    ///
+    /// Sends a `POST /api/v0/ipfs/add_file` multipart request and returns
+    /// the IPFS CID of the uploaded content.
+    fn upload_to_ipfs(
+        &self,
+        data: &[u8],
+    ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
 }
 
 /// Methods used to query account properties, ex: their balance.
@@ -1220,6 +1248,11 @@ impl AlephClient {
     }
 }
 
+#[derive(Deserialize)]
+struct UploadResponse {
+    hash: String,
+}
+
 impl AlephStorageClient for AlephClient {
     async fn get_file_size(&self, file_hash: &ItemHash) -> Result<Bytes, MessageError> {
         let url = self
@@ -1318,6 +1351,93 @@ impl AlephStorageClient for AlephClient {
             .map_err(reqwest_middleware::Error::from)?;
 
         Ok(FileDownload::new(response, file_hash.clone()))
+    }
+
+    async fn upload_to_storage(&self, data: &[u8]) -> Result<ItemHash, StorageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/storage/add_file")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name("upload")
+            .mime_str("application/octet-stream")
+            .expect("valid mime type");
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let response = self
+            .http_client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(StorageError::UploadFailed)?;
+
+        match response.status() {
+            StatusCode::PAYMENT_REQUIRED => return Err(StorageError::InsufficientBalance),
+            StatusCode::PAYLOAD_TOO_LARGE => return Err(StorageError::FileTooLarge),
+            status if !status.is_success() => {
+                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
+                    response
+                        .error_for_status()
+                        .expect_err("already checked non-success"),
+                )));
+            }
+            _ => {}
+        }
+
+        let upload: UploadResponse = response
+            .json()
+            .await
+            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+
+        upload
+            .hash
+            .parse::<ItemHash>()
+            .map_err(|e| StorageError::InvalidResponse(e.to_string()))
+    }
+
+    async fn upload_to_ipfs(&self, data: &[u8]) -> Result<ItemHash, StorageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/ipfs/add_file")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name("upload")
+            .mime_str("application/octet-stream")
+            .expect("valid mime type");
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let response = self
+            .http_client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(StorageError::UploadFailed)?;
+
+        match response.status() {
+            StatusCode::FORBIDDEN => return Err(StorageError::IpfsDisabled),
+            status if !status.is_success() => {
+                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
+                    response
+                        .error_for_status()
+                        .expect_err("already checked non-success"),
+                )));
+            }
+            _ => {}
+        }
+
+        let upload: UploadResponse = response
+            .json()
+            .await
+            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+
+        upload
+            .hash
+            .parse::<ItemHash>()
+            .map_err(|e| StorageError::InvalidResponse(e.to_string()))
     }
 }
 
@@ -1492,6 +1612,23 @@ mod tests {
     use super::*;
     use crate::aggregate_models::corechannel::CORECHANNEL_ADDRESS;
     use aleph_types::{address, channel, item_hash};
+
+    #[test]
+    fn test_storage_error_display() {
+        assert_eq!(
+            StorageError::InsufficientBalance.to_string(),
+            "Insufficient balance"
+        );
+        assert_eq!(
+            StorageError::IpfsDisabled.to_string(),
+            "IPFS is disabled on this node"
+        );
+        assert_eq!(StorageError::FileTooLarge.to_string(), "File too large");
+        assert_eq!(
+            StorageError::InvalidResponse("bad json".into()).to_string(),
+            "Invalid response from node: bad json"
+        );
+    }
 
     const FORGOTTEN_MESSAGE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1782,5 +1919,49 @@ mod tests {
             max_observed.load(Ordering::SeqCst),
             max_concurrency,
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_upload_to_storage() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let data = b"hello aleph storage";
+
+        let hash = client
+            .upload_to_storage(data)
+            .await
+            .expect("upload should succeed");
+
+        // Verify the hash is a native (SHA-256) hash, not a CID
+        assert!(matches!(hash, ItemHash::Native(_)));
+
+        // Verify the file is retrievable
+        let size = client
+            .get_file_size(&hash)
+            .await
+            .expect("file should exist");
+        assert_eq!(size, Bytes::from(data.len() as u64));
+    }
+
+    #[tokio::test]
+    #[ignore = "uses a remote CCN"]
+    async fn test_upload_to_ipfs() {
+        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
+        let data = b"hello aleph ipfs";
+
+        let hash = client
+            .upload_to_ipfs(data)
+            .await
+            .expect("upload should succeed");
+
+        // Verify the hash is an IPFS CID, not a native hash
+        assert!(matches!(hash, ItemHash::Ipfs(_)));
+
+        // Verify the file is retrievable
+        let size = client
+            .get_file_size(&hash)
+            .await
+            .expect("file should exist");
+        assert_eq!(size, Bytes::from(data.len() as u64));
     }
 }
