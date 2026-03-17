@@ -5,12 +5,13 @@ use std::time::Duration;
 use crate::account::load_account;
 use crate::cli::{
     AggregateCommand, AggregateCreateArgs, Cli, ForgetArgs, GetMessageArgs, MessageCommand,
-    PostAmendArgs, PostCommand, PostCreateArgs,
+    NodeCommand, PostAmendArgs, PostCommand, PostCreateArgs,
 };
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{
     AlephClient, AlephMessageClient, AlephPostClient, MessageError, PostMessageResponse,
 };
+use aleph_sdk::corechannel;
 use aleph_types::channel::Channel;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{Message, MessageStatus, MessageType};
@@ -356,6 +357,72 @@ async fn handle_aggregate_command(
     Ok(())
 }
 
+async fn handle_node_command(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    command: NodeCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        NodeCommand::CreateCcn(args) => {
+            let account = load_account(
+                args.signing.private_key.as_deref(),
+                args.signing.chain.into(),
+            )?;
+            let pending = corechannel::create_ccn(&account, &args.name, &args.multiaddress)?;
+            submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
+        }
+        NodeCommand::CreateCrn(args) => {
+            let account = load_account(
+                args.signing.private_key.as_deref(),
+                args.signing.chain.into(),
+            )?;
+            let pending = corechannel::create_crn(&account, &args.name, &args.address)?;
+            submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
+        }
+        NodeCommand::Link(args) => {
+            let account = load_account(
+                args.signing.private_key.as_deref(),
+                args.signing.chain.into(),
+            )?;
+            let pending = corechannel::link_crn(&account, args.crn)?;
+            submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
+        }
+        NodeCommand::Unlink(args) => {
+            let account = load_account(
+                args.signing.private_key.as_deref(),
+                args.signing.chain.into(),
+            )?;
+            let pending = corechannel::unlink_crn(&account, args.crn)?;
+            submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
+        }
+        NodeCommand::Stake(args) => {
+            let account = load_account(
+                args.signing.private_key.as_deref(),
+                args.signing.chain.into(),
+            )?;
+            let pending = corechannel::stake(&account, args.node)?;
+            submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
+        }
+        NodeCommand::Unstake(args) => {
+            let account = load_account(
+                args.signing.private_key.as_deref(),
+                args.signing.chain.into(),
+            )?;
+            let pending = corechannel::unstake(&account, args.node)?;
+            submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
+        }
+        NodeCommand::Drop(args) => {
+            let account = load_account(
+                args.signing.private_key.as_deref(),
+                args.signing.chain.into(),
+            )?;
+            let pending = corechannel::drop_node(&account, args.node)?;
+            submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
+        }
+    }
+}
+
 async fn handle_sync(args: cli::SyncArgs) -> Result<(), Box<dyn std::error::Error>> {
     let source_url = Url::parse(&args.source)?;
     let target_url = Url::parse(&args.target)?;
@@ -508,6 +575,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Aggregate {
             command: aggregate_command,
         } => handle_aggregate_command(&aleph_client, &ccn_url, json, aggregate_command).await?,
+        cli::Commands::Node {
+            command: node_command,
+        } => handle_node_command(&aleph_client, &ccn_url, json, node_command).await?,
     }
 
     Ok(())
