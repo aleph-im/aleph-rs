@@ -4,15 +4,67 @@ use aleph_types::account::Account;
 use aleph_types::channel;
 use aleph_types::channel::Channel;
 use aleph_types::message::pending::PendingMessage;
+use serde::Serialize;
 
 use crate::aggregate_models::corechannel::NodeHash;
 use crate::messages::{MessageBuildError, PostBuilder};
 
 static FOUNDATION_CHANNEL: LazyLock<Channel> = LazyLock::new(|| channel!("FOUNDATION"));
 
+#[derive(Debug, Serialize)]
+pub struct CreateNodeDetails {
+    pub name: String,
+    pub multiaddress: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateResourceNodeDetails {
+    pub name: String,
+    pub address: String,
+    #[serde(rename = "type")]
+    pub node_type: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum CoreChannelAction {
+    CreateNode { details: CreateNodeDetails },
+    CreateResourceNode { details: CreateResourceNodeDetails },
+    Link,
+    Unlink,
+    StakeSplit,
+    DropNode,
+    Unstake,
+}
+
+#[derive(Debug, Serialize)]
+struct CoreChannelContent {
+    #[serde(flatten)]
+    action: CoreChannelAction,
+    tags: Vec<String>,
+}
+
+impl CoreChannelContent {
+    fn new(action: CoreChannelAction) -> Self {
+        let action_tag = match &action {
+            CoreChannelAction::CreateNode { .. } => "create-node",
+            CoreChannelAction::CreateResourceNode { .. } => "create-resource-node",
+            CoreChannelAction::Link => "link",
+            CoreChannelAction::Unlink => "unlink",
+            CoreChannelAction::StakeSplit => "stake-split",
+            CoreChannelAction::DropNode => "drop-node",
+            CoreChannelAction::Unstake => "unstake",
+        };
+        Self {
+            action,
+            tags: vec![action_tag.to_string(), "mainnet".to_string()],
+        }
+    }
+}
+
 fn build_operation<A: Account>(
     account: &A,
-    content: serde_json::Value,
+    content: CoreChannelContent,
     reference: Option<NodeHash>,
 ) -> Result<PendingMessage, MessageBuildError> {
     let mut builder = PostBuilder::new(account, "corechan-operation", content)?
@@ -28,15 +80,13 @@ pub fn create_ccn<A: Account>(
     name: &str,
     multiaddress: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
-    let content = serde_json::json!({
-        "action": "create-node",
-        "tags": ["create-node", "mainnet"],
-        "details": {
-            "name": name,
-            "multiaddress": multiaddress,
-        }
-    });
-    build_operation(account, content, None)
+    let action = CoreChannelAction::CreateNode {
+        details: CreateNodeDetails {
+            name: name.to_string(),
+            multiaddress: multiaddress.to_string(),
+        },
+    };
+    build_operation(account, CoreChannelContent::new(action), None)
 }
 
 pub fn create_crn<A: Account>(
@@ -44,71 +94,69 @@ pub fn create_crn<A: Account>(
     name: &str,
     address: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
-    let content = serde_json::json!({
-        "action": "create-resource-node",
-        "tags": ["create-resource-node", "mainnet"],
-        "details": {
-            "name": name,
-            "address": address,
-            "type": "compute",
-        }
-    });
-    build_operation(account, content, None)
+    let action = CoreChannelAction::CreateResourceNode {
+        details: CreateResourceNodeDetails {
+            name: name.to_string(),
+            address: address.to_string(),
+            node_type: "compute".to_string(),
+        },
+    };
+    build_operation(account, CoreChannelContent::new(action), None)
 }
 
 pub fn link_crn<A: Account>(
     account: &A,
     crn_hash: NodeHash,
 ) -> Result<PendingMessage, MessageBuildError> {
-    let content = serde_json::json!({
-        "action": "link",
-        "tags": ["link", "mainnet"],
-    });
-    build_operation(account, content, Some(crn_hash))
+    build_operation(
+        account,
+        CoreChannelContent::new(CoreChannelAction::Link),
+        Some(crn_hash),
+    )
 }
 
 pub fn unlink_crn<A: Account>(
     account: &A,
     crn_hash: NodeHash,
 ) -> Result<PendingMessage, MessageBuildError> {
-    let content = serde_json::json!({
-        "action": "unlink",
-        "tags": ["unlink", "mainnet"],
-    });
-    build_operation(account, content, Some(crn_hash))
+    build_operation(
+        account,
+        CoreChannelContent::new(CoreChannelAction::Unlink),
+        Some(crn_hash),
+    )
 }
 
 pub fn stake<A: Account>(
     account: &A,
     node_hash: NodeHash,
 ) -> Result<PendingMessage, MessageBuildError> {
-    let content = serde_json::json!({
-        "action": "stake-split",
-        "tags": ["stake-split", "mainnet"],
-    });
-    build_operation(account, content, Some(node_hash))
+    build_operation(
+        account,
+        CoreChannelContent::new(CoreChannelAction::StakeSplit),
+        Some(node_hash),
+    )
 }
 
 pub fn unstake<A: Account>(
     account: &A,
     node_hash: NodeHash,
 ) -> Result<PendingMessage, MessageBuildError> {
-    let content = serde_json::json!({
-        "action": "unstake",
-        "tags": ["unstake", "mainnet"],
-    });
-    build_operation(account, content, Some(node_hash))
+    build_operation(
+        account,
+        CoreChannelContent::new(CoreChannelAction::Unstake),
+        Some(node_hash),
+    )
 }
 
 pub fn drop_node<A: Account>(
     account: &A,
     node_hash: NodeHash,
 ) -> Result<PendingMessage, MessageBuildError> {
-    let content = serde_json::json!({
-        "action": "drop-node",
-        "tags": ["drop-node", "mainnet"],
-    });
-    build_operation(account, content, Some(node_hash))
+    build_operation(
+        account,
+        CoreChannelContent::new(CoreChannelAction::DropNode),
+        Some(node_hash),
+    )
 }
 
 #[cfg(test)]
