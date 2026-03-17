@@ -53,6 +53,9 @@ impl Middleware for ConcurrencyLimit {
 #[derive(Clone)]
 pub struct AlephClient {
     http_client: ClientWithMiddleware,
+    /// Plain client without retry middleware — used for uploads where the
+    /// request body (multipart) is not cloneable and therefore cannot be retried.
+    upload_client: reqwest::Client,
     ccn_url: Url,
 }
 
@@ -1083,6 +1086,7 @@ impl AlephClientBuilder {
 
         AlephClient {
             http_client,
+            upload_client: reqwest::Client::new(),
             ccn_url: self.ccn_url,
         }
     }
@@ -1365,13 +1369,15 @@ impl AlephStorageClient for AlephClient {
             .expect("valid mime type");
         let form = reqwest::multipart::Form::new().part("file", part);
 
+        // Use the plain client — multipart bodies are not cloneable, so the
+        // retry middleware would fail with "Request object is not cloneable".
         let response = self
-            .http_client
+            .upload_client
             .post(url)
             .multipart(form)
             .send()
             .await
-            .map_err(StorageError::UploadFailed)?;
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
 
         match response.status() {
             StatusCode::PAYMENT_REQUIRED => return Err(StorageError::InsufficientBalance),
@@ -1409,13 +1415,15 @@ impl AlephStorageClient for AlephClient {
             .expect("valid mime type");
         let form = reqwest::multipart::Form::new().part("file", part);
 
+        // Use the plain client — multipart bodies are not cloneable, so the
+        // retry middleware would fail with "Request object is not cloneable".
         let response = self
-            .http_client
+            .upload_client
             .post(url)
             .multipart(form)
             .send()
             .await
-            .map_err(StorageError::UploadFailed)?;
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
 
         match response.status() {
             StatusCode::FORBIDDEN => return Err(StorageError::IpfsDisabled),
@@ -1666,110 +1674,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "uses a remote CCN"]
-    async fn test_get_file_size() {
-        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let file_hash =
-            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
-
-        let size = client
-            .get_file_size(&file_hash)
-            .await
-            .unwrap_or_else(|e| panic!("failed to fetch file: {:?}", e));
-        assert_eq!(size, Bytes::from(297));
-    }
-
-    #[tokio::test]
-    #[ignore = "uses a remote CCN"]
-    async fn test_download_file_by_hash() {
-        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let file_hash =
-            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
-
-        let download = client
-            .download_file_by_hash(&file_hash)
-            .await
-            .expect("download should succeed");
-
-        let content = download.bytes().await.expect("should read bytes");
-        assert_eq!(content.len(), 297);
-    }
-
-    #[tokio::test]
-    #[ignore = "uses a remote CCN"]
-    async fn test_download_file_to_disk() {
-        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let file_hash =
-            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
-
-        let tmp_dir = std::env::temp_dir();
-        let tmp_file = tmp_dir.join("aleph-test-download");
-
-        let download = client
-            .download_file_by_hash(&file_hash)
-            .await
-            .expect("download should succeed");
-
-        download
-            .to_file(&tmp_file)
-            .await
-            .expect("should write to file");
-
-        let metadata = std::fs::metadata(&tmp_file).expect("file should exist");
-        assert_eq!(metadata.len(), 297);
-
-        std::fs::remove_file(&tmp_file).ok();
-    }
-
-    #[tokio::test]
-    #[ignore = "uses a remote CCN"]
-    async fn test_download_file_with_verification() {
-        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let file_hash =
-            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
-
-        let download = client
-            .download_file_by_hash(&file_hash)
-            .await
-            .expect("download should succeed");
-
-        let content = download
-            .with_verification()
-            .bytes()
-            .await
-            .expect("verified download should succeed");
-        assert_eq!(content.len(), 297);
-    }
-
-    #[tokio::test]
-    #[ignore = "uses a remote CCN"]
-    async fn test_download_file_to_disk_with_verification() {
-        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let file_hash =
-            item_hash!("47959b5e166ed22fc78ed402236beeb234687d34d8edd4cb78fe7e4963b135e0");
-
-        let tmp_dir = std::env::temp_dir();
-        let tmp_file = tmp_dir.join("aleph-test-download-verified");
-
-        let download = client
-            .download_file_by_hash(&file_hash)
-            .await
-            .expect("download should succeed");
-
-        download
-            .with_verification()
-            .to_file(&tmp_file)
-            .await
-            .expect("verified write to file should succeed");
-
-        let metadata = std::fs::metadata(&tmp_file).expect("file should exist");
-        assert_eq!(metadata.len(), 297);
-
-        std::fs::remove_file(&tmp_file).ok();
-    }
-
-    #[tokio::test]
-    #[ignore = "uses a remote CCN"]
+    #[ignore = "uses a remote CCN with IPFS — no heph equivalent yet"]
     async fn test_download_cidv0_with_verification() {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
         let file_hash = item_hash!("QmQKPXPMENCLL7HfyPiTZkmyX5iHp5QrYdWWMeP6pEhiS4");
@@ -1788,7 +1693,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "uses a remote CCN"]
+    #[ignore = "uses a remote CCN with IPFS — no heph equivalent yet"]
     async fn test_download_large_cidv0_with_verification() {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
         let file_hash = item_hash!("QmdFaKjHBGsU525nHD6fgH7o1YnGZgfNo1x9jspzwCaR9N");
@@ -1822,7 +1727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "uses a remote CCN"]
+    #[ignore = "uses a remote CCN — requires corechannel data not in heph"]
     async fn test_get_corechannel_aggregate() {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
 
@@ -1842,7 +1747,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "uses a remote CCN websocket"]
+    #[ignore = "uses a remote CCN websocket — no heph equivalent yet"]
     async fn test_subscribe_to_messages() {
         use futures_util::StreamExt;
 
@@ -1922,29 +1827,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "uses a remote CCN"]
-    async fn test_upload_to_storage() {
-        let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
-        let data = b"hello aleph storage";
-
-        let hash = client
-            .upload_to_storage(data)
-            .await
-            .expect("upload should succeed");
-
-        // Verify the hash is a native (SHA-256) hash, not a CID
-        assert!(matches!(hash, ItemHash::Native(_)));
-
-        // Verify the file is retrievable
-        let size = client
-            .get_file_size(&hash)
-            .await
-            .expect("file should exist");
-        assert_eq!(size, Bytes::from(data.len() as u64));
-    }
-
-    #[tokio::test]
-    #[ignore = "uses a remote CCN"]
+    #[ignore = "uses a remote CCN with IPFS — no heph equivalent yet"]
     async fn test_upload_to_ipfs() {
         let client = AlephClient::new(Url::parse("https://api3.aleph.im").expect("valid url"));
         let data = b"hello aleph ipfs";

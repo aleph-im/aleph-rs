@@ -1,4 +1,4 @@
-use actix_web::web;
+use actix_web::{HttpResponse, Responder, web};
 use std::sync::Arc;
 
 use crate::config::HephConfig;
@@ -13,6 +13,13 @@ pub mod messages;
 pub mod posts;
 pub mod storage;
 
+async fn get_version() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "name": "heph",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
 pub struct AppState {
     pub db: Arc<Db>,
     pub file_store: Arc<FileStore>,
@@ -22,6 +29,7 @@ pub struct AppState {
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/v0")
+            .route("/version", web::get().to(get_version))
             .route("/messages", web::post().to(messages::post_message))
             .route("/messages.json", web::get().to(messages::list_messages))
             .route("/messages/hashes", web::get().to(messages::list_hashes))
