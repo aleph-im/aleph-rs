@@ -18,6 +18,16 @@ impl ForgetContent {
             reason,
         }
     }
+
+    /// Returns the list of item hashes to forget.
+    pub fn hashes(&self) -> &[ItemHash] {
+        &self.hashes
+    }
+
+    /// Returns the optional reason for forgetting.
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
 }
 
 #[cfg(test)]
