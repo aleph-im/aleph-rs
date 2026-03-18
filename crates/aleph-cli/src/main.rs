@@ -4,15 +4,19 @@ use std::time::Duration;
 
 use crate::account::load_account;
 use crate::cli::{
-    AggregateCommand, AggregateCreateArgs, Cli, ForgetArgs, GetMessageArgs, MessageCommand,
-    NodeCommand, PostAmendArgs, PostCommand, PostCreateArgs,
+    AggregateCommand, AggregateCreateArgs, Cli, FileCommand, FileUploadArgs, ForgetArgs,
+    GetMessageArgs, MessageCommand, NodeCommand, PostAmendArgs, PostCommand, PostCreateArgs,
+    StorageEngineCli,
 };
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{
-    AlephClient, AlephMessageClient, AlephPostClient, MessageError, PostMessageResponse,
+    AlephClient, AlephMessageClient, AlephPostClient, AlephStorageClient, MessageError,
+    PostMessageResponse,
 };
 use aleph_sdk::corechannel;
+use aleph_sdk::messages::StoreBuilder;
 use aleph_types::channel::Channel;
+use aleph_types::message::StorageEngine;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{Message, MessageStatus, MessageType};
 use clap::Parser;
@@ -423,6 +427,68 @@ async fn handle_node_command(
     }
 }
 
+async fn handle_file_command(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    command: FileCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        FileCommand::Upload(args) => {
+            handle_file_upload(aleph_client, ccn_url, json, args).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_file_upload(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: FileUploadArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dry_run = args.signing.dry_run;
+    let account = load_account(
+        args.signing.private_key.as_deref(),
+        args.signing.chain.into(),
+    )?;
+
+    let storage_engine = match args.storage_engine {
+        StorageEngineCli::Storage => StorageEngine::Storage,
+        StorageEngineCli::Ipfs => StorageEngine::Ipfs,
+    };
+
+    if !args.path.exists() {
+        return Err(format!("file not found: {}", args.path.display()).into());
+    }
+    if !args.path.is_file() {
+        return Err(format!("not a file: {}", args.path.display()).into());
+    }
+
+    // Upload file and get locally-verified hash
+    if !json {
+        eprintln!("Uploading {}...", args.path.display());
+    }
+    let file_hash = match storage_engine {
+        StorageEngine::Storage => aleph_client.upload_file_to_storage(&args.path).await?,
+        StorageEngine::Ipfs => aleph_client.upload_file_to_ipfs(&args.path).await?,
+    };
+    if !json {
+        eprintln!("  File hash: {file_hash}");
+    }
+
+    // Build STORE message
+    let mut builder = StoreBuilder::new(&account, file_hash, storage_engine);
+    if let Some(reference) = args.reference {
+        builder = builder.reference(reference);
+    }
+    if let Some(ch) = args.channel {
+        builder = builder.channel(Channel::from(ch));
+    }
+    let pending = builder.build()?;
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
 async fn handle_sync(args: cli::SyncArgs) -> Result<(), Box<dyn std::error::Error>> {
     let source_url = Url::parse(&args.source)?;
     let target_url = Url::parse(&args.target)?;
@@ -578,6 +644,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Node {
             command: node_command,
         } => handle_node_command(&aleph_client, &ccn_url, json, node_command).await?,
+        cli::Commands::File {
+            command: file_command,
+        } => handle_file_command(&aleph_client, &ccn_url, json, file_command).await?,
     }
 
     Ok(())
