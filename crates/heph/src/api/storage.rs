@@ -99,11 +99,12 @@ pub async fn get_metadata(state: web::Data<AppState>, path: web::Path<String>) -
 
     match result {
         Ok(Some(rec)) => {
+            let size = state.file_store.size(&rec.hash).unwrap_or(0) as i64;
             let download_url = format!("/api/v0/storage/raw/{}", rec.hash);
             HttpResponse::Ok().json(serde_json::json!({
                 "file_hash": rec.hash,
                 "type": rec.file_type,
-                "size": rec.size,
+                "size": size,
                 "download_url": download_url
             }))
         }
@@ -163,19 +164,7 @@ pub async fn get_by_message_hash(
             let ref_ = msg.content_ref.unwrap_or_default();
             let download_url = format!("/api/v0/storage/raw/{file_hash}");
 
-            // Fetch size from the files table.
-            let db2 = state.db.clone();
-            let fh_clone = file_hash.clone();
-            let file_result = tokio::task::spawn_blocking(move || {
-                db2.with_conn(|conn| files::get_file(conn, &fh_clone))
-            })
-            .await
-            .unwrap();
-
-            let size = match file_result {
-                Ok(Some(rec)) => rec.size,
-                _ => 0,
-            };
+            let size = state.file_store.size(&file_hash).unwrap_or(0) as i64;
 
             HttpResponse::Ok().json(serde_json::json!({
                 "ref": ref_,
@@ -225,17 +214,7 @@ async fn file_info_by_tag(state: &web::Data<AppState>, tag: &str) -> HttpRespons
     let file_hash = tag_rec.file_hash.clone();
     let owner = tag_rec.owner.clone();
 
-    let db2 = state.db.clone();
-    let fh_clone = file_hash.clone();
-    let file_result =
-        tokio::task::spawn_blocking(move || db2.with_conn(|conn| files::get_file(conn, &fh_clone)))
-            .await
-            .unwrap();
-
-    let size = match file_result {
-        Ok(Some(rec)) => rec.size,
-        _ => 0,
-    };
+    let size = state.file_store.size(&file_hash).unwrap_or(0) as i64;
 
     let download_url = format!("/api/v0/storage/raw/{file_hash}");
 
