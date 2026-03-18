@@ -640,6 +640,8 @@ pub struct DropNodeArgs {
 pub enum FileCommand {
     /// Upload a file to Aleph Cloud and create a STORE message.
     Upload(FileUploadArgs),
+    /// Download a file from Aleph Cloud by file hash, message hash, or ref.
+    Download(FileDownloadArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -669,4 +671,28 @@ pub struct FileUploadArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+pub struct FileDownloadArgs {
+    /// Download by file hash (direct access).
+    #[arg(long)]
+    pub hash: Option<ItemHash>,
+
+    /// Download by STORE message hash (resolves file hash from message metadata).
+    #[arg(long)]
+    pub message_hash: Option<ItemHash>,
+
+    /// Download by user-defined file reference. Requires --owner.
+    #[arg(long = "ref")]
+    pub reference: Option<String>,
+
+    /// Owner address, required when downloading by --ref.
+    #[arg(long, requires = "reference")]
+    pub owner: Option<String>,
+
+    /// Output file path. If omitted, writes to stdout.
+    #[arg(short, long)]
+    pub output: Option<std::path::PathBuf>,
 }
