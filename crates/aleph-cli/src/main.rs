@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use crate::account::load_account;
 use crate::cli::{
-    AggregateCommand, AggregateCreateArgs, Cli, FileCommand, FileDownloadArgs, FileUploadArgs,
-    ForgetArgs, GetMessageArgs, InstanceCommand, InstanceCreateArgs, MessageCommand, NodeCommand, PostAmendArgs, PostCommand,
-    PostCreateArgs, StorageEngineCli,
+    parse_size_to_mib, AggregateCommand, AggregateCreateArgs, Cli, FileCommand, FileDownloadArgs,
+    FileUploadArgs, ForgetArgs, GetMessageArgs, InstanceCommand, InstanceCreateArgs, MessageCommand, NodeCommand, PostAmendArgs,
+    PostCommand, PostCreateArgs, StorageEngineCli
 };
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{
@@ -14,9 +14,9 @@ use aleph_sdk::client::{
     PostMessageResponse,
 };
 use aleph_sdk::corechannel;
+use aleph_sdk::messages::{InstanceBuilder, StoreBuilder};
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
-use aleph_sdk::messages::{InstanceBuilder, StoreBuilder};
 use aleph_types::message::execution::base::{Payment, PaymentType};
 use aleph_types::message::execution::environment::Hypervisor;
 use aleph_types::message::execution::volume::{
@@ -595,9 +595,7 @@ fn parse_persistent_volumes(
                 match k {
                     "name" => name = Some(v.to_string()),
                     "mount" => mount = Some(v.to_string()),
-                    "size_mib" => {
-                        size_mib = Some(v.parse().map_err(|_| format!("invalid size_mib: '{v}'"))?)
-                    }
+                    "size" => size_mib = Some(parse_size_to_mib(v)?),
                     "persistence" => {
                         persistence = Some(match v {
                             "host" => VolumePersistence::Host,
@@ -608,7 +606,7 @@ fn parse_persistent_volumes(
                     _ => return Err(format!("unknown persistent volume key: '{k}'").into()),
                 }
             }
-            let size_mib = size_mib.ok_or("persistent volume requires size_mib")?;
+            let size_mib = size_mib.ok_or("persistent volume requires size")?;
             let mount = mount.ok_or("persistent volume requires mount")?;
             Ok(MachineVolume::Persistent(PersistentVolume {
                 base: BaseVolume {
@@ -636,13 +634,11 @@ fn parse_ephemeral_volumes(
             for (k, v) in pairs {
                 match k {
                     "mount" => mount = Some(v.to_string()),
-                    "size_mib" => {
-                        size_mib = Some(v.parse().map_err(|_| format!("invalid size_mib: '{v}'"))?)
-                    }
+                    "size" => size_mib = Some(parse_size_to_mib(v)?),
                     _ => return Err(format!("unknown ephemeral volume key: '{k}'").into()),
                 }
             }
-            let size_mib = size_mib.ok_or("ephemeral volume requires size_mib")?;
+            let size_mib = size_mib.ok_or("ephemeral volume requires size")?;
             let mount = mount.ok_or("ephemeral volume requires mount")?;
             Ok(MachineVolume::Ephemeral(EphemeralVolume::new(
                 size_mib, mount,
@@ -709,7 +705,8 @@ async fn handle_instance_create(
     })?;
     let ssh_pubkey = ssh_pubkey.trim().to_string();
 
-    let rootfs_size = PersistentVolumeSize::try_from(args.rootfs_size)?;
+    let rootfs_size = PersistentVolumeSize::try_from(args.rootfs_size)
+        .map_err(|e| format!("invalid rootfs size: {e}"))?;
 
     let mut builder = InstanceBuilder::new(&account, args.rootfs, rootfs_size)
         .vcpus(args.vcpus)
@@ -1030,14 +1027,10 @@ mod tests {
 
     #[test]
     fn parse_kv_pairs_basic() {
-        let pairs = parse_kv_pairs("name=data,mount=/opt/data,size_mib=1000").unwrap();
+        let pairs = parse_kv_pairs("name=data,mount=/opt/data,size=1GiB").unwrap();
         assert_eq!(
             pairs,
-            vec![
-                ("name", "data"),
-                ("mount", "/opt/data"),
-                ("size_mib", "1000")
-            ]
+            vec![("name", "data"), ("mount", "/opt/data"), ("size", "1GiB")]
         );
     }
 
@@ -1047,8 +1040,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_size_binary_units() {
+        assert_eq!(parse_size_to_mib("100MiB").unwrap(), 100);
+        assert_eq!(parse_size_to_mib("1GiB").unwrap(), 1024);
+        assert_eq!(parse_size_to_mib("2GiB").unwrap(), 2048);
+        assert_eq!(parse_size_to_mib("1TiB").unwrap(), 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_decimal_units() {
+        // 1 GB = 1_000_000_000 bytes = ~953.674 MiB
+        assert_eq!(parse_size_to_mib("1GB").unwrap(), 954);
+        // 20 GB = ~19073.486 MiB
+        assert_eq!(parse_size_to_mib("20GB").unwrap(), 19073);
+        // 100 MB = ~95.367 MiB
+        assert_eq!(parse_size_to_mib("100MB").unwrap(), 95);
+    }
+
+    #[test]
+    fn parse_size_case_insensitive() {
+        assert_eq!(parse_size_to_mib("1gib").unwrap(), 1024);
+        assert_eq!(parse_size_to_mib("1GIB").unwrap(), 1024);
+        assert_eq!(parse_size_to_mib("1gb").unwrap(), parse_size_to_mib("1GB").unwrap());
+    }
+
+    #[test]
+    fn parse_size_rejects_bare_numbers() {
+        assert!(parse_size_to_mib("1024").is_err());
+    }
+
+    #[test]
+    fn parse_size_rejects_unknown_units() {
+        assert!(parse_size_to_mib("100KiB").is_err());
+    }
+
+    #[test]
     fn parse_persistent_volume_basic() {
-        let specs = vec!["name=data,mount=/opt/data,size_mib=1000".to_string()];
+        let specs = vec!["name=data,mount=/opt/data,size=1GiB".to_string()];
         let volumes = parse_persistent_volumes(&specs).unwrap();
         assert_eq!(volumes.len(), 1);
         assert!(matches!(volumes[0], MachineVolume::Persistent(_)));
@@ -1056,7 +1084,7 @@ mod tests {
 
     #[test]
     fn parse_persistent_volume_with_persistence() {
-        let specs = vec!["name=db,mount=/var/db,size_mib=500,persistence=store".to_string()];
+        let specs = vec!["name=db,mount=/var/db,size=500MiB,persistence=store".to_string()];
         let volumes = parse_persistent_volumes(&specs).unwrap();
         if let MachineVolume::Persistent(v) = &volumes[0] {
             assert_eq!(v.persistence, Some(VolumePersistence::Store));
@@ -1074,13 +1102,13 @@ mod tests {
 
     #[test]
     fn parse_persistent_volume_missing_mount() {
-        let specs = vec!["name=data,size_mib=1000".to_string()];
+        let specs = vec!["name=data,size=1GiB".to_string()];
         assert!(parse_persistent_volumes(&specs).is_err());
     }
 
     #[test]
     fn parse_ephemeral_volume_basic() {
-        let specs = vec!["mount=/tmp/scratch,size_mib=100".to_string()];
+        let specs = vec!["mount=/tmp/scratch,size=100MiB".to_string()];
         let volumes = parse_ephemeral_volumes(&specs).unwrap();
         assert_eq!(volumes.len(), 1);
         assert!(matches!(volumes[0], MachineVolume::Ephemeral(_)));
@@ -1088,7 +1116,7 @@ mod tests {
 
     #[test]
     fn parse_ephemeral_volume_missing_mount() {
-        let specs = vec!["size_mib=100".to_string()];
+        let specs = vec!["size=100MiB".to_string()];
         assert!(parse_ephemeral_volumes(&specs).is_err());
     }
 
@@ -1130,8 +1158,8 @@ mod tests {
     #[test]
     fn parse_multiple_volumes() {
         let persistent = vec![
-            "name=a,mount=/a,size_mib=100".to_string(),
-            "name=b,mount=/b,size_mib=200".to_string(),
+            "name=a,mount=/a,size=100MiB".to_string(),
+            "name=b,mount=/b,size=200MiB".to_string(),
         ];
         let volumes = parse_persistent_volumes(&persistent).unwrap();
         assert_eq!(volumes.len(), 2);

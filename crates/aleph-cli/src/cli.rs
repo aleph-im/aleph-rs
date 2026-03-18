@@ -3,6 +3,43 @@ use aleph_types::item_hash::ItemHash;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+/// Parse a human-readable size string (e.g. "20GB", "1024MB", "1TiB") into MiB.
+/// Bare numbers without units are rejected.
+pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    // Find where the numeric part ends and the unit begins
+    let unit_start = s
+        .find(|c: char| c.is_alphabetic())
+        .ok_or_else(|| format!("missing unit in size '{s}' (use e.g. 20GB, 1024MB, 1TiB)"))?;
+    let (num_str, unit) = s.split_at(unit_start);
+    let value: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid number in size '{s}'"))?;
+    if value < 0.0 {
+        return Err(format!("size cannot be negative: '{s}'"));
+    }
+
+    // Convert to MiB
+    let mib = match unit.to_lowercase().as_str() {
+        // Binary units (1024-based)
+        "mib" => value,
+        "gib" => value * 1024.0,
+        "tib" => value * 1024.0 * 1024.0,
+        // Decimal units (1000-based), converted to MiB
+        "mb" => value * 1_000_000.0 / 1_048_576.0,
+        "gb" => value * 1_000_000_000.0 / 1_048_576.0,
+        "tb" => value * 1_000_000_000_000.0 / 1_048_576.0,
+        _ => return Err(format!("unknown size unit '{unit}' (use MB, GB, TB, MiB, GiB, TiB)")),
+    };
+
+    let mib_rounded = mib.round() as u64;
+    if mib_rounded == 0 {
+        return Err(format!("size too small: '{s}' rounds to 0 MiB"));
+    }
+    Ok(mib_rounded)
+}
+
 #[derive(Parser)]
 #[command(name = "aleph", version, about = "Aleph CLI")]
 pub struct Cli {
@@ -718,16 +755,16 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub rootfs: ItemHash,
 
-    /// Root filesystem size in MiB.
-    #[arg(long)]
+    /// Root filesystem size (e.g. 20GB, 1024MB, 1TiB).
+    #[arg(long, value_parser = parse_size_to_mib)]
     pub rootfs_size: u64,
 
     /// Number of virtual CPUs.
-    #[arg(long)]
+    #[arg(long, default_value = "1")]
     pub vcpus: u32,
 
-    /// Memory in MiB.
-    #[arg(long)]
+    /// Memory size (e.g. 2GB, 2048MB, 2GiB).
+    #[arg(long, value_parser = parse_size_to_mib, default_value = "2GiB")]
     pub memory: u64,
 
     /// Path to an SSH public key file.
@@ -742,13 +779,13 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
-    /// Persistent volume: `name=N,mount=PATH,size_mib=S[,persistence=host|store]`.
-    /// Can be repeated for multiple volumes.
+    /// Persistent volume: `name=N,mount=PATH,size=SIZE[,persistence=host|store]`.
+    /// SIZE uses human-readable format (e.g. 10GB, 500MiB). Can be repeated.
     #[arg(long)]
     pub persistent_volume: Option<Vec<String>>,
 
-    /// Ephemeral volume: `mount=PATH,size_mib=S`.
-    /// Can be repeated for multiple volumes.
+    /// Ephemeral volume: `mount=PATH,size=SIZE`.
+    /// SIZE uses human-readable format (e.g. 100MB, 500MiB). Can be repeated.
     #[arg(long)]
     pub ephemeral_volume: Option<Vec<String>>,
 
