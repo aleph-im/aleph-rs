@@ -17,6 +17,7 @@ pub enum PostType {
 pub struct PostContent {
     #[serde(flatten)]
     pub post_type: PostType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
 }
 

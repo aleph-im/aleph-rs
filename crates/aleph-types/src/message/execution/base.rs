@@ -25,10 +25,10 @@ pub enum PaymentType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Payment {
     /// Chain to check for funds.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<Chain>,
     /// Optional alternative address to send funds to.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receiver: Option<Address>,
     #[serde(rename = "type")]
     pub payment_type: PaymentType,
@@ -75,24 +75,28 @@ pub struct ExecutableContent {
     /// Allow amends to update this function.
     pub allow_amend: bool,
     /// Metadata of the VM.
-    #[serde(default, deserialize_with = "deserialize_metadata_tolerant")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_metadata_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub metadata: Option<HashMap<String, serde_json::Value>>,
     /// Environment variables to set in the VM.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variables: Option<HashMap<String, String>>,
     /// System resources required.
     pub resources: MachineResources,
     /// Payment details.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment: Option<Payment>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirements: Option<HostRequirements>,
     /// Volumes to mount on the filesystem.
     #[serde(default)]
     pub volumes: Vec<MachineVolume>,
     /// Previous version to replace.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<ItemHash>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorized_keys: Option<Vec<String>>,
 }

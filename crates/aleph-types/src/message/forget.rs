@@ -6,7 +6,7 @@ pub struct ForgetContent {
     hashes: Vec<ItemHash>,
     #[serde(default)]
     aggregates: Vec<ItemHash>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
 
