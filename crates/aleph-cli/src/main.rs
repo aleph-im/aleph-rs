@@ -499,9 +499,10 @@ async fn handle_file_download(
     args: FileDownloadArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve the file hash — for indirect lookups, fetch metadata first.
-    let file_hash = if let Some(hash) = args.hash {
+    let source = args.source;
+    let file_hash = if let Some(hash) = source.hash {
         hash
-    } else if let Some(message_hash) = args.message_hash {
+    } else if let Some(message_hash) = source.message_hash {
         if !json {
             eprintln!("Resolving file hash from message {message_hash}...");
         }
@@ -509,8 +510,8 @@ async fn handle_file_download(
             .get_file_metadata_by_message_hash(&message_hash)
             .await?;
         metadata.file_hash
-    } else if let Some(reference) = args.reference {
-        let owner = args
+    } else if let Some(reference) = source.reference {
+        let owner = source
             .owner
             .ok_or("--owner is required when downloading by --ref")?;
         let file_ref = FileRef::UserDefined {

@@ -674,8 +674,22 @@ pub struct FileUploadArgs {
 }
 
 #[derive(Args)]
-#[group(required = true, multiple = false)]
 pub struct FileDownloadArgs {
+    #[command(flatten)]
+    pub source: FileDownloadSource,
+
+    /// Output file path. Defaults to `./<file_hash>` in the current directory.
+    #[arg(short, long)]
+    pub output: Option<std::path::PathBuf>,
+
+    /// Write file contents to stdout instead of saving to a file.
+    #[arg(long)]
+    pub stdout: bool,
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+pub struct FileDownloadSource {
     /// Download by file hash (direct access).
     #[arg(long)]
     pub hash: Option<ItemHash>,
@@ -691,12 +705,4 @@ pub struct FileDownloadArgs {
     /// Owner address, required when downloading by --ref.
     #[arg(long, requires = "reference")]
     pub owner: Option<String>,
-
-    /// Output file path. Defaults to `./<file_hash>` in the current directory.
-    #[arg(short, long)]
-    pub output: Option<std::path::PathBuf>,
-
-    /// Write file contents to stdout instead of saving to a file.
-    #[arg(long)]
-    pub stdout: bool,
 }
