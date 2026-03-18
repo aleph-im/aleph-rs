@@ -687,7 +687,13 @@ async fn handle_sync(args: cli::SyncArgs) -> Result<(), Box<dyn std::error::Erro
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("Error: {e}");
+        // Walk the source chain to find the root cause — avoids
+        // redundant "Storage error: File not found: ..." nesting.
+        let mut cause: &dyn std::error::Error = e.as_ref();
+        while let Some(src) = cause.source() {
+            cause = src;
+        }
+        eprintln!("Error: {cause}");
         std::process::exit(1);
     }
 }
