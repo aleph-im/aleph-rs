@@ -575,6 +575,68 @@ async fn test_cli_file_upload() {
     assert_eq!(bytes.as_ref(), file_content);
 }
 
+/// Test file download via all three lookup modes:
+///   - by file hash (direct)
+///   - by message hash (resolves file hash from STORE message metadata)
+///   - by ref (resolves file hash from user-defined reference)
+#[tokio::test]
+async fn test_cli_file_download() {
+    use aleph_sdk::client::{AlephClient, AlephMessageClient, AlephStorageClient};
+    use aleph_sdk::messages::StoreBuilder;
+    use aleph_types::chain::Address;
+    use aleph_types::message::{FileRef, StorageEngine};
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+
+    // Upload a file and create a STORE message with a ref
+    let tmpdir = tempfile::tempdir().unwrap();
+    let file_path = tmpdir.path().join("download-test.txt");
+    let file_content = b"download integration test content";
+    std::fs::write(&file_path, file_content).unwrap();
+
+    let file_hash = client.upload_file_to_storage(&file_path).await.unwrap();
+    let pending = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Storage)
+        .reference("download-test-ref")
+        .build()
+        .unwrap();
+    let resp = client.post_message(&pending, true).await.unwrap();
+    assert_eq!(resp.message_status, "processed");
+
+    // 1. Download by file hash
+    let download = client.download_file_by_hash(&file_hash).await.unwrap();
+    let bytes = download.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), file_content);
+
+    // 2. Download by message hash
+    let download = client
+        .download_file_by_message_hash(&pending.item_hash)
+        .await
+        .unwrap();
+    let bytes = download.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), file_content);
+
+    // 3. Download by ref (owner + reference)
+    let file_ref = FileRef::UserDefined {
+        owner: Address::from(account.address().as_str().to_string()),
+        reference: "download-test-ref".to_string(),
+    };
+    let download = client.download_file_by_ref(&file_ref).await.unwrap();
+    let bytes = download.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), file_content);
+
+    // 4. Download to file
+    let output_path = tmpdir.path().join("downloaded.txt");
+    let download = client.download_file_by_hash(&file_hash).await.unwrap();
+    download.to_file(&output_path).await.unwrap();
+    let on_disk = std::fs::read(&output_path).unwrap();
+    assert_eq!(on_disk, file_content);
+}
+
 /// Test creating a STORE message using the SDK's StoreBuilder.
 /// Uploads a file, builds a STORE message, submits it, and verifies it can be retrieved.
 #[tokio::test]
