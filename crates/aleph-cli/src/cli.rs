@@ -742,17 +742,17 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
-    /// Persistent volume: "name=<n>,mount=<path>,size_mib=<s>[,persistence=<host|store>]".
+    /// Persistent volume: `name=N,mount=PATH,size_mib=S[,persistence=host|store]`.
     /// Can be repeated for multiple volumes.
     #[arg(long)]
     pub persistent_volume: Option<Vec<String>>,
 
-    /// Ephemeral volume: "mount=<path>,size_mib=<s>".
+    /// Ephemeral volume: `mount=PATH,size_mib=S`.
     /// Can be repeated for multiple volumes.
     #[arg(long)]
     pub ephemeral_volume: Option<Vec<String>>,
 
-    /// Immutable volume: "ref=<hash>,mount=<path>[,use_latest=<bool>]".
+    /// Immutable volume: `ref=HASH,mount=PATH[,use_latest=BOOL]`.
     /// Can be repeated for multiple volumes.
     #[arg(long)]
     pub immutable_volume: Option<Vec<String>>,
