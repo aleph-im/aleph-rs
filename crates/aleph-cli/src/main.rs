@@ -1061,7 +1061,10 @@ mod tests {
     fn parse_size_case_insensitive() {
         assert_eq!(parse_size_to_mib("1gib").unwrap(), 1024);
         assert_eq!(parse_size_to_mib("1GIB").unwrap(), 1024);
-        assert_eq!(parse_size_to_mib("1gb").unwrap(), parse_size_to_mib("1GB").unwrap());
+        assert_eq!(
+            parse_size_to_mib("1gb").unwrap(),
+            parse_size_to_mib("1GB").unwrap()
+        );
     }
 
     #[test]

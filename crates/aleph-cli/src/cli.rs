@@ -30,7 +30,11 @@ pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
         "mb" => value * 1_000_000.0 / 1_048_576.0,
         "gb" => value * 1_000_000_000.0 / 1_048_576.0,
         "tb" => value * 1_000_000_000_000.0 / 1_048_576.0,
-        _ => return Err(format!("unknown size unit '{unit}' (use MB, GB, TB, MiB, GiB, TiB)")),
+        _ => {
+            return Err(format!(
+                "unknown size unit '{unit}' (use MB, GB, TB, MiB, GiB, TiB)"
+            ));
+        }
     };
 
     let mib_rounded = mib.round() as u64;
