@@ -21,4 +21,4 @@ pub use forget::ForgetContent;
 pub use instance::InstanceContent;
 pub use post::{PostContent, PostType};
 pub use program::ProgramContent;
-pub use store::{FileRef, RawFileRef, StoreContent};
+pub use store::{FileRef, RawFileRef, StorageBackend, StorageEngine, StoreContent};

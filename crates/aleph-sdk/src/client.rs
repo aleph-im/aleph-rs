@@ -1,7 +1,11 @@
 use crate::aggregate_models::corechannel::CoreChannelAggregate;
+use crate::messages::StoreBuilder;
+use crate::verify::Hasher;
+use aleph_types::account::Account;
 use aleph_types::chain::{Address, Chain, Signature};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::StorageEngine;
 use aleph_types::message::item_type::ItemType;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
@@ -22,7 +26,7 @@ use serde_with::{StringWithSeparator, formats::CommaSeparator, serde_as, skip_se
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use url::Url;
 
@@ -49,6 +53,20 @@ impl Middleware for ConcurrencyLimit {
             .expect("semaphore is never closed");
         next.run(req, extensions).await
     }
+}
+
+/// Read a file in chunks and compute its hash using the given Hasher.
+async fn hash_file(path: &std::path::Path, mut hasher: Hasher) -> Result<ItemHash, StorageError> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut buf = vec![0u8; 64 * 1024]; // 64 KiB chunks
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize())
 }
 
 #[derive(Clone)]
@@ -82,6 +100,13 @@ pub enum StorageError {
     UploadFailed(reqwest_middleware::Error),
     #[error("Invalid response from node: {0}")]
     InvalidResponse(String),
+    #[error("upload integrity mismatch: locally computed {expected}, server returned {actual}")]
+    UploadIntegrityMismatch {
+        expected: ItemHash,
+        actual: ItemHash,
+    },
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -119,6 +144,8 @@ pub enum MessageError {
         expected: ItemHash,
         actual: ItemHash,
     },
+    #[error("Message build error: {0}")]
+    Build(#[from] crate::messages::MessageBuildError),
 }
 
 /// Error during message integrity verification.
@@ -798,6 +825,31 @@ pub trait AlephMessageClient {
         }
     }
 
+    /// Uploads a file and creates a STORE message in one call.
+    ///
+    /// This is a convenience that combines `upload_file_to_storage`/`upload_file_to_ipfs`,
+    /// `StoreBuilder`, and `post_message`. For more control (setting reference,
+    /// metadata, or channel), use those components directly.
+    fn create_store(
+        &self,
+        account: &impl Account,
+        path: impl AsRef<std::path::Path> + Send,
+        storage_engine: StorageEngine,
+        sync: bool,
+    ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send
+    where
+        Self: AlephStorageClient + Sync,
+    {
+        async move {
+            let file_hash = match storage_engine {
+                StorageEngine::Storage => self.upload_file_to_storage(path).await?,
+                StorageEngine::Ipfs => self.upload_file_to_ipfs(path).await?,
+            };
+            let message = StoreBuilder::new(account, file_hash, storage_engine).build()?;
+            self.post_message(&message, sync).await
+        }
+    }
+
     /// Verifies raw content and builds a [`VerifiedMessage`] from a [`MessageHeader`].
     ///
     /// For inline messages, verification is done locally by hashing the `item_content` string.
@@ -1009,6 +1061,22 @@ pub trait AlephStorageClient {
     fn upload_to_ipfs(
         &self,
         data: &[u8],
+    ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
+
+    /// Uploads a file from disk to native storage, streaming without
+    /// loading the full file into memory. Returns the locally-computed
+    /// SHA-256 hash, verified against the server's response.
+    fn upload_file_to_storage(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+    ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
+
+    /// Uploads a file from disk to IPFS, streaming without loading the
+    /// full file into memory. Returns the locally-computed CID, verified
+    /// against the server's response.
+    fn upload_file_to_ipfs(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
 }
 
@@ -1627,6 +1695,130 @@ impl AlephStorageClient for AlephClient {
             .parse::<ItemHash>()
             .map_err(|e| StorageError::InvalidResponse(e.to_string()))
     }
+
+    async fn upload_file_to_storage(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+    ) -> Result<ItemHash, StorageError> {
+        let path = path.as_ref();
+
+        // Pass 1: stream file to compute SHA-256 hash locally
+        let local_hash = hash_file(path, Hasher::for_storage()).await?;
+
+        // Pass 2: upload file using reqwest streaming
+        let url = self
+            .ccn_url
+            .join("/api/v0/storage/add_file")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        // Part::file() returns io::Result<Part>, converts via StorageError::Io
+        let part = reqwest::multipart::Part::file(path)
+            .await?
+            .mime_str("application/octet-stream")
+            .expect("valid mime type");
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let response = self
+            .upload_client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+
+        match response.status() {
+            StatusCode::PAYMENT_REQUIRED => return Err(StorageError::InsufficientBalance),
+            StatusCode::PAYLOAD_TOO_LARGE => return Err(StorageError::FileTooLarge),
+            status if !status.is_success() => {
+                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
+                    response
+                        .error_for_status()
+                        .expect_err("already checked non-success"),
+                )));
+            }
+            _ => {}
+        }
+
+        let upload: UploadResponse = response
+            .json()
+            .await
+            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+
+        let server_hash = upload
+            .hash
+            .parse::<ItemHash>()
+            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+
+        if local_hash != server_hash {
+            return Err(StorageError::UploadIntegrityMismatch {
+                expected: local_hash,
+                actual: server_hash,
+            });
+        }
+
+        Ok(local_hash)
+    }
+
+    async fn upload_file_to_ipfs(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+    ) -> Result<ItemHash, StorageError> {
+        let path = path.as_ref();
+
+        // Pass 1: stream file to compute CIDv0 hash locally
+        let local_hash = hash_file(path, Hasher::for_ipfs()).await?;
+
+        // Pass 2: upload file using reqwest streaming
+        let url = self
+            .ccn_url
+            .join("/api/v0/ipfs/add_file")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let part = reqwest::multipart::Part::file(path)
+            .await?
+            .mime_str("application/octet-stream")
+            .expect("valid mime type");
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let response = self
+            .upload_client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+
+        match response.status() {
+            StatusCode::FORBIDDEN => return Err(StorageError::IpfsDisabled),
+            status if !status.is_success() => {
+                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
+                    response
+                        .error_for_status()
+                        .expect_err("already checked non-success"),
+                )));
+            }
+            _ => {}
+        }
+
+        let upload: UploadResponse = response
+            .json()
+            .await
+            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+
+        let server_hash = upload
+            .hash
+            .parse::<ItemHash>()
+            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+
+        if local_hash != server_hash {
+            return Err(StorageError::UploadIntegrityMismatch {
+                expected: local_hash,
+                actual: server_hash,
+            });
+        }
+
+        Ok(local_hash)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2177,6 +2369,20 @@ mod tests {
                 self.upload_ipfs_called.store(true, Ordering::SeqCst);
                 let hash = self.upload_hash.clone();
                 async move { Ok(hash) }
+            }
+
+            async fn upload_file_to_storage(
+                &self,
+                _path: impl AsRef<std::path::Path> + Send,
+            ) -> Result<ItemHash, StorageError> {
+                unimplemented!()
+            }
+
+            async fn upload_file_to_ipfs(
+                &self,
+                _path: impl AsRef<std::path::Path> + Send,
+            ) -> Result<ItemHash, StorageError> {
+                unimplemented!()
             }
         }
 

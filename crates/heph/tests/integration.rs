@@ -531,3 +531,74 @@ async fn test_submit_message_storage() {
 async fn test_submit_message_ipfs() {
     todo!()
 }
+
+/// Test creating a STORE message using the SDK's StoreBuilder.
+/// Uploads a file, builds a STORE message, submits it, and verifies it can be retrieved.
+#[tokio::test]
+async fn test_store_builder_e2e() {
+    use aleph_sdk::client::{AlephClient, AlephMessageClient, AlephStorageClient};
+    use aleph_sdk::messages::StoreBuilder;
+    use aleph_types::message::{MessageStatus, StorageEngine};
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+
+    // Write a temp file to upload
+    let tmpdir = tempfile::tempdir().unwrap();
+    let file_path = tmpdir.path().join("test-upload.bin");
+    let file_content = b"hello aleph store test!";
+    std::fs::write(&file_path, file_content).unwrap();
+
+    // Upload file and get local hash
+    let file_hash = client.upload_file_to_storage(&file_path).await.unwrap();
+
+    // Build and submit STORE message
+    let pending = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Storage)
+        .build()
+        .unwrap();
+
+    assert_eq!(pending.message_type, MessageType::Store);
+    assert_eq!(pending.item_type, ItemType::Inline);
+
+    let resp = client.post_message(&pending, true).await.unwrap();
+    assert_eq!(resp.message_status, "processed");
+
+    // Verify the message can be fetched back
+    let fetched = client.get_message(&pending.item_hash).await.unwrap();
+    assert_eq!(fetched.status(), MessageStatus::Processed);
+
+    // Verify the uploaded file is downloadable
+    let download = client.download_file_by_hash(&file_hash).await.unwrap();
+    let bytes = download.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), file_content);
+}
+
+/// Test the create_store convenience method (upload + build + submit in one call).
+#[tokio::test]
+async fn test_create_store_convenience() {
+    use aleph_sdk::client::{AlephClient, AlephMessageClient};
+    use aleph_types::message::StorageEngine;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+
+    // Write a temp file
+    let tmpdir = tempfile::tempdir().unwrap();
+    let file_path = tmpdir.path().join("create-store-test.txt");
+    std::fs::write(&file_path, b"create_store convenience test").unwrap();
+
+    // One-call: upload + build + submit
+    let resp = client
+        .create_store(&account, &file_path, StorageEngine::Storage, true)
+        .await
+        .unwrap();
+    assert_eq!(resp.message_status, "processed");
+}
