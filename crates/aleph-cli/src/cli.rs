@@ -3,8 +3,17 @@ use aleph_types::item_hash::ItemHash;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-/// Parse a human-readable size string (e.g. "20GB", "1024MB", "1TiB") into MiB.
+/// Parse a human-readable size string into MiB.
+///
+/// Supports binary units (MiB, GiB, TiB) and decimal units (MB, GB, TB).
 /// Bare numbers without units are rejected.
+///
+/// ```text
+/// parse_size_to_mib("2GiB")  -> Ok(2048)
+/// parse_size_to_mib("100MiB") -> Ok(100)
+/// parse_size_to_mib("20GB")  -> Ok(19073)
+/// parse_size_to_mib("1024")  -> Err (no unit)
+/// ```
 pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
     let s = s.trim();
     // Find where the numeric part ends and the unit begins
@@ -771,9 +780,9 @@ pub struct InstanceCreateArgs {
     #[arg(long, value_parser = parse_size_to_mib, default_value = "2GiB")]
     pub memory: u64,
 
-    /// Path to an SSH public key file.
-    #[arg(long)]
-    pub ssh_pubkey_file: PathBuf,
+    /// Path to an SSH public key file. Can be repeated for multiple keys.
+    #[arg(long, required = true)]
+    pub ssh_pubkey_file: Vec<PathBuf>,
 
     /// Instance name.
     #[arg(long)]

@@ -568,6 +568,34 @@ async fn handle_instance_command(
     Ok(())
 }
 
+const SSH_PUBKEY_PREFIXES: &[&str] = &[
+    "ssh-rsa",
+    "ssh-ed25519",
+    "ssh-dss",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+];
+
+fn validate_ssh_pubkey(
+    key: &str,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let has_valid_prefix = SSH_PUBKEY_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix));
+    if !has_valid_prefix {
+        return Err(format!(
+            "'{}' does not look like an SSH public key (expected a line starting with ssh-rsa, ssh-ed25519, etc.)",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Parse a "key=value,key=value" string into a list of (key, value) pairs.
 fn parse_kv_pairs(s: &str) -> Result<Vec<(&str, &str)>, String> {
     s.split(',')
@@ -696,14 +724,16 @@ async fn handle_instance_create(
         args.signing.chain.into(),
     )?;
 
-    // Read SSH public key
-    let ssh_pubkey = std::fs::read_to_string(&args.ssh_pubkey_file).map_err(|e| {
-        format!(
-            "failed to read SSH public key file '{}': {e}",
-            args.ssh_pubkey_file.display()
-        )
-    })?;
-    let ssh_pubkey = ssh_pubkey.trim().to_string();
+    // Read and validate SSH public keys
+    let mut ssh_keys = Vec::new();
+    for path in &args.ssh_pubkey_file {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            format!("failed to read SSH public key file '{}': {e}", path.display())
+        })?;
+        let key = content.trim().to_string();
+        validate_ssh_pubkey(&key, path)?;
+        ssh_keys.push(key);
+    }
 
     let rootfs_size = PersistentVolumeSize::try_from(args.rootfs_size)
         .map_err(|e| format!("invalid rootfs size: {e}"))?;
@@ -717,7 +747,7 @@ async fn handle_instance_create(
             receiver: None,
             payment_type: PaymentType::Credit,
         })
-        .ssh_keys(vec![ssh_pubkey]);
+        .ssh_keys(ssh_keys);
 
     if let Some(name) = args.name {
         let mut metadata = std::collections::HashMap::new();
@@ -1166,5 +1196,26 @@ mod tests {
         ];
         let volumes = parse_persistent_volumes(&persistent).unwrap();
         assert_eq!(volumes.len(), 2);
+    }
+
+    #[test]
+    fn validate_ssh_pubkey_accepts_valid_keys() {
+        let path = std::path::Path::new("test.pub");
+        validate_ssh_pubkey("ssh-rsa AAAAB3... user@host", path).unwrap();
+        validate_ssh_pubkey("ssh-ed25519 AAAAC3... user@host", path).unwrap();
+        validate_ssh_pubkey("ecdsa-sha2-nistp256 AAAAE2... user@host", path).unwrap();
+        validate_ssh_pubkey("sk-ssh-ed25519@openssh.com AAAAG... user@host", path).unwrap();
+    }
+
+    #[test]
+    fn validate_ssh_pubkey_rejects_private_key() {
+        let path = std::path::Path::new("id_rsa");
+        assert!(validate_ssh_pubkey("-----BEGIN OPENSSH PRIVATE KEY-----", path).is_err());
+    }
+
+    #[test]
+    fn validate_ssh_pubkey_rejects_garbage() {
+        let path = std::path::Path::new("garbage.txt");
+        assert!(validate_ssh_pubkey("not a key at all", path).is_err());
     }
 }
