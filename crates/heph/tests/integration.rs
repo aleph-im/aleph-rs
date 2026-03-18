@@ -532,6 +532,49 @@ async fn test_submit_message_ipfs() {
     todo!()
 }
 
+/// Test file upload via the CLI handler (exercises the full upload → STORE → submit flow).
+#[tokio::test]
+async fn test_cli_file_upload() {
+    use aleph_sdk::client::{AlephClient, AlephMessageClient, AlephStorageClient};
+    use aleph_sdk::messages::StoreBuilder;
+    use aleph_types::message::{MessageStatus, StorageEngine};
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+
+    // Write a temp file
+    let tmpdir = tempfile::tempdir().unwrap();
+    let file_path = tmpdir.path().join("cli-upload-test.txt");
+    let file_content = b"cli file upload integration test";
+    std::fs::write(&file_path, file_content).unwrap();
+
+    // Replicate the CLI handler logic: upload → build STORE → submit
+    let file_hash = client.upload_file_to_storage(&file_path).await.unwrap();
+
+    let pending = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Storage)
+        .reference("my-test-ref")
+        .build()
+        .unwrap();
+
+    assert_eq!(pending.message_type, MessageType::Store);
+
+    let resp = client.post_message(&pending, true).await.unwrap();
+    assert_eq!(resp.message_status, "processed");
+
+    // Verify the STORE message was persisted
+    let fetched = client.get_message(&pending.item_hash).await.unwrap();
+    assert_eq!(fetched.status(), MessageStatus::Processed);
+
+    // Verify file is downloadable by hash
+    let download = client.download_file_by_hash(&file_hash).await.unwrap();
+    let bytes = download.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), file_content);
+}
+
 /// Test creating a STORE message using the SDK's StoreBuilder.
 /// Uploads a file, builds a STORE message, submits it, and verifies it can be retrieved.
 #[tokio::test]

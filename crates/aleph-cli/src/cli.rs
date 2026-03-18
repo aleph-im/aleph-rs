@@ -39,6 +39,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: NodeCommand,
     },
+    /// Work with files (upload, download)
+    File {
+        #[clap(subcommand)]
+        command: FileCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -626,6 +631,41 @@ pub struct DropNodeArgs {
     /// Hash of the node to remove.
     #[arg(long)]
     pub node: NodeHash,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum FileCommand {
+    /// Upload a file to Aleph Cloud and create a STORE message.
+    Upload(FileUploadArgs),
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum StorageEngineCli {
+    /// Aleph native storage (default, recommended for files up to 100 MB).
+    Storage,
+    /// IPFS storage.
+    Ipfs,
+}
+
+#[derive(Args)]
+pub struct FileUploadArgs {
+    /// Path of the file to upload.
+    pub path: std::path::PathBuf,
+
+    /// Storage engine to use.
+    #[arg(long, value_enum, default_value = "storage")]
+    pub storage_engine: StorageEngineCli,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// User-defined file reference (for updates/versioning).
+    #[arg(long = "ref")]
+    pub reference: Option<String>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
