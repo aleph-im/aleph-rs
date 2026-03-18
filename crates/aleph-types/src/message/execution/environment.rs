@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct FunctionTriggers {
     /// Route HTTP requests to the program.
     pub http: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistent: Option<bool>,
 }
 
@@ -56,7 +56,7 @@ pub struct MachineResources {
     #[serde(default = "default_seconds")]
     pub seconds: u32,
     /// Guest IPv4 ports to map to open ports on the host.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_ports: Option<Vec<PublishedPort>>,
 }
 
@@ -85,6 +85,7 @@ pub struct CpuProperties {
     /// CPU architecture.
     pub architecture: Architecture,
     /// CPU vendor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<Vendor>,
     /// CPU features required by the virtual machine. Examples: 'sev', 'sev_es', 'sev_snp'.
     pub features: Vec<CpuFeature>,
@@ -154,6 +155,7 @@ fn default_amd_sev_policy() -> u32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustedExecutionEnvironment {
     /// OVMF firmware to use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware: Option<ItemHash>,
     /// SEV Policy. The default value is 0x01 for SEV without debugging.
     #[serde(default = "default_amd_sev_policy")]
@@ -167,8 +169,10 @@ pub struct InstanceEnvironment {
     #[serde(default)]
     pub aleph_api: bool,
     /// Hypervisor to use. Default is Qemu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hypervisor: Option<Hypervisor>,
     /// Trusted Execution Environment properties. Defaults to no TEE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_execution: Option<TrustedExecutionEnvironment>,
     // The following fields are kept for retro-compatibility.
     #[serde(default)]
@@ -180,21 +184,28 @@ pub struct InstanceEnvironment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeRequirements {
     /// Address of the node owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<Address>,
     /// Node address must match this regular expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address_regex: Option<String>,
     /// Hash of the compute resource node that must be used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_hash: Option<String>,
     /// Terms and conditions of this CRN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terms_and_conditions: Option<ItemHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostRequirements {
     /// Required CPU properties.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuProperties>,
     /// Required Compute Resource Node properties.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<NodeRequirements>,
     /// GPUs needed to pass-through from the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<Vec<GpuProperties>>,
 }

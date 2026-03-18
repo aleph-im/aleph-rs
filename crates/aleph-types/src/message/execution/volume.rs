@@ -17,9 +17,9 @@ pub trait IsReadOnly {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BaseVolume {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<PathBuf>,
 }
 
@@ -175,11 +175,11 @@ impl From<PersistentVolumeSize> for MiB {
 pub struct PersistentVolume {
     #[serde(flatten)]
     pub base: BaseVolume,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentVolume>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence: Option<VolumePersistence>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub size_mib: PersistentVolumeSize,
 }
@@ -207,7 +207,7 @@ pub struct RootfsVolume {
     pub parent: ParentVolume,
     pub persistence: VolumePersistence,
     pub size_mib: PersistentVolumeSize,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forgotten_by: Option<Vec<ItemHash>>,
 }
 

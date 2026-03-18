@@ -21,9 +21,9 @@ pub struct CodeContent {
     /// Reference to the STORE message containing the code.
     #[serde(rename = "ref")]
     pub reference: ItemHash,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<Interface>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     #[serde(default)]
     pub use_latest: bool,
@@ -35,7 +35,10 @@ pub struct DataContent {
     pub mount: PathBuf,
     #[serde(rename = "ref")]
     pub reference: ItemHash,
-    #[serde(default = "default_some_false")]
+    #[serde(
+        default = "default_some_false",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub use_latest: Option<bool>,
 }
 
@@ -54,12 +57,12 @@ pub struct ProgramContent {
     /// Execution runtime (rootfs with Python interpreter).
     pub runtime: FunctionRuntime,
     /// Data to use during computation.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<DataContent>,
     /// Properties of the execution environment.
     pub environment: FunctionEnvironment,
     /// Data to export after computation.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<Export>,
     /// Signals that trigger an execution.
     pub on: FunctionTriggers,

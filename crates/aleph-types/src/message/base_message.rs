@@ -143,7 +143,9 @@ pub struct MessageConfirmation {
     pub chain: Chain,
     pub height: u64,
     pub hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<Address>,
 }
 
