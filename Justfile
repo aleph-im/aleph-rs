@@ -68,6 +68,10 @@ test-integration: setup-dev-env
 # Run all tests (unit + integration)
 test-all: test test-integration
 
+# Generate code coverage report
+coverage:
+    cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+
 # Build Docker image for heph
 build-heph-image:
     docker build -t {{heph_image}}:{{heph_version}} -f crates/heph/Dockerfile .
