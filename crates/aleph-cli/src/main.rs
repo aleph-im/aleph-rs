@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use crate::account::load_account;
 use crate::cli::{
-    parse_size_to_mib, AggregateCommand, AggregateCreateArgs, Cli, FileCommand, FileDownloadArgs,
-    FileUploadArgs, ForgetArgs, GetMessageArgs, InstanceCommand, InstanceCreateArgs, MessageCommand, NodeCommand, PostAmendArgs,
-    PostCommand, PostCreateArgs, StorageEngineCli
+    AggregateCommand, AggregateCreateArgs, Cli, FileCommand, FileDownloadArgs, FileUploadArgs,
+    ForgetArgs, GetMessageArgs, InstanceCommand, InstanceCreateArgs, MessageCommand, NodeCommand,
+    PostAmendArgs, PostCommand, PostCreateArgs, StorageEngineCli, parse_size_to_mib,
 };
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{
@@ -728,7 +728,10 @@ async fn handle_instance_create(
     let mut ssh_keys = Vec::new();
     for path in &args.ssh_pubkey_file {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            format!("failed to read SSH public key file '{}': {e}", path.display())
+            format!(
+                "failed to read SSH public key file '{}': {e}",
+                path.display()
+            )
         })?;
         let key = content.trim().to_string();
         validate_ssh_pubkey(&key, path)?;
