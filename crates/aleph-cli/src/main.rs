@@ -520,9 +520,7 @@ async fn handle_file_download(
         if !json {
             eprintln!("Resolving file hash from ref {file_ref}...");
         }
-        let metadata = aleph_client
-            .get_file_metadata_by_ref(&file_ref)
-            .await?;
+        let metadata = aleph_client.get_file_metadata_by_ref(&file_ref).await?;
         metadata.file_hash
     } else {
         unreachable!("clap group ensures one of hash/message-hash/ref is provided")
