@@ -685,7 +685,14 @@ async fn handle_sync(args: cli::SyncArgs) -> Result<(), Box<dyn std::error::Erro
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let ccn_url = Url::parse(&cli.ccn_url).unwrap_or_else(|e| panic!("invalid CCN url: {e}"));
     let aleph_client = AlephClient::new(ccn_url.clone());
