@@ -68,8 +68,9 @@ test-integration: setup-dev-env
 # Run all tests (unit + integration)
 test-all: test test-integration
 
-# Generate code coverage report
+# Generate code coverage report (installs cargo-tarpaulin if needed)
 coverage:
+    cargo install cargo-tarpaulin
     cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
 
 # Build Docker image for heph
