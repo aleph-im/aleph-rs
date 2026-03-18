@@ -13,6 +13,7 @@ aleph-types = { workspace = true, features = ["account"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+memsizes = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

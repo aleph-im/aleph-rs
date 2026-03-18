@@ -91,6 +91,20 @@ pub struct EphemeralVolume {
     pub size_mib: EphemeralVolumeSize,
 }
 
+impl EphemeralVolume {
+    /// Create a new ephemeral volume with the given size and mount point.
+    pub fn new(size_mib: u64, mount: impl Into<PathBuf>) -> Result<Self, VolumeError> {
+        Ok(Self {
+            base: BaseVolume {
+                comment: None,
+                mount: Some(mount.into()),
+            },
+            ephemeral: true,
+            size_mib: EphemeralVolumeSize::try_from(size_mib)?,
+        })
+    }
+}
+
 impl IsReadOnly for EphemeralVolume {
     fn is_read_only() -> bool {
         false
