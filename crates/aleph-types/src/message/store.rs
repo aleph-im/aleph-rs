@@ -13,6 +13,16 @@ pub enum StorageBackend {
     Storage { item_hash: AlephItemHash },
 }
 
+/// User's choice of storage backend for file uploads.
+///
+/// Distinct from [`StorageBackend`], which pairs the engine choice with the
+/// file hash and is used for serde of [`StoreContent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageEngine {
+    Storage,
+    Ipfs,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 /// File reference, as deserialized in STORE messages. Does not contain
@@ -67,6 +77,20 @@ pub struct StoreContent {
 }
 
 impl StoreContent {
+    pub fn new(
+        file_hash: StorageBackend,
+        reference: Option<RawFileRef>,
+        metadata: Option<HashMap<String, serde_json::Value>>,
+    ) -> Self {
+        Self {
+            file_hash,
+            size: None,
+            content_type: None,
+            reference,
+            metadata,
+        }
+    }
+
     pub fn file_hash(&self) -> ItemHash {
         match &self.file_hash {
             StorageBackend::Ipfs { item_hash: cid } => ItemHash::Ipfs(cid.clone()),

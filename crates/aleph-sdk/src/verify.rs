@@ -74,7 +74,7 @@ const RAW_CODEC: u64 = 0x55;
 const DAG_PB_CODEC: u64 = 0x70;
 
 /// IPFS default chunk size: 256 KiB.
-const CHUNK_SIZE: usize = 262144;
+pub(crate) const CHUNK_SIZE: usize = 262144;
 
 /// IPFS default maximum links per node (go-ipfs `helpers.DefaultLinksPerBlock`).
 const MAX_LINKS: usize = 174;
@@ -101,29 +101,43 @@ pub struct DagNode {
     pub(crate) data_size: u64,
 }
 
-pub enum HashVerifier {
+/// A streaming hasher that accumulates data and produces an `ItemHash` on finalization.
+pub enum Hasher {
     Native {
         hasher: Sha256,
-        expected: AlephItemHash,
     },
     CidRaw {
         hasher: Sha256,
-        expected_cid: Cid,
     },
     DagPb {
         buffer: Vec<u8>,
         leaves: Vec<DagNode>,
-        expected_cid: Cid,
         raw_leaves: bool,
     },
 }
 
-impl HashVerifier {
-    pub fn new(expected: &ItemHash) -> Result<Self, VerifyError> {
+impl Hasher {
+    /// Creates a hasher for Aleph native storage (SHA-256).
+    pub fn for_storage() -> Self {
+        Self::Native {
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// Creates a hasher for IPFS CIDv0 dag-pb (wrapped leaves, balanced DAG).
+    pub fn for_ipfs() -> Self {
+        Self::DagPb {
+            buffer: Vec::with_capacity(CHUNK_SIZE),
+            leaves: Vec::new(),
+            raw_leaves: false,
+        }
+    }
+
+    /// Creates a hasher appropriate for the given expected hash.
+    pub(crate) fn from_expected(expected: &ItemHash) -> Result<Self, VerifyError> {
         match expected {
-            ItemHash::Native(hash) => Ok(Self::Native {
+            ItemHash::Native(_) => Ok(Self::Native {
                 hasher: Sha256::new(),
-                expected: *hash,
             }),
             ItemHash::Ipfs(cid) => {
                 if cid.is_v0() {
@@ -131,7 +145,6 @@ impl HashVerifier {
                     return Ok(Self::DagPb {
                         buffer: Vec::with_capacity(CHUNK_SIZE),
                         leaves: Vec::new(),
-                        expected_cid: cid.clone(),
                         raw_leaves: false,
                     });
                 }
@@ -142,12 +155,10 @@ impl HashVerifier {
                 match parsed.codec() {
                     RAW_CODEC => Ok(Self::CidRaw {
                         hasher: Sha256::new(),
-                        expected_cid: cid.clone(),
                     }),
                     DAG_PB_CODEC => Ok(Self::DagPb {
                         buffer: Vec::with_capacity(CHUNK_SIZE),
                         leaves: Vec::new(),
-                        expected_cid: cid.clone(),
                         raw_leaves: true,
                     }),
                     other => Err(VerifyError::UnsupportedCid(format!(
@@ -158,6 +169,7 @@ impl HashVerifier {
         }
     }
 
+    /// Feed data into the hasher.
     pub fn update(&mut self, data: &[u8]) {
         match self {
             Self::Native { hasher, .. } | Self::CidRaw { hasher, .. } => hasher.update(data),
@@ -165,7 +177,6 @@ impl HashVerifier {
                 buffer,
                 leaves,
                 raw_leaves,
-                ..
             } => {
                 let raw = *raw_leaves;
                 let mut remaining = data;
@@ -298,44 +309,26 @@ impl HashVerifier {
         }
     }
 
-    pub fn finalize(self) -> Result<(), VerifyError> {
+    /// Finalize the hasher and return the computed `ItemHash`.
+    pub fn finalize(self) -> ItemHash {
         match self {
-            Self::Native { hasher, expected } => {
+            Self::Native { hasher } => {
                 let computed = AlephItemHash::new(hasher.finalize().into());
-                if computed == expected {
-                    Ok(())
-                } else {
-                    Err(VerifyError::IntegrityMismatch {
-                        expected: ItemHash::Native(expected),
-                        actual: ItemHash::Native(computed),
-                    })
-                }
+                ItemHash::Native(computed)
             }
-            Self::CidRaw {
-                hasher,
-                expected_cid,
-            } => {
+            Self::CidRaw { hasher } => {
                 let digest = hasher.finalize();
                 // SHA-256 multihash code is 0x12
                 let mh = multihash::Multihash::<64>::wrap(0x12, &digest)
                     .expect("SHA-256 digest fits in 64-byte multihash");
                 let computed_lib_cid = LibCid::new_v1(RAW_CODEC, mh);
                 let computed_cid_str = computed_lib_cid.to_string();
-                if computed_cid_str == expected_cid.as_str() {
-                    Ok(())
-                } else {
-                    let computed_cid =
-                        Cid::try_from(computed_cid_str.as_str()).expect("valid computed CID");
-                    Err(VerifyError::IntegrityMismatch {
-                        expected: ItemHash::Ipfs(expected_cid),
-                        actual: ItemHash::Ipfs(computed_cid),
-                    })
-                }
+                let cid = Cid::try_from(computed_cid_str.as_str()).expect("valid computed CID");
+                ItemHash::Ipfs(cid)
             }
             Self::DagPb {
                 buffer,
                 mut leaves,
-                expected_cid,
                 raw_leaves,
             } => {
                 let make_leaf = |chunk: &[u8]| {
@@ -351,7 +344,7 @@ impl HashVerifier {
                     leaves.push(make_leaf(&buffer));
                 }
 
-                let v1 = !expected_cid.is_v0();
+                let v1 = raw_leaves;
 
                 let root_cid_bytes = if leaves.is_empty() {
                     make_leaf(&[]).cid_bytes
@@ -376,18 +369,40 @@ impl HashVerifier {
                     bs58::encode(&root_cid_bytes).into_string()
                 };
 
-                if computed_cid_str == expected_cid.as_str() {
-                    Ok(())
-                } else {
-                    Err(VerifyError::IntegrityMismatch {
-                        expected: ItemHash::Ipfs(expected_cid),
-                        actual: ItemHash::Ipfs(
-                            Cid::try_from(computed_cid_str.as_str())
-                                .expect("computed CID is always valid"),
-                        ),
-                    })
-                }
+                let cid =
+                    Cid::try_from(computed_cid_str.as_str()).expect("computed CID is always valid");
+                ItemHash::Ipfs(cid)
             }
+        }
+    }
+}
+
+pub struct HashVerifier {
+    hasher: Hasher,
+    expected: ItemHash,
+}
+
+impl HashVerifier {
+    pub fn new(expected: &ItemHash) -> Result<Self, VerifyError> {
+        Ok(Self {
+            hasher: Hasher::from_expected(expected)?,
+            expected: expected.clone(),
+        })
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        self.hasher.update(data);
+    }
+
+    pub fn finalize(self) -> Result<(), VerifyError> {
+        let computed = self.hasher.finalize();
+        if computed == self.expected {
+            Ok(())
+        } else {
+            Err(VerifyError::IntegrityMismatch {
+                expected: self.expected,
+                actual: computed,
+            })
         }
     }
 }
@@ -397,30 +412,12 @@ impl HashVerifier {
 /// Uses the same chunking and tree construction as IPFS's default settings
 /// (256 KiB chunks, balanced DAG, wrapped leaves).
 pub fn compute_cid(data: &[u8]) -> Cid {
-    let mut leaves: Vec<DagNode> = data
-        .chunks(CHUNK_SIZE)
-        .map(HashVerifier::build_leaf)
-        .collect();
-
-    if leaves.is_empty() {
-        leaves.push(HashVerifier::build_leaf(&[]));
+    let mut hasher = Hasher::for_ipfs();
+    hasher.update(data);
+    match hasher.finalize() {
+        ItemHash::Ipfs(cid) => cid,
+        _ => unreachable!("for_ipfs() always produces ItemHash::Ipfs"),
     }
-
-    let root_cid_bytes = if leaves.len() == 1 {
-        leaves.into_iter().next().unwrap().cid_bytes
-    } else {
-        let mut nodes = leaves;
-        while nodes.len() > 1 {
-            nodes = nodes
-                .chunks(MAX_LINKS)
-                .map(|c| HashVerifier::build_internal_node(c, false))
-                .collect();
-        }
-        nodes.into_iter().next().unwrap().cid_bytes
-    };
-
-    let cid_str = bs58::encode(&root_cid_bytes).into_string();
-    Cid::try_from(cid_str.as_str()).expect("computed CID is always valid")
 }
 
 #[cfg(test)]
@@ -835,5 +832,44 @@ mod tests {
         let mut verifier = HashVerifier::new(&expected).unwrap();
         verifier.update(&data);
         verifier.finalize().expect("computed CID should verify");
+    }
+
+    #[test]
+    fn test_hasher_for_storage() {
+        let data = b"hello world";
+        let mut hasher = Hasher::for_storage();
+        hasher.update(data);
+        let hash = hasher.finalize();
+        assert_eq!(hash, ItemHash::Native(AlephItemHash::from_bytes(data)));
+    }
+
+    #[test]
+    fn test_hasher_for_storage_chunked() {
+        let data = b"hello world";
+        let mut hasher = Hasher::for_storage();
+        hasher.update(b"hello ");
+        hasher.update(b"world");
+        let hash = hasher.finalize();
+        assert_eq!(hash, ItemHash::Native(AlephItemHash::from_bytes(data)));
+    }
+
+    #[test]
+    fn test_hasher_for_ipfs() {
+        let data = b"hello dag-pb world";
+        let mut hasher = Hasher::for_ipfs();
+        hasher.update(data);
+        let hash = hasher.finalize();
+        let expected_cid = compute_cid(data);
+        assert_eq!(hash, ItemHash::Ipfs(expected_cid));
+    }
+
+    #[test]
+    fn test_hasher_for_ipfs_large() {
+        let data = vec![0xABu8; CHUNK_SIZE + 100];
+        let mut hasher = Hasher::for_ipfs();
+        hasher.update(&data);
+        let hash = hasher.finalize();
+        let expected_cid = compute_cid(&data);
+        assert_eq!(hash, ItemHash::Ipfs(expected_cid));
     }
 }

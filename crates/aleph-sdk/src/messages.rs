@@ -5,7 +5,9 @@ use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
     AggregateContent, AggregateKey, ForgetContent, MessageType, PostContent, PostType,
 };
+use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
 use serde::Serialize;
+use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::builder::MessageBuilder;
@@ -18,6 +20,8 @@ pub enum MessageBuildError {
     Signing(#[from] SignError),
     #[error("forget message must target at least one hash or aggregate")]
     EmptyForget,
+    #[error("storage engine mismatch: engine {engine:?} does not match hash type '{hash}'")]
+    StorageEngineMismatch { engine: StorageEngine, hash: String },
 }
 
 pub struct PostBuilder<'a, A: Account> {
@@ -175,6 +179,78 @@ impl<'a, A: Account> ForgetBuilder<'a, A> {
         let forget_content = ForgetContent::new(self.hashes, self.aggregates, self.reason);
         let value = serde_json::to_value(forget_content)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::Forget, value);
+        if let Some(channel) = self.channel {
+            builder = builder.channel(channel);
+        }
+        Ok(builder.build()?)
+    }
+}
+
+pub struct StoreBuilder<'a, A: Account> {
+    account: &'a A,
+    file_hash: ItemHash,
+    storage_engine: StorageEngine,
+    reference: Option<RawFileRef>,
+    metadata: Option<HashMap<String, serde_json::Value>>,
+    channel: Option<Channel>,
+}
+
+impl<'a, A: Account> StoreBuilder<'a, A> {
+    /// Create a new StoreBuilder for a file that has already been uploaded.
+    pub fn new(account: &'a A, file_hash: ItemHash, storage_engine: StorageEngine) -> Self {
+        Self {
+            account,
+            file_hash,
+            storage_engine,
+            reference: None,
+            metadata: None,
+            channel: None,
+        }
+    }
+
+    /// Set a user-defined file reference string.
+    pub fn reference(mut self, reference: impl Into<String>) -> Self {
+        self.reference = Some(RawFileRef::UserDefined(reference.into()));
+        self
+    }
+
+    /// Set a file reference from an item hash.
+    pub fn reference_hash(mut self, hash: ItemHash) -> Self {
+        self.reference = Some(RawFileRef::ItemHash(hash));
+        self
+    }
+
+    /// Set metadata key-value pairs.
+    pub fn metadata(mut self, metadata: HashMap<String, serde_json::Value>) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// Set the message channel.
+    pub fn channel(mut self, channel: Channel) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    /// Build and sign the STORE message.
+    pub fn build(self) -> Result<PendingMessage, MessageBuildError> {
+        let backend = match (self.storage_engine, self.file_hash) {
+            (StorageEngine::Storage, ItemHash::Native(h)) => {
+                StorageBackend::Storage { item_hash: h }
+            }
+            (StorageEngine::Ipfs, ItemHash::Ipfs(cid)) => StorageBackend::Ipfs { item_hash: cid },
+            (engine, hash) => {
+                return Err(MessageBuildError::StorageEngineMismatch {
+                    engine,
+                    hash: hash.to_string(),
+                });
+            }
+        };
+
+        let store_content = StoreContent::new(backend, self.reference, self.metadata);
+        let value = serde_json::to_value(store_content)?;
+
+        let mut builder = MessageBuilder::new(self.account, MessageType::Store, value);
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
         }
@@ -381,5 +457,131 @@ mod tests {
         let account = TestAccount::new();
         let err = ForgetBuilder::new(&account, vec![]).build().unwrap_err();
         assert!(matches!(err, MessageBuildError::EmptyForget));
+    }
+
+    #[test]
+    fn test_store_builder_storage() {
+        use aleph_types::message::{StorageEngine, StoreContent};
+
+        let account = TestAccount::new();
+        let file_hash = aleph_types::item_hash!(
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+        let msg = StoreBuilder::new(&account, file_hash, StorageEngine::Storage)
+            .build()
+            .unwrap();
+
+        assert_eq!(msg.message_type, MessageType::Store);
+        assert_eq!(msg.item_type, ItemType::Inline);
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(parsed["item_type"], "storage");
+        assert_eq!(
+            parsed["item_hash"],
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+        assert_eq!(
+            parsed["address"],
+            "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef"
+        );
+        assert!(parsed["time"].is_number());
+
+        // Round-trip through StoreContent deserialization
+        let store: StoreContent = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(
+            store.file_hash().to_string(),
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+    }
+
+    #[test]
+    fn test_store_builder_ipfs() {
+        use aleph_types::message::StorageEngine;
+
+        let account = TestAccount::new();
+        let file_hash = aleph_types::item_hash!("QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8");
+        let msg = StoreBuilder::new(&account, file_hash, StorageEngine::Ipfs)
+            .build()
+            .unwrap();
+
+        assert_eq!(msg.message_type, MessageType::Store);
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(parsed["item_type"], "ipfs");
+        assert_eq!(
+            parsed["item_hash"],
+            "QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8"
+        );
+    }
+
+    #[test]
+    fn test_store_builder_with_reference() {
+        use aleph_types::message::StorageEngine;
+
+        let account = TestAccount::new();
+        let file_hash = aleph_types::item_hash!(
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+        let msg = StoreBuilder::new(&account, file_hash, StorageEngine::Storage)
+            .reference("my-custom-ref")
+            .build()
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(parsed["ref"], "my-custom-ref");
+    }
+
+    #[test]
+    fn test_store_builder_with_metadata() {
+        use aleph_types::message::StorageEngine;
+        use std::collections::HashMap;
+
+        let account = TestAccount::new();
+        let file_hash = aleph_types::item_hash!(
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("filename".to_string(), serde_json::json!("test.pdf"));
+        let msg = StoreBuilder::new(&account, file_hash, StorageEngine::Storage)
+            .metadata(metadata)
+            .build()
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(parsed["metadata"]["filename"], "test.pdf");
+    }
+
+    #[test]
+    fn test_store_builder_with_channel() {
+        use aleph_types::message::StorageEngine;
+
+        let account = TestAccount::new();
+        let file_hash = aleph_types::item_hash!(
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+        let channel = aleph_types::channel::Channel::from("TEST".to_string());
+        let msg = StoreBuilder::new(&account, file_hash, StorageEngine::Storage)
+            .channel(channel.clone())
+            .build()
+            .unwrap();
+
+        assert_eq!(msg.channel, Some(channel));
+    }
+
+    #[test]
+    fn test_store_builder_engine_mismatch() {
+        use aleph_types::message::StorageEngine;
+
+        let account = TestAccount::new();
+        // Native hash with Ipfs engine should error
+        let file_hash = aleph_types::item_hash!(
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+        let err = StoreBuilder::new(&account, file_hash, StorageEngine::Ipfs)
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MessageBuildError::StorageEngineMismatch { .. }
+        ));
     }
 }
