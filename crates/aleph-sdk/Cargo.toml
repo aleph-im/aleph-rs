@@ -9,6 +9,7 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aleph-types = { workspace = true }
+async-stream = { workspace = true }
 async-trait = { workspace = true }
 bs58 = { workspace = true }
 bytes = { workspace = true }
