@@ -486,32 +486,7 @@ async fn handle_file_upload(
         builder = builder.channel(Channel::from(ch));
     }
     let pending = builder.build()?;
-
-    if dry_run {
-        if json {
-            println!("{}", serde_json::to_string_pretty(&pending)?);
-        } else {
-            eprintln!("Dry run — STORE message not submitted.\n");
-            println!("{}", serde_json::to_string_pretty(&pending)?);
-        }
-        return Ok(());
-    }
-
-    // Submit the STORE message
-    let response = match aleph_client.post_message(&pending, true).await {
-        Ok(r) => r,
-        Err(MessageError::ApiError { status, body }) => {
-            return Err(format_api_error(status, &body, json).into());
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    if json {
-        print_json_result(ccn_url, &pending, &response)?;
-    } else {
-        print_human_result(ccn_url, &pending, &response);
-    }
-    Ok(())
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
 }
 
 async fn handle_sync(args: cli::SyncArgs) -> Result<(), Box<dyn std::error::Error>> {
