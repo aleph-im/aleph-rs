@@ -692,7 +692,11 @@ pub struct FileDownloadArgs {
     #[arg(long, requires = "reference")]
     pub owner: Option<String>,
 
-    /// Output file path. If omitted, writes to stdout.
+    /// Output file path. Defaults to `./<file_hash>` in the current directory.
     #[arg(short, long)]
     pub output: Option<std::path::PathBuf>,
+
+    /// Write file contents to stdout instead of saving to a file.
+    #[arg(long)]
+    pub stdout: bool,
 }

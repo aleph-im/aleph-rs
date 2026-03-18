@@ -498,18 +498,17 @@ async fn handle_file_download(
     json: bool,
     args: FileDownloadArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let download = if let Some(hash) = args.hash {
-        if !json {
-            eprintln!("Downloading by file hash: {hash}");
-        }
-        aleph_client.download_file_by_hash(&hash).await?
+    // Resolve the file hash — for indirect lookups, fetch metadata first.
+    let file_hash = if let Some(hash) = args.hash {
+        hash
     } else if let Some(message_hash) = args.message_hash {
         if !json {
-            eprintln!("Downloading by message hash: {message_hash}");
+            eprintln!("Resolving file hash from message {message_hash}...");
         }
-        aleph_client
-            .download_file_by_message_hash(&message_hash)
-            .await?
+        let metadata = aleph_client
+            .get_file_metadata_by_message_hash(&message_hash)
+            .await?;
+        metadata.file_hash
     } else if let Some(reference) = args.reference {
         let owner = args
             .owner
@@ -519,22 +518,32 @@ async fn handle_file_download(
             reference,
         };
         if !json {
-            eprintln!("Downloading by ref: {file_ref}");
+            eprintln!("Resolving file hash from ref {file_ref}...");
         }
-        aleph_client.download_file_by_ref(&file_ref).await?
+        let metadata = aleph_client
+            .get_file_metadata_by_ref(&file_ref)
+            .await?;
+        metadata.file_hash
     } else {
         unreachable!("clap group ensures one of hash/message-hash/ref is provided")
     };
 
-    if let Some(output) = args.output {
+    if !json {
+        eprintln!("Downloading {file_hash}...");
+    }
+
+    let download = aleph_client.download_file_by_hash(&file_hash).await?;
+
+    if args.stdout {
+        let bytes = download.bytes().await?;
+        use std::io::Write;
+        std::io::stdout().write_all(&bytes)?;
+    } else {
+        let output = args.output.unwrap_or_else(|| file_hash.to_string().into());
         download.to_file(&output).await?;
         if !json {
             eprintln!("Saved to {}", output.display());
         }
-    } else {
-        let bytes = download.bytes().await?;
-        use std::io::Write;
-        std::io::stdout().write_all(&bytes)?;
     }
 
     Ok(())
