@@ -1,6 +1,7 @@
 use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_types::item_hash::ItemHash;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "aleph", version, about = "Aleph CLI")]
@@ -43,6 +44,11 @@ pub enum Commands {
     File {
         #[clap(subcommand)]
         command: FileCommand,
+    },
+    /// Work with instances (VM deployments)
+    Instance {
+        #[clap(subcommand)]
+        command: InstanceCommand,
     },
 }
 
@@ -698,4 +704,59 @@ pub struct FileDownloadArgs {
     /// Write file contents to stdout instead of saving to a file.
     #[arg(long)]
     pub stdout: bool,
+}
+
+#[derive(Subcommand)]
+pub enum InstanceCommand {
+    /// Create a new instance (VM).
+    Create(InstanceCreateArgs),
+}
+
+#[derive(Args)]
+pub struct InstanceCreateArgs {
+    /// Root filesystem image hash (STORE message hash).
+    #[arg(long)]
+    pub rootfs: ItemHash,
+
+    /// Root filesystem size in MiB.
+    #[arg(long)]
+    pub rootfs_size: u64,
+
+    /// Number of virtual CPUs.
+    #[arg(long)]
+    pub vcpus: u32,
+
+    /// Memory in MiB.
+    #[arg(long)]
+    pub memory: u64,
+
+    /// Path to an SSH public key file.
+    #[arg(long)]
+    pub ssh_pubkey_file: PathBuf,
+
+    /// Instance name.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// Persistent volume: "name=<n>,mount=<path>,size_mib=<s>[,persistence=<host|store>]".
+    /// Can be repeated for multiple volumes.
+    #[arg(long)]
+    pub persistent_volume: Option<Vec<String>>,
+
+    /// Ephemeral volume: "mount=<path>,size_mib=<s>".
+    /// Can be repeated for multiple volumes.
+    #[arg(long)]
+    pub ephemeral_volume: Option<Vec<String>>,
+
+    /// Immutable volume: "ref=<hash>,mount=<path>[,use_latest=<bool>]".
+    /// Can be repeated for multiple volumes.
+    #[arg(long)]
+    pub immutable_volume: Option<Vec<String>>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }

@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::account::load_account;
 use crate::cli::{
     AggregateCommand, AggregateCreateArgs, Cli, FileCommand, FileDownloadArgs, FileUploadArgs,
-    ForgetArgs, GetMessageArgs, MessageCommand, NodeCommand, PostAmendArgs, PostCommand,
+    ForgetArgs, GetMessageArgs, InstanceCommand, InstanceCreateArgs, MessageCommand, NodeCommand, PostAmendArgs, PostCommand,
     PostCreateArgs, StorageEngineCli,
 };
 use aleph_sdk::builder::MessageBuilder;
@@ -14,13 +14,20 @@ use aleph_sdk::client::{
     PostMessageResponse,
 };
 use aleph_sdk::corechannel;
-use aleph_sdk::messages::StoreBuilder;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
+use aleph_sdk::messages::{InstanceBuilder, StoreBuilder};
+use aleph_types::message::execution::base::{Payment, PaymentType};
+use aleph_types::message::execution::environment::Hypervisor;
+use aleph_types::message::execution::volume::{
+    BaseVolume, EphemeralVolume, ImmutableVolume, MachineVolume, PersistentVolume,
+    PersistentVolumeSize, VolumePersistence,
+};
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{FileRef, StorageEngine};
 use aleph_types::message::{Message, MessageStatus, MessageType};
 use clap::Parser;
+use memsizes::MiB;
 use url::Url;
 
 /// Returns true if the error is an HTTP 429 Too Many Requests.
@@ -547,6 +554,203 @@ async fn handle_file_download(
     Ok(())
 }
 
+async fn handle_instance_command(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    command: InstanceCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        InstanceCommand::Create(args) => {
+            handle_instance_create(aleph_client, ccn_url, json, args).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Parse a "key=value,key=value" string into a list of (key, value) pairs.
+fn parse_kv_pairs(s: &str) -> Result<Vec<(&str, &str)>, String> {
+    s.split(',')
+        .map(|pair| {
+            let (k, v) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("invalid key=value pair: '{pair}'"))?;
+            Ok((k.trim(), v.trim()))
+        })
+        .collect()
+}
+
+fn parse_persistent_volumes(
+    specs: &[String],
+) -> Result<Vec<MachineVolume>, Box<dyn std::error::Error>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let pairs = parse_kv_pairs(spec)?;
+            let mut name: Option<String> = None;
+            let mut mount: Option<String> = None;
+            let mut size_mib: Option<u64> = None;
+            let mut persistence: Option<VolumePersistence> = None;
+            for (k, v) in pairs {
+                match k {
+                    "name" => name = Some(v.to_string()),
+                    "mount" => mount = Some(v.to_string()),
+                    "size_mib" => {
+                        size_mib = Some(v.parse().map_err(|_| format!("invalid size_mib: '{v}'"))?)
+                    }
+                    "persistence" => {
+                        persistence = Some(match v {
+                            "host" => VolumePersistence::Host,
+                            "store" => VolumePersistence::Store,
+                            _ => return Err(format!("invalid persistence: '{v}'").into()),
+                        })
+                    }
+                    _ => return Err(format!("unknown persistent volume key: '{k}'").into()),
+                }
+            }
+            let size_mib = size_mib.ok_or("persistent volume requires size_mib")?;
+            let mount = mount.ok_or("persistent volume requires mount")?;
+            Ok(MachineVolume::Persistent(PersistentVolume {
+                base: BaseVolume {
+                    comment: None,
+                    mount: Some(mount.into()),
+                },
+                parent: None,
+                persistence,
+                name,
+                size_mib: PersistentVolumeSize::try_from(size_mib)?,
+            }))
+        })
+        .collect()
+}
+
+fn parse_ephemeral_volumes(
+    specs: &[String],
+) -> Result<Vec<MachineVolume>, Box<dyn std::error::Error>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let pairs = parse_kv_pairs(spec)?;
+            let mut mount: Option<String> = None;
+            let mut size_mib: Option<u64> = None;
+            for (k, v) in pairs {
+                match k {
+                    "mount" => mount = Some(v.to_string()),
+                    "size_mib" => {
+                        size_mib = Some(v.parse().map_err(|_| format!("invalid size_mib: '{v}'"))?)
+                    }
+                    _ => return Err(format!("unknown ephemeral volume key: '{k}'").into()),
+                }
+            }
+            let size_mib = size_mib.ok_or("ephemeral volume requires size_mib")?;
+            let mount = mount.ok_or("ephemeral volume requires mount")?;
+            Ok(MachineVolume::Ephemeral(EphemeralVolume::new(
+                size_mib, mount,
+            )?))
+        })
+        .collect()
+}
+
+fn parse_immutable_volumes(
+    specs: &[String],
+) -> Result<Vec<MachineVolume>, Box<dyn std::error::Error>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let pairs = parse_kv_pairs(spec)?;
+            let mut reference: Option<String> = None;
+            let mut mount: Option<String> = None;
+            let mut use_latest = true;
+            for (k, v) in pairs {
+                match k {
+                    "ref" => reference = Some(v.to_string()),
+                    "mount" => mount = Some(v.to_string()),
+                    "use_latest" => {
+                        use_latest = v
+                            .parse()
+                            .map_err(|_| format!("invalid use_latest: '{v}'"))?
+                    }
+                    _ => return Err(format!("unknown immutable volume key: '{k}'").into()),
+                }
+            }
+            let reference = reference.ok_or("immutable volume requires ref")?;
+            let mount = mount.ok_or("immutable volume requires mount")?;
+            let item_hash = reference.parse().map_err(|e| format!("invalid ref: {e}"))?;
+            Ok(MachineVolume::Immutable(ImmutableVolume {
+                base: BaseVolume {
+                    comment: None,
+                    mount: Some(mount.into()),
+                },
+                reference: item_hash,
+                use_latest,
+            }))
+        })
+        .collect()
+}
+
+async fn handle_instance_create(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: InstanceCreateArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dry_run = args.signing.dry_run;
+    let account = load_account(
+        args.signing.private_key.as_deref(),
+        args.signing.chain.into(),
+    )?;
+
+    // Read SSH public key
+    let ssh_pubkey = std::fs::read_to_string(&args.ssh_pubkey_file).map_err(|e| {
+        format!(
+            "failed to read SSH public key file '{}': {e}",
+            args.ssh_pubkey_file.display()
+        )
+    })?;
+    let ssh_pubkey = ssh_pubkey.trim().to_string();
+
+    let rootfs_size = PersistentVolumeSize::try_from(args.rootfs_size)?;
+
+    let mut builder = InstanceBuilder::new(&account, args.rootfs, rootfs_size)
+        .vcpus(args.vcpus)
+        .memory(MiB::from(args.memory))
+        .hypervisor(Hypervisor::Qemu)
+        .payment(Payment {
+            chain: None,
+            receiver: None,
+            payment_type: PaymentType::Credit,
+        })
+        .ssh_keys(vec![ssh_pubkey]);
+
+    if let Some(name) = args.name {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("name".to_string(), serde_json::json!(name));
+        builder = builder.metadata(metadata);
+    }
+
+    // Parse volumes
+    let mut volumes = Vec::new();
+    if let Some(specs) = &args.persistent_volume {
+        volumes.extend(parse_persistent_volumes(specs)?);
+    }
+    if let Some(specs) = &args.ephemeral_volume {
+        volumes.extend(parse_ephemeral_volumes(specs)?);
+    }
+    if let Some(specs) = &args.immutable_volume {
+        volumes.extend(parse_immutable_volumes(specs)?);
+    }
+    if !volumes.is_empty() {
+        builder = builder.volumes(volumes);
+    }
+
+    if let Some(ch) = args.channel {
+        builder = builder.channel(Channel::from(ch));
+    }
+
+    let pending = builder.build()?;
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
 async fn handle_sync(args: cli::SyncArgs) -> Result<(), Box<dyn std::error::Error>> {
     let source_url = Url::parse(&args.source)?;
     let target_url = Url::parse(&args.target)?;
@@ -718,6 +922,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::File {
             command: file_command,
         } => handle_file_command(&aleph_client, &ccn_url, json, file_command).await?,
+        cli::Commands::Instance {
+            command: instance_command,
+        } => handle_instance_command(&aleph_client, &ccn_url, json, instance_command).await?,
     }
 
     Ok(())
@@ -819,5 +1026,114 @@ mod tests {
         assert_eq!(envelope["hashes"][0], "abc123");
         assert_eq!(envelope["aggregates"][0], "def456");
         assert_eq!(envelope["reason"], "cleanup");
+    }
+
+    #[test]
+    fn parse_kv_pairs_basic() {
+        let pairs = parse_kv_pairs("name=data,mount=/opt/data,size_mib=1000").unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                ("name", "data"),
+                ("mount", "/opt/data"),
+                ("size_mib", "1000")
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_kv_pairs_missing_equals() {
+        assert!(parse_kv_pairs("invalid").is_err());
+    }
+
+    #[test]
+    fn parse_persistent_volume_basic() {
+        let specs = vec!["name=data,mount=/opt/data,size_mib=1000".to_string()];
+        let volumes = parse_persistent_volumes(&specs).unwrap();
+        assert_eq!(volumes.len(), 1);
+        assert!(matches!(volumes[0], MachineVolume::Persistent(_)));
+    }
+
+    #[test]
+    fn parse_persistent_volume_with_persistence() {
+        let specs = vec!["name=db,mount=/var/db,size_mib=500,persistence=store".to_string()];
+        let volumes = parse_persistent_volumes(&specs).unwrap();
+        if let MachineVolume::Persistent(v) = &volumes[0] {
+            assert_eq!(v.persistence, Some(VolumePersistence::Store));
+            assert_eq!(v.name, Some("db".to_string()));
+        } else {
+            panic!("expected persistent volume");
+        }
+    }
+
+    #[test]
+    fn parse_persistent_volume_missing_size() {
+        let specs = vec!["name=data,mount=/opt/data".to_string()];
+        assert!(parse_persistent_volumes(&specs).is_err());
+    }
+
+    #[test]
+    fn parse_persistent_volume_missing_mount() {
+        let specs = vec!["name=data,size_mib=1000".to_string()];
+        assert!(parse_persistent_volumes(&specs).is_err());
+    }
+
+    #[test]
+    fn parse_ephemeral_volume_basic() {
+        let specs = vec!["mount=/tmp/scratch,size_mib=100".to_string()];
+        let volumes = parse_ephemeral_volumes(&specs).unwrap();
+        assert_eq!(volumes.len(), 1);
+        assert!(matches!(volumes[0], MachineVolume::Ephemeral(_)));
+    }
+
+    #[test]
+    fn parse_ephemeral_volume_missing_mount() {
+        let specs = vec!["size_mib=100".to_string()];
+        assert!(parse_ephemeral_volumes(&specs).is_err());
+    }
+
+    #[test]
+    fn parse_immutable_volume_basic() {
+        let specs = vec![
+            "ref=d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c,mount=/opt/pkg"
+                .to_string(),
+        ];
+        let volumes = parse_immutable_volumes(&specs).unwrap();
+        assert_eq!(volumes.len(), 1);
+        if let MachineVolume::Immutable(v) = &volumes[0] {
+            assert!(v.use_latest); // default
+        } else {
+            panic!("expected immutable volume");
+        }
+    }
+
+    #[test]
+    fn parse_immutable_volume_use_latest_false() {
+        let specs = vec![
+            "ref=d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c,mount=/opt/pkg,use_latest=false"
+                .to_string(),
+        ];
+        let volumes = parse_immutable_volumes(&specs).unwrap();
+        if let MachineVolume::Immutable(v) = &volumes[0] {
+            assert!(!v.use_latest);
+        } else {
+            panic!("expected immutable volume");
+        }
+    }
+
+    #[test]
+    fn parse_immutable_volume_missing_ref() {
+        let specs = vec!["mount=/opt/pkg".to_string()];
+        assert!(parse_immutable_volumes(&specs).is_err());
+    }
+
+    #[test]
+    fn parse_multiple_volumes() {
+        let persistent = vec![
+            "name=a,mount=/a,size_mib=100".to_string(),
+            "name=b,mount=/b,size_mib=200".to_string(),
+        ];
+        let volumes = parse_persistent_volumes(&persistent).unwrap();
+        assert_eq!(volumes.len(), 2);
     }
 }

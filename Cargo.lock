@@ -274,6 +274,7 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
+ "memsizes",
  "serde_json",
  "tokio",
  "url",
