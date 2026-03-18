@@ -675,8 +675,21 @@ pub struct FileUploadArgs {
 
 #[derive(Args)]
 pub struct FileDownloadArgs {
-    #[command(flatten)]
-    pub source: FileDownloadSource,
+    /// File hash to download (direct access).
+    #[arg(conflicts_with_all = ["message_hash", "reference"])]
+    pub hash: Option<ItemHash>,
+
+    /// Download by STORE message hash (resolves file hash from message metadata).
+    #[arg(long, conflicts_with_all = ["hash", "reference"])]
+    pub message_hash: Option<ItemHash>,
+
+    /// Download by user-defined file reference. Requires --owner.
+    #[arg(long = "ref", conflicts_with_all = ["hash", "message_hash"])]
+    pub reference: Option<String>,
+
+    /// Owner address, required when downloading by --ref.
+    #[arg(long, requires = "reference")]
+    pub owner: Option<String>,
 
     /// Output file path. Defaults to `./<file_hash>` in the current directory.
     #[arg(short, long)]
@@ -685,24 +698,4 @@ pub struct FileDownloadArgs {
     /// Write file contents to stdout instead of saving to a file.
     #[arg(long)]
     pub stdout: bool,
-}
-
-#[derive(Args)]
-#[group(required = true, multiple = false)]
-pub struct FileDownloadSource {
-    /// Download by file hash (direct access).
-    #[arg(long)]
-    pub hash: Option<ItemHash>,
-
-    /// Download by STORE message hash (resolves file hash from message metadata).
-    #[arg(long)]
-    pub message_hash: Option<ItemHash>,
-
-    /// Download by user-defined file reference. Requires --owner.
-    #[arg(long = "ref")]
-    pub reference: Option<String>,
-
-    /// Owner address, required when downloading by --ref.
-    #[arg(long, requires = "reference")]
-    pub owner: Option<String>,
 }
