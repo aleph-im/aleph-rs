@@ -501,7 +501,7 @@ async fn test_submit_message_storage() {
     let key = [1u8; 32];
     let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
 
-    // Create content large enough to exceed the 50KB inline cutoff
+    // Create content large enough to exceed the 200KB inline cutoff
     let big_body = "x".repeat(210_000);
     let pending = PostBuilder::new(&account, "test-post", serde_json::json!({"body": big_body}))
         .unwrap()
