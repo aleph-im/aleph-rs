@@ -1,11 +1,21 @@
 use aleph_types::account::{Account, SignError};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::execution::base::{Encoding, ExecutableContent, Interface, Payment};
+use aleph_types::message::execution::environment::{
+    FunctionEnvironment, FunctionTriggers, HostRequirements, Hypervisor, InstanceEnvironment,
+    MachineResources, PublishedPort, TrustedExecutionEnvironment,
+};
+use aleph_types::message::execution::volume::{
+    MachineVolume, ParentVolume, PersistentVolumeSize, RootfsVolume, VolumePersistence,
+};
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
-    AggregateContent, AggregateKey, ForgetContent, MessageType, PostContent, PostType,
+    AggregateContent, AggregateKey, CodeContent, DataContent, Export, ForgetContent,
+    FunctionRuntime, InstanceContent, MessageType, PostContent, PostType, ProgramContent,
 };
 use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
+use memsizes::MiB;
 use serde::Serialize;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -251,6 +261,474 @@ impl<'a, A: Account> StoreBuilder<'a, A> {
         let value = serde_json::to_value(store_content)?;
 
         let mut builder = MessageBuilder::new(self.account, MessageType::Store, value);
+        if let Some(channel) = self.channel {
+            builder = builder.channel(channel);
+        }
+        Ok(builder.build()?)
+    }
+}
+
+pub struct ProgramBuilder<'a, A: Account> {
+    account: &'a A,
+    // Code
+    program_ref: ItemHash,
+    entrypoint: String,
+    encoding: Encoding,
+    interface: Option<Interface>,
+    use_latest_code: bool,
+    // Runtime
+    runtime: ItemHash,
+    runtime_comment: String,
+    use_latest_runtime: bool,
+    // Environment
+    internet: bool,
+    aleph_api: bool,
+    reproducible: bool,
+    shared_cache: bool,
+    // Triggers
+    http: bool,
+    persistent: Option<bool>,
+    // Resources
+    vcpus: u32,
+    memory: MiB,
+    seconds: u32,
+    // Optional fields
+    data: Option<DataContent>,
+    export: Option<Export>,
+    variables: Option<HashMap<String, String>>,
+    metadata: Option<HashMap<String, serde_json::Value>>,
+    volumes: Vec<MachineVolume>,
+    payment: Option<Payment>,
+    requirements: Option<HostRequirements>,
+    authorized_keys: Option<Vec<String>>,
+    published_ports: Option<Vec<PublishedPort>>,
+    args: Option<Vec<String>>,
+    allow_amend: bool,
+    replaces: Option<ItemHash>,
+    channel: Option<Channel>,
+}
+
+impl<'a, A: Account> ProgramBuilder<'a, A> {
+    pub fn new(
+        account: &'a A,
+        program_ref: ItemHash,
+        entrypoint: impl Into<String>,
+        runtime: ItemHash,
+    ) -> Self {
+        Self {
+            account,
+            program_ref,
+            entrypoint: entrypoint.into(),
+            encoding: Encoding::Zip,
+            interface: None,
+            use_latest_code: true,
+            runtime,
+            runtime_comment: String::new(),
+            use_latest_runtime: true,
+            internet: true,
+            aleph_api: true,
+            reproducible: false,
+            shared_cache: false,
+            http: true,
+            persistent: None,
+            vcpus: 1,
+            memory: MiB::from(128),
+            seconds: 1,
+            data: None,
+            export: None,
+            variables: None,
+            metadata: None,
+            volumes: vec![],
+            payment: None,
+            requirements: None,
+            authorized_keys: None,
+            published_ports: None,
+            args: None,
+            allow_amend: false,
+            replaces: None,
+            channel: None,
+        }
+    }
+
+    pub fn encoding(mut self, encoding: Encoding) -> Self {
+        self.encoding = encoding;
+        self
+    }
+
+    pub fn interface(mut self, interface: Interface) -> Self {
+        self.interface = Some(interface);
+        self
+    }
+
+    pub fn use_latest_code(mut self, use_latest: bool) -> Self {
+        self.use_latest_code = use_latest;
+        self
+    }
+
+    pub fn runtime_comment(mut self, comment: impl Into<String>) -> Self {
+        self.runtime_comment = comment.into();
+        self
+    }
+
+    pub fn use_latest_runtime(mut self, use_latest: bool) -> Self {
+        self.use_latest_runtime = use_latest;
+        self
+    }
+
+    pub fn internet(mut self, internet: bool) -> Self {
+        self.internet = internet;
+        self
+    }
+
+    pub fn aleph_api(mut self, aleph_api: bool) -> Self {
+        self.aleph_api = aleph_api;
+        self
+    }
+
+    pub fn http(mut self, http: bool) -> Self {
+        self.http = http;
+        self
+    }
+
+    pub fn persistent(mut self, persistent: bool) -> Self {
+        self.persistent = Some(persistent);
+        self
+    }
+
+    pub fn vcpus(mut self, vcpus: u32) -> Self {
+        self.vcpus = vcpus;
+        self
+    }
+
+    pub fn memory(mut self, memory: MiB) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    pub fn timeout_seconds(mut self, seconds: u32) -> Self {
+        self.seconds = seconds;
+        self
+    }
+
+    pub fn data(mut self, data: DataContent) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    pub fn export(mut self, export: Export) -> Self {
+        self.export = Some(export);
+        self
+    }
+
+    pub fn variables(mut self, variables: HashMap<String, String>) -> Self {
+        self.variables = Some(variables);
+        self
+    }
+
+    pub fn metadata(mut self, metadata: HashMap<String, serde_json::Value>) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn volumes(mut self, volumes: Vec<MachineVolume>) -> Self {
+        self.volumes = volumes;
+        self
+    }
+
+    pub fn payment(mut self, payment: Payment) -> Self {
+        self.payment = Some(payment);
+        self
+    }
+
+    pub fn requirements(mut self, requirements: HostRequirements) -> Self {
+        self.requirements = Some(requirements);
+        self
+    }
+
+    pub fn authorized_keys(mut self, keys: Vec<String>) -> Self {
+        self.authorized_keys = Some(keys);
+        self
+    }
+
+    pub fn published_ports(mut self, ports: Vec<PublishedPort>) -> Self {
+        self.published_ports = Some(ports);
+        self
+    }
+
+    pub fn args(mut self, args: Vec<String>) -> Self {
+        self.args = Some(args);
+        self
+    }
+
+    pub fn reproducible(mut self, reproducible: bool) -> Self {
+        self.reproducible = reproducible;
+        self
+    }
+
+    pub fn shared_cache(mut self, shared_cache: bool) -> Self {
+        self.shared_cache = shared_cache;
+        self
+    }
+
+    pub fn allow_amend(mut self, allow: bool) -> Self {
+        self.allow_amend = allow;
+        self
+    }
+
+    pub fn replaces(mut self, replaces: ItemHash) -> Self {
+        self.replaces = Some(replaces);
+        self
+    }
+
+    pub fn channel(mut self, channel: Channel) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    pub fn build(self) -> Result<PendingMessage, MessageBuildError> {
+        let content = ProgramContent {
+            base: ExecutableContent {
+                allow_amend: self.allow_amend,
+                metadata: self.metadata,
+                variables: self.variables,
+                resources: MachineResources {
+                    vcpus: self.vcpus,
+                    memory: self.memory,
+                    seconds: self.seconds,
+                    published_ports: self.published_ports,
+                },
+                payment: self.payment,
+                requirements: self.requirements,
+                volumes: self.volumes,
+                replaces: self.replaces,
+                authorized_keys: self.authorized_keys,
+            },
+            code: CodeContent {
+                encoding: self.encoding,
+                entrypoint: self.entrypoint,
+                reference: self.program_ref,
+                interface: self.interface,
+                args: self.args,
+                use_latest: self.use_latest_code,
+            },
+            runtime: FunctionRuntime {
+                reference: self.runtime,
+                use_latest: self.use_latest_runtime,
+                comment: self.runtime_comment,
+            },
+            data: self.data,
+            environment: FunctionEnvironment {
+                reproducible: self.reproducible,
+                internet: self.internet,
+                aleph_api: self.aleph_api,
+                shared_cache: self.shared_cache,
+            },
+            export: self.export,
+            on: FunctionTriggers {
+                http: self.http,
+                persistent: self.persistent,
+            },
+        };
+        let value = serde_json::to_value(content)?;
+        let mut builder = MessageBuilder::new(self.account, MessageType::Program, value);
+        if let Some(channel) = self.channel {
+            builder = builder.channel(channel);
+        }
+        Ok(builder.build()?)
+    }
+}
+
+pub struct InstanceBuilder<'a, A: Account> {
+    account: &'a A,
+    // Root filesystem
+    rootfs: ItemHash,
+    rootfs_size: PersistentVolumeSize,
+    rootfs_persistence: VolumePersistence,
+    use_latest_rootfs: bool,
+    // Environment
+    internet: bool,
+    aleph_api: bool,
+    hypervisor: Option<Hypervisor>,
+    trusted_execution: Option<TrustedExecutionEnvironment>,
+    // Resources
+    vcpus: u32,
+    memory: MiB,
+    seconds: u32,
+    // Optional fields
+    variables: Option<HashMap<String, String>>,
+    metadata: Option<HashMap<String, serde_json::Value>>,
+    volumes: Vec<MachineVolume>,
+    payment: Option<Payment>,
+    requirements: Option<HostRequirements>,
+    authorized_keys: Option<Vec<String>>,
+    published_ports: Option<Vec<PublishedPort>>,
+    allow_amend: bool,
+    replaces: Option<ItemHash>,
+    channel: Option<Channel>,
+}
+
+impl<'a, A: Account> InstanceBuilder<'a, A> {
+    pub fn new(account: &'a A, rootfs: ItemHash, rootfs_size: PersistentVolumeSize) -> Self {
+        Self {
+            account,
+            rootfs,
+            rootfs_size,
+            rootfs_persistence: VolumePersistence::Host,
+            use_latest_rootfs: true,
+            internet: true,
+            aleph_api: true,
+            hypervisor: None,
+            trusted_execution: None,
+            vcpus: 1,
+            memory: MiB::from(128),
+            seconds: 1,
+            variables: None,
+            metadata: None,
+            volumes: vec![],
+            payment: None,
+            requirements: None,
+            authorized_keys: None,
+            published_ports: None,
+            allow_amend: false,
+            replaces: None,
+            channel: None,
+        }
+    }
+
+    pub fn rootfs_persistence(mut self, persistence: VolumePersistence) -> Self {
+        self.rootfs_persistence = persistence;
+        self
+    }
+
+    pub fn use_latest_rootfs(mut self, use_latest: bool) -> Self {
+        self.use_latest_rootfs = use_latest;
+        self
+    }
+
+    pub fn internet(mut self, internet: bool) -> Self {
+        self.internet = internet;
+        self
+    }
+
+    pub fn aleph_api(mut self, aleph_api: bool) -> Self {
+        self.aleph_api = aleph_api;
+        self
+    }
+
+    pub fn hypervisor(mut self, hypervisor: Hypervisor) -> Self {
+        self.hypervisor = Some(hypervisor);
+        self
+    }
+
+    pub fn trusted_execution(mut self, tee: TrustedExecutionEnvironment) -> Self {
+        self.trusted_execution = Some(tee);
+        self
+    }
+
+    pub fn vcpus(mut self, vcpus: u32) -> Self {
+        self.vcpus = vcpus;
+        self
+    }
+
+    pub fn memory(mut self, memory: MiB) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    pub fn timeout_seconds(mut self, seconds: u32) -> Self {
+        self.seconds = seconds;
+        self
+    }
+
+    pub fn variables(mut self, variables: HashMap<String, String>) -> Self {
+        self.variables = Some(variables);
+        self
+    }
+
+    pub fn metadata(mut self, metadata: HashMap<String, serde_json::Value>) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn volumes(mut self, volumes: Vec<MachineVolume>) -> Self {
+        self.volumes = volumes;
+        self
+    }
+
+    pub fn payment(mut self, payment: Payment) -> Self {
+        self.payment = Some(payment);
+        self
+    }
+
+    pub fn requirements(mut self, requirements: HostRequirements) -> Self {
+        self.requirements = Some(requirements);
+        self
+    }
+
+    pub fn ssh_keys(mut self, keys: Vec<String>) -> Self {
+        self.authorized_keys = Some(keys);
+        self
+    }
+
+    pub fn published_ports(mut self, ports: Vec<PublishedPort>) -> Self {
+        self.published_ports = Some(ports);
+        self
+    }
+
+    pub fn allow_amend(mut self, allow: bool) -> Self {
+        self.allow_amend = allow;
+        self
+    }
+
+    pub fn replaces(mut self, replaces: ItemHash) -> Self {
+        self.replaces = Some(replaces);
+        self
+    }
+
+    pub fn channel(mut self, channel: Channel) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    pub fn build(self) -> Result<PendingMessage, MessageBuildError> {
+        let content = InstanceContent {
+            base: ExecutableContent {
+                allow_amend: self.allow_amend,
+                metadata: self.metadata,
+                variables: self.variables,
+                resources: MachineResources {
+                    vcpus: self.vcpus,
+                    memory: self.memory,
+                    seconds: self.seconds,
+                    published_ports: self.published_ports,
+                },
+                payment: self.payment,
+                requirements: self.requirements,
+                volumes: self.volumes,
+                replaces: self.replaces,
+                authorized_keys: self.authorized_keys,
+            },
+            environment: InstanceEnvironment {
+                internet: self.internet,
+                aleph_api: self.aleph_api,
+                hypervisor: self.hypervisor,
+                trusted_execution: self.trusted_execution,
+                // Legacy fields kept for retro-compatibility, always false for instances.
+                reproducible: false,
+                shared_cache: false,
+            },
+            rootfs: RootfsVolume {
+                parent: ParentVolume {
+                    reference: self.rootfs,
+                    use_latest: self.use_latest_rootfs,
+                },
+                persistence: self.rootfs_persistence,
+                size_mib: self.rootfs_size,
+                forgotten_by: None,
+            },
+        };
+        let value = serde_json::to_value(content)?;
+        let mut builder = MessageBuilder::new(self.account, MessageType::Instance, value);
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
         }
@@ -583,5 +1061,155 @@ mod tests {
             err,
             MessageBuildError::StorageEngineMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn test_program_builder_defaults() {
+        let account = TestAccount::new();
+        let code_ref = aleph_types::item_hash!(
+            "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e"
+        );
+        let runtime_ref = aleph_types::item_hash!(
+            "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696"
+        );
+
+        let msg = ProgramBuilder::new(&account, code_ref, "main:app", runtime_ref)
+            .build()
+            .unwrap();
+
+        assert_eq!(msg.message_type, MessageType::Program);
+        assert_eq!(msg.item_type, ItemType::Inline);
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(
+            parsed["address"],
+            "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef"
+        );
+        // Code
+        assert_eq!(parsed["code"]["entrypoint"], "main:app");
+        assert_eq!(parsed["code"]["encoding"], "zip");
+        assert_eq!(parsed["code"]["use_latest"], true);
+        // Runtime
+        assert_eq!(parsed["runtime"]["use_latest"], true);
+        // Environment defaults
+        assert_eq!(parsed["environment"]["internet"], true);
+        assert_eq!(parsed["environment"]["aleph_api"], true);
+        assert_eq!(parsed["environment"]["reproducible"], false);
+        // Triggers defaults
+        assert_eq!(parsed["on"]["http"], true);
+        // Resources defaults
+        assert_eq!(parsed["resources"]["vcpus"], 1);
+        assert_eq!(parsed["resources"]["memory"], 128);
+        assert_eq!(parsed["resources"]["seconds"], 1);
+        // Optional fields absent
+        assert_eq!(parsed["allow_amend"], false);
+    }
+
+    #[test]
+    fn test_program_builder_with_options() {
+        let account = TestAccount::new();
+        let code_ref = aleph_types::item_hash!(
+            "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e"
+        );
+        let runtime_ref = aleph_types::item_hash!(
+            "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696"
+        );
+        let channel = Channel::from("MY_CHANNEL".to_string());
+
+        let msg = ProgramBuilder::new(&account, code_ref, "main:app", runtime_ref)
+            .encoding(aleph_types::message::execution::base::Encoding::Squashfs)
+            .persistent(true)
+            .internet(false)
+            .vcpus(4)
+            .memory(memsizes::MiB::from(2048))
+            .timeout_seconds(30)
+            .allow_amend(true)
+            .channel(channel.clone())
+            .build()
+            .unwrap();
+
+        assert_eq!(msg.message_type, MessageType::Program);
+        assert_eq!(msg.channel, Some(channel));
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(parsed["code"]["encoding"], "squashfs");
+        assert_eq!(parsed["on"]["persistent"], true);
+        assert_eq!(parsed["environment"]["internet"], false);
+        assert_eq!(parsed["resources"]["vcpus"], 4);
+        assert_eq!(parsed["resources"]["memory"], 2048);
+        assert_eq!(parsed["resources"]["seconds"], 30);
+        assert_eq!(parsed["allow_amend"], true);
+    }
+
+    #[test]
+    fn test_instance_builder_defaults() {
+        let account = TestAccount::new();
+        let rootfs_ref = aleph_types::item_hash!(
+            "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717"
+        );
+        let rootfs_size = aleph_types::message::execution::volume::PersistentVolumeSize::from(
+            memsizes::MiB::from(20480),
+        );
+
+        let msg = InstanceBuilder::new(&account, rootfs_ref, rootfs_size)
+            .build()
+            .unwrap();
+
+        assert_eq!(msg.message_type, MessageType::Instance);
+        assert_eq!(msg.item_type, ItemType::Inline);
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(
+            parsed["address"],
+            "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef"
+        );
+        // Rootfs
+        assert_eq!(parsed["rootfs"]["parent"]["use_latest"], true);
+        assert_eq!(parsed["rootfs"]["persistence"], "host");
+        assert_eq!(parsed["rootfs"]["size_mib"], 20480);
+        // Environment defaults
+        assert_eq!(parsed["environment"]["internet"], true);
+        assert_eq!(parsed["environment"]["aleph_api"], true);
+        assert!(parsed["environment"]["hypervisor"].is_null());
+        // Resources defaults
+        assert_eq!(parsed["resources"]["vcpus"], 1);
+        assert_eq!(parsed["resources"]["memory"], 128);
+        assert_eq!(parsed["allow_amend"], false);
+    }
+
+    #[test]
+    fn test_instance_builder_with_options() {
+        let account = TestAccount::new();
+        let rootfs_ref = aleph_types::item_hash!(
+            "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717"
+        );
+        let rootfs_size = aleph_types::message::execution::volume::PersistentVolumeSize::from(
+            memsizes::MiB::from(20480),
+        );
+        let channel = Channel::from("ALEPH-CLOUDSOLUTIONS".to_string());
+
+        let msg = InstanceBuilder::new(&account, rootfs_ref, rootfs_size)
+            .hypervisor(aleph_types::message::execution::environment::Hypervisor::Qemu)
+            .internet(true)
+            .vcpus(12)
+            .memory(memsizes::MiB::from(73728))
+            .timeout_seconds(30)
+            .ssh_keys(vec!["ssh-ed25519 AAAA... user@host".to_string()])
+            .channel(channel.clone())
+            .build()
+            .unwrap();
+
+        assert_eq!(msg.message_type, MessageType::Instance);
+        assert_eq!(msg.channel, Some(channel));
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(parsed["environment"]["hypervisor"], "qemu");
+        assert_eq!(parsed["resources"]["vcpus"], 12);
+        assert_eq!(parsed["resources"]["memory"], 73728);
+        assert_eq!(parsed["resources"]["seconds"], 30);
+        assert_eq!(
+            parsed["authorized_keys"][0],
+            "ssh-ed25519 AAAA... user@host"
+        );
     }
 }

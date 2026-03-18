@@ -20,5 +20,5 @@ pub use base_message::{
 pub use forget::ForgetContent;
 pub use instance::InstanceContent;
 pub use post::{PostContent, PostType};
-pub use program::ProgramContent;
+pub use program::{CodeContent, DataContent, Export, FunctionRuntime, ProgramContent};
 pub use store::{FileRef, RawFileRef, StorageBackend, StorageEngine, StoreContent};
