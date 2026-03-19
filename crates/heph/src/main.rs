@@ -4,10 +4,11 @@ use aleph_types::account::{Account, EvmAccount};
 use aleph_types::chain::Chain;
 use clap::Parser;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use heph::api::{AppState, configure_routes};
 use heph::config::HephConfig;
+use heph::corechannel::CoreChannelState;
 use heph::db::Db;
 use heph::files::FileStore;
 
@@ -64,10 +65,34 @@ async fn main() -> anyhow::Result<()> {
     let host = config.host.clone();
     let port = config.port;
 
+    // Initialize corechannel aggregate with heph itself as a CCN.
+    // The first account is the node operator.
+    let corechannel = {
+        use aleph_sdk::corechannel::{CoreChannelAction, CreateNodeDetails};
+
+        let mut cc = CoreChannelState::new();
+        let node_addr = &config.accounts[0];
+        cc.apply_operation(
+            CoreChannelAction::CreateNode {
+                details: CreateNodeDetails {
+                    name: "heph".to_string(),
+                    multiaddress: format!("/ip4/{}/tcp/{}", config.host, config.port),
+                },
+            },
+            node_addr,
+            None,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            0.0,
+        );
+        heph::corechannel::persist_aggregate(&db, &cc, 0.0);
+        Mutex::new(cc)
+    };
+
     let state = web::Data::new(AppState {
         db,
         file_store,
         config,
+        corechannel,
     });
 
     HttpServer::new(move || {

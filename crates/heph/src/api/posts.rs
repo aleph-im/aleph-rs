@@ -268,6 +268,7 @@ mod tests {
             db,
             file_store,
             config,
+            corechannel: std::sync::Mutex::new(crate::corechannel::CoreChannelState::new()),
         })
     }
 
@@ -306,7 +307,7 @@ mod tests {
         let account = EvmAccount::new(Chain::Ethereum, key).unwrap();
         let addr = account.address().as_str().to_string();
         let ic = format!(
-            r#"{{"ref":"{}","address":"{}","time":{},"content":{{"body":"Amended"}}}}"#,
+            r#"{{"type":"amend","ref":"{}","address":"{}","time":{},"content":{{"body":"Amended"}}}}"#,
             ref_hash, addr, time
         );
         let item_hash = ItemHash::Native(AlephItemHash::from_bytes(ic.as_bytes()));

@@ -36,14 +36,7 @@ pub fn process_post(
         .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
 
     if post_content.is_amend() {
-        // Extract the ref by serializing the PostContent and reading the "ref" field.
-        let post_val = serde_json::to_value(&post_content.post_type)
-            .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
-        let ref_hash = post_val
-            .get("ref")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let ref_hash = post_content.reference.as_deref().unwrap_or("").to_string();
 
         if ref_hash.is_empty() {
             return Err(ProcessingError::PostAmendNoTarget(
@@ -142,7 +135,7 @@ mod tests {
 
     fn make_amend_content_str(addr: &str, time: f64, ref_hash: &str) -> String {
         format!(
-            r#"{{"ref":"{}","address":"{}","time":{},"content":{{"body":"Amended"}}}}"#,
+            r#"{{"type":"amend","ref":"{}","address":"{}","time":{},"content":{{"body":"Amended"}}}}"#,
             ref_hash, addr, time
         )
     }

@@ -4,20 +4,20 @@ use aleph_types::account::Account;
 use aleph_types::channel;
 use aleph_types::channel::Channel;
 use aleph_types::message::pending::PendingMessage;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::aggregate_models::corechannel::NodeHash;
 use crate::messages::{MessageBuildError, PostBuilder};
 
 static FOUNDATION_CHANNEL: LazyLock<Channel> = LazyLock::new(|| channel!("FOUNDATION"));
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateNodeDetails {
     pub name: String,
     pub multiaddress: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateResourceNodeDetails {
     pub name: String,
     pub address: String,
@@ -25,7 +25,7 @@ pub struct CreateResourceNodeDetails {
     pub node_type: String,
 }
 
-#[derive(Debug, Default, PartialEq, Serialize)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AmendDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -55,7 +55,7 @@ pub struct AmendDetails {
     pub terms_and_conditions: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 #[allow(clippy::large_enum_variant)]
 pub enum CoreChannelAction {
@@ -405,5 +405,25 @@ mod tests {
             parsed["ref"],
             "a75e0d10aec10614553ed00070147dd288aa4f510346cf4f5c13a826ae9f2d77"
         );
+    }
+
+    #[test]
+    fn test_deserialize_create_node_action() {
+        let json = r#"{"action":"create-node","details":{"name":"My CCN","multiaddress":"/ip4/1.2.3.4/tcp/4025"}}"#;
+        let action: CoreChannelAction = serde_json::from_str(json).unwrap();
+        match action {
+            CoreChannelAction::CreateNode { details } => {
+                assert_eq!(details.name, "My CCN");
+                assert_eq!(details.multiaddress, "/ip4/1.2.3.4/tcp/4025");
+            }
+            _ => panic!("expected CreateNode"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_link_action() {
+        let json = r#"{"action":"link"}"#;
+        let action: CoreChannelAction = serde_json::from_str(json).unwrap();
+        assert!(matches!(action, CoreChannelAction::Link));
     }
 }
