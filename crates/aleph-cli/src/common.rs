@@ -161,6 +161,44 @@ pub fn format_api_error(status: u16, body: &str, json: bool) -> String {
     format!("API error (HTTP {status}): {body}")
 }
 
+use crate::account::store::AccountStore;
+use crate::account::{CliAccount, load_account, load_account_by_name};
+use crate::cli::SigningArgs;
+
+/// Resolve a signing account from CLI args.
+///
+/// Resolution order:
+/// 1. --private-key flag or ALEPH_PRIVATE_KEY env var
+/// 2. --account flag (named account from store)
+/// 3. Default account from store
+pub fn resolve_account(signing: &SigningArgs) -> Result<CliAccount, Box<dyn std::error::Error>> {
+    // 1. Explicit private key takes precedence
+    if signing.private_key.is_some() || std::env::var("ALEPH_PRIVATE_KEY").is_ok() {
+        return Ok(load_account(
+            signing.private_key.as_deref(),
+            signing.chain.into(),
+        )?);
+    }
+
+    // 2-3. Named account or default from store
+    let store =
+        AccountStore::open().map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
+
+    let name = match &signing.account {
+        Some(name) => name.clone(),
+        None => store
+            .default_account_name()
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!(
+                "no account specified and no default account set.\n\
+                 Use --private-key, --account, or create an account with: aleph account create --name <NAME>"
+            ))?
+            .to_string(),
+    };
+
+    Ok(load_account_by_name(&store, &name)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

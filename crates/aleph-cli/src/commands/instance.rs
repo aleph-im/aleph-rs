@@ -12,7 +12,7 @@ use aleph_types::message::execution::volume::{
 use memsizes::MiB;
 use url::Url;
 
-use crate::account::load_account;
+use crate::common::resolve_account;
 
 pub async fn handle_instance_command(
     aleph_client: &AlephClient,
@@ -179,10 +179,7 @@ async fn handle_instance_create(
     args: InstanceCreateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = load_account(
-        args.signing.private_key.as_deref(),
-        args.signing.chain.into(),
-    )?;
+    let account = resolve_account(&args.signing)?;
 
     // Read and validate SSH public keys
     let mut ssh_keys = Vec::new();

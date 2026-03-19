@@ -1,6 +1,10 @@
+pub mod generate;
+pub mod store;
+
 use aleph_types::account::{Account, EvmAccount, SignError, SolanaAccount};
 use aleph_types::chain::{Address, Chain, Signature};
 use anyhow::{Context, Result, bail};
+use zeroize::Zeroizing;
 
 /// Account wrapper that dispatches to the correct signing implementation
 /// based on the chain type. This exists because the SDK builders are generic
@@ -49,14 +53,14 @@ impl Account for CliAccount {
 ///
 /// The hex string may optionally have a `0x` prefix.
 pub fn load_account(private_key: Option<&str>, chain: Chain) -> Result<CliAccount> {
-    let key_hex = match private_key {
+    let key_hex = Zeroizing::new(match private_key {
         Some(k) => k.to_string(),
         None => std::env::var("ALEPH_PRIVATE_KEY")
             .context("no private key provided; use --private-key or set ALEPH_PRIVATE_KEY")?,
-    };
+    });
 
     let key_hex = key_hex.strip_prefix("0x").unwrap_or(&key_hex);
-    let key_bytes = hex::decode(key_hex).context("invalid hex in private key")?;
+    let key_bytes = Zeroizing::new(hex::decode(key_hex).context("invalid hex in private key")?);
 
     if chain.is_evm() {
         let account = EvmAccount::new(chain, &key_bytes).map_err(|e| anyhow::anyhow!(e))?;
@@ -66,6 +70,30 @@ pub fn load_account(private_key: Option<&str>, chain: Chain) -> Result<CliAccoun
         Ok(CliAccount::Sol(account))
     } else {
         bail!("chain {chain} is not supported for signing (only EVM and SVM chains)")
+    }
+}
+
+/// Load a named account from the account store.
+///
+/// Retrieves the private key from the OS keychain and constructs the
+/// appropriate account type based on the stored chain.
+pub fn load_account_by_name(store: &store::AccountStore, name: &str) -> Result<CliAccount> {
+    let entry = store
+        .get_account(name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    match entry.kind {
+        store::AccountKind::Local => {
+            let key_hex = Zeroizing::new(
+                store
+                    .get_private_key(name)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+            );
+            load_account(Some(&key_hex), entry.chain)
+        }
+        store::AccountKind::Ledger => {
+            bail!("Ledger accounts are not yet supported (coming in Phase 2)")
+        }
     }
 }
 
@@ -141,5 +169,13 @@ mod tests {
         let account = load_account(Some(TEST_KEY_HEX), Chain::Ethereum).unwrap();
         let sig = account.sign_raw(b"test message").unwrap();
         assert!(sig.as_str().starts_with("0x"));
+    }
+
+    #[test]
+    fn load_account_by_name_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store::AccountStore::with_manifest_path(dir.path().join("accounts.toml"));
+        let err = load_account_by_name(&store, "nonexistent").unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 }

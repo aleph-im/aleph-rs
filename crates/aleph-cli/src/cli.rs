@@ -100,6 +100,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: InstanceCommand,
     },
+    /// Manage local accounts and signing keys.
+    Account {
+        #[clap(subcommand)]
+        command: AccountCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -325,11 +330,17 @@ impl From<ChainCli> for aleph_types::chain::Chain {
 
 #[derive(Debug, Clone, Args)]
 pub struct SigningArgs {
+    /// Named account from `aleph account list`.
+    /// Defaults to the active account set by `aleph account use`.
+    #[arg(long)]
+    pub account: Option<String>,
+
     /// Hex-encoded private key. Falls back to ALEPH_PRIVATE_KEY env var.
+    /// Overrides --account if both are provided.
     #[arg(long)]
     pub private_key: Option<String>,
 
-    /// Signing chain.
+    /// Signing chain. Only required with --private-key.
     #[arg(long, value_enum, default_value = "eth")]
     pub chain: ChainCli,
 
@@ -690,6 +701,78 @@ pub struct DropNodeArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum AccountCommand {
+    /// Generate a new private key and store it in the OS keychain.
+    Create(AccountCreateArgs),
+    /// Import an existing private key (or Ledger account in Phase 2).
+    Import(AccountImportArgs),
+    /// List all stored accounts.
+    List,
+    /// Show details of an account (defaults to the active account).
+    Show(AccountShowArgs),
+    /// Delete an account from the keychain and manifest.
+    Delete(AccountDeleteArgs),
+    /// Set the default account used for signing.
+    Use(AccountUseArgs),
+    /// Export the private key of a local account.
+    Export(AccountExportArgs),
+}
+
+#[derive(Args)]
+pub struct AccountCreateArgs {
+    /// Name for the new account.
+    #[arg(long)]
+    pub name: String,
+
+    /// Chain for the new account.
+    #[arg(long, value_enum, default_value = "eth")]
+    pub chain: ChainCli,
+}
+
+#[derive(Args)]
+pub struct AccountImportArgs {
+    /// Name for the imported account.
+    #[arg(long)]
+    pub name: String,
+
+    /// Chain for the imported account.
+    #[arg(long, value_enum, default_value = "eth")]
+    pub chain: ChainCli,
+
+    /// Hex-encoded private key. If not provided, reads from stdin.
+    #[arg(long)]
+    pub private_key: Option<String>,
+}
+
+#[derive(Args)]
+pub struct AccountShowArgs {
+    /// Account name (defaults to the active account).
+    pub name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct AccountDeleteArgs {
+    /// Name of the account to delete.
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct AccountUseArgs {
+    /// Name of the account to set as default.
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct AccountExportArgs {
+    /// Name of the account whose key to export.
+    pub name: String,
+
+    /// Skip confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Subcommand)]
