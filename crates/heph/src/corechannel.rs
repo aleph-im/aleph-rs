@@ -337,8 +337,8 @@ impl CoreChannelState {
 
         // Try CCN amend: sender must be owner (and own a CCN) or manager
         if let Some(node) = self.nodes.get(ref_hash) {
-            let is_owner =
-                node.owner == sender && self.address_nodes.get(sender) == Some(&ref_hash.to_string());
+            let is_owner = node.owner == sender
+                && self.address_nodes.get(sender) == Some(&ref_hash.to_string());
             let is_manager = node.manager == sender;
             if !is_owner && !is_manager {
                 return false;
