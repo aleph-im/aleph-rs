@@ -1118,6 +1118,16 @@ pub trait AlephAggregateClient {
     ) -> impl Future<Output = Result<CoreChannelAggregate, MessageError>> + Send {
         self.get_aggregate(address, "corechannel")
     }
+
+    /// Returns the most recent version of multiple aggregates, keyed by their aggregate key.
+    ///
+    /// The result map only contains keys that exist on the server. Keys that
+    /// have no aggregate are silently omitted.
+    fn get_aggregates(
+        &self,
+        address: &Address,
+        keys: &[&str],
+    ) -> impl Future<Output = Result<HashMap<String, serde_json::Value>, MessageError>> + Send;
 }
 
 pub trait AlephPostClient {
@@ -1929,7 +1939,7 @@ impl AlephAggregateClient for AlephClient {
         let response = self
             .http_client
             .get(url)
-            .query(&[("key", key)])
+            .query(&[("keys", key)])
             .send()
             .await?;
         let aggregate_response: AggregateResponse<T> = response
@@ -1938,6 +1948,46 @@ impl AlephAggregateClient for AlephClient {
             .map_err(reqwest_middleware::Error::from)?;
 
         Ok(aggregate_response.data)
+    }
+
+    async fn get_aggregates(
+        &self,
+        address: &Address,
+        keys: &[&str],
+    ) -> Result<HashMap<String, serde_json::Value>, MessageError> {
+        if keys.is_empty() {
+            return Err(MessageError::ApiError {
+                status: 0,
+                body: "get_aggregates requires at least one key".to_string(),
+            });
+        }
+
+        #[derive(Deserialize)]
+        struct AggregatesResponse {
+            data: HashMap<String, serde_json::Value>,
+        }
+
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/aggregates/{}.json", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let keys_csv = keys.join(",");
+        let response = self
+            .http_client
+            .get(url)
+            .query(&[("keys", &keys_csv)])
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let aggregates_response: AggregatesResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+
+        Ok(aggregates_response.data)
     }
 }
 
