@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 aleph-types = { path = "../aleph-types", features = ["account-evm", "signature-sol"] }
+aleph-sdk = { path = "../aleph-sdk" }
 actix-web = "4"
 actix-cors = "0.7"
 actix-multipart = "0.7"

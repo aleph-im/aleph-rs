@@ -13,7 +13,7 @@ use aleph_types::message::execution::volume::{
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
     AggregateContent, AggregateKey, Authorization, CodeContent, DataContent, Export, ForgetContent,
-    FunctionRuntime, InstanceContent, MessageType, PostContent, PostType, ProgramContent,
+    FunctionRuntime, InstanceContent, MessageType, PostContent, ProgramContent,
 };
 use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
 use memsizes::MiB;
@@ -39,7 +39,7 @@ pub enum MessageBuildError {
 
 pub struct PostBuilder<'a, A: Account> {
     account: &'a A,
-    post_type: PostType,
+    post_type: String,
     content: serde_json::Value,
     reference: Option<String>,
     channel: Option<Channel>,
@@ -53,9 +53,7 @@ impl<'a, A: Account> PostBuilder<'a, A> {
     ) -> Result<Self, MessageBuildError> {
         Ok(Self {
             account,
-            post_type: PostType::Other {
-                post_type: post_type.into(),
-            },
+            post_type: post_type.into(),
             content: serde_json::to_value(content)?,
             reference: None,
             channel: None,
@@ -69,11 +67,9 @@ impl<'a, A: Account> PostBuilder<'a, A> {
     ) -> Result<Self, MessageBuildError> {
         Ok(Self {
             account,
-            post_type: PostType::Amend {
-                reference: reference.to_string(),
-            },
+            post_type: "amend".to_string(),
             content: serde_json::to_value(content)?,
-            reference: None,
+            reference: Some(reference.to_string()),
             channel: None,
         })
     }
@@ -94,15 +90,10 @@ impl<'a, A: Account> PostBuilder<'a, A> {
     pub fn build(self) -> Result<PendingMessage, MessageBuildError> {
         let post_content = PostContent {
             post_type: self.post_type,
+            reference: self.reference,
             content: Some(self.content),
         };
-        let mut value = serde_json::to_value(post_content)?;
-        if let Some(reference) = self.reference {
-            value
-                .as_object_mut()
-                .expect("PostContent serializes to an object")
-                .insert("ref".to_string(), serde_json::Value::String(reference));
-        }
+        let value = serde_json::to_value(post_content)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::Post, value);
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
@@ -884,7 +875,7 @@ mod tests {
             "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
         );
         assert_eq!(parsed["content"]["body"], "edited");
-        assert!(parsed.get("type").is_none());
+        assert_eq!(parsed["type"], "amend");
     }
 
     #[test]

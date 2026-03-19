@@ -1,5 +1,6 @@
 pub mod api;
 pub mod config;
+pub mod corechannel;
 pub mod cost;
 pub mod db;
 pub mod files;

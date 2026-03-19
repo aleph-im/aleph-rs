@@ -425,11 +425,7 @@ impl DenormalizedFields {
         match content_enum {
             MessageContentEnum::Post(post) => {
                 fields.content_type = Some(post.post_type_str().to_string());
-                // Serialize the content to extract the ref field if this is an amend.
-                if post.is_amend()
-                    && let Some(v) = serde_json::to_value(post).ok()
-                    && let Some(r) = v.get("ref").and_then(|r| r.as_str())
-                {
+                if let Some(ref r) = post.reference {
                     fields.content_ref = Some(r.to_string());
                 }
             }

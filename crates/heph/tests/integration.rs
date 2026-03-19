@@ -59,6 +59,7 @@ fn start_test_server() -> String {
             db,
             file_store,
             config,
+            corechannel: std::sync::Mutex::new(heph::corechannel::CoreChannelState::new()),
         });
 
         let sys = actix_web::rt::System::new();

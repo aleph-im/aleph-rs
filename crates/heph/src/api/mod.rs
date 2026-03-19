@@ -1,7 +1,8 @@
 use actix_web::{HttpResponse, Responder, web};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::HephConfig;
+use crate::corechannel::CoreChannelState;
 use crate::db::Db;
 use crate::files::FileStore;
 
@@ -24,6 +25,7 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub file_store: Arc<FileStore>,
     pub config: HephConfig,
+    pub corechannel: Mutex<CoreChannelState>,
 }
 
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {

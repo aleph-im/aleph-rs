@@ -483,6 +483,7 @@ mod tests {
             db,
             file_store,
             config,
+            corechannel: std::sync::Mutex::new(crate::corechannel::CoreChannelState::new()),
         })
     }
 

@@ -1,36 +1,22 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PostType {
-    Amend {
-        #[serde(rename = "ref")]
-        reference: String,
-    },
-    Other {
-        #[serde(rename = "type")]
-        post_type: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PostContent {
-    #[serde(flatten)]
-    pub post_type: PostType,
+    #[serde(rename = "type")]
+    pub post_type: String,
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
 }
 
 impl PostContent {
     pub fn is_amend(&self) -> bool {
-        matches!(self.post_type, PostType::Amend { .. })
+        self.post_type == "amend"
     }
 
     pub fn post_type_str(&self) -> &str {
-        match &self.post_type {
-            PostType::Amend { .. } => "amend",
-            PostType::Other { post_type } => post_type,
-        }
+        &self.post_type
     }
 }
 

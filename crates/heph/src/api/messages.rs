@@ -2,6 +2,7 @@ use actix_web::{HttpResponse, Responder, web};
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
+use crate::corechannel;
 use crate::db::messages::{self, MessageFilter, StoredMessage};
 use crate::handlers::{self, IncomingMessage};
 
@@ -38,11 +39,39 @@ pub async fn post_message(
     let db = state.db.clone();
     let file_store = state.file_store.clone();
 
+    // Capture fields needed for corechannel hook before msg is moved.
+    let is_post = matches!(msg.message_type, aleph_types::message::MessageType::Post);
+    let item_content = msg.item_content.clone();
+    let sender = msg.sender.as_str().to_string();
+    let item_hash = msg.item_hash.to_string();
+    let time = msg.time.as_f64();
+
     let result = tokio::task::spawn_blocking(move || {
         handlers::process_message_with_store(&db, &msg, Some(&file_store))
     })
     .await
     .unwrap();
+
+    // Corechannel hook: runs after successful processing.
+    if result.is_ok()
+        && is_post
+        && let Some(item_content) = &item_content
+        && let Some(parsed) = corechannel::parse_corechan_operation(item_content)
+    {
+        let db = state.db.clone();
+        if let Ok(mut cc) = state.corechannel.lock() {
+            let changed = cc.apply_operation(
+                parsed.action,
+                &sender,
+                parsed.ref_.as_deref(),
+                &item_hash,
+                time,
+            );
+            if changed {
+                corechannel::persist_aggregate(&db, &cc, time);
+            }
+        }
+    }
 
     let pub_status = PublicationStatus {
         status: "success",
@@ -517,6 +546,7 @@ mod tests {
             db,
             file_store,
             config,
+            corechannel: std::sync::Mutex::new(crate::corechannel::CoreChannelState::new()),
         })
     }
 

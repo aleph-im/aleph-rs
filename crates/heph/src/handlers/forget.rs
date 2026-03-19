@@ -342,7 +342,7 @@ mod tests {
     fn make_amend_msg(key: &[u8; 32], time: f64, ref_hash: &str) -> IncomingMessage {
         let addr = addr_for_key(key);
         let ic = format!(
-            r#"{{"ref":"{}","address":"{}","time":{},"content":{{"body":"Amended"}}}}"#,
+            r#"{{"type":"amend","ref":"{}","address":"{}","time":{},"content":{{"body":"Amended"}}}}"#,
             ref_hash, addr, time
         );
         sign_inline(key, MessageType::Post, ic)
