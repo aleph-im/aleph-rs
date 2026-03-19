@@ -25,8 +25,39 @@ pub struct CreateResourceNodeDetails {
     pub node_type: String,
 }
 
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub struct AmendDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiaddress: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_reward: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manager: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorized: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terms_and_conditions: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
+#[allow(clippy::large_enum_variant)]
 pub enum CoreChannelAction {
     CreateNode { details: CreateNodeDetails },
     CreateResourceNode { details: CreateResourceNodeDetails },
@@ -35,6 +66,7 @@ pub enum CoreChannelAction {
     StakeSplit,
     DropNode,
     Unstake,
+    Amend { details: AmendDetails },
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +86,7 @@ impl CoreChannelContent {
             CoreChannelAction::StakeSplit => "stake-split",
             CoreChannelAction::DropNode => "drop-node",
             CoreChannelAction::Unstake => "unstake",
+            CoreChannelAction::Amend { .. } => "amend",
         };
         Self {
             action,
@@ -157,6 +190,15 @@ pub fn drop_node<A: Account>(
         CoreChannelContent::new(CoreChannelAction::DropNode),
         Some(node_hash),
     )
+}
+
+pub fn amend_node<A: Account>(
+    account: &A,
+    node_hash: NodeHash,
+    details: AmendDetails,
+) -> Result<PendingMessage, MessageBuildError> {
+    let action = CoreChannelAction::Amend { details };
+    build_operation(account, CoreChannelContent::new(action), Some(node_hash))
 }
 
 #[cfg(test)]
@@ -328,6 +370,37 @@ mod tests {
             parsed["content"]["tags"],
             serde_json::json!(["drop-node", "mainnet"])
         );
+        assert_eq!(
+            parsed["ref"],
+            "a75e0d10aec10614553ed00070147dd288aa4f510346cf4f5c13a826ae9f2d77"
+        );
+    }
+
+    #[test]
+    fn test_amend_node() {
+        let account = TestAccount::new();
+        let node_hash = test_node_hash();
+        let details = AmendDetails {
+            name: Some("Updated Name".to_string()),
+            reward: Some("0xNewRewardAddress".to_string()),
+            ..Default::default()
+        };
+        let msg = amend_node(&account, node_hash, details).unwrap();
+
+        assert_eq!(msg.message_type, MessageType::Post);
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(parsed["type"], "corechan-operation");
+        assert_eq!(parsed["content"]["action"], "amend");
+        assert_eq!(
+            parsed["content"]["tags"],
+            serde_json::json!(["amend", "mainnet"])
+        );
+        assert_eq!(parsed["content"]["details"]["name"], "Updated Name");
+        assert_eq!(parsed["content"]["details"]["reward"], "0xNewRewardAddress");
+        // Omitted fields must not appear (no nulls)
+        assert!(parsed["content"]["details"].get("multiaddress").is_none());
+        assert!(parsed["content"]["details"].get("locked").is_none());
         assert_eq!(
             parsed["ref"],
             "a75e0d10aec10614553ed00070147dd288aa4f510346cf4f5c13a826ae9f2d77"

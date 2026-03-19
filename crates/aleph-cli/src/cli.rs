@@ -613,6 +613,7 @@ pub struct ForgetArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum NodeCommand {
     /// Register a new Core Channel Node (CCN).
     CreateCcn(CreateCcnArgs),
@@ -628,6 +629,8 @@ pub enum NodeCommand {
     Unstake(UnstakeArgs),
     /// Remove a node from the network.
     Drop(DropNodeArgs),
+    /// Amend metadata fields on an existing node.
+    Amend(AmendNodeArgs),
 }
 
 #[derive(Args)]
@@ -703,6 +706,68 @@ pub struct DropNodeArgs {
     /// Hash of the node to remove.
     #[arg(long)]
     pub node: NodeHash,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct AmendNodeArgs {
+    /// Hash of the node to amend.
+    #[arg(long)]
+    pub node: NodeHash,
+
+    /// Human-readable node name.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// libp2p multiaddress (CCN only).
+    #[arg(long)]
+    pub multiaddress: Option<String>,
+
+    /// HTTPS endpoint address (CRN only).
+    #[arg(long)]
+    pub address: Option<String>,
+
+    /// Profile picture URL.
+    #[arg(long)]
+    pub picture: Option<String>,
+
+    /// Banner image URL.
+    #[arg(long)]
+    pub banner: Option<String>,
+
+    /// Node description.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// Reward address.
+    #[arg(long)]
+    pub reward: Option<String>,
+
+    /// PAYG stream reward address.
+    #[arg(long)]
+    pub stream_reward: Option<String>,
+
+    /// Manager address.
+    #[arg(long)]
+    pub manager: Option<String>,
+
+    /// Authorized staker addresses (comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub authorized: Option<Vec<String>>,
+
+    /// Restrict staking to authorized addresses.
+    #[arg(long)]
+    pub locked: Option<bool>,
+
+    /// Registration URL.
+    #[arg(long)]
+    pub registration_url: Option<String>,
+
+    /// Terms and conditions hash or URL.
+    #[arg(long)]
+    pub terms_and_conditions: Option<String>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
