@@ -236,9 +236,9 @@ impl CoreChannelState {
             Some(h) => h.clone(),
             None => return false,
         };
-        // CRN must exist and have no parent
+        // CRN must exist, have no parent, and not be locked
         match self.resource_nodes.get(crn_hash) {
-            Some(c) if c.parent.is_none() => {}
+            Some(c) if c.parent.is_none() && !c.locked => {}
             _ => return false,
         }
         // CCN must not be at max
@@ -270,10 +270,14 @@ impl CoreChannelState {
             Some(h) => h.clone(),
             None => return false,
         };
-        // Sender must be the parent CCN's owner
-        match self.nodes.get(&parent_hash) {
-            Some(c) if c.owner == sender => {}
-            _ => return false,
+        // Sender must be the parent CCN's owner OR the CRN owner
+        let is_ccn_owner = self
+            .nodes
+            .get(&parent_hash)
+            .is_some_and(|c| c.owner == sender);
+        let is_crn_owner = crn.owner == sender;
+        if !is_ccn_owner && !is_crn_owner {
+            return false;
         }
         // Apply
         self.resource_nodes.get_mut(crn_hash).unwrap().parent = None;
@@ -983,6 +987,95 @@ mod tests {
         assert_eq!(parsed["nodes"].as_array().unwrap().len(), 0);
         assert_eq!(parsed["resource_nodes"].as_array().unwrap().len(), 1);
         assert_eq!(parsed["resource_nodes"][0]["status"], "waiting");
+    }
+
+    #[test]
+    fn test_link_fails_locked_crn() {
+        let mut state = CoreChannelState::new();
+        state.apply_operation(
+            CoreChannelAction::CreateNode {
+                details: CreateNodeDetails {
+                    name: "CCN".to_string(),
+                    multiaddress: "/ip4/1.2.3.4/tcp/4025".to_string(),
+                },
+            },
+            "0xCcnOwner",
+            None,
+            "ccn_hash",
+            1000.0,
+        );
+        state.apply_operation(
+            CoreChannelAction::CreateResourceNode {
+                details: CreateResourceNodeDetails {
+                    name: "CRN".to_string(),
+                    address: "https://crn.example.com".to_string(),
+                    node_type: "compute".to_string(),
+                },
+            },
+            "0xCrnOwner",
+            None,
+            "crn_hash",
+            1001.0,
+        );
+        state.resource_nodes.get_mut("crn_hash").unwrap().locked = true;
+
+        let changed = state.apply_operation(
+            CoreChannelAction::Link,
+            "0xCcnOwner",
+            Some("crn_hash"),
+            "link_hash",
+            1002.0,
+        );
+        assert!(!changed);
+        assert_eq!(state.resource_nodes["crn_hash"].status, "waiting");
+    }
+
+    #[test]
+    fn test_unlink_by_crn_owner() {
+        let mut state = CoreChannelState::new();
+        state.apply_operation(
+            CoreChannelAction::CreateNode {
+                details: CreateNodeDetails {
+                    name: "CCN".to_string(),
+                    multiaddress: "/ip4/1.2.3.4/tcp/4025".to_string(),
+                },
+            },
+            "0xCcnOwner",
+            None,
+            "ccn_hash",
+            1000.0,
+        );
+        state.apply_operation(
+            CoreChannelAction::CreateResourceNode {
+                details: CreateResourceNodeDetails {
+                    name: "CRN".to_string(),
+                    address: "https://crn.example.com".to_string(),
+                    node_type: "compute".to_string(),
+                },
+            },
+            "0xCrnOwner",
+            None,
+            "crn_hash",
+            1001.0,
+        );
+        state.apply_operation(
+            CoreChannelAction::Link,
+            "0xCcnOwner",
+            Some("crn_hash"),
+            "link_hash",
+            1002.0,
+        );
+        let changed = state.apply_operation(
+            CoreChannelAction::Unlink,
+            "0xCrnOwner",
+            Some("crn_hash"),
+            "unlink_hash",
+            1003.0,
+        );
+        assert!(changed);
+        assert_eq!(state.resource_nodes["crn_hash"].status, "waiting");
+        assert!(state.resource_nodes["crn_hash"].parent.is_none());
+        assert!(state.nodes["ccn_hash"].resource_nodes.is_empty());
     }
 
     #[test]
