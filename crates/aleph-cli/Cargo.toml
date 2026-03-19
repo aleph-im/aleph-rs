@@ -18,6 +18,27 @@ hex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }
+directories = { workspace = true }
+rpassword = { workspace = true }
+rand = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [[bin]]
 name = "aleph"

@@ -6,7 +6,7 @@ use aleph_types::channel::Channel;
 use aleph_types::message::MessageType;
 use url::Url;
 
-use crate::account::load_account;
+use crate::common::resolve_account;
 
 pub async fn handle_message_command(
     aleph_client: &AlephClient,
@@ -41,10 +41,7 @@ async fn handle_forget(
     args: ForgetArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = load_account(
-        args.signing.private_key.as_deref(),
-        args.signing.chain.into(),
-    )?;
+    let account = resolve_account(&args.signing)?;
     let hashes: Vec<String> = args.hashes.iter().map(|h| h.to_string()).collect();
     let mut envelope = serde_json::json!({
         "hashes": hashes,
