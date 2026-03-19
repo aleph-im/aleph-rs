@@ -707,3 +707,144 @@ async fn test_create_store_convenience() {
         .unwrap();
     assert_eq!(resp.message_status, "processed");
 }
+
+/// Test that get_aggregate works correctly against heph with key filtering.
+#[tokio::test]
+async fn test_sdk_get_aggregate_single_key() {
+    use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+    use url::Url;
+
+    let base_url = start_test_server();
+    let http_client = reqwest::Client::new();
+    let sdk_client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let addr = account.address().as_str().to_string();
+
+    // Create two aggregates with different keys
+    let (agg1, _) = build_aggregate_msg(&key, "profile", r#"{"name":"Alice"}"#, 1_700_000_001.0);
+    let (agg2, _) = build_aggregate_msg(&key, "settings", r#"{"theme":"dark"}"#, 1_700_000_002.0);
+
+    for msg in [&agg1, &agg2] {
+        let resp = http_client
+            .post(format!("{base_url}/api/v0/messages"))
+            .json(&serde_json::json!({ "sync": true, "message": msg }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    // Fetch only "profile" — data should contain just that key, not both.
+    // get_aggregate<Value> deserializes the `data` field, which wraps values
+    // under their key name: {"profile": {"name": "Alice"}}
+    use aleph_types::chain::Address;
+    let result: serde_json::Value = sdk_client
+        .get_aggregate(&Address::from(addr), "profile")
+        .await
+        .unwrap();
+    assert_eq!(result["profile"]["name"], "Alice");
+    assert!(
+        result.get("settings").is_none(),
+        "should not contain settings key"
+    );
+}
+
+/// Test multi-key aggregate fetch via SDK.
+#[tokio::test]
+async fn test_sdk_get_aggregates_multi_key() {
+    use std::collections::HashMap;
+
+    use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+    use url::Url;
+
+    let base_url = start_test_server();
+    let http_client = reqwest::Client::new();
+    let sdk_client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [2u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let addr = account.address().as_str().to_string();
+
+    // Create two aggregates with different keys
+    let (agg1, _) = build_aggregate_msg(&key, "profile", r#"{"name":"Bob"}"#, 1_700_000_001.0);
+    let (agg2, _) = build_aggregate_msg(&key, "settings", r#"{"theme":"light"}"#, 1_700_000_002.0);
+
+    for msg in [&agg1, &agg2] {
+        let resp = http_client
+            .post(format!("{base_url}/api/v0/messages"))
+            .json(&serde_json::json!({ "sync": true, "message": msg }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    // Fetch both keys in one call
+    use aleph_types::chain::Address;
+    let result: HashMap<String, serde_json::Value> = sdk_client
+        .get_aggregates(&Address::from(addr), &["profile", "settings"])
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result["profile"]["name"], "Bob");
+    assert_eq!(result["settings"]["theme"], "light");
+}
+
+/// Test that get_aggregates with a mix of existing and non-existing keys
+/// returns only the existing ones.
+#[tokio::test]
+async fn test_sdk_get_aggregates_partial_match() {
+    use std::collections::HashMap;
+
+    use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+    use aleph_types::chain::Address;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let http_client = reqwest::Client::new();
+    let sdk_client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [3u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let addr = account.address().as_str().to_string();
+
+    // Create only one aggregate
+    let (agg, _) = build_aggregate_msg(&key, "profile", r#"{"name":"Carol"}"#, 1_700_000_001.0);
+    let resp = http_client
+        .post(format!("{base_url}/api/v0/messages"))
+        .json(&serde_json::json!({ "sync": true, "message": agg }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Request two keys, only one exists
+    let result: HashMap<String, serde_json::Value> = sdk_client
+        .get_aggregates(&Address::from(addr), &["profile", "nonexistent"])
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result["profile"]["name"], "Carol");
+    assert!(!result.contains_key("nonexistent"));
+}
+
+/// Test that get_aggregates with empty keys returns an error.
+#[tokio::test]
+async fn test_sdk_get_aggregates_empty_keys_error() {
+    use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+    use aleph_types::chain::Address;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let sdk_client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let result = sdk_client
+        .get_aggregates(&Address::from("0xdeadbeef".to_string()), &[])
+        .await;
+
+    assert!(result.is_err());
+}
