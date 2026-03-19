@@ -118,6 +118,12 @@ pub struct CoreChannelState {
     pub address_nodes: HashMap<String, String>,
 }
 
+impl Default for CoreChannelState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoreChannelState {
     pub fn new() -> Self {
         Self {
@@ -287,32 +293,33 @@ impl CoreChannelState {
         };
 
         // Try CCN drop: sender must own a CCN and ref must be that CCN
-        if let Some(sender_ccn) = self.address_nodes.get(sender) {
-            if sender_ccn == ref_hash && self.nodes.contains_key(ref_hash) {
-                let children: Vec<String> = self.nodes[ref_hash].resource_nodes.clone();
-                for crn_hash in &children {
-                    if let Some(crn) = self.resource_nodes.get_mut(crn_hash) {
-                        crn.parent = None;
-                        crn.status = "waiting".to_string();
-                    }
+        if let Some(sender_ccn) = self.address_nodes.get(sender)
+            && sender_ccn == ref_hash
+            && self.nodes.contains_key(ref_hash)
+        {
+            let children: Vec<String> = self.nodes[ref_hash].resource_nodes.clone();
+            for crn_hash in &children {
+                if let Some(crn) = self.resource_nodes.get_mut(crn_hash) {
+                    crn.parent = None;
+                    crn.status = "waiting".to_string();
                 }
-                self.nodes.remove(ref_hash);
-                self.address_nodes.remove(sender);
-                return true;
             }
+            self.nodes.remove(ref_hash);
+            self.address_nodes.remove(sender);
+            return true;
         }
 
         // Try CRN drop: ref must be a resource node owned by sender
-        if let Some(crn) = self.resource_nodes.get(ref_hash) {
-            if crn.owner == sender {
-                if let Some(parent_hash) = crn.parent.clone() {
-                    if let Some(ccn) = self.nodes.get_mut(&parent_hash) {
-                        ccn.resource_nodes.retain(|h| h != ref_hash);
-                    }
-                }
-                self.resource_nodes.remove(ref_hash);
-                return true;
+        if let Some(crn) = self.resource_nodes.get(ref_hash)
+            && crn.owner == sender
+        {
+            if let Some(parent_hash) = crn.parent.clone()
+                && let Some(ccn) = self.nodes.get_mut(&parent_hash)
+            {
+                ccn.resource_nodes.retain(|h| h != ref_hash);
             }
+            self.resource_nodes.remove(ref_hash);
+            return true;
         }
 
         false

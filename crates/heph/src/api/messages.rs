@@ -53,22 +53,22 @@ pub async fn post_message(
     .unwrap();
 
     // Corechannel hook: runs after successful processing.
-    if result.is_ok() && is_post {
-        if let Some(item_content) = &item_content {
-            if let Some(parsed) = corechannel::parse_corechan_operation(item_content) {
-                let db = state.db.clone();
-                if let Ok(mut cc) = state.corechannel.lock() {
-                    let changed = cc.apply_operation(
-                        parsed.action,
-                        &sender,
-                        parsed.ref_.as_deref(),
-                        &item_hash,
-                        time,
-                    );
-                    if changed {
-                        corechannel::persist_aggregate(&db, &cc, time);
-                    }
-                }
+    if result.is_ok()
+        && is_post
+        && let Some(item_content) = &item_content
+        && let Some(parsed) = corechannel::parse_corechan_operation(item_content)
+    {
+        let db = state.db.clone();
+        if let Ok(mut cc) = state.corechannel.lock() {
+            let changed = cc.apply_operation(
+                parsed.action,
+                &sender,
+                parsed.ref_.as_deref(),
+                &item_hash,
+                time,
+            );
+            if changed {
+                corechannel::persist_aggregate(&db, &cc, time);
             }
         }
     }
