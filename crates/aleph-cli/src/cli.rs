@@ -105,6 +105,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: AccountCommand,
     },
+    /// Manage delegated authorizations
+    Authorization {
+        #[clap(subcommand)]
+        command: AuthorizationCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -889,6 +894,74 @@ pub struct InstanceCreateArgs {
     /// Can be repeated for multiple volumes.
     #[arg(long)]
     pub immutable_volume: Option<Vec<String>>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum AuthorizationCommand {
+    /// List authorizations for an address
+    List(AuthorizationListArgs),
+    /// Add an authorization for a delegate
+    Add(AuthorizationAddArgs),
+    /// Revoke authorizations for a delegate
+    Revoke(AuthorizationRevokeArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthorizationListArgs {
+    /// Address to list authorizations for (defaults to own address from --private-key)
+    #[arg(long)]
+    pub address: Option<String>,
+
+    /// Filter by delegate address
+    #[arg(long)]
+    pub delegate: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthorizationAddArgs {
+    /// Address to delegate authorization to
+    pub delegate_address: String,
+
+    /// Restrict to a specific chain
+    #[arg(long, value_enum)]
+    pub chain: Option<ChainCli>,
+
+    /// Comma-separated list of allowed channels
+    #[arg(long, value_delimiter = ',')]
+    pub channels: Vec<String>,
+
+    /// Comma-separated list of allowed message types (e.g. post,aggregate)
+    #[arg(long, value_delimiter = ',', value_enum)]
+    pub message_types: Vec<MessageTypeCli>,
+
+    /// Comma-separated list of allowed post types
+    #[arg(long, value_delimiter = ',')]
+    pub post_types: Vec<String>,
+
+    /// Comma-separated list of allowed aggregate keys
+    #[arg(long, value_delimiter = ',')]
+    pub aggregate_keys: Vec<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(group(clap::ArgGroup::new("target").required(true)))]
+pub struct AuthorizationRevokeArgs {
+    /// Address to revoke authorization from
+    #[arg(group = "target")]
+    pub delegate_address: Option<String>,
+
+    /// Revoke all authorizations
+    #[arg(long, group = "target")]
+    pub all: bool,
 
     #[command(flatten)]
     pub signing: SigningArgs,
