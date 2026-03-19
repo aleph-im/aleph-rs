@@ -6,7 +6,7 @@ use aleph_types::channel::Channel;
 use aleph_types::message::MessageType;
 use url::Url;
 
-use crate::account::load_account;
+use crate::common::resolve_account;
 
 pub async fn handle_aggregate_command(
     aleph_client: &AlephClient,
@@ -29,10 +29,7 @@ async fn handle_aggregate_create(
     args: AggregateCreateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = load_account(
-        args.signing.private_key.as_deref(),
-        args.signing.chain.into(),
-    )?;
+    let account = resolve_account(&args.signing)?;
     let content = read_content(args.content)?;
     let map = match content {
         serde_json::Value::Object(map) => map,

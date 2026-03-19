@@ -7,7 +7,7 @@ use aleph_types::channel::Channel;
 use aleph_types::message::{FileRef, StorageEngine};
 use url::Url;
 
-use crate::account::load_account;
+use crate::common::resolve_account;
 
 pub async fn handle_file_command(
     aleph_client: &AlephClient,
@@ -33,10 +33,7 @@ async fn handle_file_upload(
     args: FileUploadArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = load_account(
-        args.signing.private_key.as_deref(),
-        args.signing.chain.into(),
-    )?;
+    let account = resolve_account(&args.signing)?;
 
     let storage_engine = match args.storage_engine {
         StorageEngineCli::Storage => StorageEngine::Storage,

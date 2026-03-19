@@ -77,6 +77,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?
         }
+        cli::Commands::Account {
+            command: account_command,
+        } => commands::account::handle_account_command(account_command, json)?,
     }
 
     Ok(())
