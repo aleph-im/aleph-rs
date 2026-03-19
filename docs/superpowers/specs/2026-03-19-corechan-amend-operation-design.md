@@ -30,8 +30,11 @@ being changed:
 ### `AmendDetails` struct
 
 All 13 editable fields as `Option<T>`, with `#[serde(skip_serializing_if = "Option::is_none")]`
-so only provided fields appear in the serialized JSON. Derives `Default` for
-convenient construction.
+so only provided fields appear in the serialized JSON. Derives `Debug, Default, Serialize`.
+
+Field names use serde's default (underscore) serialization, which matches the
+wire protocol (confirmed via `aggregate.json` and `instance-gpu-payg.json` fixtures).
+No `#[serde(rename)]` attributes needed.
 
 Fields:
 
@@ -90,7 +93,7 @@ New variant: `Amend(AmendNodeArgs)`.
 --reward <String>              (optional)
 --stream-reward <String>       (optional)
 --manager <String>             (optional)
---authorized <String>...       (optional, multi-value)
+--authorized <String>...       (optional, comma-delimited via value_delimiter = ',')
 --locked <bool>                (optional)
 --registration-url <String>    (optional)
 --terms-and-conditions <String>(optional)
@@ -105,7 +108,8 @@ New match arm: maps `AmendNodeArgs` fields into `AmendDetails`, calls
 
 **Validation:** If all 13 optional fields are `None`, error early with
 "at least one field must be provided" rather than submitting a no-op. This
-check lives in the CLI handler, not the SDK.
+check lives in the CLI handler, not the SDK — the SDK is a faithful message
+builder and permits empty details (the server would reject it).
 
 ## Tests
 
