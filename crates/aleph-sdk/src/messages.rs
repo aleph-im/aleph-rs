@@ -1,4 +1,5 @@
 use aleph_types::account::{Account, SignError};
+use aleph_types::chain::{Address, Chain};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::{Encoding, ExecutableContent, Interface, Payment};
@@ -11,7 +12,7 @@ use aleph_types::message::execution::volume::{
 };
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
-    AggregateContent, AggregateKey, CodeContent, DataContent, Export, ForgetContent,
+    AggregateContent, AggregateKey, Authorization, CodeContent, DataContent, Export, ForgetContent,
     FunctionRuntime, InstanceContent, MessageType, PostContent, PostType, ProgramContent,
 };
 use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
@@ -32,6 +33,8 @@ pub enum MessageBuildError {
     EmptyForget,
     #[error("storage engine mismatch: engine {engine:?} does not match hash type '{hash}'")]
     StorageEngineMismatch { engine: StorageEngine, hash: String },
+    #[error("invalid authorization: {0}")]
+    InvalidAuthorization(String),
 }
 
 pub struct PostBuilder<'a, A: Account> {
@@ -736,6 +739,75 @@ impl<'a, A: Account> InstanceBuilder<'a, A> {
     }
 }
 
+pub struct AuthorizationBuilder {
+    address: Address,
+    chain: Option<Chain>,
+    channels: Vec<String>,
+    message_types: Vec<MessageType>,
+    post_types: Vec<String>,
+    aggregate_keys: Vec<String>,
+}
+
+impl AuthorizationBuilder {
+    pub fn new(address: Address) -> Self {
+        Self {
+            address,
+            chain: None,
+            channels: Vec::new(),
+            message_types: Vec::new(),
+            post_types: Vec::new(),
+            aggregate_keys: Vec::new(),
+        }
+    }
+
+    pub fn chain(mut self, chain: Chain) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
+    pub fn channel(mut self, channel: String) -> Self {
+        self.channels.push(channel);
+        self
+    }
+
+    pub fn message_type(mut self, message_type: MessageType) -> Self {
+        self.message_types.push(message_type);
+        self
+    }
+
+    pub fn post_type(mut self, post_type: String) -> Self {
+        self.post_types.push(post_type);
+        self
+    }
+
+    pub fn aggregate_key(mut self, aggregate_key: String) -> Self {
+        self.aggregate_keys.push(aggregate_key);
+        self
+    }
+
+    pub fn build(self) -> Result<Authorization, MessageBuildError> {
+        if !self.post_types.is_empty() && !self.message_types.contains(&MessageType::Post) {
+            return Err(MessageBuildError::InvalidAuthorization(
+                "post_types requires POST in message types".to_string(),
+            ));
+        }
+        if !self.aggregate_keys.is_empty() && !self.message_types.contains(&MessageType::Aggregate)
+        {
+            return Err(MessageBuildError::InvalidAuthorization(
+                "aggregate_keys requires AGGREGATE in message types".to_string(),
+            ));
+        }
+        Ok(Authorization {
+            address: self.address,
+            chain: self.chain,
+            channels: self.channels,
+            types: self.message_types,
+            post_types: self.post_types,
+            aggregate_keys: self.aggregate_keys,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1210,6 +1282,58 @@ mod tests {
         assert_eq!(
             parsed["authorized_keys"][0],
             "ssh-ed25519 AAAA... user@host"
+        );
+    }
+
+    #[test]
+    fn test_authorization_builder_minimal() {
+        let auth = AuthorizationBuilder::new(Address::from("0xabc".to_string()))
+            .build()
+            .unwrap();
+        assert_eq!(auth.address, Address::from("0xabc".to_string()));
+        assert_eq!(auth.chain, None);
+        assert!(auth.channels.is_empty());
+        assert!(auth.types.is_empty());
+    }
+
+    #[test]
+    fn test_authorization_builder_full() {
+        let auth = AuthorizationBuilder::new(Address::from("0xabc".to_string()))
+            .chain(Chain::Ethereum)
+            .channel("test-channel".to_string())
+            .message_type(MessageType::Post)
+            .message_type(MessageType::Aggregate)
+            .post_type("blog".to_string())
+            .aggregate_key("profile".to_string())
+            .build()
+            .unwrap();
+        assert_eq!(auth.chain, Some(Chain::Ethereum));
+        assert_eq!(auth.channels, vec!["test-channel"]);
+        assert_eq!(auth.types, vec![MessageType::Post, MessageType::Aggregate]);
+        assert_eq!(auth.post_types, vec!["blog"]);
+        assert_eq!(auth.aggregate_keys, vec!["profile"]);
+    }
+
+    #[test]
+    fn test_authorization_builder_post_type_without_post_fails() {
+        let result = AuthorizationBuilder::new(Address::from("0xabc".to_string()))
+            .post_type("blog".to_string())
+            .build();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("POST"), "error should mention POST: {err}");
+    }
+
+    #[test]
+    fn test_authorization_builder_aggregate_key_without_aggregate_fails() {
+        let result = AuthorizationBuilder::new(Address::from("0xabc".to_string()))
+            .aggregate_key("profile".to_string())
+            .build();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("AGGREGATE"),
+            "error should mention AGGREGATE: {err}"
         );
     }
 }

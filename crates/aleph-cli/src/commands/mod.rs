@@ -1,5 +1,6 @@
 pub mod account;
 pub mod aggregate;
+pub mod authorization;
 pub mod file;
 pub mod instance;
 pub mod message;
