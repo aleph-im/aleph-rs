@@ -39,6 +39,7 @@ pub enum MessageBuildError {
 
 pub struct PostBuilder<'a, A: Account> {
     account: &'a A,
+    owner: Option<Address>,
     post_type: String,
     content: serde_json::Value,
     reference: Option<String>,
@@ -53,6 +54,7 @@ impl<'a, A: Account> PostBuilder<'a, A> {
     ) -> Result<Self, MessageBuildError> {
         Ok(Self {
             account,
+            owner: None,
             post_type: post_type.into(),
             content: serde_json::to_value(content)?,
             reference: None,
@@ -67,11 +69,17 @@ impl<'a, A: Account> PostBuilder<'a, A> {
     ) -> Result<Self, MessageBuildError> {
         Ok(Self {
             account,
+            owner: None,
             post_type: "amend".to_string(),
             content: serde_json::to_value(content)?,
             reference: Some(reference.to_string()),
             channel: None,
         })
+    }
+
+    pub fn on_behalf_of(mut self, owner: Address) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     /// Set a reference hash on the post. This is independent of amend semantics —
@@ -95,6 +103,9 @@ impl<'a, A: Account> PostBuilder<'a, A> {
         };
         let value = serde_json::to_value(post_content)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::Post, value);
+        if let Some(owner) = self.owner {
+            builder = builder.on_behalf_of(owner);
+        }
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
         }
@@ -104,6 +115,7 @@ impl<'a, A: Account> PostBuilder<'a, A> {
 
 pub struct AggregateBuilder<'a, A: Account> {
     account: &'a A,
+    owner: Option<Address>,
     key: String,
     content: serde_json::Map<String, serde_json::Value>,
     channel: Option<Channel>,
@@ -117,10 +129,16 @@ impl<'a, A: Account> AggregateBuilder<'a, A> {
     ) -> Self {
         Self {
             account,
+            owner: None,
             key: key.into(),
             content,
             channel: None,
         }
+    }
+
+    pub fn on_behalf_of(mut self, owner: Address) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     pub fn channel(mut self, channel: Channel) -> Self {
@@ -135,6 +153,9 @@ impl<'a, A: Account> AggregateBuilder<'a, A> {
         };
         let value = serde_json::to_value(aggregate_content)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::Aggregate, value);
+        if let Some(owner) = self.owner {
+            builder = builder.on_behalf_of(owner);
+        }
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
         }
@@ -144,6 +165,7 @@ impl<'a, A: Account> AggregateBuilder<'a, A> {
 
 pub struct ForgetBuilder<'a, A: Account> {
     account: &'a A,
+    owner: Option<Address>,
     hashes: Vec<ItemHash>,
     aggregates: Vec<ItemHash>,
     reason: Option<String>,
@@ -154,11 +176,17 @@ impl<'a, A: Account> ForgetBuilder<'a, A> {
     pub fn new(account: &'a A, hashes: Vec<ItemHash>) -> Self {
         Self {
             account,
+            owner: None,
             hashes,
             aggregates: vec![],
             reason: None,
             channel: None,
         }
+    }
+
+    pub fn on_behalf_of(mut self, owner: Address) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     pub fn aggregates(mut self, aggregates: Vec<ItemHash>) -> Self {
@@ -183,6 +211,9 @@ impl<'a, A: Account> ForgetBuilder<'a, A> {
         let forget_content = ForgetContent::new(self.hashes, self.aggregates, self.reason);
         let value = serde_json::to_value(forget_content)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::Forget, value);
+        if let Some(owner) = self.owner {
+            builder = builder.on_behalf_of(owner);
+        }
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
         }
@@ -192,6 +223,7 @@ impl<'a, A: Account> ForgetBuilder<'a, A> {
 
 pub struct StoreBuilder<'a, A: Account> {
     account: &'a A,
+    owner: Option<Address>,
     file_hash: ItemHash,
     storage_engine: StorageEngine,
     reference: Option<RawFileRef>,
@@ -204,12 +236,18 @@ impl<'a, A: Account> StoreBuilder<'a, A> {
     pub fn new(account: &'a A, file_hash: ItemHash, storage_engine: StorageEngine) -> Self {
         Self {
             account,
+            owner: None,
             file_hash,
             storage_engine,
             reference: None,
             metadata: None,
             channel: None,
         }
+    }
+
+    pub fn on_behalf_of(mut self, owner: Address) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     /// Set a user-defined file reference string.
@@ -255,6 +293,9 @@ impl<'a, A: Account> StoreBuilder<'a, A> {
         let value = serde_json::to_value(store_content)?;
 
         let mut builder = MessageBuilder::new(self.account, MessageType::Store, value);
+        if let Some(owner) = self.owner {
+            builder = builder.on_behalf_of(owner);
+        }
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
         }
@@ -264,6 +305,7 @@ impl<'a, A: Account> StoreBuilder<'a, A> {
 
 pub struct ProgramBuilder<'a, A: Account> {
     account: &'a A,
+    owner: Option<Address>,
     // Code
     program_ref: ItemHash,
     entrypoint: String,
@@ -311,6 +353,7 @@ impl<'a, A: Account> ProgramBuilder<'a, A> {
     ) -> Self {
         Self {
             account,
+            owner: None,
             program_ref,
             entrypoint: entrypoint.into(),
             encoding: Encoding::Zip,
@@ -342,6 +385,11 @@ impl<'a, A: Account> ProgramBuilder<'a, A> {
             replaces: None,
             channel: None,
         }
+    }
+
+    pub fn on_behalf_of(mut self, owner: Address) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     pub fn encoding(mut self, encoding: Encoding) -> Self {
@@ -525,6 +573,9 @@ impl<'a, A: Account> ProgramBuilder<'a, A> {
         };
         let value = serde_json::to_value(content)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::Program, value);
+        if let Some(owner) = self.owner {
+            builder = builder.on_behalf_of(owner);
+        }
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
         }
@@ -534,6 +585,7 @@ impl<'a, A: Account> ProgramBuilder<'a, A> {
 
 pub struct InstanceBuilder<'a, A: Account> {
     account: &'a A,
+    owner: Option<Address>,
     // Root filesystem
     rootfs: ItemHash,
     rootfs_size: PersistentVolumeSize,
@@ -565,6 +617,7 @@ impl<'a, A: Account> InstanceBuilder<'a, A> {
     pub fn new(account: &'a A, rootfs: ItemHash, rootfs_size: PersistentVolumeSize) -> Self {
         Self {
             account,
+            owner: None,
             rootfs,
             rootfs_size,
             rootfs_persistence: VolumePersistence::Host,
@@ -587,6 +640,11 @@ impl<'a, A: Account> InstanceBuilder<'a, A> {
             replaces: None,
             channel: None,
         }
+    }
+
+    pub fn on_behalf_of(mut self, owner: Address) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     pub fn rootfs_persistence(mut self, persistence: VolumePersistence) -> Self {
@@ -723,6 +781,9 @@ impl<'a, A: Account> InstanceBuilder<'a, A> {
         };
         let value = serde_json::to_value(content)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::Instance, value);
+        if let Some(owner) = self.owner {
+            builder = builder.on_behalf_of(owner);
+        }
         if let Some(channel) = self.channel {
             builder = builder.channel(channel);
         }
@@ -1326,5 +1387,107 @@ mod tests {
             err.contains("AGGREGATE"),
             "error should mention AGGREGATE: {err}"
         );
+    }
+
+    fn assert_on_behalf_of(msg: &aleph_types::message::pending::PendingMessage, owner: &str) {
+        let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
+        assert_eq!(
+            parsed["address"], owner,
+            "content.address should be the owner"
+        );
+        assert_eq!(
+            msg.sender,
+            Address::from("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef".to_string()),
+            "sender should still be the signer"
+        );
+    }
+
+    #[test]
+    fn test_post_builder_on_behalf_of() {
+        let account = TestAccount::new();
+        let owner = Address::from("0xOwnerAddress".to_string());
+        let msg = PostBuilder::new(&account, "chat", serde_json::json!({"body": "delegated"}))
+            .unwrap()
+            .on_behalf_of(owner)
+            .build()
+            .unwrap();
+        assert_on_behalf_of(&msg, "0xOwnerAddress");
+    }
+
+    #[test]
+    fn test_aggregate_builder_on_behalf_of() {
+        let account = TestAccount::new();
+        let owner = Address::from("0xOwnerAddress".to_string());
+        let mut content = serde_json::Map::new();
+        content.insert("setting".into(), serde_json::json!("value"));
+        let msg = AggregateBuilder::new(&account, "my_settings", content)
+            .on_behalf_of(owner)
+            .build()
+            .unwrap();
+        assert_on_behalf_of(&msg, "0xOwnerAddress");
+    }
+
+    #[test]
+    fn test_forget_builder_on_behalf_of() {
+        let account = TestAccount::new();
+        let owner = Address::from("0xOwnerAddress".to_string());
+        let hash = aleph_types::item_hash!(
+            "ecd3bab3db7b449ad7875336c9a46dbbe6a010b023fc9525d81e8fdf56936ea1"
+        );
+        let msg = ForgetBuilder::new(&account, vec![hash])
+            .on_behalf_of(owner)
+            .build()
+            .unwrap();
+        assert_on_behalf_of(&msg, "0xOwnerAddress");
+    }
+
+    #[test]
+    fn test_store_builder_on_behalf_of() {
+        use aleph_types::message::StorageEngine;
+
+        let account = TestAccount::new();
+        let owner = Address::from("0xOwnerAddress".to_string());
+        let file_hash = aleph_types::item_hash!(
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+        let msg = StoreBuilder::new(&account, file_hash, StorageEngine::Storage)
+            .on_behalf_of(owner)
+            .build()
+            .unwrap();
+        assert_on_behalf_of(&msg, "0xOwnerAddress");
+    }
+
+    #[test]
+    fn test_program_builder_on_behalf_of() {
+        let account = TestAccount::new();
+        let owner = Address::from("0xOwnerAddress".to_string());
+        let code_ref = aleph_types::item_hash!(
+            "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e"
+        );
+        let runtime_ref = aleph_types::item_hash!(
+            "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696"
+        );
+        let msg = ProgramBuilder::new(&account, code_ref, "main:app", runtime_ref)
+            .on_behalf_of(owner)
+            .build()
+            .unwrap();
+        assert_on_behalf_of(&msg, "0xOwnerAddress");
+    }
+
+    #[test]
+    fn test_instance_builder_on_behalf_of() {
+        let account = TestAccount::new();
+        let owner = Address::from("0xOwnerAddress".to_string());
+        let rootfs_ref = aleph_types::item_hash!(
+            "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717"
+        );
+        let rootfs_size = aleph_types::message::execution::volume::PersistentVolumeSize::from(
+            memsizes::MiB::from(20480),
+        );
+        let msg = InstanceBuilder::new(&account, rootfs_ref, rootfs_size)
+            .on_behalf_of(owner)
+            .build()
+            .unwrap();
+        assert_on_behalf_of(&msg, "0xOwnerAddress");
     }
 }

@@ -559,6 +559,10 @@ pub struct PostCreateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -576,6 +580,10 @@ pub struct PostAmendArgs {
     /// Channel name.
     #[arg(long)]
     pub channel: Option<String>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -601,6 +609,10 @@ pub struct AggregateCreateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -621,6 +633,10 @@ pub struct ForgetArgs {
     /// Channel name.
     #[arg(long)]
     pub channel: Option<String>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -939,6 +955,10 @@ pub struct FileUploadArgs {
     #[arg(long = "ref")]
     pub reference: Option<String>,
 
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -1020,6 +1040,10 @@ pub struct InstanceCreateArgs {
     /// Can be repeated for multiple volumes.
     #[arg(long)]
     pub immutable_volume: Option<Vec<String>>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
 
     #[command(flatten)]
     pub signing: SigningArgs,

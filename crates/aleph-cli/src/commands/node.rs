@@ -1,10 +1,9 @@
 use crate::cli::{NodeCommand, NodeListArgs, NodeTypeCli};
-use crate::common::{resolve_account, submit_or_preview};
+use crate::common::{resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CcnInfo, CrnInfo, CrnStatus};
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::corechannel::{self, AmendDetails};
 use aleph_types::account::Account;
-use aleph_types::chain::Address;
 use serde::Serialize;
 use url::Url;
 
@@ -92,7 +91,7 @@ async fn list_nodes(
     let filter_address = if args.all {
         None
     } else if let Some(addr) = &args.address {
-        Some(Address::from(addr.clone()))
+        Some(resolve_address(addr)?)
     } else {
         match resolve_account(&args.signing) {
             Ok(account) => Some(account.address().clone()),

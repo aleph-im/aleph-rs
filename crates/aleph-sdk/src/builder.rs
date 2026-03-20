@@ -1,4 +1,5 @@
 use aleph_types::account::{Account, SignError, sign_message};
+use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::{AlephItemHash, ItemHash};
 use aleph_types::message::MessageType;
@@ -20,6 +21,7 @@ const DEFAULT_IPFS_CUTOFF: usize = 4 * 1024 * 1024; // 4 MiB
 /// and signing via the provided `Account`.
 pub struct MessageBuilder<'a, A: Account> {
     account: &'a A,
+    owner: Option<Address>,
     message_type: MessageType,
     content: serde_json::Value,
     channel: Option<Channel>,
@@ -33,6 +35,7 @@ impl<'a, A: Account> MessageBuilder<'a, A> {
     pub fn new(account: &'a A, message_type: MessageType, content: serde_json::Value) -> Self {
         Self {
             account,
+            owner: None,
             message_type,
             content,
             channel: None,
@@ -41,6 +44,14 @@ impl<'a, A: Account> MessageBuilder<'a, A> {
             inline_cutoff: DEFAULT_INLINE_CUTOFF,
             ipfs_cutoff: DEFAULT_IPFS_CUTOFF,
         }
+    }
+
+    /// Set the content owner address, for signing on behalf of another account.
+    /// When set, `content.address` will be this address instead of the signer's.
+    /// The signer must have a matching authorization from this address.
+    pub fn on_behalf_of(mut self, owner: Address) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     pub fn channel(mut self, channel: Channel) -> Self {
@@ -79,9 +90,13 @@ impl<'a, A: Account> MessageBuilder<'a, A> {
         let time = self.time.unwrap_or_else(Timestamp::now);
 
         let mut envelope = serde_json::Map::new();
+        let address = self
+            .owner
+            .as_ref()
+            .unwrap_or_else(|| self.account.address());
         envelope.insert(
             "address".to_string(),
-            serde_json::Value::String(self.account.address().as_str().to_string()),
+            serde_json::Value::String(address.as_str().to_string()),
         );
         envelope.insert("time".to_string(), serde_json::json!(time));
 
@@ -243,5 +258,44 @@ mod tests {
 
         let expected = AlephItemHash::from_bytes(pending.item_content.as_bytes());
         assert_eq!(pending.item_hash, ItemHash::Native(expected));
+    }
+
+    #[test]
+    fn test_builder_on_behalf_of_sets_content_address() {
+        let account = TestAccount::new();
+        let owner = Address::from("0x1234567890abcdef1234567890abcdef12345678".to_string());
+        let content = serde_json::json!({"type": "test", "content": {"body": "delegated"}});
+        let pending = MessageBuilder::new(&account, MessageType::Post, content)
+            .on_behalf_of(owner)
+            .build()
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        // content.address should be the owner, not the signer
+        assert_eq!(
+            parsed["address"],
+            "0x1234567890abcdef1234567890abcdef12345678"
+        );
+        // sender should still be the signer
+        assert_eq!(
+            pending.sender,
+            Address::from("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef".to_string())
+        );
+    }
+
+    #[test]
+    fn test_builder_without_on_behalf_of_uses_signer_address() {
+        let account = TestAccount::new();
+        let content = serde_json::json!({"type": "test"});
+        let pending = MessageBuilder::new(&account, MessageType::Post, content)
+            .build()
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        assert_eq!(
+            parsed["address"],
+            "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef"
+        );
+        assert_eq!(pending.sender, account.address().clone());
     }
 }
