@@ -71,7 +71,7 @@ pub async fn handle_authorization_command(
             let mut builder =
                 AuthorizationBuilder::new(Address::from(args.delegate_address.clone()));
 
-            if let Some(chain_cli) = args.chain {
+            if let Some(chain_cli) = args.delegate_chain {
                 builder = builder.chain(chain_cli.into());
             }
 
