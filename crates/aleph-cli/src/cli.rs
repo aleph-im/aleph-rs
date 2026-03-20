@@ -1045,9 +1045,9 @@ pub struct AuthorizationAddArgs {
     /// Address to delegate authorization to
     pub delegate_address: String,
 
-    /// Restrict to a specific chain
-    #[arg(long, value_enum)]
-    pub chain: Option<ChainCli>,
+    /// Restrict the authorization to a specific chain
+    #[arg(long = "delegate-chain", value_enum)]
+    pub delegate_chain: Option<ChainCli>,
 
     /// Comma-separated list of allowed channels
     #[arg(long, value_delimiter = ',')]
