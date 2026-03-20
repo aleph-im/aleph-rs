@@ -124,6 +124,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: ConfigCommand,
     },
+    /// Buy and manage Aleph credits
+    Credit {
+        #[clap(subcommand)]
+        command: CreditCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1206,4 +1211,43 @@ pub struct CcnShowArgs {
 pub struct CcnRemoveArgs {
     /// Name of the CCN to remove.
     pub name: String,
+}
+
+#[derive(Subcommand)]
+pub enum CreditCommand {
+    /// Buy Aleph credits by transferring ALEPH or USDC tokens
+    Buy(BuyCreditArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CreditTokenCli {
+    Aleph,
+    Usdc,
+}
+
+#[derive(Args)]
+pub struct BuyCreditArgs {
+    /// Token to pay with
+    #[arg(long, value_enum)]
+    pub token: CreditTokenCli,
+
+    /// Amount in human-readable units (e.g. 100 for 100 ALEPH)
+    #[arg(long)]
+    pub amount: String,
+
+    /// Ethereum JSON-RPC endpoint
+    #[arg(long, default_value = "https://eth.llamarpc.com")]
+    pub rpc_url: String,
+
+    /// Named account from keystore
+    #[arg(long)]
+    pub account: Option<String>,
+
+    /// Hex-encoded private key
+    #[arg(long)]
+    pub private_key: Option<String>,
+
+    /// Show estimate without submitting
+    #[arg(long)]
+    pub dry_run: bool,
 }

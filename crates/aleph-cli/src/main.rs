@@ -107,6 +107,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             command: crn_command,
         } => commands::crn::handle_crn_command(json, crn_command).await?,
         cli::Commands::Config { .. } => unreachable!(),
+        cli::Commands::Credit {
+            command: credit_command,
+        } => commands::credit::handle_credit_command(json, credit_command).await?,
     }
 
     Ok(())

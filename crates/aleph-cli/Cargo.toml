@@ -9,6 +9,7 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aleph-sdk = { workspace = true, features = ["account-evm", "account-sol"] }
+alloy = { workspace = true }
 aleph-types = { workspace = true, features = ["account"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
