@@ -141,7 +141,7 @@ fn apdu_status_to_error(status: u16, app_name: &str) -> Option<LedgerError> {
         0x9000 => None,
         0x6804 | 0x5515 => Some(LedgerError::DeviceLocked),
         0x6D00 => Some(LedgerError::WrongApp(app_name.to_string())),
-        0x6985 | 0x6986 => Some(LedgerError::UserRejected),
+        0x6982 | 0x6985 | 0x6986 => Some(LedgerError::UserRejected),
         0x6A80 => Some(LedgerError::Communication(
             "invalid data sent to device".to_string(),
         )),
@@ -419,13 +419,11 @@ impl aleph_types::account::Account for LedgerEvmAccount {
     }
 
     fn sign_raw(&self, buffer: &[u8]) -> Result<Signature, SignError> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let ledger = connect().await.map_err(SignError::from)?;
-                sign_evm(&ledger, &self.derivation_path, buffer)
-                    .await
-                    .map_err(Into::into)
-            })
+        tokio::runtime::Handle::current().block_on(async {
+            let ledger = connect().await.map_err(SignError::from)?;
+            sign_evm(&ledger, &self.derivation_path, buffer)
+                .await
+                .map_err(Into::into)
         })
     }
 }
@@ -579,5 +577,18 @@ mod tests {
     fn ledger_error_converts_to_sign_error() {
         let err: SignError = LedgerError::UserRejected.into();
         assert!(err.to_string().contains("rejected"));
+    }
+
+    #[test]
+    fn ledger_solana_signing_not_supported() {
+        use aleph_types::account::Account;
+        let account = LedgerSolanaAccount::new(
+            Address::from("7Hg3test".to_string()),
+            Chain::Sol,
+            DerivationPath::default_sol(),
+        );
+        let err = account.sign_raw(b"test").unwrap_err();
+        assert!(err.to_string().contains("not yet supported"));
+        assert!(err.to_string().contains("off-chain"));
     }
 }
