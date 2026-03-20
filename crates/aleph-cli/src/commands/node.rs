@@ -1,10 +1,19 @@
-use crate::cli::NodeCommand;
-use crate::common::submit_or_preview;
-use aleph_sdk::client::AlephClient;
+use crate::cli::{NodeCommand, NodeListArgs, NodeTypeCli};
+use crate::common::{resolve_account, submit_or_preview};
+use aleph_sdk::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CcnInfo, CrnInfo, CrnStatus};
+use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::corechannel::{self, AmendDetails};
+use aleph_types::account::Account;
+use aleph_types::chain::Address;
+use serde::Serialize;
 use url::Url;
 
-use crate::common::resolve_account;
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum NodeInfo {
+    Ccn(CcnInfo),
+    Crn(CrnInfo),
+}
 
 pub async fn handle_node_command(
     aleph_client: &AlephClient,
@@ -13,6 +22,7 @@ pub async fn handle_node_command(
     command: NodeCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        NodeCommand::List(args) => list_nodes(aleph_client, json, args).await,
         NodeCommand::CreateCcn(args) => {
             let account = resolve_account(&args.signing)?;
             let pending = corechannel::create_ccn(&account, &args.name, &args.multiaddress)?;
@@ -72,4 +82,78 @@ pub async fn handle_node_command(
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
     }
+}
+
+async fn list_nodes(
+    aleph_client: &AlephClient,
+    json: bool,
+    args: NodeListArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let filter_address = if args.all {
+        None
+    } else if let Some(addr) = &args.address {
+        Some(Address::from(addr.clone()))
+    } else {
+        match resolve_account(&args.signing) {
+            Ok(account) => Some(account.address().clone()),
+            Err(_) => {
+                return Err("No address provided. Use --address <ADDRESS> or --all, \
+                     or configure a signing account."
+                    .into());
+            }
+        }
+    };
+
+    let aggregate = aleph_client
+        .get_corechannel_aggregate(&CORECHANNEL_ADDRESS)
+        .await?;
+
+    let mut nodes: Vec<NodeInfo> = Vec::new();
+
+    let include_ccn = !matches!(args.r#type, Some(NodeTypeCli::Crn));
+    let include_crn = !matches!(args.r#type, Some(NodeTypeCli::Ccn));
+
+    if include_ccn {
+        for ccn in aggregate.corechannel.nodes {
+            if filter_address.as_ref().is_none_or(|a| *a == ccn.owner) {
+                nodes.push(NodeInfo::Ccn(ccn));
+            }
+        }
+    }
+
+    if include_crn {
+        for crn in aggregate.corechannel.resource_nodes {
+            if filter_address.as_ref().is_none_or(|a| *a == crn.owner) {
+                nodes.push(NodeInfo::Crn(crn));
+            }
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&nodes)?);
+    } else if nodes.is_empty() {
+        match &filter_address {
+            Some(addr) => eprintln!("No nodes found for {addr}"),
+            None => eprintln!("No nodes found"),
+        }
+    } else {
+        for node in &nodes {
+            match node {
+                NodeInfo::Ccn(ccn) => {
+                    eprintln!("CCN  {}  {}  score: {:.2}", ccn.hash, ccn.name, ccn.score,);
+                }
+                NodeInfo::Crn(crn) => {
+                    let status = match &crn.status {
+                        CrnStatus::Linked { parent } => format!("linked (parent: {parent})"),
+                        CrnStatus::Waiting => "waiting".to_string(),
+                    };
+                    eprintln!(
+                        "CRN  {}  {}  score: {:.2}  status: {}",
+                        crn.hash, crn.name, crn.score, status,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }

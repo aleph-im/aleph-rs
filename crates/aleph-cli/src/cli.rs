@@ -620,6 +620,8 @@ pub struct ForgetArgs {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum NodeCommand {
+    /// List nodes on the network.
+    List(NodeListArgs),
     /// Register a new Core Channel Node (CCN).
     CreateCcn(CreateCcnArgs),
     /// Register a new Compute Resource Node (CRN).
@@ -636,6 +638,31 @@ pub enum NodeCommand {
     Drop(DropNodeArgs),
     /// Amend metadata fields on an existing node.
     Amend(AmendNodeArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(group = clap::ArgGroup::new("scope").args(["address", "all"]))]
+pub struct NodeListArgs {
+    /// Filter by owner address. Defaults to own address from signing config.
+    #[arg(long)]
+    pub address: Option<String>,
+
+    /// List all nodes on the network.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Filter by node type.
+    #[arg(long, value_enum, rename_all = "lowercase")]
+    pub r#type: Option<NodeTypeCli>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum NodeTypeCli {
+    Ccn,
+    Crn,
 }
 
 #[derive(Args)]
