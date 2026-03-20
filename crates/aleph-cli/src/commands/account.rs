@@ -93,6 +93,14 @@ fn handle_import_ledger(store: &AccountStore, args: AccountImportArgs, json: boo
         anyhow::bail!("Ledger import is only supported for EVM and SVM chains");
     }
 
+    if is_svm && !json {
+        eprintln!(
+            "Note: Solana Ledger signing is not yet supported. This account can be\n\
+             imported for address tracking, but cannot sign Aleph messages.\n\
+             Use an EVM Ledger account or a local Solana key for signing.\n"
+        );
+    }
+
     let app_name = if is_evm { "Ethereum" } else { "Solana" };
     let base_path = match &args.derivation_path {
         Some(p) => {
