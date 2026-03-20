@@ -21,6 +21,7 @@ url = { workspace = true }
 directories = { workspace = true }
 rpassword = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

@@ -164,6 +164,46 @@ pub fn format_api_error(status: u16, body: &str, json: bool) -> String {
 use crate::account::store::AccountStore;
 use crate::account::{CliAccount, load_account, load_account_by_name};
 use crate::cli::SigningArgs;
+use crate::config::store::ConfigStore;
+
+/// Resolve the CCN URL from CLI flags or config.
+///
+/// Resolution order:
+/// 1. --ccn-url flag (explicit URL)
+/// 2. --ccn flag (named CCN from config)
+/// 3. default_ccn from config.toml
+pub fn resolve_ccn_url(
+    ccn_url: Option<&str>,
+    ccn: Option<&str>,
+) -> Result<Url, Box<dyn std::error::Error>> {
+    // 1. Explicit URL
+    if let Some(raw) = ccn_url {
+        return Ok(Url::parse(raw).map_err(|e| format!("invalid --ccn-url: {e}"))?);
+    }
+
+    // open() seeds the built-in "official" entry, so there is always a default.
+    let store =
+        ConfigStore::open().map_err(|e| anyhow::anyhow!("failed to open config store: {e}"))?;
+
+    // 2. Named CCN from --ccn flag
+    if let Some(name) = ccn {
+        let entry = store.get_ccn(name).map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok(
+            Url::parse(&entry.url).map_err(|e| format!("invalid URL for CCN '{name}': {e}"))?
+        );
+    }
+
+    // 3. Default from config (always set — open() ensures the built-in exists)
+    let default_name = store
+        .default_ccn_name()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .expect("open() ensures a default CCN exists");
+
+    let entry = store
+        .get_ccn(&default_name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(Url::parse(&entry.url).map_err(|e| format!("invalid URL for CCN '{default_name}': {e}"))?)
+}
 
 /// Resolve a signing account from CLI args.
 ///

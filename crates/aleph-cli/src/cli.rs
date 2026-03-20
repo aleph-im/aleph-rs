@@ -56,9 +56,13 @@ pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
 #[derive(Parser)]
 #[command(name = "aleph", version, about = "Aleph CLI")]
 pub struct Cli {
-    /// CCN endpoint URL.
-    #[arg(long, default_value = "https://api3.aleph.im")]
-    pub ccn_url: String,
+    /// CCN endpoint URL (overrides --ccn and config default).
+    #[arg(long, conflicts_with = "ccn")]
+    pub ccn_url: Option<String>,
+
+    /// Named CCN from config (see: aleph config ccn list).
+    #[arg(long, conflicts_with = "ccn_url")]
+    pub ccn: Option<String>,
 
     /// Output results as JSON (for scripting/tooling).
     #[arg(long, global = true)]
@@ -114,6 +118,11 @@ pub enum Commands {
     Crn {
         #[clap(subcommand)]
         command: CrnCommand,
+    },
+    /// Manage CLI configuration (CCN endpoints, etc.).
+    Config {
+        #[clap(subcommand)]
+        command: ConfigCommand,
     },
 }
 
@@ -1124,4 +1133,53 @@ pub struct CrnStartArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommand {
+    /// Manage named CCN endpoints.
+    Ccn {
+        #[clap(subcommand)]
+        command: CcnCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CcnCommand {
+    /// Register a new CCN endpoint.
+    Add(CcnAddArgs),
+    /// Set the default CCN endpoint.
+    Use(CcnUseArgs),
+    /// List all registered CCN endpoints.
+    List,
+    /// Show details of a CCN endpoint (defaults to the active one).
+    Show(CcnShowArgs),
+    /// Remove a registered CCN endpoint.
+    Remove(CcnRemoveArgs),
+}
+
+#[derive(Args)]
+pub struct CcnAddArgs {
+    /// Name for this CCN endpoint.
+    pub name: String,
+    /// URL of the CCN endpoint.
+    pub url: String,
+}
+
+#[derive(Args)]
+pub struct CcnUseArgs {
+    /// Name of the CCN to set as default.
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct CcnShowArgs {
+    /// CCN name (defaults to the active CCN).
+    pub name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct CcnRemoveArgs {
+    /// Name of the CCN to remove.
+    pub name: String,
 }
