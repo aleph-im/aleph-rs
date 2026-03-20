@@ -42,7 +42,7 @@ impl std::fmt::Display for NodeHash {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CcnInfo {
     pub hash: NodeHash,
     pub name: String,
@@ -53,7 +53,7 @@ pub struct CcnInfo {
     pub multiaddress: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum CrnStatus {
     /// Linked to a CCN.
@@ -62,7 +62,7 @@ pub enum CrnStatus {
     Waiting,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrnInfo {
     pub hash: NodeHash,
     pub name: String,
