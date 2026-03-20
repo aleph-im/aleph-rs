@@ -80,7 +80,13 @@ async fn handle_operation(
             }))?
         );
     } else {
-        eprintln!("Instance {} {operation}ped on {}", args.vm_id, args.crn_url);
+        let past_tense = match operation {
+            "stop" => "stopped",
+            "reboot" => "rebooted",
+            "erase" => "erased",
+            _ => unreachable!(),
+        };
+        eprintln!("Instance {} {past_tense} on {}", args.vm_id, args.crn_url);
     }
 
     Ok(())
