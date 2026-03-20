@@ -14,7 +14,6 @@ pub enum CliAccount {
     Evm(EvmAccount),
     Sol(SolanaAccount),
     LedgerEvm(ledger::LedgerEvmAccount),
-    LedgerSol(ledger::LedgerSolanaAccount),
 }
 
 impl std::fmt::Debug for CliAccount {
@@ -23,7 +22,6 @@ impl std::fmt::Debug for CliAccount {
             CliAccount::Evm(a) => write!(f, "CliAccount::Evm({})", a.address()),
             CliAccount::Sol(a) => write!(f, "CliAccount::Sol({})", a.address()),
             CliAccount::LedgerEvm(a) => write!(f, "CliAccount::LedgerEvm({})", a.address()),
-            CliAccount::LedgerSol(a) => write!(f, "CliAccount::LedgerSol({})", a.address()),
         }
     }
 }
@@ -34,7 +32,6 @@ impl Account for CliAccount {
             CliAccount::Evm(a) => a.chain(),
             CliAccount::Sol(a) => a.chain(),
             CliAccount::LedgerEvm(a) => a.chain(),
-            CliAccount::LedgerSol(a) => a.chain(),
         }
     }
 
@@ -43,7 +40,6 @@ impl Account for CliAccount {
             CliAccount::Evm(a) => a.address(),
             CliAccount::Sol(a) => a.address(),
             CliAccount::LedgerEvm(a) => a.address(),
-            CliAccount::LedgerSol(a) => a.address(),
         }
     }
 
@@ -52,7 +48,6 @@ impl Account for CliAccount {
             CliAccount::Evm(a) => a.sign_raw(buffer),
             CliAccount::Sol(a) => a.sign_raw(buffer),
             CliAccount::LedgerEvm(a) => a.sign_raw(buffer),
-            CliAccount::LedgerSol(a) => a.sign_raw(buffer),
         }
     }
 }
@@ -118,11 +113,7 @@ pub fn load_account_by_name(store: &store::AccountStore, name: &str) -> Result<C
                     path,
                 )))
             } else if entry.chain.is_svm() {
-                Ok(CliAccount::LedgerSol(ledger::LedgerSolanaAccount::new(
-                    address,
-                    entry.chain,
-                    path,
-                )))
+                bail!("Solana Ledger signing is not supported. Use a local Solana key instead.")
             } else {
                 bail!("chain {} is not supported for Ledger signing", entry.chain)
             }

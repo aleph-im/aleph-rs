@@ -86,33 +86,16 @@ fn handle_import_ledger(store: &AccountStore, args: AccountImportArgs, json: boo
     use crate::account::ledger::{self, DerivationPath};
 
     let chain: aleph_types::chain::Chain = args.chain.into();
-    let is_evm = chain.is_evm();
-    let is_svm = chain.is_svm();
 
-    if !is_evm && !is_svm {
-        anyhow::bail!("Ledger import is only supported for EVM and SVM chains");
+    if !chain.is_evm() {
+        anyhow::bail!("Ledger import is only supported for EVM chains");
     }
 
-    if is_svm && !json {
-        eprintln!(
-            "Note: Solana Ledger signing is not yet supported. This account can be\n\
-             imported for address tracking, but cannot sign Aleph messages.\n\
-             Use an EVM Ledger account or a local Solana key for signing.\n"
-        );
-    }
-
-    let app_name = if is_evm { "Ethereum" } else { "Solana" };
     let base_path = match &args.derivation_path {
         Some(p) => {
             DerivationPath::parse(p).map_err(|e| anyhow::anyhow!("invalid derivation path: {e}"))?
         }
-        None => {
-            if is_evm {
-                DerivationPath::default_evm()
-            } else {
-                DerivationPath::default_sol()
-            }
-        }
+        None => DerivationPath::default_evm(),
     };
 
     let count = args.ledger_count;
@@ -121,18 +104,14 @@ fn handle_import_ledger(store: &AccountStore, args: AccountImportArgs, json: boo
     }
 
     if !json {
-        eprintln!("Connect your Ledger and open the {app_name} app.");
+        eprintln!("Connect your Ledger and open the Ethereum app.");
     }
 
     // Fetch addresses from device (async -> sync bridge)
     let addresses = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
             let device = ledger::connect().await?;
-            if is_evm {
-                ledger::get_evm_addresses(&device, &base_path, count).await
-            } else {
-                ledger::get_sol_addresses(&device, &base_path, count).await
-            }
+            ledger::get_evm_addresses(&device, &base_path, count).await
         })
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;

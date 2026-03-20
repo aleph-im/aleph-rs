@@ -72,13 +72,6 @@ impl DerivationPath {
             components: vec![44 | HARDENED_BIT, 60 | HARDENED_BIT, HARDENED_BIT, 0],
         }
     }
-
-    /// Default Solana base path: m/44'/501'
-    pub fn default_sol() -> Self {
-        Self {
-            components: vec![44 | HARDENED_BIT, 501 | HARDENED_BIT],
-        }
-    }
 }
 
 impl fmt::Display for DerivationPath {
@@ -244,62 +237,6 @@ pub async fn get_evm_addresses(
     Ok(results)
 }
 
-// Solana Ledger app APDU constants
-const SOL_CLA: u8 = 0xE0;
-const SOL_INS_GET_ADDRESS: u8 = 0x05;
-
-/// Fetch a Solana address from the Ledger at the given derivation path.
-async fn get_sol_address(ledger: &Ledger, path: &DerivationPath) -> Result<Address, LedgerError> {
-    let data = path.to_apdu_bytes();
-
-    let command = APDUCommand {
-        cla: SOL_CLA,
-        ins: SOL_INS_GET_ADDRESS,
-        p1: 0x00,
-        p2: 0x00,
-        data: APDUData::new(&data),
-        response_len: None,
-    };
-
-    let response = ledger
-        .exchange(&command)
-        .await
-        .map_err(|e| LedgerError::Communication(e.to_string()))?;
-
-    let status = response.retcode();
-    if let Some(err) = apdu_status_to_error(status, "Solana") {
-        return Err(err);
-    }
-
-    let response_data = response
-        .data()
-        .ok_or_else(|| LedgerError::Communication("no data in Solana app response".to_string()))?;
-
-    if response_data.len() < 32 {
-        return Err(LedgerError::Communication(
-            "truncated response from Solana app".to_string(),
-        ));
-    }
-
-    let address = bs58::encode(&response_data[..32]).into_string();
-    Ok(Address::from(address))
-}
-
-/// Fetch multiple Solana addresses. Solana uses hardened child indices.
-pub async fn get_sol_addresses(
-    ledger: &Ledger,
-    base_path: &DerivationPath,
-    count: usize,
-) -> Result<Vec<(Address, DerivationPath)>, LedgerError> {
-    let mut results = Vec::with_capacity(count);
-    for i in 0..count {
-        let path = base_path.child(i as u32, true); // hardened for Ed25519
-        let address = get_sol_address(ledger, &path).await?;
-        results.push((address, path));
-    }
-    Ok(results)
-}
-
 /// Sign a message using the Ethereum Ledger app (EIP-191 personal_sign).
 ///
 /// IMPORTANT: The Ledger performs EIP-191 hashing internally (prepends
@@ -428,47 +365,6 @@ impl aleph_types::account::Account for LedgerEvmAccount {
     }
 }
 
-pub struct LedgerSolanaAccount {
-    address: Address,
-    chain: Chain,
-    #[allow(dead_code)] // Will be used when Solana off-chain signing is supported
-    derivation_path: DerivationPath,
-}
-
-impl LedgerSolanaAccount {
-    pub fn new(address: Address, chain: Chain, derivation_path: DerivationPath) -> Self {
-        Self {
-            address,
-            chain,
-            derivation_path,
-        }
-    }
-}
-
-impl aleph_types::account::Account for LedgerSolanaAccount {
-    fn chain(&self) -> Chain {
-        self.chain.clone()
-    }
-
-    fn address(&self) -> &Address {
-        &self.address
-    }
-
-    fn sign_raw(&self, _buffer: &[u8]) -> Result<Signature, SignError> {
-        // The Solana Ledger app wraps messages in an off-chain message format
-        // before signing, producing signatures over a different byte sequence
-        // than what Aleph's verification expects (raw Ed25519 over the
-        // verification buffer). Until the Aleph protocol supports Solana
-        // off-chain message signatures, Ledger signing is EVM-only.
-        Err(SignError::SigningFailed(
-            "Solana Ledger signing is not yet supported. The Solana Ledger app's \
-             off-chain message format is incompatible with Aleph's signature verification. \
-             Use an EVM Ledger account or a local Solana key instead."
-                .to_string(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,13 +379,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_sol_path() {
-        let path = DerivationPath::parse("m/44'/501'/0'").unwrap();
-        assert_eq!(path.components.len(), 3);
-        assert_eq!(path.components[2], HARDENED_BIT);
-    }
-
-    #[test]
     fn roundtrip_display() {
         let path = DerivationPath::parse("m/44'/60'/0'/0/0").unwrap();
         assert_eq!(path.to_string(), "m/44'/60'/0'/0/0");
@@ -500,13 +389,6 @@ mod tests {
         let base = DerivationPath::default_evm();
         let child = base.child(3, false);
         assert_eq!(child.to_string(), "m/44'/60'/0'/0/3");
-    }
-
-    #[test]
-    fn child_hardened() {
-        let base = DerivationPath::default_sol();
-        let child = base.child(2, true);
-        assert_eq!(child.to_string(), "m/44'/501'/2'");
     }
 
     #[test]
@@ -540,11 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn default_sol_path() {
-        assert_eq!(DerivationPath::default_sol().to_string(), "m/44'/501'");
-    }
-
-    #[test]
     fn apdu_success() {
         assert!(apdu_status_to_error(0x9000, "Ethereum").is_none());
     }
@@ -563,7 +440,7 @@ mod tests {
 
     #[test]
     fn apdu_device_locked() {
-        let err = apdu_status_to_error(0x6804, "Solana").unwrap();
+        let err = apdu_status_to_error(0x6804, "Ethereum").unwrap();
         assert!(matches!(err, LedgerError::DeviceLocked));
     }
 
@@ -577,18 +454,5 @@ mod tests {
     fn ledger_error_converts_to_sign_error() {
         let err: SignError = LedgerError::UserRejected.into();
         assert!(err.to_string().contains("rejected"));
-    }
-
-    #[test]
-    fn ledger_solana_signing_not_supported() {
-        use aleph_types::account::Account;
-        let account = LedgerSolanaAccount::new(
-            Address::from("7Hg3test".to_string()),
-            Chain::Sol,
-            DerivationPath::default_sol(),
-        );
-        let err = account.sign_raw(b"test").unwrap_err();
-        assert!(err.to_string().contains("not yet supported"));
-        assert!(err.to_string().contains("off-chain"));
     }
 }
