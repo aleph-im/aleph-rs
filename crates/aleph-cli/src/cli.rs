@@ -110,6 +110,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: AuthorizationCommand,
     },
+    /// Control VMs on a Compute Resource Node (CRN)
+    Crn {
+        #[clap(subcommand)]
+        command: CrnCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1031,3 +1036,46 @@ pub struct AuthorizationRevokeArgs {
     #[command(flatten)]
     pub signing: SigningArgs,
 }
+
+#[derive(Subcommand)]
+pub enum CrnCommand {
+    /// Start (allocate) a VM instance on the CRN.
+    Start(CrnStartArgs),
+    /// Stop a running VM instance.
+    Stop(CrnArgs),
+    /// Reboot a VM instance.
+    Reboot(CrnArgs),
+    /// Erase a VM instance's data.
+    Erase(CrnArgs),
+    /// Stream logs from a running VM instance.
+    Logs(CrnArgs),
+}
+
+#[derive(Args)]
+pub struct CrnArgs {
+    /// CRN endpoint URL.
+    #[arg(long)]
+    pub crn_url: String,
+
+    /// VM instance item hash.
+    pub vm_id: ItemHash,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+/// Start is separate because it's unauthenticated — signing args are still
+/// required to construct the CrnClient but no auth headers are sent.
+#[derive(Args)]
+pub struct CrnStartArgs {
+    /// CRN endpoint URL.
+    #[arg(long)]
+    pub crn_url: String,
+
+    /// VM instance item hash.
+    pub vm_id: ItemHash,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+

@@ -275,6 +275,7 @@ dependencies = [
  "clap",
  "directories",
  "ed25519-dalek",
+ "futures-util",
  "hex",
  "k256",
  "keyring",
