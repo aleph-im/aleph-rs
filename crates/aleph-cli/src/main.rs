@@ -91,6 +91,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?
         }
+        cli::Commands::Crn {
+            command: crn_command,
+        } => commands::crn::handle_crn_command(json, crn_command).await?,
     }
 
     Ok(())
