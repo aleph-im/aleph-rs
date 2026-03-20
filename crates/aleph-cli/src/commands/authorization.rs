@@ -1,10 +1,9 @@
 use crate::cli::AuthorizationCommand;
-use crate::common::{resolve_account, submit_or_preview};
+use crate::common::{format_address, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::authorization::AlephAuthorizationClient;
 use aleph_sdk::client::AlephClient;
 use aleph_sdk::messages::AuthorizationBuilder;
 use aleph_types::account::Account;
-use aleph_types::chain::Address;
 use url::Url;
 
 pub async fn handle_authorization_command(
@@ -16,7 +15,7 @@ pub async fn handle_authorization_command(
     match command {
         AuthorizationCommand::List(args) => {
             let address = match &args.address {
-                Some(addr) => Address::from(addr.clone()),
+                Some(addr) => resolve_address(addr)?,
                 None => {
                     let account = resolve_account(&args.signing)?;
                     account.address().clone()
@@ -27,7 +26,7 @@ pub async fn handle_authorization_command(
 
             let filtered: Vec<_> = match &args.delegate {
                 Some(delegate) => {
-                    let delegate_addr = Address::from(delegate.clone());
+                    let delegate_addr = resolve_address(delegate)?;
                     authorizations
                         .into_iter()
                         .filter(|a| a.address == delegate_addr)
@@ -68,8 +67,9 @@ pub async fn handle_authorization_command(
             let dry_run = args.signing.dry_run;
             let account = resolve_account(&args.signing)?;
 
-            let mut builder =
-                AuthorizationBuilder::new(Address::from(args.delegate_address.clone()));
+            let delegate_addr = resolve_address(&args.delegate_address)?;
+            let delegate_display = format_address(&args.delegate_address, &delegate_addr);
+            let mut builder = AuthorizationBuilder::new(delegate_addr);
 
             if let Some(chain_cli) = args.delegate_chain {
                 builder = builder.chain(chain_cli.into());
@@ -110,7 +110,7 @@ pub async fn handle_authorization_command(
             submit_or_preview(aleph_client, ccn_url, &pending_msg, dry_run, json).await?;
 
             if !json && !dry_run {
-                eprintln!("Added authorization for {}", args.delegate_address);
+                eprintln!("Added authorization for {delegate_display}");
             }
         }
         AuthorizationCommand::Revoke(args) => {
@@ -120,10 +120,11 @@ pub async fn handle_authorization_command(
             let dry_run = args.signing.dry_run;
             let account = resolve_account(&args.signing)?;
 
+            let delegate_input = args.delegate_address.as_deref();
             let authorizations = if args.all {
                 vec![]
             } else {
-                let delegate_addr = Address::from(args.delegate_address.as_ref().unwrap().clone());
+                let delegate_addr = resolve_address(delegate_input.unwrap())?;
                 aleph_client
                     .get_authorizations(account.address())
                     .await?
@@ -147,9 +148,11 @@ pub async fn handle_authorization_command(
                 if args.all {
                     eprintln!("Revoked all authorizations");
                 } else {
+                    let input = delegate_input.unwrap();
+                    let addr = resolve_address(input)?;
                     eprintln!(
                         "Revoked authorizations for {}",
-                        args.delegate_address.unwrap()
+                        format_address(input, &addr)
                     );
                 }
             }

@@ -1,13 +1,10 @@
 use crate::cli::{FileCommand, FileDownloadArgs, FileUploadArgs, StorageEngineCli};
-use crate::common::submit_or_preview;
+use crate::common::{resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::{AlephClient, AlephStorageClient};
 use aleph_sdk::messages::StoreBuilder;
-use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::message::{FileRef, StorageEngine};
 use url::Url;
-
-use crate::common::resolve_account;
 
 pub async fn handle_file_command(
     aleph_client: &AlephClient,
@@ -61,6 +58,9 @@ async fn handle_file_upload(
 
     // Build STORE message
     let mut builder = StoreBuilder::new(&account, file_hash, storage_engine);
+    if let Some(owner) = args.on_behalf_of {
+        builder = builder.on_behalf_of(resolve_address(&owner)?);
+    }
     if let Some(reference) = args.reference {
         builder = builder.reference(reference);
     }
@@ -92,7 +92,7 @@ async fn handle_file_download(
             .owner
             .ok_or("--owner is required when downloading by --ref")?;
         let file_ref = FileRef::UserDefined {
-            owner: Address::from(owner),
+            owner: resolve_address(&owner)?,
             reference,
         };
         if !json {

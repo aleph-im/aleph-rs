@@ -1,5 +1,5 @@
 use crate::cli::{InstanceCommand, InstanceCreateArgs, parse_size_to_mib};
-use crate::common::submit_or_preview;
+use crate::common::{resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::AlephClient;
 use aleph_sdk::messages::InstanceBuilder;
 use aleph_types::channel::Channel;
@@ -11,8 +11,6 @@ use aleph_types::message::execution::volume::{
 };
 use memsizes::MiB;
 use url::Url;
-
-use crate::common::resolve_account;
 
 pub async fn handle_instance_command(
     aleph_client: &AlephClient,
@@ -208,6 +206,10 @@ async fn handle_instance_create(
             payment_type: PaymentType::Credit,
         })
         .ssh_keys(ssh_keys);
+
+    if let Some(owner) = args.on_behalf_of {
+        builder = builder.on_behalf_of(resolve_address(&owner)?);
+    }
 
     if let Some(name) = args.name {
         let mut metadata = std::collections::HashMap::new();

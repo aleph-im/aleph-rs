@@ -1,12 +1,10 @@
 use crate::cli::{AggregateCommand, AggregateCreateArgs};
-use crate::common::{read_content, submit_or_preview};
+use crate::common::{read_content, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::AlephClient;
 use aleph_types::channel::Channel;
 use aleph_types::message::MessageType;
 use url::Url;
-
-use crate::common::resolve_account;
 
 pub async fn handle_aggregate_command(
     aleph_client: &AlephClient,
@@ -40,6 +38,9 @@ async fn handle_aggregate_create(
         "content": serde_json::Value::Object(map),
     });
     let mut builder = MessageBuilder::new(&account, MessageType::Aggregate, envelope);
+    if let Some(owner) = args.on_behalf_of {
+        builder = builder.on_behalf_of(resolve_address(&owner)?);
+    }
     if let Some(ch) = args.channel {
         builder = builder.channel(Channel::from(ch));
     }

@@ -161,6 +161,8 @@ pub fn format_api_error(status: u16, body: &str, json: bool) -> String {
     format!("API error (HTTP {status}): {body}")
 }
 
+use aleph_types::chain::Address;
+
 use crate::account::store::AccountStore;
 use crate::account::{CliAccount, load_account, load_account_by_name};
 use crate::cli::SigningArgs;
@@ -197,6 +199,35 @@ pub fn resolve_account(signing: &SigningArgs) -> Result<CliAccount, Box<dyn std:
     };
 
     Ok(load_account_by_name(&store, &name)?)
+}
+
+/// Resolve a user-supplied value to an address.
+///
+/// Accepts either a raw address (hex string starting with "0x") or an account
+/// name from the local account store.
+pub fn resolve_address(value: &str) -> Result<Address, Box<dyn std::error::Error>> {
+    if value.starts_with("0x") || value.starts_with("0X") {
+        return Ok(Address::from(value.to_string()));
+    }
+
+    let store =
+        AccountStore::open().map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
+    let entry = store
+        .get_account(value)
+        .map_err(|_| anyhow::anyhow!("'{value}' is not a valid address or known account name"))?;
+    Ok(Address::from(entry.address))
+}
+
+/// Format a user-supplied address value for display.
+///
+/// If the input was an account name (resolved via the store), returns
+/// `"name (0xABC...)"`. If it was already a raw address, returns it as-is.
+pub fn format_address(input: &str, resolved: &Address) -> String {
+    if input.starts_with("0x") || input.starts_with("0X") {
+        resolved.to_string()
+    } else {
+        format!("{input} ({resolved})")
+    }
 }
 
 #[cfg(test)]
