@@ -1,6 +1,7 @@
 pub mod account;
 pub mod aggregate;
 pub mod authorization;
+pub mod config;
 pub mod crn;
 pub mod file;
 pub mod instance;

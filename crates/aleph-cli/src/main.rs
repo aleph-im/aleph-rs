@@ -1,12 +1,12 @@
 use crate::cli::Cli;
 use aleph_sdk::client::AlephClient;
 use clap::Parser;
-use url::Url;
 
 mod account;
 mod cli;
 mod commands;
 mod common;
+mod config;
 
 #[tokio::main]
 async fn main() {
@@ -24,9 +24,19 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let ccn_url = Url::parse(&cli.ccn_url).unwrap_or_else(|e| panic!("invalid CCN url: {e}"));
-    let aleph_client = AlephClient::new(ccn_url.clone());
     let json = cli.json;
+
+    // Config subcommand doesn't need a CCN URL
+    if let cli::Commands::Config {
+        command: config_command,
+    } = cli.command
+    {
+        commands::config::handle_config_command(config_command, json).await?;
+        return Ok(());
+    }
+
+    let ccn_url = common::resolve_ccn_url(cli.ccn_url.as_deref(), cli.ccn.as_deref())?;
+    let aleph_client = AlephClient::new(ccn_url.clone());
 
     match cli.command {
         cli::Commands::Message {
@@ -96,6 +106,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Crn {
             command: crn_command,
         } => commands::crn::handle_crn_command(json, crn_command).await?,
+        cli::Commands::Config { .. } => unreachable!(),
     }
 
     Ok(())
