@@ -3,6 +3,7 @@ pub mod authorization;
 pub mod builder;
 pub mod client;
 pub mod corechannel;
+pub mod crn;
 pub mod messages;
 pub mod verify;
 pub mod ws;

@@ -48,6 +48,8 @@ toml = { version = "0.8" }
 tempfile = { version = "3" }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+base64 = { version = "0.22" }
+p256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = { version = "0.10" }
 hex = { version = "0.4" }
 zeroize = { version = "1" }
