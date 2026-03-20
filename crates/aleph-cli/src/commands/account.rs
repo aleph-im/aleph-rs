@@ -425,3 +425,30 @@ fn handle_export(store: &AccountStore, args: AccountExportArgs, json: bool) -> R
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_credits_zero() {
+        assert_eq!(format_credits(0), "0 ($0.00)");
+    }
+
+    #[test]
+    fn format_credits_whole_dollars() {
+        assert_eq!(format_credits(1_000_000), "1000000 ($1.00)");
+        assert_eq!(format_credits(3_900_000), "3900000 ($3.90)");
+    }
+
+    #[test]
+    fn format_credits_fractional() {
+        assert_eq!(format_credits(500_000), "500000 ($0.50)");
+        assert_eq!(format_credits(1_234), "1234 ($0.00)");
+    }
+
+    #[test]
+    fn format_credits_large() {
+        assert_eq!(format_credits(1_000_000_000), "1000000000 ($1000.00)");
+    }
+}
