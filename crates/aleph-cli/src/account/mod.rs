@@ -1,4 +1,5 @@
 pub mod generate;
+pub mod ledger;
 pub mod store;
 
 use aleph_types::account::{Account, EvmAccount, SignError, SolanaAccount};
@@ -12,6 +13,7 @@ use zeroize::Zeroizing;
 pub enum CliAccount {
     Evm(EvmAccount),
     Sol(SolanaAccount),
+    LedgerEvm(ledger::LedgerEvmAccount),
 }
 
 impl std::fmt::Debug for CliAccount {
@@ -19,6 +21,7 @@ impl std::fmt::Debug for CliAccount {
         match self {
             CliAccount::Evm(a) => write!(f, "CliAccount::Evm({})", a.address()),
             CliAccount::Sol(a) => write!(f, "CliAccount::Sol({})", a.address()),
+            CliAccount::LedgerEvm(a) => write!(f, "CliAccount::LedgerEvm({})", a.address()),
         }
     }
 }
@@ -28,6 +31,7 @@ impl Account for CliAccount {
         match self {
             CliAccount::Evm(a) => a.chain(),
             CliAccount::Sol(a) => a.chain(),
+            CliAccount::LedgerEvm(a) => a.chain(),
         }
     }
 
@@ -35,6 +39,7 @@ impl Account for CliAccount {
         match self {
             CliAccount::Evm(a) => a.address(),
             CliAccount::Sol(a) => a.address(),
+            CliAccount::LedgerEvm(a) => a.address(),
         }
     }
 
@@ -42,6 +47,7 @@ impl Account for CliAccount {
         match self {
             CliAccount::Evm(a) => a.sign_raw(buffer),
             CliAccount::Sol(a) => a.sign_raw(buffer),
+            CliAccount::LedgerEvm(a) => a.sign_raw(buffer),
         }
     }
 }
@@ -92,7 +98,25 @@ pub fn load_account_by_name(store: &store::AccountStore, name: &str) -> Result<C
             load_account(Some(&key_hex), entry.chain)
         }
         store::AccountKind::Ledger => {
-            bail!("Ledger accounts are not yet supported (coming in Phase 2)")
+            let path_str = entry
+                .derivation_path
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("ledger account '{name}' has no derivation path"))?;
+            let path = ledger::DerivationPath::parse(path_str)
+                .map_err(|e| anyhow::anyhow!("invalid derivation path for '{name}': {e}"))?;
+            let address = Address::from(entry.address);
+
+            if entry.chain.is_evm() {
+                Ok(CliAccount::LedgerEvm(ledger::LedgerEvmAccount::new(
+                    address,
+                    entry.chain,
+                    path,
+                )))
+            } else if entry.chain.is_svm() {
+                bail!("Solana Ledger signing is not supported. Use a local Solana key instead.")
+            } else {
+                bail!("chain {} is not supported for Ledger signing", entry.chain)
+            }
         }
     }
 }

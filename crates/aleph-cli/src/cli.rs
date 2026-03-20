@@ -845,8 +845,20 @@ pub struct AccountImportArgs {
     pub chain: ChainCli,
 
     /// Hex-encoded private key. If not provided, reads from stdin.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "ledger")]
     pub private_key: Option<String>,
+
+    /// Import from a Ledger hardware wallet instead of a private key.
+    #[arg(long)]
+    pub ledger: bool,
+
+    /// BIP44 derivation path override (only with --ledger).
+    #[arg(long, requires = "ledger")]
+    pub derivation_path: Option<String>,
+
+    /// Number of addresses to fetch from the Ledger (only with --ledger).
+    #[arg(long, requires = "ledger", default_value = "5")]
+    pub ledger_count: usize,
 }
 
 #[derive(Args)]

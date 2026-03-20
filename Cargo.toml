@@ -53,3 +53,5 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = { version = "0.10" }
 hex = { version = "0.4" }
 zeroize = { version = "1" }
+coins-ledger = { version = "0.13" }
+dialoguer = { version = "0.11" }
