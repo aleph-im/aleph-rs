@@ -96,17 +96,17 @@ fn sanitize_log(s: &str) -> String {
         match c {
             '\x1b' => {
                 // Skip ANSI escape sequence
-                if let Some(next) = chars.next() {
-                    if next == '[' {
-                        // CSI sequence: skip until final byte (0x40-0x7E)
-                        for c in chars.by_ref() {
-                            if ('\x40'..='\x7e').contains(&c) {
-                                break;
-                            }
+                if let Some(next) = chars.next()
+                    && next == '['
+                {
+                    // CSI sequence: skip until final byte (0x40-0x7E)
+                    for c in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
                         }
                     }
-                    // else: 2-char escape — already consumed
                 }
+                // else: 2-char escape — already consumed
             }
             '\n' | '\t' => result.push(c),
             c if c.is_control() => {} // strip CR, BEL, etc.

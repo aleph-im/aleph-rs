@@ -1078,4 +1078,3 @@ pub struct CrnStartArgs {
     #[command(flatten)]
     pub signing: SigningArgs,
 }
-
