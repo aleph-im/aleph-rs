@@ -1,21 +1,28 @@
 use crate::account::generate::generate_key;
 use crate::account::store::{AccountKind, AccountStore};
 use crate::cli::{
-    AccountCommand, AccountCreateArgs, AccountDeleteArgs, AccountExportArgs, AccountImportArgs,
-    AccountShowArgs, AccountUseArgs,
+    AccountBalanceArgs, AccountCommand, AccountCreateArgs, AccountDeleteArgs, AccountExportArgs,
+    AccountImportArgs, AccountShowArgs, AccountUseArgs,
 };
+use aleph_sdk::client::{AccountBalance, AlephAccountClient, AlephClient};
 use aleph_types::account::Account;
+use aleph_types::chain::Address;
 use anyhow::{Context, Result};
 use zeroize::Zeroizing;
 
-pub fn handle_account_command(command: AccountCommand, json: bool) -> Result<()> {
+pub async fn handle_account_command(
+    client: &AlephClient,
+    command: AccountCommand,
+    json: bool,
+) -> Result<()> {
     let store = AccountStore::open().context("failed to open account store")?;
 
     match command {
         AccountCommand::Create(args) => handle_create(&store, args, json),
         AccountCommand::Import(args) => handle_import(&store, args, json),
-        AccountCommand::List => handle_list(&store, json),
-        AccountCommand::Show(args) => handle_show(&store, args, json),
+        AccountCommand::List => handle_list(client, &store, json).await,
+        AccountCommand::Show(args) => handle_show(client, &store, args, json).await,
+        AccountCommand::Balance(args) => handle_balance(client, &store, args, json).await,
         AccountCommand::Delete(args) => handle_delete(&store, args),
         AccountCommand::Use(args) => handle_use(&store, args, json),
         AccountCommand::Export(args) => handle_export(&store, args, json),
@@ -164,42 +171,99 @@ fn handle_import_ledger(store: &AccountStore, args: AccountImportArgs, json: boo
     Ok(())
 }
 
-fn handle_list(store: &AccountStore, json: bool) -> Result<()> {
+/// 1,000,000 credits = $1 USD.
+const CREDITS_PER_USD: f64 = 1_000_000.0;
+
+fn format_credits(credits: u64) -> String {
+    let usd = credits as f64 / CREDITS_PER_USD;
+    format!("{credits} (${usd:.2})")
+}
+
+async fn fetch_balance(client: &AlephClient, address: &str) -> Option<AccountBalance> {
+    let addr = Address::from(address.to_string());
+    client.get_balance(&addr).await.ok()
+}
+
+async fn handle_list(client: &AlephClient, store: &AccountStore, json: bool) -> Result<()> {
     let manifest = store.load_manifest()?;
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&manifest.accounts)?);
+    if manifest.accounts.is_empty() {
+        if json {
+            println!("[]");
+        } else {
+            eprintln!("No accounts. Create one with: aleph account create --name <NAME>");
+        }
         return Ok(());
     }
 
-    if manifest.accounts.is_empty() {
-        eprintln!("No accounts. Create one with: aleph account create --name <NAME>");
+    // Fetch balances for all accounts concurrently.
+    let balance_futures: Vec<_> = manifest
+        .accounts
+        .iter()
+        .map(|a| fetch_balance(client, &a.address))
+        .collect();
+    let balances = futures_util::future::join_all(balance_futures).await;
+
+    if json {
+        let output: Vec<_> = manifest
+            .accounts
+            .iter()
+            .zip(&balances)
+            .map(|(a, bal)| {
+                let mut obj = serde_json::json!({
+                    "name": a.name,
+                    "chain": a.chain,
+                    "address": a.address,
+                    "kind": a.kind_display(),
+                });
+                if let Some(bal) = bal {
+                    obj["balance"] = serde_json::json!({
+                        "aleph_tokens": bal.aleph_tokens,
+                        "locked_aleph_tokens": bal.locked_aleph_tokens,
+                        "credits": bal.credits,
+                    });
+                }
+                obj
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
     eprintln!(
-        "{:<2} {:<16} {:<6} {:<48} TYPE",
-        "", "NAME", "CHAIN", "ADDRESS"
+        "{:<2} {:<16} {:<6} {:<48} {:<10} {:<14} CREDITS",
+        "", "NAME", "CHAIN", "ADDRESS", "TYPE", "ALEPH"
     );
-    for account in &manifest.accounts {
+    for (account, balance) in manifest.accounts.iter().zip(&balances) {
         let marker = if manifest.default.as_deref() == Some(&account.name) {
             "*"
         } else {
             " "
         };
+        let (aleph, credits) = match balance {
+            Some(b) => (format!("{:.4}", b.aleph_tokens), format_credits(b.credits)),
+            None => ("N/A".into(), "N/A".into()),
+        };
         eprintln!(
-            "{:<2} {:<16} {:<6} {:<48} {}",
+            "{:<2} {:<16} {:<6} {:<48} {:<10} {:<14} {}",
             marker,
             account.name,
             account.chain,
             account.address,
-            account.kind_display()
+            account.kind_display(),
+            aleph,
+            credits,
         );
     }
     Ok(())
 }
 
-fn handle_show(store: &AccountStore, args: AccountShowArgs, json: bool) -> Result<()> {
+async fn handle_show(
+    client: &AlephClient,
+    store: &AccountStore,
+    args: AccountShowArgs,
+    json: bool,
+) -> Result<()> {
     let name = match args.name {
         Some(n) => n,
         None => store.default_account_name()?.ok_or_else(|| {
@@ -208,9 +272,18 @@ fn handle_show(store: &AccountStore, args: AccountShowArgs, json: bool) -> Resul
     };
 
     let entry = store.get_account(&name)?;
+    let balance = fetch_balance(client, &entry.address).await;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&entry)?);
+        let mut output = serde_json::to_value(&entry)?;
+        if let Some(bal) = &balance {
+            output["balance"] = serde_json::json!({
+                "aleph_tokens": bal.aleph_tokens,
+                "locked_aleph_tokens": bal.locked_aleph_tokens,
+                "credits": bal.credits,
+            });
+        }
+        println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         let is_default =
             store.default_account_name().ok().flatten().as_deref() == Some(name.as_str());
@@ -224,6 +297,60 @@ fn handle_show(store: &AccountStore, args: AccountShowArgs, json: bool) -> Resul
         if let Some(path) = &entry.derivation_path {
             eprintln!("Path:    {path}");
         }
+        match &balance {
+            Some(b) => {
+                eprintln!(
+                    "ALEPH:   {:.4} (locked: {:.4})",
+                    b.aleph_tokens, b.locked_aleph_tokens
+                );
+                eprintln!("Credits: {}", format_credits(b.credits));
+            }
+            None => {
+                eprintln!("Balance: N/A (could not reach CCN)");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_balance(
+    client: &AlephClient,
+    store: &AccountStore,
+    args: AccountBalanceArgs,
+    json: bool,
+) -> Result<()> {
+    let address = match args.address {
+        Some(addr) => addr,
+        None => {
+            let name = store.default_account_name()?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no address provided and no default account set; \
+                     use: aleph account balance <ADDRESS>"
+                )
+            })?;
+            store.get_account(&name)?.address
+        }
+    };
+
+    let balance = fetch_balance(client, &address)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("could not fetch balance from CCN"))?;
+
+    if json {
+        let output = serde_json::json!({
+            "address": address,
+            "aleph_tokens": balance.aleph_tokens,
+            "locked_aleph_tokens": balance.locked_aleph_tokens,
+            "credits": balance.credits,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        eprintln!("Address: {address}");
+        eprintln!(
+            "ALEPH:   {:.4} (locked: {:.4})",
+            balance.aleph_tokens, balance.locked_aleph_tokens
+        );
+        eprintln!("Credits: {}", format_credits(balance.credits));
     }
     Ok(())
 }
@@ -297,4 +424,31 @@ fn handle_export(store: &AccountStore, args: AccountExportArgs, json: bool) -> R
         println!("0x{}", *key);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_credits_zero() {
+        assert_eq!(format_credits(0), "0 ($0.00)");
+    }
+
+    #[test]
+    fn format_credits_whole_dollars() {
+        assert_eq!(format_credits(1_000_000), "1000000 ($1.00)");
+        assert_eq!(format_credits(3_900_000), "3900000 ($3.90)");
+    }
+
+    #[test]
+    fn format_credits_fractional() {
+        assert_eq!(format_credits(500_000), "500000 ($0.50)");
+        assert_eq!(format_credits(1_234), "1234 ($0.00)");
+    }
+
+    #[test]
+    fn format_credits_large() {
+        assert_eq!(format_credits(1_000_000_000), "1000000000 ($1000.00)");
+    }
 }

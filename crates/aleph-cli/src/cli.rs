@@ -815,6 +815,8 @@ pub enum AccountCommand {
     List,
     /// Show details of an account (defaults to the active account).
     Show(AccountShowArgs),
+    /// Show the balance of any address.
+    Balance(AccountBalanceArgs),
     /// Delete an account from the keychain and manifest.
     Delete(AccountDeleteArgs),
     /// Set the default account used for signing.
@@ -865,6 +867,12 @@ pub struct AccountImportArgs {
 pub struct AccountShowArgs {
     /// Account name (defaults to the active account).
     pub name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct AccountBalanceArgs {
+    /// Address to query (e.g. 0x...). If omitted, uses the default account.
+    pub address: Option<String>,
 }
 
 #[derive(Args)]
