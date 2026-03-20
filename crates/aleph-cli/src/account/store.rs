@@ -224,6 +224,36 @@ impl AccountStore {
         Ok(())
     }
 
+    /// Add a Ledger account (no private key stored — only address and derivation path).
+    pub fn add_ledger_account(
+        &self,
+        name: &str,
+        chain: Chain,
+        address: String,
+        derivation_path: String,
+    ) -> Result<(), StoreError> {
+        Self::validate_name(name)?;
+
+        let mut manifest = self.load_manifest()?;
+        if manifest.accounts.iter().any(|a| a.name == name) {
+            return Err(StoreError::AlreadyExists(name.to_string()));
+        }
+
+        manifest.accounts.push(AccountEntry {
+            name: name.to_string(),
+            chain,
+            address,
+            kind: AccountKind::Ledger,
+            derivation_path: Some(derivation_path),
+        });
+
+        if manifest.default.is_none() {
+            manifest.default = Some(name.to_string());
+        }
+
+        self.save_manifest(&manifest)
+    }
+
     /// Get the private key for a local account from the keyring.
     pub fn get_private_key(&self, name: &str) -> Result<String, StoreError> {
         let manifest = self.load_manifest()?;
@@ -405,6 +435,44 @@ mod tests {
         let loaded = store.load_manifest().unwrap();
         assert_eq!(loaded.default.as_deref(), Some("test"));
         assert_eq!(loaded.accounts.len(), 1);
+    }
+
+    #[test]
+    fn add_and_load_ledger_account() {
+        let (_dir, store) = temp_store();
+        store
+            .add_ledger_account(
+                "hw",
+                Chain::Ethereum,
+                "0xABCD".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+
+        let manifest = store.load_manifest().unwrap();
+        assert_eq!(manifest.accounts.len(), 1);
+        assert_eq!(manifest.accounts[0].kind, AccountKind::Ledger);
+        assert_eq!(
+            manifest.accounts[0].derivation_path.as_deref(),
+            Some("m/44'/60'/0'/0/0")
+        );
+        assert_eq!(manifest.default.as_deref(), Some("hw"));
+    }
+
+    #[test]
+    fn add_ledger_account_no_keyring_touched() {
+        let (_dir, store) = temp_store();
+        store
+            .add_ledger_account(
+                "hw",
+                Chain::Sol,
+                "7Hg3test".to_string(),
+                "m/44'/501'/0'".to_string(),
+            )
+            .unwrap();
+
+        let err = store.get_private_key("hw").unwrap_err();
+        assert!(err.to_string().contains("not a local account"));
     }
 
     #[test]

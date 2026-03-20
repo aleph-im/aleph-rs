@@ -44,9 +44,13 @@ fn handle_create(store: &AccountStore, args: AccountCreateArgs, json: bool) -> R
 }
 
 fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> Result<()> {
+    if args.ledger {
+        return handle_import_ledger(store, args, json);
+    }
+
+    // Existing private-key import flow
     let chain: aleph_types::chain::Chain = args.chain.into();
 
-    // Read key from flag, env, or stdin prompt
     let key_hex = match args.private_key {
         Some(k) => k,
         None => match std::env::var("ALEPH_PRIVATE_KEY") {
@@ -58,7 +62,6 @@ fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> R
 
     let key_hex = Zeroizing::new(key_hex.strip_prefix("0x").unwrap_or(&key_hex).to_string());
 
-    // Validate the key by constructing an account
     let account = crate::account::load_account(Some(&key_hex), chain.clone())?;
     let address = account.address().to_string();
 
@@ -75,6 +78,101 @@ fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> R
         eprintln!("Account '{}' imported.", args.name);
         eprintln!("  Chain:   {chain}");
         eprintln!("  Address: {address}");
+    }
+    Ok(())
+}
+
+fn handle_import_ledger(store: &AccountStore, args: AccountImportArgs, json: bool) -> Result<()> {
+    use crate::account::ledger::{self, DerivationPath};
+
+    let chain: aleph_types::chain::Chain = args.chain.into();
+    let is_evm = chain.is_evm();
+    let is_svm = chain.is_svm();
+
+    if !is_evm && !is_svm {
+        anyhow::bail!("Ledger import is only supported for EVM and SVM chains");
+    }
+
+    let app_name = if is_evm { "Ethereum" } else { "Solana" };
+    let base_path = match &args.derivation_path {
+        Some(p) => {
+            DerivationPath::parse(p).map_err(|e| anyhow::anyhow!("invalid derivation path: {e}"))?
+        }
+        None => {
+            if is_evm {
+                DerivationPath::default_evm()
+            } else {
+                DerivationPath::default_sol()
+            }
+        }
+    };
+
+    let count = args.ledger_count;
+    if count == 0 {
+        anyhow::bail!("--ledger-count must be at least 1");
+    }
+
+    if !json {
+        eprintln!("Connect your Ledger and open the {app_name} app.");
+    }
+
+    // Fetch addresses from device (async -> sync bridge)
+    let addresses = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            let device = ledger::connect().await?;
+            if is_evm {
+                ledger::get_evm_addresses(&device, &base_path, count).await
+            } else {
+                ledger::get_sol_addresses(&device, &base_path, count).await
+            }
+        })
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Select address
+    let (address, path) = if json || addresses.len() == 1 {
+        addresses.into_iter().next().unwrap()
+    } else {
+        let items: Vec<String> = addresses
+            .iter()
+            .map(|(addr, path)| format!("{}  ({})", addr, path))
+            .collect();
+
+        let selection = dialoguer::Select::new()
+            .with_prompt("Select an account")
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("failed to show account selector")?;
+
+        addresses.into_iter().nth(selection).unwrap()
+    };
+
+    let address_str = address.to_string();
+    let path_str = path.to_string();
+
+    store.add_ledger_account(
+        &args.name,
+        chain.clone(),
+        address_str.clone(),
+        path_str.clone(),
+    )?;
+
+    if json {
+        let output = serde_json::json!({
+            "name": args.name,
+            "chain": chain,
+            "address": address_str,
+            "kind": "ledger",
+            "derivation_path": path_str,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        eprintln!("Account '{}' imported.", args.name);
+        eprintln!("  Type:    ledger");
+        eprintln!("  Chain:   {chain}");
+        eprintln!("  Address: {address_str}");
+        eprintln!("  Path:    {path_str}");
     }
     Ok(())
 }
