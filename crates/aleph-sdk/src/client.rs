@@ -1251,27 +1251,66 @@ impl Default for RetryConfig {
     }
 }
 
+/// Configuration for HTTP timeouts.
+#[derive(Debug, Clone)]
+pub struct TimeoutConfig {
+    /// Timeout for establishing a TCP connection. Default: 10s.
+    pub connect_timeout: Duration,
+    /// Overall timeout for an individual HTTP request (including reading the
+    /// response body). Default: 120s. Set to `None` via [`TimeoutConfig::no_request_timeout`]
+    /// to disable.
+    pub request_timeout: Option<Duration>,
+}
+
+impl TimeoutConfig {
+    /// Returns a config with no per-request timeout (connect timeout still applies).
+    /// Useful for long-running streaming downloads.
+    pub fn no_request_timeout() -> Self {
+        Self {
+            request_timeout: None,
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Some(Duration::from_secs(120)),
+        }
+    }
+}
+
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 16;
 
 /// Builder for [`AlephClient`].
 ///
 /// ```
 /// # use url::Url;
-/// # use aleph_sdk::client::{AlephClient, RetryConfig};
+/// # use aleph_sdk::client::{AlephClient, RetryConfig, TimeoutConfig};
+/// # use std::time::Duration;
 /// let client = AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
 ///     .max_concurrent_requests(32)
 ///     .retry_config(RetryConfig { max_retries: 5, ..Default::default() })
+///     .timeout_config(TimeoutConfig { connect_timeout: Duration::from_secs(5), ..Default::default() })
 ///     .build();
 /// ```
 pub struct AlephClientBuilder {
     ccn_url: Url,
     retry_config: RetryConfig,
+    timeout_config: TimeoutConfig,
     max_concurrent_requests: usize,
 }
 
 impl AlephClientBuilder {
     pub fn retry_config(mut self, config: RetryConfig) -> Self {
         self.retry_config = config;
+        self
+    }
+
+    pub fn timeout_config(mut self, config: TimeoutConfig) -> Self {
+        self.timeout_config = config;
         self
     }
 
@@ -1295,19 +1334,32 @@ impl AlephClientBuilder {
             semaphore: Arc::new(Semaphore::new(self.max_concurrent_requests)),
         };
 
+        let base_client = self.build_reqwest_client();
+
         // Retry is the outer middleware: it decides whether to retry.
         // ConcurrencyLimit is the inner middleware: each attempt (including retries)
         // acquires a permit only for the duration of actual network I/O.
-        let http_client = ClientBuilder::new(reqwest::Client::new())
+        let http_client = ClientBuilder::new(base_client.clone())
             .with(RetryTransientMiddleware::new_with_policy(retry_policy))
             .with(concurrency_limit)
             .build();
 
+        // Upload client shares the same timeout settings but has no retry
+        // middleware (multipart bodies are not cloneable and cannot be retried).
         AlephClient {
             http_client,
-            upload_client: reqwest::Client::new(),
+            upload_client: base_client,
             ccn_url: self.ccn_url,
         }
+    }
+
+    fn build_reqwest_client(&self) -> reqwest::Client {
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(self.timeout_config.connect_timeout);
+        if let Some(timeout) = self.timeout_config.request_timeout {
+            builder = builder.timeout(timeout);
+        }
+        builder.build().expect("failed to build HTTP client")
     }
 }
 
@@ -1320,6 +1372,7 @@ impl AlephClient {
         AlephClientBuilder {
             ccn_url,
             retry_config: RetryConfig::default(),
+            timeout_config: TimeoutConfig::default(),
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
         }
     }
@@ -2208,6 +2261,26 @@ mod tests {
         AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
             .max_concurrent_requests(0)
             .build();
+    }
+
+    #[test]
+    fn test_builder_with_custom_timeouts() {
+        let client = AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
+            .timeout_config(TimeoutConfig {
+                connect_timeout: Duration::from_secs(5),
+                request_timeout: Some(Duration::from_secs(60)),
+            })
+            .build();
+        // Smoke test: client should be constructable with custom timeouts.
+        assert_eq!(client.ccn_url.as_str(), "https://api3.aleph.im/");
+    }
+
+    #[test]
+    fn test_builder_with_no_request_timeout() {
+        let client = AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
+            .timeout_config(TimeoutConfig::no_request_timeout())
+            .build();
+        assert_eq!(client.ccn_url.as_str(), "https://api3.aleph.im/");
     }
 
     #[tokio::test]
