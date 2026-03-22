@@ -212,8 +212,14 @@ struct MessageResponse {
 }
 
 fn stored_to_response(msg: &StoredMessage) -> MessageResponse {
-    let content: serde_json::Value =
-        serde_json::from_str(&msg.content).unwrap_or(serde_json::Value::Null);
+    // Prefer item_content (the original, authentic message payload) over the
+    // denormalized `content` column which may have been stored incorrectly by
+    // an older version of the code (the PostType::Amend misclassification bug).
+    let content: serde_json::Value = msg
+        .item_content
+        .as_deref()
+        .and_then(|ic| serde_json::from_str(ic).ok())
+        .unwrap_or_else(|| serde_json::from_str(&msg.content).unwrap_or(serde_json::Value::Null));
     MessageResponse {
         sender: msg.sender.clone(),
         chain: msg.chain.clone(),
