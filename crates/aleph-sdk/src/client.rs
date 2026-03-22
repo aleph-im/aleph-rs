@@ -1354,8 +1354,8 @@ impl AlephClientBuilder {
     }
 
     fn build_reqwest_client(&self) -> reqwest::Client {
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(self.timeout_config.connect_timeout);
+        let mut builder =
+            reqwest::Client::builder().connect_timeout(self.timeout_config.connect_timeout);
         if let Some(timeout) = self.timeout_config.request_timeout {
             builder = builder.timeout(timeout);
         }
@@ -2263,24 +2263,77 @@ mod tests {
             .build();
     }
 
-    #[test]
-    fn test_builder_with_custom_timeouts() {
-        let client = AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
-            .timeout_config(TimeoutConfig {
-                connect_timeout: Duration::from_secs(5),
-                request_timeout: Some(Duration::from_secs(60)),
-            })
-            .build();
-        // Smoke test: client should be constructable with custom timeouts.
-        assert_eq!(client.ccn_url.as_str(), "https://api3.aleph.im/");
+    /// Spin up a TCP listener that accepts connections but never sends a response,
+    /// simulating a stalled server. Returns the URL to connect to.
+    async fn start_stalling_server() -> Url {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                // Accept the connection and hold it open without responding.
+                let Ok((_stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+        Url::parse(&format!("http://{addr}")).unwrap()
     }
 
-    #[test]
-    fn test_builder_with_no_request_timeout() {
-        let client = AlephClient::builder(Url::parse("https://api3.aleph.im").unwrap())
-            .timeout_config(TimeoutConfig::no_request_timeout())
+    #[tokio::test]
+    async fn test_request_timeout_fires_on_stalled_server() {
+        let url = start_stalling_server().await;
+        let client = AlephClient::builder(url)
+            .timeout_config(TimeoutConfig {
+                connect_timeout: Duration::from_secs(5),
+                request_timeout: Some(Duration::from_millis(200)),
+            })
+            .retry_config(RetryConfig {
+                max_retries: 0,
+                ..Default::default()
+            })
             .build();
-        assert_eq!(client.ccn_url.as_str(), "https://api3.aleph.im/");
+
+        let start = std::time::Instant::now();
+        let hash = aleph_types::item_hash!(
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        let result = client.get_message(&hash).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "should fail with timeout");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "should bail out quickly (took {elapsed:?}), not hang indefinitely"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connect_timeout_fires_on_unreachable_host() {
+        // 192.0.2.1 is TEST-NET-1 (RFC 5737) — routable nowhere, will time out.
+        let client = AlephClient::builder(Url::parse("http://192.0.2.1:1").unwrap())
+            .timeout_config(TimeoutConfig {
+                connect_timeout: Duration::from_millis(200),
+                request_timeout: Some(Duration::from_secs(30)),
+            })
+            .retry_config(RetryConfig {
+                max_retries: 0,
+                ..Default::default()
+            })
+            .build();
+
+        let start = std::time::Instant::now();
+        let hash = aleph_types::item_hash!(
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        let result = client.get_message(&hash).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "should fail with connect timeout");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "should bail out within connect_timeout (took {elapsed:?})"
+        );
     }
 
     #[tokio::test]
