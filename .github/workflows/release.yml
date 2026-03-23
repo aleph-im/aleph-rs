@@ -183,7 +183,131 @@ jobs:
             --repo "${{ github.repository }}" \
             --clobber
 
-  # Fifth job: Manual approval step before publishing to crates.io
+  # Fifth job: Build .deb and publish to APT repository (GitHub Pages)
+  #
+  # GPG key setup (one-time):
+  #   1. Generate an Ed25519 signing key:
+  #        gpg --batch --gen-key <<EOF
+  #        Key-Type: EdDSA
+  #        Key-Curve: ed25519
+  #        Name-Real: Aleph Cloud Packaging
+  #        Name-Email: packaging@aleph.im
+  #        %no-protection
+  #        %commit
+  #        EOF
+  #   2. Store the private key as the APT_GPG_PRIVATE_KEY secret:
+  #        gpg --export-secret-keys --armor packaging@aleph.im
+  #   3. The public key is exported automatically by the workflow to apt.aleph.im/gpg.key.
+  #
+  # Key compromise recovery:
+  #   Generate a new key, update the APT_GPG_PRIVATE_KEY secret, and publish a
+  #   security advisory asking users to re-run the install script. There is no way
+  #   to rotate keys transparently after a compromise — this is an inherent
+  #   limitation of all APT repositories.
+  #
+  # Required secrets:
+  #   - APT_GPG_PRIVATE_KEY: ASCII-armored private key (from step 2 above)
+  #   - APT_REPO_TOKEN: PAT with write access to aleph-im/apt
+  #
+  publish-apt:
+    name: Publish to APT Repository
+    needs: [check-versions, build-binaries]
+    runs-on: ubuntu-latest
+    environment: apt
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-deb-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build .deb package
+        run: cargo deb -p aleph-cli
+
+      - name: Upload .deb to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEB_FILE=$(find target/debian -name "aleph-cli_*.deb" | head -1)
+          gh release upload "v${{ needs.check-versions.outputs.version }}" \
+            "$DEB_FILE" \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+      - name: Import GPG signing key
+        run: echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+      - name: Install reprepro
+        run: sudo apt-get update && sudo apt-get install -y reprepro
+
+      - name: Checkout APT repository
+        uses: actions/checkout@v4
+        with:
+          repository: aleph-im/apt
+          token: ${{ secrets.APT_REPO_TOKEN }}
+          path: apt-repo
+
+      - name: Ensure reprepro config exists
+        run: |
+          mkdir -p apt-repo/conf
+          cat > apt-repo/conf/distributions <<EOF
+          Origin: Aleph.im
+          Label: Aleph.im
+          Codename: stable
+          Architectures: amd64
+          Components: main
+          Description: Aleph Cloud CLI packages
+          SignWith: yes
+          EOF
+          cat > apt-repo/conf/options <<EOF
+          verbose
+          basedir .
+          EOF
+
+      - name: Export public GPG key
+        run: gpg --export --armor > apt-repo/gpg.key
+
+      - name: Ensure GitHub Pages files exist
+        run: |
+          echo "apt.aleph.im" > apt-repo/CNAME
+          cp packaging/apt/install.sh apt-repo/install.sh
+
+      - name: Update APT repository
+        run: |
+          cd apt-repo
+          DEB_FILE=$(find ../target/debian -name "aleph-cli_*.deb" | head -1)
+          reprepro remove stable aleph-cli || true
+          reprepro includedeb stable "$DEB_FILE"
+
+      - name: Push APT repository
+        run: |
+          cd apt-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Update aleph-cli to v${{ needs.check-versions.outputs.version }}"
+          git push
+
+  # Sixth job: Manual approval step before publishing to crates.io (runs in parallel with publish-apt)
   request-publish-approval:
     name: Request Publish Approval
     runs-on: ubuntu-latest
@@ -202,7 +326,7 @@ jobs:
           echo "  - aleph-sdk v${{ needs.check-versions.outputs.version }}"
           echo "  - aleph-cli v${{ needs.check-versions.outputs.version }}"
 
-  # Sixth job: Publish to crates.io (only runs after manual approval)
+  # Seventh job: Publish to crates.io (only runs after manual approval)
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
