@@ -1080,8 +1080,10 @@ pub struct InstanceCreateArgs {
 
 #[derive(Subcommand)]
 pub enum AuthorizationCommand {
-    /// List authorizations for an address
+    /// List authorizations granted by an address
     List(AuthorizationListArgs),
+    /// List authorizations received from other addresses (what you can do on behalf of others)
+    Received(AuthorizationReceivedArgs),
     /// Add an authorization for a delegate
     Add(AuthorizationAddArgs),
     /// Revoke authorizations for a delegate
@@ -1097,6 +1099,20 @@ pub struct AuthorizationListArgs {
     /// Filter by delegate address
     #[arg(long)]
     pub delegate: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthorizationReceivedArgs {
+    /// Address to check received authorizations for (defaults to own address from --private-key)
+    #[arg(long)]
+    pub address: Option<String>,
+
+    /// Filter by granter address
+    #[arg(long)]
+    pub granter: Option<String>,
 
     #[command(flatten)]
     pub signing: SigningArgs,

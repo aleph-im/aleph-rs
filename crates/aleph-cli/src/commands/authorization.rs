@@ -63,6 +63,101 @@ pub async fn handle_authorization_command(
                 }
             }
         }
+        AuthorizationCommand::Received(args) => {
+            let address = match &args.address {
+                Some(addr) => resolve_address(addr)?,
+                None => {
+                    let account = resolve_account(&args.signing)?;
+                    account.address().clone()
+                }
+            };
+
+            let received = aleph_client.get_received_authorizations(&address).await?;
+
+            let filtered: Vec<_> = match &args.granter {
+                Some(granter) => {
+                    let granter_addr = resolve_address(granter)?;
+                    received
+                        .into_iter()
+                        .filter(|r| r.granter == granter_addr)
+                        .collect()
+                }
+                None => received,
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&filtered)?);
+            } else if filtered.is_empty() {
+                eprintln!("No received authorizations found for {address}");
+            } else {
+                eprintln!("Received authorizations for {address}:\n");
+                for entry in &filtered {
+                    eprintln!("  From: {}", entry.granter);
+                    if entry.authorizations.is_empty() {
+                        eprintln!("    (no permission entries)");
+                    }
+                    for (i, auth) in entry.authorizations.iter().enumerate() {
+                        if entry.authorizations.len() > 1 {
+                            eprintln!("    Permission #{}:", i + 1);
+                        }
+                        let indent = if entry.authorizations.len() > 1 {
+                            "      "
+                        } else {
+                            "    "
+                        };
+                        let mut has_restriction = false;
+
+                        if let Some(chain) = auth.get("chain").and_then(|v| v.as_str()) {
+                            eprintln!("{indent}Chain:          {chain}");
+                            has_restriction = true;
+                        }
+
+                        if let Some(channels) = auth.get("channels").and_then(|v| v.as_array()) {
+                            let vals: Vec<&str> =
+                                channels.iter().filter_map(|v| v.as_str()).collect();
+                            if !vals.is_empty() {
+                                eprintln!("{indent}Channels:       {}", vals.join(", "));
+                                has_restriction = true;
+                            }
+                        }
+
+                        if let Some(types) = auth.get("types").and_then(|v| v.as_array()) {
+                            let vals: Vec<&str> = types.iter().filter_map(|v| v.as_str()).collect();
+                            if !vals.is_empty() {
+                                eprintln!("{indent}Message Types:  {}", vals.join(", "));
+                                has_restriction = true;
+                            }
+                        }
+
+                        if let Some(post_types) = auth.get("post_types").and_then(|v| v.as_array())
+                        {
+                            let vals: Vec<&str> =
+                                post_types.iter().filter_map(|v| v.as_str()).collect();
+                            if !vals.is_empty() {
+                                eprintln!("{indent}Post Types:     {}", vals.join(", "));
+                                has_restriction = true;
+                            }
+                        }
+
+                        if let Some(agg_keys) =
+                            auth.get("aggregate_keys").and_then(|v| v.as_array())
+                        {
+                            let vals: Vec<&str> =
+                                agg_keys.iter().filter_map(|v| v.as_str()).collect();
+                            if !vals.is_empty() {
+                                eprintln!("{indent}Aggregate Keys: {}", vals.join(", "));
+                                has_restriction = true;
+                            }
+                        }
+
+                        if !has_restriction {
+                            eprintln!("{indent}All permissions (unrestricted)");
+                        }
+                    }
+                    eprintln!();
+                }
+            }
+        }
         AuthorizationCommand::Add(args) => {
             let dry_run = args.signing.dry_run;
             let account = resolve_account(&args.signing)?;

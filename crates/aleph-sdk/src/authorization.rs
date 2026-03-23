@@ -3,12 +3,27 @@ use std::future::Future;
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::message::{Authorization, SecurityAggregateContent};
+use serde::{Deserialize, Serialize};
 
 use crate::aggregate_models::security::SecurityAggregate;
 use crate::client::{
     AlephAggregateClient, AlephMessageClient, AlephStorageClient, MessageError, PostMessageResponse,
 };
 use crate::messages::AggregateBuilder;
+
+/// A set of authorizations received from a specific granter address.
+/// Returned by the received authorizations CCN endpoint.
+///
+/// Authorization entries are kept as raw JSON values because the CCN
+/// response format may omit or reshape fields compared to the
+/// [`Authorization`] type used for submission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceivedAuthorization {
+    /// The address that granted the authorizations.
+    pub granter: Address,
+    /// Raw authorization entries from the CCN response.
+    pub authorizations: Vec<serde_json::Value>,
+}
 
 /// Trait for reading authorization data from the Aleph network.
 pub trait AlephAuthorizationClient: AlephAggregateClient {

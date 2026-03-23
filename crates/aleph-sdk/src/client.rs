@@ -1563,6 +1563,69 @@ impl AlephClient {
     }
 }
 
+impl AlephClient {
+    /// Fetch authorizations received by the given address, i.e. what operations
+    /// the address is authorized to perform on behalf of other accounts.
+    ///
+    /// Calls `GET /api/v0/authorizations/received/{address}.json` on the CCN.
+    pub async fn get_received_authorizations(
+        &self,
+        address: &Address,
+    ) -> Result<Vec<crate::authorization::ReceivedAuthorization>, MessageError> {
+        use crate::authorization::ReceivedAuthorization;
+
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/authorizations/received/{}.json", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .get(url)
+            .query(&[("pagination", "200")])
+            .send()
+            .await?;
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let auths = body
+            .get("authorizations")
+            .ok_or_else(|| MessageError::ApiError {
+                status: 0,
+                body: "missing 'authorizations' field in response".into(),
+            })?;
+
+        let mut result = Vec::new();
+
+        if let Some(obj) = auths.as_object() {
+            // CCN format: {"granter_addr": [auth_entries], ...}
+            for (granter, entries) in obj {
+                let authorizations = match entries {
+                    serde_json::Value::Array(arr) => arr.clone(),
+                    other => vec![other.clone()],
+                };
+                result.push(ReceivedAuthorization {
+                    granter: Address::from(granter.clone()),
+                    authorizations,
+                });
+            }
+        } else if let Some(arr) = auths.as_array() {
+            // Alt format: [{"granter": "addr", "authorizations": [...]}, ...]
+            for entry in arr {
+                if let Ok(received) = serde_json::from_value::<ReceivedAuthorization>(entry.clone())
+                {
+                    result.push(received);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
 #[derive(Deserialize)]
 struct UploadResponse {
     hash: String,
