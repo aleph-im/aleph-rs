@@ -356,11 +356,13 @@ impl aleph_types::account::Account for LedgerEvmAccount {
     }
 
     fn sign_raw(&self, buffer: &[u8]) -> Result<Signature, SignError> {
-        tokio::runtime::Handle::current().block_on(async {
-            let ledger = connect().await.map_err(SignError::from)?;
-            sign_evm(&ledger, &self.derivation_path, buffer)
-                .await
-                .map_err(Into::into)
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let ledger = connect().await.map_err(SignError::from)?;
+                sign_evm(&ledger, &self.derivation_path, buffer)
+                    .await
+                    .map_err(Into::into)
+            })
         })
     }
 }
