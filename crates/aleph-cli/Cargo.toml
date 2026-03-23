@@ -37,13 +37,21 @@ bs58 = { workspace = true }
 keyring = { workspace = true, features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { workspace = true, features = ["sync-secret-service"] }
+keyring = { workspace = true, features = ["async-secret-service", "crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { workspace = true, features = ["windows-native"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[package.metadata.deb]
+maintainer = "Aleph.im <contact@aleph.im>"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/aleph", "usr/bin/", "755"],
+]
 
 [[bin]]
 name = "aleph"
