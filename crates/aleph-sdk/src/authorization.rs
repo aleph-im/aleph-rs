@@ -13,7 +13,7 @@ use crate::messages::AggregateBuilder;
 
 /// A set of authorizations received from a specific granter address.
 /// Returned by the received authorizations CCN endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceivedAuthorization {
     /// The address that granted the authorizations.
     pub granter: Address,
@@ -299,5 +299,116 @@ mod tests {
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].address, delegate2);
         assert_eq!(fetched[0].types, vec![MessageType::Program]);
+    }
+
+    /// Mirrors the `AuthorizationsBody` enum from `client.rs` so we can
+    /// verify that both CCN response formats deserialize correctly.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum AuthorizationsBody {
+        Grouped(std::collections::HashMap<String, Vec<Authorization>>),
+        List(Vec<ReceivedAuthorization>),
+    }
+
+    #[derive(Deserialize)]
+    struct ReceivedResponse {
+        authorizations: AuthorizationsBody,
+    }
+
+    fn parse_received(json: &str) -> Vec<ReceivedAuthorization> {
+        let parsed: ReceivedResponse = serde_json::from_str(json).unwrap();
+        match parsed.authorizations {
+            AuthorizationsBody::Grouped(map) => map
+                .into_iter()
+                .map(|(granter, authorizations)| ReceivedAuthorization {
+                    granter: Address::from(granter),
+                    authorizations,
+                })
+                .collect(),
+            AuthorizationsBody::List(list) => list,
+        }
+    }
+
+    #[test]
+    fn test_received_python_ccn_format() {
+        // Python CCN format: authorizations is an object keyed by granter address
+        let json = r#"{
+            "authorizations": {
+                "0xgranter1": [
+                    {"address": "0xdelegate", "types": ["POST"], "channels": ["my-app"]}
+                ],
+                "0xgranter2": [
+                    {"address": "0xdelegate", "types": ["AGGREGATE"], "aggregate_keys": ["profile"]}
+                ]
+            },
+            "pagination_page": 1,
+            "pagination_per_page": 20,
+            "pagination_total": 2,
+            "address": "0xdelegate"
+        }"#;
+
+        let received = parse_received(json);
+        assert_eq!(received.len(), 2);
+
+        let g1 = received
+            .iter()
+            .find(|r| r.granter == Address::from("0xgranter1".to_string()))
+            .unwrap();
+        assert_eq!(g1.authorizations.len(), 1);
+        assert_eq!(g1.authorizations[0].types, vec![MessageType::Post]);
+        assert_eq!(g1.authorizations[0].channels, vec!["my-app".to_string()]);
+
+        let g2 = received
+            .iter()
+            .find(|r| r.granter == Address::from("0xgranter2".to_string()))
+            .unwrap();
+        assert_eq!(g2.authorizations[0].types, vec![MessageType::Aggregate]);
+        assert_eq!(
+            g2.authorizations[0].aggregate_keys,
+            vec!["profile".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_received_heph_format() {
+        // Heph format: authorizations is an array of {granter, authorizations} objects
+        let json = r#"{
+            "authorizations": [
+                {
+                    "granter": "0xgranter1",
+                    "authorizations": [
+                        {"address": "0xdelegate", "chain": "ETH", "types": ["POST"]}
+                    ]
+                }
+            ],
+            "pagination_page": 1,
+            "pagination_per_page": 20,
+            "pagination_total": 1,
+            "address": "0xdelegate"
+        }"#;
+
+        let received = parse_received(json);
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0].granter,
+            Address::from("0xgranter1".to_string())
+        );
+        assert_eq!(received[0].authorizations.len(), 1);
+        assert_eq!(received[0].authorizations[0].chain, Some(Chain::Ethereum));
+        assert_eq!(received[0].authorizations[0].types, vec![MessageType::Post]);
+    }
+
+    #[test]
+    fn test_received_empty_authorizations() {
+        let json = r#"{
+            "authorizations": {},
+            "pagination_page": 1,
+            "pagination_per_page": 20,
+            "pagination_total": 0,
+            "address": "0xdelegate"
+        }"#;
+
+        let received = parse_received(json);
+        assert!(received.is_empty());
     }
 }
