@@ -12,8 +12,6 @@ pub struct StoredMessage {
     pub signature: String,
     pub item_type: String,
     pub item_content: Option<String>,
-    /// Serialized JSON of the parsed content.
-    pub content: String,
     pub channel: Option<String>,
     pub time: f64,
     pub size: i64,
@@ -38,8 +36,6 @@ pub struct InsertMessage<'a> {
     pub signature: &'a str,
     pub item_type: &'a str,
     pub item_content: Option<&'a str>,
-    /// Pre-serialized JSON of the parsed content.
-    pub content_json: &'a str,
     pub channel: Option<&'a str>,
     pub time: f64,
     pub size: i64,
@@ -61,14 +57,14 @@ pub fn insert_message(conn: &Connection, msg: &InsertMessage<'_>) -> SqlResult<u
     conn.execute(
         "INSERT INTO messages (
             item_hash, type, chain, sender, signature,
-            item_type, item_content, content, channel, time,
+            item_type, item_content, channel, time,
             size, status, reception_time,
             owner, content_type, content_ref, content_key, content_item_hash, payment_type
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
-            ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13,
-            ?14, ?15, ?16, ?17, ?18, ?19
+            ?6, ?7, ?8, ?9,
+            ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17, ?18
         )",
         params![
             msg.item_hash,
@@ -78,7 +74,6 @@ pub fn insert_message(conn: &Connection, msg: &InsertMessage<'_>) -> SqlResult<u
             msg.signature,
             msg.item_type,
             msg.item_content,
-            msg.content_json,
             msg.channel,
             msg.time,
             msg.size,
@@ -99,7 +94,7 @@ pub fn get_message_by_hash(conn: &Connection, item_hash: &str) -> SqlResult<Opti
     conn.query_row(
         "SELECT
             item_hash, type, chain, sender, signature,
-            item_type, item_content, content, channel, time,
+            item_type, item_content, channel, time,
             size, status, reception_time,
             owner, content_type, content_ref, content_key, content_item_hash, payment_type
          FROM messages WHERE item_hash = ?1",
@@ -113,18 +108,17 @@ pub fn get_message_by_hash(conn: &Connection, item_hash: &str) -> SqlResult<Opti
                 signature: row.get(4)?,
                 item_type: row.get(5)?,
                 item_content: row.get(6)?,
-                content: row.get(7)?,
-                channel: row.get(8)?,
-                time: row.get(9)?,
-                size: row.get(10)?,
-                status: row.get(11)?,
-                reception_time: row.get(12)?,
-                owner: row.get(13)?,
-                content_type: row.get(14)?,
-                content_ref: row.get(15)?,
-                content_key: row.get(16)?,
-                content_item_hash: row.get(17)?,
-                payment_type: row.get(18)?,
+                channel: row.get(7)?,
+                time: row.get(8)?,
+                size: row.get(9)?,
+                status: row.get(10)?,
+                reception_time: row.get(11)?,
+                owner: row.get(12)?,
+                content_type: row.get(13)?,
+                content_ref: row.get(14)?,
+                content_key: row.get(15)?,
+                content_item_hash: row.get(16)?,
+                payment_type: row.get(17)?,
             })
         },
     )
@@ -329,7 +323,7 @@ pub fn query_messages(
     let query_sql = format!(
         "SELECT
             item_hash, type, chain, sender, signature,
-            item_type, item_content, content, channel, time,
+            item_type, item_content, channel, time,
             size, status, reception_time,
             owner, content_type, content_ref, content_key, content_item_hash, payment_type
          FROM messages{where_sql} ORDER BY {sort_col} {sort_dir}{limit_clause}"
@@ -346,18 +340,17 @@ pub fn query_messages(
             signature: row.get(4)?,
             item_type: row.get(5)?,
             item_content: row.get(6)?,
-            content: row.get(7)?,
-            channel: row.get(8)?,
-            time: row.get(9)?,
-            size: row.get(10)?,
-            status: row.get(11)?,
-            reception_time: row.get(12)?,
-            owner: row.get(13)?,
-            content_type: row.get(14)?,
-            content_ref: row.get(15)?,
-            content_key: row.get(16)?,
-            content_item_hash: row.get(17)?,
-            payment_type: row.get(18)?,
+            channel: row.get(7)?,
+            time: row.get(8)?,
+            size: row.get(9)?,
+            status: row.get(10)?,
+            reception_time: row.get(11)?,
+            owner: row.get(12)?,
+            content_type: row.get(13)?,
+            content_ref: row.get(14)?,
+            content_key: row.get(15)?,
+            content_item_hash: row.get(16)?,
+            payment_type: row.get(17)?,
         })
     })?;
 
@@ -479,7 +472,6 @@ mod tests {
             signature: "0xdeadbeef",
             item_type: "inline",
             item_content: Some(r#"{"type":"test","address":"0xB68","time":1000.0}"#),
-            content_json: r#"{"address":"0xB68","time":1000.0,"type":"test"}"#,
             channel: Some("TEST"),
             time: 1000.0,
             size: 45,

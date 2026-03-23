@@ -79,17 +79,22 @@ pub async fn list_posts_v0(
                     let effective = &pwm.msg;
                     let original = pwm.original_msg.as_ref().unwrap_or(&pwm.msg);
 
-                    let content: serde_json::Value =
-                        serde_json::from_str(&effective.content).unwrap_or(serde_json::Value::Null);
-                    // Extract content.content (the user's body)
-                    let content_body = content
+                    let effective_parsed: serde_json::Value = effective
+                        .item_content
+                        .as_deref()
+                        .and_then(|ic| serde_json::from_str(ic).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    let content_body = effective_parsed
                         .get("content")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
 
-                    let original_content: serde_json::Value =
-                        serde_json::from_str(&original.content).unwrap_or(serde_json::Value::Null);
-                    let original_type = original_content
+                    let original_parsed: serde_json::Value = original
+                        .item_content
+                        .as_deref()
+                        .and_then(|ic| serde_json::from_str(ic).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    let original_type = original_parsed
                         .get("type")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
@@ -164,16 +169,22 @@ pub async fn list_posts_v1(
                     let effective = &pwm.msg;
                     let original = pwm.original_msg.as_ref().unwrap_or(&pwm.msg);
 
-                    let content: serde_json::Value =
-                        serde_json::from_str(&effective.content).unwrap_or(serde_json::Value::Null);
-                    let content_body = content
+                    let effective_parsed: serde_json::Value = effective
+                        .item_content
+                        .as_deref()
+                        .and_then(|ic| serde_json::from_str(ic).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    let content_body = effective_parsed
                         .get("content")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
 
-                    let original_content: serde_json::Value =
-                        serde_json::from_str(&original.content).unwrap_or(serde_json::Value::Null);
-                    let original_type = original_content
+                    let original_parsed: serde_json::Value = original
+                        .item_content
+                        .as_deref()
+                        .and_then(|ic| serde_json::from_str(ic).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    let original_type = original_parsed
                         .get("type")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
