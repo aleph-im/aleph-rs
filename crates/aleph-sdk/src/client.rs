@@ -10,9 +10,8 @@ use aleph_types::message::StorageEngine;
 use aleph_types::message::item_type::ItemType;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
-    Authorization, ContentSource, FileRef, Message, MessageConfirmation, MessageContent,
-    MessageContentEnum, MessageHeader, MessageStatus, MessageType, RawFileRef,
-    SignatureVerificationError,
+    ContentSource, FileRef, Message, MessageConfirmation, MessageContent, MessageContentEnum,
+    MessageHeader, MessageStatus, MessageType, RawFileRef, SignatureVerificationError,
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
@@ -1575,7 +1574,7 @@ impl AlephAuthorizationClient for AlephClient {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum AuthorizationsBody {
-            Grouped(HashMap<String, Vec<Authorization>>),
+            Grouped(HashMap<String, Vec<crate::authorization::AuthorizationRule>>),
             List(Vec<ReceivedAuthorization>),
         }
 

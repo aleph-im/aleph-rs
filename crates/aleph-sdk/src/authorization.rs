@@ -1,8 +1,8 @@
 use std::future::Future;
 
 use aleph_types::account::Account;
-use aleph_types::chain::Address;
-use aleph_types::message::{Authorization, SecurityAggregateContent};
+use aleph_types::chain::{Address, Chain};
+use aleph_types::message::{Authorization, MessageType, SecurityAggregateContent};
 use serde::{Deserialize, Serialize};
 
 use crate::aggregate_models::security::SecurityAggregate;
@@ -11,14 +11,33 @@ use crate::client::{
 };
 use crate::messages::AggregateBuilder;
 
+/// An authorization rule describing permitted operations.
+///
+/// Unlike [`Authorization`], this does not include a delegate address — the
+/// address is implicit from context (the key in the CCN grouped response,
+/// or the queried address for received authorizations).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationRule {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<Chain>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<MessageType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregate_keys: Vec<String>,
+}
+
 /// A set of authorizations received from a specific granter address.
 /// Returned by the received authorizations CCN endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceivedAuthorization {
     /// The address that granted the authorizations.
     pub granter: Address,
-    /// The authorization entries describing what operations are permitted.
-    pub authorizations: Vec<Authorization>,
+    /// The authorization rules describing what operations are permitted.
+    pub authorizations: Vec<AuthorizationRule>,
 }
 
 /// Trait for reading authorization data from the Aleph network.
@@ -306,7 +325,7 @@ mod tests {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum AuthorizationsBody {
-        Grouped(std::collections::HashMap<String, Vec<Authorization>>),
+        Grouped(std::collections::HashMap<String, Vec<AuthorizationRule>>),
         List(Vec<ReceivedAuthorization>),
     }
 
@@ -331,14 +350,14 @@ mod tests {
 
     #[test]
     fn test_received_python_ccn_format() {
-        // Python CCN format: authorizations is an object keyed by granter address
+        // Python CCN format: entries don't have `address`, may have extra fields like `alias`
         let json = r#"{
             "authorizations": {
                 "0xgranter1": [
-                    {"address": "0xdelegate", "types": ["POST"], "channels": ["my-app"]}
+                    {"alias": "My key", "types": ["POST"], "channels": ["my-app"]}
                 ],
                 "0xgranter2": [
-                    {"address": "0xdelegate", "types": ["AGGREGATE"], "aggregate_keys": ["profile"]}
+                    {"types": ["AGGREGATE"], "aggregate_keys": ["profile"]}
                 ]
             },
             "pagination_page": 1,
@@ -371,7 +390,8 @@ mod tests {
 
     #[test]
     fn test_received_heph_format() {
-        // Heph format: authorizations is an array of {granter, authorizations} objects
+        // Heph format: authorizations is an array of {granter, authorizations} objects.
+        // Entries may include extra fields (like `address`) which are ignored.
         let json = r#"{
             "authorizations": [
                 {
@@ -389,7 +409,10 @@ mod tests {
 
         let received = parse_received(json);
         assert_eq!(received.len(), 1);
-        assert_eq!(received[0].granter, Address::from("0xgranter1".to_string()));
+        assert_eq!(
+            received[0].granter,
+            Address::from("0xgranter1".to_string())
+        );
         assert_eq!(received[0].authorizations.len(), 1);
         assert_eq!(received[0].authorizations[0].chain, Some(Chain::Ethereum));
         assert_eq!(received[0].authorizations[0].types, vec![MessageType::Post]);
