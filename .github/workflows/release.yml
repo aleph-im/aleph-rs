@@ -130,11 +130,13 @@ jobs:
             exit 1
           fi
 
-  # Fourth job: Build release binaries
+  # Fourth job: Build release binaries and attach to existing release
   build-binaries:
     name: Build Release Binaries
     needs: [verify, check-versions, check-release]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -171,38 +173,18 @@ jobs:
       - name: Build release binary
         run: cargo build --release --package aleph-cli --target ${{ matrix.target }}
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset_name }}
-          path: ./target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+      - name: Rename binary to unique asset name
+        shell: bash
+        run: cp "./target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "${{ matrix.asset_name }}"
 
-  # Fifth job: Upload all binaries to the GitHub Release sequentially
-  upload-release-assets:
-    name: Upload Release Assets
-    needs: [build-binaries, check-versions]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Upload assets to release
+      - name: Upload Release Asset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for dir in artifacts/*/; do
-            asset_name=$(basename "$dir")
-            file=$(find "$dir" -type f | head -1)
-            echo "Uploading $file as $asset_name"
-            gh release upload "v${{ needs.check-versions.outputs.version }}" \
-              "$file#$asset_name" \
-              --repo "${{ github.repository }}" \
-              --clobber
-          done
+          gh release upload "v${{ needs.check-versions.outputs.version }}" \
+            "${{ matrix.asset_name }}" \
+            --repo "${{ github.repository }}" \
+            --clobber
 
   # Sixth job: Build .deb and publish to APT repository (GitHub Pages)
   #
@@ -335,7 +317,7 @@ jobs:
   #
   publish-brew:
     name: Publish to Homebrew Tap
-    needs: [check-versions, upload-release-assets]
+    needs: [check-versions, build-binaries]
     runs-on: ubuntu-latest
     environment: brew
     steps:
@@ -402,7 +384,7 @@ jobs:
   request-publish-approval:
     name: Request Publish Approval
     runs-on: ubuntu-latest
-    needs: [verify, check-versions, upload-release-assets]
+    needs: [verify, check-versions, build-binaries]
     environment:
       name: crates-io-publish  # Requires manual approval in GitHub
     steps:
