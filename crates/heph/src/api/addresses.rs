@@ -555,7 +555,6 @@ mod tests {
                     signature: "0xsig",
                     item_type: "inline",
                     item_content: Some("{}"),
-                    content_json: "{}",
                     channel,
                     time: 1_700_000_000.0,
                     size: 100,

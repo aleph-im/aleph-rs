@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS messages (
     signature       TEXT NOT NULL,
     item_type       TEXT NOT NULL,
     item_content    TEXT,
-    content         TEXT NOT NULL,  -- JSON string of parsed content
     channel         TEXT,
     time            REAL NOT NULL,
     size            INTEGER NOT NULL DEFAULT 0,

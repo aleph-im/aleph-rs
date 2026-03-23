@@ -137,7 +137,6 @@ pub struct StoredMessage {
     pub signature: String,
     pub item_type: String,
     pub item_content: Option<String>,
-    pub content: String,
     pub channel: Option<String>,
     pub time: f64,
     pub size: i64,
@@ -227,15 +226,15 @@ pub fn query_posts(
         format!(" LIMIT {} OFFSET {}", filter.per_page, offset)
     };
 
-    // Columns: post fields (9) + orig_msg fields (12) + amend_msg fields (12)
+    // Columns: post fields (9) + orig_msg fields (11) + amend_msg fields (11)
     let query_sql = format!(
         "SELECT
             p.item_hash, p.address, p.post_type, p.ref_, p.content, p.channel, p.time,
             p.original_item_hash, p.latest_amend,
             om.item_hash, om.type, om.chain, om.sender, om.signature,
-            om.item_type, om.item_content, om.content, om.channel, om.time, om.size, om.status,
+            om.item_type, om.item_content, om.channel, om.time, om.size, om.status,
             am.item_hash, am.type, am.chain, am.sender, am.signature,
-            am.item_type, am.item_content, am.content, am.channel, am.time, am.size, am.status
+            am.item_type, am.item_content, am.channel, am.time, am.size, am.status
          FROM posts p
          LEFT JOIN messages om ON om.item_hash = p.item_hash
          LEFT JOIN messages am ON am.item_hash = p.latest_amend
@@ -268,32 +267,30 @@ pub fn query_posts(
                 signature: row.get(13)?,
                 item_type: row.get(14)?,
                 item_content: row.get(15)?,
-                content: row.get(16)?,
-                channel: row.get(17)?,
-                time: row.get(18)?,
-                size: row.get(19)?,
-                status: row.get(20)?,
+                channel: row.get(16)?,
+                time: row.get(17)?,
+                size: row.get(18)?,
+                status: row.get(19)?,
             })
         } else {
             None
         };
 
-        // amend_msg (offset 21)
-        let amend_item_hash: Option<String> = row.get(21)?;
+        // amend_msg (offset 20)
+        let amend_item_hash: Option<String> = row.get(20)?;
         let amend_msg = if let Some(item_hash) = amend_item_hash {
             Some(StoredMessage {
                 item_hash,
-                message_type: row.get(22)?,
-                chain: row.get(23)?,
-                sender: row.get(24)?,
-                signature: row.get(25)?,
-                item_type: row.get(26)?,
-                item_content: row.get(27)?,
-                content: row.get(28)?,
-                channel: row.get(29)?,
-                time: row.get(30)?,
-                size: row.get(31)?,
-                status: row.get(32)?,
+                message_type: row.get(21)?,
+                chain: row.get(22)?,
+                sender: row.get(23)?,
+                signature: row.get(24)?,
+                item_type: row.get(25)?,
+                item_content: row.get(26)?,
+                channel: row.get(27)?,
+                time: row.get(28)?,
+                size: row.get(29)?,
+                status: row.get(30)?,
             })
         } else {
             None

@@ -314,12 +314,11 @@ pub fn process_message_with_store(
     }
 
     // Step 2 — format validation.
-    // For inline messages this parses content directly. For non-inline messages
-    // it returns ContentUnavailable, and we try to fetch from the local file store.
-    let content = match validate::validate_format(msg) {
-        Ok(c) => c,
+    // For non-inline messages we also capture the raw content bytes so they
+    // can be stored in item_content (non-inline messages arrive without it).
+    let (content, item_content_resolved) = match validate::validate_format(msg) {
+        Ok(c) => (c, msg.item_content.clone()),
         Err(ProcessingError::ContentUnavailable(_)) => {
-            // Try to resolve content from local file store.
             let store = file_store.ok_or_else(|| {
                 ProcessingError::ContentUnavailable(
                     "non-inline message and no file store available".into(),
@@ -330,7 +329,11 @@ pub fn process_message_with_store(
                     "content for {item_hash_str} not found in local storage"
                 ))
             })?;
-            validate::validate_fetched_content(msg, &raw)?
+            let c = validate::validate_fetched_content(msg, &raw)?;
+            let raw_str = String::from_utf8(raw).map_err(|e| {
+                ProcessingError::InternalError(format!("content is not valid UTF-8: {e}"))
+            })?;
+            (c, Some(raw_str))
         }
         Err(e) => return Err(e),
     };
@@ -346,8 +349,6 @@ pub fn process_message_with_store(
 
     // Step 6 — insert into DB with status PROCESSED.
     let denorm = DenormalizedFields::from_content(&content.content, msg.sender.as_str());
-    let content_json = serde_json::to_string(&content)
-        .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
     let item_hash_str2 = item_hash_str.clone();
     let chain_str = msg.chain.to_string();
     let sender_str = msg.sender.as_str().to_string();
@@ -357,7 +358,6 @@ pub fn process_message_with_store(
         ItemType::Storage => "storage",
         ItemType::Ipfs => "ipfs",
     };
-    let item_content_owned = msg.item_content.clone();
     // Channel serializes as a JSON string (newtype wrapper), so serialize+strip quotes.
     let channel_str: Option<String> = msg.channel.as_ref().and_then(|c| {
         serde_json::to_value(c)
@@ -375,11 +375,10 @@ pub fn process_message_with_store(
         sender: &sender_str,
         signature: &sig_str,
         item_type: item_type_str,
-        item_content: item_content_owned.as_deref(),
-        content_json: &content_json,
+        item_content: item_content_resolved.as_deref(),
         channel: channel_str.as_deref(),
         time: time_val,
-        size: item_content_owned
+        size: item_content_resolved
             .as_deref()
             .map(|s| s.len() as i64)
             .unwrap_or(0),

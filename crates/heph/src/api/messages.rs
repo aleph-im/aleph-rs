@@ -212,14 +212,23 @@ struct MessageResponse {
 }
 
 fn stored_to_response(msg: &StoredMessage) -> MessageResponse {
-    let content: serde_json::Value =
-        serde_json::from_str(&msg.content).unwrap_or(serde_json::Value::Null);
+    let content: serde_json::Value = msg
+        .item_content
+        .as_deref()
+        .and_then(|ic| serde_json::from_str(ic).ok())
+        .unwrap_or(serde_json::Value::Null);
+    // Non-inline messages must have item_content = null in the API response.
+    let api_item_content = if msg.item_type == "inline" {
+        msg.item_content.clone()
+    } else {
+        None
+    };
     MessageResponse {
         sender: msg.sender.clone(),
         chain: msg.chain.clone(),
         signature: msg.signature.clone(),
         message_type: msg.message_type.clone(),
-        item_content: msg.item_content.clone(),
+        item_content: api_item_content,
         item_type: msg.item_type.clone(),
         item_hash: msg.item_hash.clone(),
         time: msg.time,
@@ -430,8 +439,11 @@ pub async fn get_message_content(
                 }));
             }
             // Return content.content (the user-provided content body)
-            let parsed: serde_json::Value =
-                serde_json::from_str(&msg.content).unwrap_or(serde_json::Value::Null);
+            let parsed: serde_json::Value = msg
+                .item_content
+                .as_deref()
+                .and_then(|ic| serde_json::from_str(ic).ok())
+                .unwrap_or(serde_json::Value::Null);
             if let Some(content) = parsed.get("content") {
                 HttpResponse::Ok().json(content)
             } else {
@@ -783,7 +795,6 @@ mod tests {
                     signature: "0xsig",
                     item_type: "inline",
                     item_content: Some("{}"),
-                    content_json: "{}",
                     channel: None,
                     time: 1000.0,
                     size: 2,
