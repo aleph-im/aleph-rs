@@ -848,6 +848,11 @@ pub enum AccountCommand {
     Use(AccountUseArgs),
     /// Export the private key of a local account.
     Export(AccountExportArgs),
+    /// Manage address aliases (named bookmarks for addresses without private keys).
+    Alias {
+        #[clap(subcommand)]
+        command: AliasCommand,
+    },
 }
 
 #[derive(Args)]
@@ -920,6 +925,30 @@ pub struct AccountExportArgs {
     /// Skip confirmation prompt.
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Subcommand)]
+pub enum AliasCommand {
+    /// Add a named alias for an address.
+    Add(AliasAddArgs),
+    /// List all address aliases.
+    List,
+    /// Remove an address alias.
+    Remove(AliasRemoveArgs),
+}
+
+#[derive(Args)]
+pub struct AliasAddArgs {
+    /// Name for the alias.
+    pub name: String,
+    /// Address to associate with the alias (e.g. 0x...).
+    pub address: String,
+}
+
+#[derive(Args)]
+pub struct AliasRemoveArgs {
+    /// Name of the alias to remove.
+    pub name: String,
 }
 
 #[derive(Subcommand)]

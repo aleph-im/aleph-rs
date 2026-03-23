@@ -2,7 +2,8 @@ use crate::account::generate::generate_key;
 use crate::account::store::{AccountKind, AccountStore};
 use crate::cli::{
     AccountBalanceArgs, AccountCommand, AccountCreateArgs, AccountDeleteArgs, AccountExportArgs,
-    AccountImportArgs, AccountShowArgs, AccountUseArgs,
+    AccountImportArgs, AccountShowArgs, AccountUseArgs, AliasAddArgs, AliasCommand,
+    AliasRemoveArgs,
 };
 use aleph_sdk::client::{AccountBalance, AlephAccountClient, AlephClient};
 use aleph_types::account::Account;
@@ -26,6 +27,7 @@ pub async fn handle_account_command(
         AccountCommand::Delete(args) => handle_delete(&store, args),
         AccountCommand::Use(args) => handle_use(&store, args, json),
         AccountCommand::Export(args) => handle_export(&store, args, json),
+        AccountCommand::Alias { command } => handle_alias_command(&store, command, json),
     }
 }
 
@@ -187,7 +189,7 @@ async fn fetch_balance(client: &AlephClient, address: &str) -> Option<AccountBal
 async fn handle_list(client: &AlephClient, store: &AccountStore, json: bool) -> Result<()> {
     let manifest = store.load_manifest()?;
 
-    if manifest.accounts.is_empty() {
+    if manifest.accounts.is_empty() && manifest.aliases.is_empty() {
         if json {
             println!("[]");
         } else {
@@ -205,7 +207,7 @@ async fn handle_list(client: &AlephClient, store: &AccountStore, json: bool) -> 
     let balances = futures_util::future::join_all(balance_futures).await;
 
     if json {
-        let output: Vec<_> = manifest
+        let mut output: Vec<_> = manifest
             .accounts
             .iter()
             .zip(&balances)
@@ -226,6 +228,13 @@ async fn handle_list(client: &AlephClient, store: &AccountStore, json: bool) -> 
                 obj
             })
             .collect();
+        for alias in &manifest.aliases {
+            output.push(serde_json::json!({
+                "name": alias.name,
+                "address": alias.address,
+                "kind": "alias",
+            }));
+        }
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
@@ -253,6 +262,12 @@ async fn handle_list(client: &AlephClient, store: &AccountStore, json: bool) -> 
             account.kind_display(),
             aleph,
             credits,
+        );
+    }
+    for alias in &manifest.aliases {
+        eprintln!(
+            "{:<2} {:<16} {:<6} {:<48} {:<10}",
+            "", alias.name, "", alias.address, "alias",
         );
     }
     Ok(())
@@ -422,6 +437,74 @@ fn handle_export(store: &AccountStore, args: AccountExportArgs, json: bool) -> R
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("0x{}", *key);
+    }
+    Ok(())
+}
+
+fn handle_alias_command(store: &AccountStore, command: AliasCommand, json: bool) -> Result<()> {
+    match command {
+        AliasCommand::Add(args) => handle_alias_add(store, args, json),
+        AliasCommand::List => handle_alias_list(store, json),
+        AliasCommand::Remove(args) => handle_alias_remove(store, args, json),
+    }
+}
+
+fn handle_alias_add(store: &AccountStore, args: AliasAddArgs, json: bool) -> Result<()> {
+    store.add_alias(&args.name, args.address.clone())?;
+
+    if json {
+        let output = serde_json::json!({
+            "name": args.name,
+            "address": args.address,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        eprintln!("Alias '{}' added ({}).", args.name, args.address);
+    }
+    Ok(())
+}
+
+fn handle_alias_list(store: &AccountStore, json: bool) -> Result<()> {
+    let manifest = store.load_manifest()?;
+
+    if manifest.aliases.is_empty() {
+        if json {
+            println!("[]");
+        } else {
+            eprintln!("No aliases. Add one with: aleph account alias add <NAME> <ADDRESS>");
+        }
+        return Ok(());
+    }
+
+    if json {
+        let output: Vec<_> = manifest
+            .aliases
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "name": a.name,
+                    "address": a.address,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        eprintln!("{:<16} ADDRESS", "NAME");
+        for alias in &manifest.aliases {
+            eprintln!("{:<16} {}", alias.name, alias.address);
+        }
+    }
+    Ok(())
+}
+
+fn handle_alias_remove(store: &AccountStore, args: AliasRemoveArgs, json: bool) -> Result<()> {
+    store.remove_alias(&args.name)?;
+
+    if json {
+        let output = serde_json::json!({ "removed": args.name });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        eprintln!("Alias '{}' removed.", args.name);
     }
     Ok(())
 }

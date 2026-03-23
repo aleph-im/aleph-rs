@@ -243,8 +243,8 @@ pub fn resolve_account(signing: &SigningArgs) -> Result<CliAccount, Box<dyn std:
 
 /// Resolve a user-supplied value to an address.
 ///
-/// Accepts either a raw address (hex string starting with "0x") or an account
-/// name from the local account store.
+/// Accepts either a raw address (hex string starting with "0x"), an account
+/// name, or an alias name from the local account store.
 pub fn resolve_address(value: &str) -> Result<Address, Box<dyn std::error::Error>> {
     if value.starts_with("0x") || value.starts_with("0X") {
         return Ok(Address::from(value.to_string()));
@@ -252,10 +252,16 @@ pub fn resolve_address(value: &str) -> Result<Address, Box<dyn std::error::Error
 
     let store =
         AccountStore::open().map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
-    let entry = store
-        .get_account(value)
-        .map_err(|_| anyhow::anyhow!("'{value}' is not a valid address or known account name"))?;
-    Ok(Address::from(entry.address))
+
+    // Try account first, then alias.
+    if let Ok(entry) = store.get_account(value) {
+        return Ok(Address::from(entry.address));
+    }
+    if let Ok(alias) = store.get_alias(value) {
+        return Ok(Address::from(alias.address));
+    }
+
+    Err(anyhow::anyhow!("'{value}' is not a valid address or known account/alias name").into())
 }
 
 /// Format a user-supplied address value for display.
