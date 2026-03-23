@@ -178,6 +178,7 @@ jobs:
         run: cp "./target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "${{ matrix.asset_name }}"
 
       - name: Upload Release Asset
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
