@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aleph-sdk",
  "aleph-types",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-sdk"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aleph-types",
  "async-stream",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-types"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "assert_matches",
  "bs58",
