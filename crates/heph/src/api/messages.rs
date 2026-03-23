@@ -217,12 +217,18 @@ fn stored_to_response(msg: &StoredMessage) -> MessageResponse {
         .as_deref()
         .and_then(|ic| serde_json::from_str(ic).ok())
         .unwrap_or(serde_json::Value::Null);
+    // Non-inline messages must have item_content = null in the API response.
+    let api_item_content = if msg.item_type == "inline" {
+        msg.item_content.clone()
+    } else {
+        None
+    };
     MessageResponse {
         sender: msg.sender.clone(),
         chain: msg.chain.clone(),
         signature: msg.signature.clone(),
         message_type: msg.message_type.clone(),
-        item_content: msg.item_content.clone(),
+        item_content: api_item_content,
         item_type: msg.item_type.clone(),
         item_hash: msg.item_hash.clone(),
         time: msg.time,
