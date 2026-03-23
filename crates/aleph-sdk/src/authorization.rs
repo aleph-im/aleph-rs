@@ -13,21 +13,17 @@ use crate::messages::AggregateBuilder;
 
 /// A set of authorizations received from a specific granter address.
 /// Returned by the received authorizations CCN endpoint.
-///
-/// Authorization entries are kept as raw JSON values because the CCN
-/// response format may omit or reshape fields compared to the
-/// [`Authorization`] type used for submission.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReceivedAuthorization {
     /// The address that granted the authorizations.
     pub granter: Address,
-    /// Raw authorization entries from the CCN response.
-    pub authorizations: Vec<serde_json::Value>,
+    /// The authorization entries describing what operations are permitted.
+    pub authorizations: Vec<Authorization>,
 }
 
 /// Trait for reading authorization data from the Aleph network.
 pub trait AlephAuthorizationClient: AlephAggregateClient {
-    /// Fetch all authorizations for an address.
+    /// Fetch all authorizations granted by an address.
     /// Returns empty vec if no security aggregate exists.
     fn get_authorizations(
         &self,
@@ -51,9 +47,16 @@ pub trait AlephAuthorizationClient: AlephAggregateClient {
             }
         }
     }
-}
 
-impl AlephAuthorizationClient for crate::client::AlephClient {}
+    /// Fetch authorizations received by the given address, i.e. what operations
+    /// the address is authorized to perform on behalf of other accounts.
+    ///
+    /// Calls `GET /api/v0/authorizations/received/{address}.json` on the CCN.
+    fn get_received_authorizations(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<Vec<ReceivedAuthorization>, MessageError>> + Send;
+}
 
 /// Replace all authorizations for the account.
 /// Builds an AGGREGATE message with key "security" and submits it.

@@ -107,49 +107,31 @@ pub async fn handle_authorization_command(
                         };
                         let mut has_restriction = false;
 
-                        if let Some(chain) = auth.get("chain").and_then(|v| v.as_str()) {
+                        if let Some(chain) = &auth.chain {
                             eprintln!("{indent}Chain:          {chain}");
                             has_restriction = true;
                         }
-
-                        if let Some(channels) = auth.get("channels").and_then(|v| v.as_array()) {
-                            let vals: Vec<&str> =
-                                channels.iter().filter_map(|v| v.as_str()).collect();
-                            if !vals.is_empty() {
-                                eprintln!("{indent}Channels:       {}", vals.join(", "));
-                                has_restriction = true;
-                            }
+                        if !auth.channels.is_empty() {
+                            eprintln!("{indent}Channels:       {}", auth.channels.join(", "));
+                            has_restriction = true;
                         }
-
-                        if let Some(types) = auth.get("types").and_then(|v| v.as_array()) {
-                            let vals: Vec<&str> = types.iter().filter_map(|v| v.as_str()).collect();
-                            if !vals.is_empty() {
-                                eprintln!("{indent}Message Types:  {}", vals.join(", "));
-                                has_restriction = true;
-                            }
+                        if !auth.types.is_empty() {
+                            let types: Vec<String> =
+                                auth.types.iter().map(|t| t.to_string()).collect();
+                            eprintln!("{indent}Message Types:  {}", types.join(", "));
+                            has_restriction = true;
                         }
-
-                        if let Some(post_types) = auth.get("post_types").and_then(|v| v.as_array())
-                        {
-                            let vals: Vec<&str> =
-                                post_types.iter().filter_map(|v| v.as_str()).collect();
-                            if !vals.is_empty() {
-                                eprintln!("{indent}Post Types:     {}", vals.join(", "));
-                                has_restriction = true;
-                            }
+                        if !auth.post_types.is_empty() {
+                            eprintln!("{indent}Post Types:     {}", auth.post_types.join(", "));
+                            has_restriction = true;
                         }
-
-                        if let Some(agg_keys) =
-                            auth.get("aggregate_keys").and_then(|v| v.as_array())
-                        {
-                            let vals: Vec<&str> =
-                                agg_keys.iter().filter_map(|v| v.as_str()).collect();
-                            if !vals.is_empty() {
-                                eprintln!("{indent}Aggregate Keys: {}", vals.join(", "));
-                                has_restriction = true;
-                            }
+                        if !auth.aggregate_keys.is_empty() {
+                            eprintln!(
+                                "{indent}Aggregate Keys: {}",
+                                auth.aggregate_keys.join(", ")
+                            );
+                            has_restriction = true;
                         }
-
                         if !has_restriction {
                             eprintln!("{indent}All permissions (unrestricted)");
                         }

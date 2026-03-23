@@ -1,4 +1,5 @@
 use crate::aggregate_models::corechannel::CoreChannelAggregate;
+use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
 use crate::messages::StoreBuilder;
 use crate::verify::Hasher;
 use aleph_types::account::Account;
@@ -9,8 +10,9 @@ use aleph_types::message::StorageEngine;
 use aleph_types::message::item_type::ItemType;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
-    ContentSource, FileRef, Message, MessageConfirmation, MessageContent, MessageContentEnum,
-    MessageHeader, MessageStatus, MessageType, RawFileRef, SignatureVerificationError,
+    Authorization, ContentSource, FileRef, Message, MessageConfirmation, MessageContent,
+    MessageContentEnum, MessageHeader, MessageStatus, MessageType, RawFileRef,
+    SignatureVerificationError,
 };
 use aleph_types::timestamp::Timestamp;
 use chrono::{DateTime, Utc};
@@ -1563,20 +1565,31 @@ impl AlephClient {
     }
 }
 
-impl AlephClient {
-    /// Fetch authorizations received by the given address, i.e. what operations
-    /// the address is authorized to perform on behalf of other accounts.
-    ///
-    /// Calls `GET /api/v0/authorizations/received/{address}.json` on the CCN.
-    pub async fn get_received_authorizations(
+impl AlephAuthorizationClient for AlephClient {
+    async fn get_received_authorizations(
         &self,
         address: &Address,
-    ) -> Result<Vec<crate::authorization::ReceivedAuthorization>, MessageError> {
-        use crate::authorization::ReceivedAuthorization;
+    ) -> Result<Vec<ReceivedAuthorization>, MessageError> {
+        /// The CCN `authorizations` field is either an object keyed by granter
+        /// address (Python CCN) or an array of `ReceivedAuthorization` (heph).
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum AuthorizationsBody {
+            Grouped(HashMap<String, Vec<Authorization>>),
+            List(Vec<ReceivedAuthorization>),
+        }
+
+        #[derive(Deserialize)]
+        struct Response {
+            authorizations: AuthorizationsBody,
+        }
 
         let url = self
             .ccn_url
-            .join(&format!("/api/v0/authorizations/received/{}.json", address))
+            .join(&format!(
+                "/api/v0/authorizations/received/{}.json",
+                address
+            ))
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
         let response = self
@@ -1586,43 +1599,21 @@ impl AlephClient {
             .send()
             .await?;
 
-        let body: serde_json::Value = response
+        let parsed: Response = response
             .json()
             .await
             .map_err(reqwest_middleware::Error::from)?;
 
-        let auths = body
-            .get("authorizations")
-            .ok_or_else(|| MessageError::ApiError {
-                status: 0,
-                body: "missing 'authorizations' field in response".into(),
-            })?;
-
-        let mut result = Vec::new();
-
-        if let Some(obj) = auths.as_object() {
-            // CCN format: {"granter_addr": [auth_entries], ...}
-            for (granter, entries) in obj {
-                let authorizations = match entries {
-                    serde_json::Value::Array(arr) => arr.clone(),
-                    other => vec![other.clone()],
-                };
-                result.push(ReceivedAuthorization {
-                    granter: Address::from(granter.clone()),
+        Ok(match parsed.authorizations {
+            AuthorizationsBody::Grouped(map) => map
+                .into_iter()
+                .map(|(granter, authorizations)| ReceivedAuthorization {
+                    granter: Address::from(granter),
                     authorizations,
-                });
-            }
-        } else if let Some(arr) = auths.as_array() {
-            // Alt format: [{"granter": "addr", "authorizations": [...]}, ...]
-            for entry in arr {
-                if let Ok(received) = serde_json::from_value::<ReceivedAuthorization>(entry.clone())
-                {
-                    result.push(received);
-                }
-            }
-        }
-
-        Ok(result)
+                })
+                .collect(),
+            AuthorizationsBody::List(list) => list,
+        })
     }
 }
 
