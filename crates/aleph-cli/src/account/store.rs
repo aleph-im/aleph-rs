@@ -23,6 +23,13 @@ pub struct AccountEntry {
     pub derivation_path: Option<String>,
 }
 
+/// An address alias — a named bookmark for an address without a private key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AliasEntry {
+    pub name: String,
+    pub address: String,
+}
+
 impl AccountEntry {
     pub fn kind_display(&self) -> &'static str {
         match self.kind {
@@ -39,6 +46,8 @@ pub struct AccountsManifest {
     pub default: Option<String>,
     #[serde(default)]
     pub accounts: Vec<AccountEntry>,
+    #[serde(default)]
+    pub aliases: Vec<AliasEntry>,
 }
 
 /// Convert a `keyring` crate error into a `StoreError::Keyring` with
@@ -184,7 +193,9 @@ impl AccountStore {
         Self::validate_name(name)?;
 
         let mut manifest = self.load_manifest()?;
-        if manifest.accounts.iter().any(|a| a.name == name) {
+        if manifest.accounts.iter().any(|a| a.name == name)
+            || manifest.aliases.iter().any(|a| a.name == name)
+        {
             return Err(StoreError::AlreadyExists(name.to_string()));
         }
 
@@ -235,7 +246,9 @@ impl AccountStore {
         Self::validate_name(name)?;
 
         let mut manifest = self.load_manifest()?;
-        if manifest.accounts.iter().any(|a| a.name == name) {
+        if manifest.accounts.iter().any(|a| a.name == name)
+            || manifest.aliases.iter().any(|a| a.name == name)
+        {
             return Err(StoreError::AlreadyExists(name.to_string()));
         }
 
@@ -337,6 +350,47 @@ impl AccountStore {
         Ok(())
     }
 
+    /// Add an address alias (a named bookmark with no private key).
+    pub fn add_alias(&self, name: &str, address: String) -> Result<(), StoreError> {
+        Self::validate_name(name)?;
+
+        let mut manifest = self.load_manifest()?;
+        if manifest.accounts.iter().any(|a| a.name == name)
+            || manifest.aliases.iter().any(|a| a.name == name)
+        {
+            return Err(StoreError::AlreadyExists(name.to_string()));
+        }
+
+        manifest.aliases.push(AliasEntry {
+            name: name.to_string(),
+            address,
+        });
+        self.save_manifest(&manifest)
+    }
+
+    /// Look up an alias by name.
+    pub fn get_alias(&self, name: &str) -> Result<AliasEntry, StoreError> {
+        let manifest = self.load_manifest()?;
+        manifest
+            .aliases
+            .iter()
+            .find(|a| a.name == name)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(name.to_string()))
+    }
+
+    /// Remove an alias by name.
+    pub fn remove_alias(&self, name: &str) -> Result<(), StoreError> {
+        let mut manifest = self.load_manifest()?;
+        let idx = manifest
+            .aliases
+            .iter()
+            .position(|a| a.name == name)
+            .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
+        manifest.aliases.remove(idx);
+        self.save_manifest(&manifest)
+    }
+
     /// Return path to the manifest file (for display in CLI output).
     #[allow(dead_code)]
     pub fn manifest_path(&self) -> &Path {
@@ -383,6 +437,7 @@ mod tests {
                     derivation_path: Some("m/44'/501'/0'/0'".to_string()),
                 },
             ],
+            aliases: vec![],
         };
 
         let serialized = toml::to_string_pretty(&manifest).unwrap();
@@ -430,6 +485,7 @@ mod tests {
                 kind: AccountKind::Local,
                 derivation_path: None,
             }],
+            aliases: vec![],
         };
         store.save_manifest(&manifest).unwrap();
         let loaded = store.load_manifest().unwrap();
@@ -480,6 +536,90 @@ mod tests {
         let (_dir, store) = temp_store();
         let err = store.set_default("nonexistent").unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn add_and_get_alias() {
+        let (_dir, store) = temp_store();
+        store
+            .add_alias("treasury", "0xABCD1234".to_string())
+            .unwrap();
+
+        let alias = store.get_alias("treasury").unwrap();
+        assert_eq!(alias.name, "treasury");
+        assert_eq!(alias.address, "0xABCD1234");
+    }
+
+    #[test]
+    fn add_and_remove_alias() {
+        let (_dir, store) = temp_store();
+        store
+            .add_alias("treasury", "0xABCD1234".to_string())
+            .unwrap();
+        store.remove_alias("treasury").unwrap();
+
+        let err = store.get_alias("treasury").unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn remove_nonexistent_alias_errors() {
+        let (_dir, store) = temp_store();
+        let err = store.remove_alias("nope").unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn alias_name_collides_with_account() {
+        let (_dir, store) = temp_store();
+        store
+            .add_ledger_account(
+                "shared",
+                Chain::Ethereum,
+                "0x1111".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+
+        let err = store.add_alias("shared", "0x2222".to_string()).unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyExists(_)));
+    }
+
+    #[test]
+    fn account_name_collides_with_alias() {
+        let (_dir, store) = temp_store();
+        store.add_alias("shared", "0x1111".to_string()).unwrap();
+
+        let err = store
+            .add_ledger_account(
+                "shared",
+                Chain::Ethereum,
+                "0x2222".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyExists(_)));
+    }
+
+    #[test]
+    fn alias_roundtrip_manifest_serde() {
+        let (_dir, store) = temp_store();
+        store.add_alias("treasury", "0xABCD".to_string()).unwrap();
+        store.add_alias("vault", "0xDEAD".to_string()).unwrap();
+
+        let manifest = store.load_manifest().unwrap();
+        assert_eq!(manifest.aliases.len(), 2);
+        assert_eq!(manifest.aliases[0].name, "treasury");
+        assert_eq!(manifest.aliases[1].address, "0xDEAD");
+    }
+
+    #[test]
+    fn alias_invalid_name_rejected() {
+        let (_dir, store) = temp_store();
+        let err = store
+            .add_alias("bad name!", "0x1234".to_string())
+            .unwrap_err();
+        assert!(matches!(err, StoreError::InvalidName(_)));
     }
 
     // Integration tests that actually touch the OS keyring are marked #[ignore].
