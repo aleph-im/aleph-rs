@@ -1,4 +1,5 @@
 use crate::aggregate_models::corechannel::CoreChannelAggregate;
+use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
 use crate::messages::StoreBuilder;
 use crate::verify::Hasher;
 use aleph_types::account::Account;
@@ -1560,6 +1561,55 @@ impl AlephClient {
             .await
             .map_err(reqwest_middleware::Error::from)?;
         Ok(response.messages)
+    }
+}
+
+impl AlephAuthorizationClient for AlephClient {
+    async fn get_received_authorizations(
+        &self,
+        address: &Address,
+    ) -> Result<Vec<ReceivedAuthorization>, MessageError> {
+        /// The CCN `authorizations` field is either an object keyed by granter
+        /// address (Python CCN) or an array of `ReceivedAuthorization` (heph).
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum AuthorizationsBody {
+            Grouped(HashMap<String, Vec<crate::authorization::AuthorizationRule>>),
+            List(Vec<ReceivedAuthorization>),
+        }
+
+        #[derive(Deserialize)]
+        struct Response {
+            authorizations: AuthorizationsBody,
+        }
+
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/authorizations/received/{}.json", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .get(url)
+            .query(&[("pagination", "200")])
+            .send()
+            .await?;
+
+        let parsed: Response = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+
+        Ok(match parsed.authorizations {
+            AuthorizationsBody::Grouped(map) => map
+                .into_iter()
+                .map(|(granter, authorizations)| ReceivedAuthorization {
+                    granter: Address::from(granter),
+                    authorizations,
+                })
+                .collect(),
+            AuthorizationsBody::List(list) => list,
+        })
     }
 }
 

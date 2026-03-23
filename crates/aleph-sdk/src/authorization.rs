@@ -1,8 +1,9 @@
 use std::future::Future;
 
 use aleph_types::account::Account;
-use aleph_types::chain::Address;
-use aleph_types::message::{Authorization, SecurityAggregateContent};
+use aleph_types::chain::{Address, Chain};
+use aleph_types::message::{Authorization, MessageType, SecurityAggregateContent};
+use serde::{Deserialize, Serialize};
 
 use crate::aggregate_models::security::SecurityAggregate;
 use crate::client::{
@@ -10,9 +11,38 @@ use crate::client::{
 };
 use crate::messages::AggregateBuilder;
 
+/// An authorization rule describing permitted operations.
+///
+/// Unlike [`Authorization`], this does not include a delegate address — the
+/// address is implicit from context (the key in the CCN grouped response,
+/// or the queried address for received authorizations).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationRule {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<Chain>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<MessageType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregate_keys: Vec<String>,
+}
+
+/// A set of authorizations received from a specific granter address.
+/// Returned by the received authorizations CCN endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceivedAuthorization {
+    /// The address that granted the authorizations.
+    pub granter: Address,
+    /// The authorization rules describing what operations are permitted.
+    pub authorizations: Vec<AuthorizationRule>,
+}
+
 /// Trait for reading authorization data from the Aleph network.
 pub trait AlephAuthorizationClient: AlephAggregateClient {
-    /// Fetch all authorizations for an address.
+    /// Fetch all authorizations granted by an address.
     /// Returns empty vec if no security aggregate exists.
     fn get_authorizations(
         &self,
@@ -36,9 +66,16 @@ pub trait AlephAuthorizationClient: AlephAggregateClient {
             }
         }
     }
-}
 
-impl AlephAuthorizationClient for crate::client::AlephClient {}
+    /// Fetch authorizations received by the given address, i.e. what operations
+    /// the address is authorized to perform on behalf of other accounts.
+    ///
+    /// Calls `GET /api/v0/authorizations/received/{address}.json` on the CCN.
+    fn get_received_authorizations(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<Vec<ReceivedAuthorization>, MessageError>> + Send;
+}
 
 /// Replace all authorizations for the account.
 /// Builds an AGGREGATE message with key "security" and submits it.
@@ -281,5 +318,114 @@ mod tests {
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].address, delegate2);
         assert_eq!(fetched[0].types, vec![MessageType::Program]);
+    }
+
+    /// Mirrors the `AuthorizationsBody` enum from `client.rs` so we can
+    /// verify that both CCN response formats deserialize correctly.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum AuthorizationsBody {
+        Grouped(std::collections::HashMap<String, Vec<AuthorizationRule>>),
+        List(Vec<ReceivedAuthorization>),
+    }
+
+    #[derive(Deserialize)]
+    struct ReceivedResponse {
+        authorizations: AuthorizationsBody,
+    }
+
+    fn parse_received(json: &str) -> Vec<ReceivedAuthorization> {
+        let parsed: ReceivedResponse = serde_json::from_str(json).unwrap();
+        match parsed.authorizations {
+            AuthorizationsBody::Grouped(map) => map
+                .into_iter()
+                .map(|(granter, authorizations)| ReceivedAuthorization {
+                    granter: Address::from(granter),
+                    authorizations,
+                })
+                .collect(),
+            AuthorizationsBody::List(list) => list,
+        }
+    }
+
+    #[test]
+    fn test_received_python_ccn_format() {
+        // Python CCN format: entries don't have `address`, may have extra fields like `alias`
+        let json = r#"{
+            "authorizations": {
+                "0xgranter1": [
+                    {"alias": "My key", "types": ["POST"], "channels": ["my-app"]}
+                ],
+                "0xgranter2": [
+                    {"types": ["AGGREGATE"], "aggregate_keys": ["profile"]}
+                ]
+            },
+            "pagination_page": 1,
+            "pagination_per_page": 20,
+            "pagination_total": 2,
+            "address": "0xdelegate"
+        }"#;
+
+        let received = parse_received(json);
+        assert_eq!(received.len(), 2);
+
+        let g1 = received
+            .iter()
+            .find(|r| r.granter == Address::from("0xgranter1".to_string()))
+            .unwrap();
+        assert_eq!(g1.authorizations.len(), 1);
+        assert_eq!(g1.authorizations[0].types, vec![MessageType::Post]);
+        assert_eq!(g1.authorizations[0].channels, vec!["my-app".to_string()]);
+
+        let g2 = received
+            .iter()
+            .find(|r| r.granter == Address::from("0xgranter2".to_string()))
+            .unwrap();
+        assert_eq!(g2.authorizations[0].types, vec![MessageType::Aggregate]);
+        assert_eq!(
+            g2.authorizations[0].aggregate_keys,
+            vec!["profile".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_received_heph_format() {
+        // Heph format: authorizations is an array of {granter, authorizations} objects.
+        // Entries may include extra fields (like `address`) which are ignored.
+        let json = r#"{
+            "authorizations": [
+                {
+                    "granter": "0xgranter1",
+                    "authorizations": [
+                        {"address": "0xdelegate", "chain": "ETH", "types": ["POST"]}
+                    ]
+                }
+            ],
+            "pagination_page": 1,
+            "pagination_per_page": 20,
+            "pagination_total": 1,
+            "address": "0xdelegate"
+        }"#;
+
+        let received = parse_received(json);
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].granter, Address::from("0xgranter1".to_string()));
+        assert_eq!(received[0].authorizations.len(), 1);
+        assert_eq!(received[0].authorizations[0].chain, Some(Chain::Ethereum));
+        assert_eq!(received[0].authorizations[0].types, vec![MessageType::Post]);
+    }
+
+    #[test]
+    fn test_received_empty_authorizations() {
+        let json = r#"{
+            "authorizations": {},
+            "pagination_page": 1,
+            "pagination_per_page": 20,
+            "pagination_total": 0,
+            "address": "0xdelegate"
+        }"#;
+
+        let received = parse_received(json);
+        assert!(received.is_empty());
     }
 }
