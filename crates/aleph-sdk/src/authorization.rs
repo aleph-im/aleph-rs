@@ -389,10 +389,7 @@ mod tests {
 
         let received = parse_received(json);
         assert_eq!(received.len(), 1);
-        assert_eq!(
-            received[0].granter,
-            Address::from("0xgranter1".to_string())
-        );
+        assert_eq!(received[0].granter, Address::from("0xgranter1".to_string()));
         assert_eq!(received[0].authorizations.len(), 1);
         assert_eq!(received[0].authorizations[0].chain, Some(Chain::Ethereum));
         assert_eq!(received[0].authorizations[0].types, vec![MessageType::Post]);
