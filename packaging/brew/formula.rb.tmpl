@@ -1,0 +1,28 @@
+class AlephCli < Formula
+  desc "Minimal CLI for Aleph Cloud"
+  homepage "https://github.com/aleph-im/aleph-rs"
+  version "{{version}}"
+  license "MIT"
+
+  on_arm do
+    url "https://github.com/aleph-im/aleph-rs/releases/download/v{{version}}/aleph-cli-macos-aarch64"
+    sha256 "{{sha256_arm64}}"
+  end
+
+  on_intel do
+    url "https://github.com/aleph-im/aleph-rs/releases/download/v{{version}}/aleph-cli-macos-x86_64"
+    sha256 "{{sha256_x86_64}}"
+  end
+
+  def install
+    if Hardware::CPU.arm?
+      bin.install "aleph-cli-macos-aarch64" => "aleph"
+    else
+      bin.install "aleph-cli-macos-x86_64" => "aleph"
+    end
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/aleph --version")
+  end
+end

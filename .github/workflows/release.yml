@@ -307,7 +307,77 @@ jobs:
           git commit -m "Update aleph-cli to v${{ needs.check-versions.outputs.version }}"
           git push
 
-  # Sixth job: Manual approval step before publishing to crates.io (runs in parallel with publish-apt)
+  # Sixth job: Update Homebrew tap with new formula
+  #
+  # Required secrets (in the `brew` GitHub environment):
+  #   - BREW_REPO_TOKEN: PAT with Contents read/write on aleph-im/homebrew-tap
+  #
+  publish-brew:
+    name: Publish to Homebrew Tap
+    needs: [check-versions, build-binaries]
+    runs-on: ubuntu-latest
+    environment: brew
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Download macOS release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="v${{ needs.check-versions.outputs.version }}"
+          gh release download "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --pattern "aleph-cli-macos-*" \
+            --dir ./artifacts
+
+      - name: Verify downloads
+        run: |
+          test -f ./artifacts/aleph-cli-macos-aarch64 || { echo "Missing aarch64 binary"; exit 1; }
+          test -f ./artifacts/aleph-cli-macos-x86_64 || { echo "Missing x86_64 binary"; exit 1; }
+
+      - name: Generate formula from template
+        run: |
+          VERSION="${{ needs.check-versions.outputs.version }}"
+          SHA_ARM64=$(sha256sum ./artifacts/aleph-cli-macos-aarch64 | cut -d' ' -f1)
+          SHA_X86_64=$(sha256sum ./artifacts/aleph-cli-macos-x86_64 | cut -d' ' -f1)
+
+          sed -e "s/{{version}}/$VERSION/g" \
+              -e "s/{{sha256_arm64}}/$SHA_ARM64/g" \
+              -e "s/{{sha256_x86_64}}/$SHA_X86_64/g" \
+              packaging/brew/formula.rb.tmpl > aleph-cli.rb
+
+          if grep -q '{{' aleph-cli.rb; then
+            echo "Error: Unreplaced placeholders in formula"
+            exit 1
+          fi
+
+          echo "Generated formula:"
+          cat aleph-cli.rb
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: aleph-im/homebrew-tap
+          token: ${{ secrets.BREW_REPO_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula and push
+        run: |
+          mkdir -p homebrew-tap/Formula
+          cp aleph-cli.rb homebrew-tap/Formula/aleph-cli.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/aleph-cli.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged, skipping push"
+          else
+            git commit -m "Update aleph-cli to v${{ needs.check-versions.outputs.version }}"
+            git push
+          fi
+
+  # Seventh job: Manual approval step before publishing to crates.io (runs in parallel with publish-apt)
   request-publish-approval:
     name: Request Publish Approval
     runs-on: ubuntu-latest
@@ -326,7 +396,7 @@ jobs:
           echo "  - aleph-sdk v${{ needs.check-versions.outputs.version }}"
           echo "  - aleph-cli v${{ needs.check-versions.outputs.version }}"
 
-  # Seventh job: Publish to crates.io (only runs after manual approval)
+  # Eighth job: Publish to crates.io (only runs after manual approval)
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
