@@ -1586,10 +1586,7 @@ impl AlephAuthorizationClient for AlephClient {
 
         let url = self
             .ccn_url
-            .join(&format!(
-                "/api/v0/authorizations/received/{}.json",
-                address
-            ))
+            .join(&format!("/api/v0/authorizations/received/{}.json", address))
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
         let response = self

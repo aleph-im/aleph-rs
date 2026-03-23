@@ -126,10 +126,7 @@ pub async fn handle_authorization_command(
                             has_restriction = true;
                         }
                         if !auth.aggregate_keys.is_empty() {
-                            eprintln!(
-                                "{indent}Aggregate Keys: {}",
-                                auth.aggregate_keys.join(", ")
-                            );
+                            eprintln!("{indent}Aggregate Keys: {}", auth.aggregate_keys.join(", "));
                             has_restriction = true;
                         }
                         if !has_restriction {
