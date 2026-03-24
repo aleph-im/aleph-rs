@@ -74,69 +74,69 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Work with messages
-    Message {
-        #[clap(subcommand)]
-        command: MessageCommand,
-    },
-    /// Work with posts (merged view of POST messages)
-    Post {
-        #[clap(subcommand)]
-        command: PostCommand,
-    },
-    /// Work with aggregates
-    Aggregate {
-        #[clap(subcommand)]
-        command: AggregateCommand,
-    },
-    /// Work with network nodes (CCN/CRN operations)
-    Node {
-        #[clap(subcommand)]
-        command: NodeCommand,
-    },
-    /// Work with files (upload, download)
-    File {
-        #[clap(subcommand)]
-        command: FileCommand,
-    },
-    /// Work with instances (VM deployments)
-    Instance {
-        #[clap(subcommand)]
-        command: InstanceCommand,
-    },
-    /// Manage local accounts and signing keys.
+    /// Manage local accounts and signing keys
     Account {
         #[clap(subcommand)]
         command: AccountCommand,
+    },
+    /// Create aggregate key-value entries
+    Aggregate {
+        #[clap(subcommand)]
+        command: AggregateCommand,
     },
     /// Manage delegated authorizations
     Authorization {
         #[clap(subcommand)]
         command: AuthorizationCommand,
     },
+    /// Manage CLI configuration (CCN endpoints, etc.)
+    Config {
+        #[clap(subcommand)]
+        command: ConfigCommand,
+    },
     /// Control VMs on a Compute Resource Node (CRN)
     Crn {
         #[clap(subcommand)]
         command: CrnCommand,
     },
-    /// Manage CLI configuration (CCN endpoints, etc.).
-    Config {
+    /// Upload and download files
+    File {
         #[clap(subcommand)]
-        command: ConfigCommand,
+        command: FileCommand,
+    },
+    /// Create and manage VM instances
+    Instance {
+        #[clap(subcommand)]
+        command: InstanceCommand,
+    },
+    /// Query, sync, and forget raw protocol messages
+    Message {
+        #[clap(subcommand)]
+        command: MessageCommand,
+    },
+    /// Register, stake, and manage network nodes
+    Node {
+        #[clap(subcommand)]
+        command: NodeCommand,
+    },
+    /// List, create, and amend posts
+    Post {
+        #[clap(subcommand)]
+        command: PostCommand,
     },
 }
 
 #[derive(Subcommand)]
 pub enum MessageCommand {
+    /// Forget messages by their item hashes
+    Forget(ForgetArgs),
     /// Get a message by its item hash
     Get(GetMessageArgs),
     // Boxing because of a large enum variant.
-    /// List messages (with filters).
+    /// List messages (with filters)
     List(Box<MessageFilterCli>),
-    /// Sync messages from one node to another.
+    /// Sync messages from one node to another
     Sync(Box<SyncArgs>),
-    /// Forget messages by their item hashes.
-    Forget(ForgetArgs),
 }
 
 #[derive(Args)]
@@ -170,12 +170,12 @@ pub struct GetMessageArgs {
 
 #[derive(Subcommand)]
 pub enum PostCommand {
-    /// List posts (with filters).
-    List(Box<PostListArgs>),
-    /// Create a new post message.
-    Create(PostCreateArgs),
-    /// Amend an existing post message.
+    /// Amend an existing post
     Amend(PostAmendArgs),
+    /// Create a new post
+    Create(PostCreateArgs),
+    /// List posts (with filters)
+    List(Box<PostListArgs>),
 }
 
 #[derive(Args)]
@@ -591,7 +591,7 @@ pub struct PostAmendArgs {
 
 #[derive(Subcommand)]
 pub enum AggregateCommand {
-    /// Create a new aggregate message.
+    /// Create a new aggregate message
     Create(AggregateCreateArgs),
 }
 
@@ -645,24 +645,24 @@ pub struct ForgetArgs {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum NodeCommand {
-    /// List nodes on the network.
-    List(NodeListArgs),
-    /// Register a new Core Channel Node (CCN).
-    CreateCcn(CreateCcnArgs),
-    /// Register a new Compute Resource Node (CRN).
-    CreateCrn(CreateCrnArgs),
-    /// Link a CRN to one of your CCNs.
-    Link(LinkCrnArgs),
-    /// Unlink a CRN from your CCN.
-    Unlink(UnlinkCrnArgs),
-    /// Stake ALEPH tokens on a node.
-    Stake(StakeArgs),
-    /// Remove your stake from a node.
-    Unstake(UnstakeArgs),
-    /// Remove a node from the network.
-    Drop(DropNodeArgs),
-    /// Amend metadata fields on an existing node.
+    /// Amend metadata fields on an existing node
     Amend(AmendNodeArgs),
+    /// Register a new Core Channel Node (CCN)
+    CreateCcn(CreateCcnArgs),
+    /// Register a new Compute Resource Node (CRN)
+    CreateCrn(CreateCrnArgs),
+    /// Remove a node from the network
+    Drop(DropNodeArgs),
+    /// Link a CRN to one of your CCNs
+    Link(LinkCrnArgs),
+    /// List nodes on the network
+    List(NodeListArgs),
+    /// Stake ALEPH tokens on a node
+    Stake(StakeArgs),
+    /// Unlink a CRN from your CCN
+    Unlink(UnlinkCrnArgs),
+    /// Remove your stake from a node
+    Unstake(UnstakeArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -832,27 +832,27 @@ pub struct AmendNodeArgs {
 
 #[derive(Subcommand)]
 pub enum AccountCommand {
-    /// Generate a new private key and store it in the OS keychain.
-    Create(AccountCreateArgs),
-    /// Import an existing private key (or Ledger account in Phase 2).
-    Import(AccountImportArgs),
-    /// List all stored accounts.
-    List,
-    /// Show details of an account (defaults to the active account).
-    Show(AccountShowArgs),
-    /// Show the balance of any address.
-    Balance(AccountBalanceArgs),
-    /// Delete an account from the keychain and manifest.
-    Delete(AccountDeleteArgs),
-    /// Set the default account used for signing.
-    Use(AccountUseArgs),
-    /// Export the private key of a local account.
-    Export(AccountExportArgs),
-    /// Manage address aliases (named bookmarks for addresses without private keys).
+    /// Manage address aliases (bookmarks for external addresses)
     Alias {
         #[clap(subcommand)]
         command: AliasCommand,
     },
+    /// Show the balance of any address
+    Balance(AccountBalanceArgs),
+    /// Generate a new private key and store it in the OS keychain
+    Create(AccountCreateArgs),
+    /// Delete an account from the keychain
+    Delete(AccountDeleteArgs),
+    /// Export the private key of a local account
+    Export(AccountExportArgs),
+    /// Import an existing private key
+    Import(AccountImportArgs),
+    /// List all stored accounts
+    List,
+    /// Show details of an account (defaults to the active account)
+    Show(AccountShowArgs),
+    /// Set the default account used for signing
+    Use(AccountUseArgs),
 }
 
 #[derive(Args)]
@@ -929,11 +929,11 @@ pub struct AccountExportArgs {
 
 #[derive(Subcommand)]
 pub enum AliasCommand {
-    /// Add a named alias for an address.
+    /// Add a named alias for an address
     Add(AliasAddArgs),
-    /// List all address aliases.
+    /// List all address aliases
     List,
-    /// Remove an address alias.
+    /// Remove an address alias
     Remove(AliasRemoveArgs),
 }
 
@@ -953,10 +953,10 @@ pub struct AliasRemoveArgs {
 
 #[derive(Subcommand)]
 pub enum FileCommand {
-    /// Upload a file to Aleph Cloud and create a STORE message.
-    Upload(FileUploadArgs),
-    /// Download a file from Aleph Cloud by file hash, message hash, or ref.
+    /// Download a file by hash, message hash, or ref
     Download(FileDownloadArgs),
+    /// Upload a file and create a STORE message
+    Upload(FileUploadArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -1021,7 +1021,7 @@ pub struct FileDownloadArgs {
 
 #[derive(Subcommand)]
 pub enum InstanceCommand {
-    /// Create a new instance (VM).
+    /// Create a new instance (VM)
     Create(InstanceCreateArgs),
 }
 
@@ -1080,12 +1080,12 @@ pub struct InstanceCreateArgs {
 
 #[derive(Subcommand)]
 pub enum AuthorizationCommand {
-    /// List authorizations granted by an address
-    List(AuthorizationListArgs),
-    /// List authorizations received from other addresses (what you can do on behalf of others)
-    Received(AuthorizationReceivedArgs),
     /// Add an authorization for a delegate
     Add(AuthorizationAddArgs),
+    /// List authorizations granted by an address
+    List(AuthorizationListArgs),
+    /// List authorizations received from other addresses
+    Received(AuthorizationReceivedArgs),
     /// Revoke authorizations for a delegate
     Revoke(AuthorizationRevokeArgs),
 }
@@ -1164,16 +1164,16 @@ pub struct AuthorizationRevokeArgs {
 
 #[derive(Subcommand)]
 pub enum CrnCommand {
-    /// Start (allocate) a VM instance on the CRN.
-    Start(CrnStartArgs),
-    /// Stop a running VM instance.
-    Stop(CrnArgs),
-    /// Reboot a VM instance.
-    Reboot(CrnArgs),
-    /// Erase a VM instance's data.
+    /// Erase a VM instance's data
     Erase(CrnArgs),
-    /// Stream logs from a running VM instance.
+    /// Stream logs from a running VM instance
     Logs(CrnArgs),
+    /// Reboot a VM instance
+    Reboot(CrnArgs),
+    /// Start (allocate) a VM instance on the CRN
+    Start(CrnStartArgs),
+    /// Stop a running VM instance
+    Stop(CrnArgs),
 }
 
 #[derive(Args)]
@@ -1206,7 +1206,7 @@ pub struct CrnStartArgs {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Manage named CCN endpoints.
+    /// Manage named CCN endpoints
     Ccn {
         #[clap(subcommand)]
         command: CcnCommand,
@@ -1215,16 +1215,16 @@ pub enum ConfigCommand {
 
 #[derive(Subcommand)]
 pub enum CcnCommand {
-    /// Register a new CCN endpoint.
+    /// Register a new CCN endpoint
     Add(CcnAddArgs),
-    /// Set the default CCN endpoint.
-    Use(CcnUseArgs),
-    /// List all registered CCN endpoints.
+    /// List all registered CCN endpoints
     List,
-    /// Show details of a CCN endpoint (defaults to the active one).
-    Show(CcnShowArgs),
-    /// Remove a registered CCN endpoint.
+    /// Remove a registered CCN endpoint
     Remove(CcnRemoveArgs),
+    /// Show details of a CCN endpoint (defaults to the active one)
+    Show(CcnShowArgs),
+    /// Set the default CCN endpoint
+    Use(CcnUseArgs),
 }
 
 #[derive(Args)]
