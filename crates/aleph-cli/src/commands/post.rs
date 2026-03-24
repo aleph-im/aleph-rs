@@ -74,6 +74,7 @@ async fn handle_post_amend(
     let account = resolve_account(&args.signing)?;
     let content = read_content(args.content)?;
     let envelope = serde_json::json!({
+        "type": "amend",
         "ref": args.reference.to_string(),
         "content": content,
     });
@@ -107,11 +108,12 @@ mod tests {
         let content = serde_json::json!({"body": "edited"});
         let reference = "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c";
         let envelope = serde_json::json!({
+            "type": "amend",
             "ref": reference,
             "content": content,
         });
+        assert_eq!(envelope["type"], "amend");
         assert_eq!(envelope["ref"], reference);
         assert_eq!(envelope["content"]["body"], "edited");
-        assert!(envelope.get("type").is_none());
     }
 }
