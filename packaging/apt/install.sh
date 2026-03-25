@@ -19,6 +19,7 @@ URIs: https://apt.aleph.im https://aleph-im.github.io/apt
 Suites: stable
 Components: main
 Signed-By: $KEYRING_PATH
+Architectures: amd64
 EOF
 
 # Update and install
