@@ -24,37 +24,39 @@ pub async fn handle_node_command(
         NodeCommand::List(args) => list_nodes(aleph_client, json, args).await,
         NodeCommand::CreateCcn(args) => {
             let account = resolve_account(&args.signing)?;
-            let pending = corechannel::create_ccn(&account, &args.name, &args.multiaddress)?;
+            let pending =
+                corechannel::create_ccn(&account, &args.name, &args.multiaddress, &args.network)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::CreateCrn(args) => {
             let account = resolve_account(&args.signing)?;
-            let pending = corechannel::create_crn(&account, &args.name, &args.address)?;
+            let pending =
+                corechannel::create_crn(&account, &args.name, &args.address, &args.network)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Link(args) => {
             let account = resolve_account(&args.signing)?;
-            let pending = corechannel::link_crn(&account, args.crn)?;
+            let pending = corechannel::link_crn(&account, args.crn, &args.network)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Unlink(args) => {
             let account = resolve_account(&args.signing)?;
-            let pending = corechannel::unlink_crn(&account, args.crn)?;
+            let pending = corechannel::unlink_crn(&account, args.crn, &args.network)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Stake(args) => {
             let account = resolve_account(&args.signing)?;
-            let pending = corechannel::stake(&account, args.node)?;
+            let pending = corechannel::stake(&account, args.node, &args.network)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Unstake(args) => {
             let account = resolve_account(&args.signing)?;
-            let pending = corechannel::unstake(&account, args.node)?;
+            let pending = corechannel::unstake(&account, args.node, &args.network)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Drop(args) => {
             let account = resolve_account(&args.signing)?;
-            let pending = corechannel::drop_node(&account, args.node)?;
+            let pending = corechannel::drop_node(&account, args.node, &args.network)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Amend(args) => {
@@ -77,7 +79,7 @@ pub async fn handle_node_command(
                 return Err("at least one field must be provided".into());
             }
             let account = resolve_account(&args.signing)?;
-            let pending = corechannel::amend_node(&account, args.node, details)?;
+            let pending = corechannel::amend_node(&account, args.node, details, &args.network)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
     }
