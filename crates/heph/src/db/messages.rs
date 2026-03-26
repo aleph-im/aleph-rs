@@ -432,14 +432,13 @@ impl DenormalizedFields {
                     fields.content_ref = Some(raw_ref.to_string());
                 }
                 // Extract payment type if present.
-                if let Some(ref payment) = store.payment {
-                    if let Some(v) = serde_json::to_value(&payment.payment_type)
+                if let Some(ref payment) = store.payment
+                    && let Some(v) = serde_json::to_value(&payment.payment_type)
                         .ok()
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
                     {
                         fields.payment_type = Some(v);
                     }
-                }
             }
             MessageContentEnum::Program(prog) => {
                 // Payment type is nested in on/payment objects — use a JSON value approach.
