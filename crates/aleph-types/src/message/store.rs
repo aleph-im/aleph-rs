@@ -1,6 +1,7 @@
 use crate::chain::Address;
 use crate::cid::Cid;
 use crate::item_hash::{AlephItemHash, ItemHash};
+use crate::message::execution::base::{Payment, PaymentType};
 use memsizes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -76,6 +77,9 @@ pub struct StoreContent {
     /// Metadata of the VM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, serde_json::Value>>,
+    /// Payment information for storage. Only `hold` and `credit` types are supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment: Option<Payment>,
 }
 
 impl StoreContent {
@@ -83,6 +87,7 @@ impl StoreContent {
         file_hash: StorageBackend,
         reference: Option<RawFileRef>,
         metadata: Option<HashMap<String, serde_json::Value>>,
+        payment: Option<Payment>,
     ) -> Self {
         Self {
             file_hash,
@@ -90,6 +95,16 @@ impl StoreContent {
             content_type: None,
             reference,
             metadata,
+            payment,
+        }
+    }
+
+    /// Returns `true` if the payment type is valid for a STORE message.
+    /// Only `hold` and `credit` are supported; `superfluid` is not allowed.
+    pub fn has_valid_payment(&self) -> bool {
+        match &self.payment {
+            None => true,
+            Some(p) => !matches!(p.payment_type, PaymentType::Superfluid),
         }
     }
 
@@ -204,5 +219,79 @@ mod tests {
         deserialized_message.verify_item_hash().unwrap();
 
         assert_eq!(message, deserialized_message);
+    }
+
+    const TEST_HASH: &str = "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c";
+
+    #[test]
+    fn test_store_content_without_payment() {
+        let json = format!(r#"{{"item_type":"storage","item_hash":"{}"}}"#, TEST_HASH);
+        let content: StoreContent = serde_json::from_str(&json).unwrap();
+        assert!(content.payment.is_none());
+        assert!(content.has_valid_payment());
+    }
+
+    #[test]
+    fn test_store_content_with_credit_payment() {
+        let json = format!(
+            r#"{{"item_type":"storage","item_hash":"{}","payment":{{"type":"credit"}}}}"#,
+            TEST_HASH
+        );
+        let content: StoreContent = serde_json::from_str(&json).unwrap();
+        let payment = content.payment.as_ref().unwrap();
+        assert_eq!(payment.payment_type, PaymentType::Credit);
+        assert!(payment.chain.is_none());
+        assert!(payment.receiver.is_none());
+        assert!(content.has_valid_payment());
+    }
+
+    #[test]
+    fn test_store_content_with_hold_payment() {
+        let json = format!(
+            r#"{{"item_type":"storage","item_hash":"{}","payment":{{"type":"hold"}}}}"#,
+            TEST_HASH
+        );
+        let content: StoreContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            content.payment.as_ref().unwrap().payment_type,
+            PaymentType::Hold
+        );
+        assert!(content.has_valid_payment());
+    }
+
+    #[test]
+    fn test_store_content_superfluid_payment_invalid() {
+        let json = format!(
+            r#"{{"item_type":"storage","item_hash":"{}","payment":{{"type":"superfluid"}}}}"#,
+            TEST_HASH
+        );
+        let content: StoreContent = serde_json::from_str(&json).unwrap();
+        assert!(!content.has_valid_payment());
+    }
+
+    #[test]
+    fn test_store_content_credit_payment_round_trip() {
+        let json = format!(
+            r#"{{"item_type":"storage","item_hash":"{}","payment":{{"type":"credit"}}}}"#,
+            TEST_HASH
+        );
+        let content: StoreContent = serde_json::from_str(&json).unwrap();
+        let serialized = serde_json::to_string(&content).unwrap();
+        let deserialized: StoreContent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(content, deserialized);
+    }
+
+    #[test]
+    fn test_store_content_payment_not_serialized_when_none() {
+        let content = StoreContent::new(
+            StorageBackend::Storage {
+                item_hash: AlephItemHash::from_bytes(b"test"),
+            },
+            None,
+            None,
+            None,
+        );
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(!json.contains("payment"));
     }
 }

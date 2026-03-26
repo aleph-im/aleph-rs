@@ -228,6 +228,7 @@ pub struct StoreBuilder<'a, A: Account> {
     storage_engine: StorageEngine,
     reference: Option<RawFileRef>,
     metadata: Option<HashMap<String, serde_json::Value>>,
+    payment: Option<Payment>,
     channel: Option<Channel>,
 }
 
@@ -241,6 +242,7 @@ impl<'a, A: Account> StoreBuilder<'a, A> {
             storage_engine,
             reference: None,
             metadata: None,
+            payment: None,
             channel: None,
         }
     }
@@ -268,6 +270,12 @@ impl<'a, A: Account> StoreBuilder<'a, A> {
         self
     }
 
+    /// Set payment details for the STORE message.
+    pub fn payment(mut self, payment: Payment) -> Self {
+        self.payment = Some(payment);
+        self
+    }
+
     /// Set the message channel.
     pub fn channel(mut self, channel: Channel) -> Self {
         self.channel = Some(channel);
@@ -289,7 +297,7 @@ impl<'a, A: Account> StoreBuilder<'a, A> {
             }
         };
 
-        let store_content = StoreContent::new(backend, self.reference, self.metadata);
+        let store_content = StoreContent::new(backend, self.reference, self.metadata, self.payment);
         let value = serde_json::to_value(store_content)?;
 
         let mut builder = MessageBuilder::new(self.account, MessageType::Store, value);
