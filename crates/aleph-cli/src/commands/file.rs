@@ -3,7 +3,7 @@ use crate::common::{resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::{AlephClient, AlephStorageClient};
 use aleph_sdk::messages::StoreBuilder;
 use aleph_types::channel::Channel;
-use aleph_types::message::execution::base::{Payment, PaymentType};
+use aleph_types::message::execution::base::Payment;
 use aleph_types::message::{FileRef, StorageEngine};
 use url::Url;
 
@@ -58,11 +58,8 @@ async fn handle_file_upload(
     }
 
     // Build STORE message
-    let mut builder = StoreBuilder::new(&account, file_hash, storage_engine).payment(Payment {
-        chain: None,
-        receiver: None,
-        payment_type: PaymentType::Credit,
-    });
+    let mut builder =
+        StoreBuilder::new(&account, file_hash, storage_engine).payment(Payment::credits());
     if let Some(owner) = args.on_behalf_of {
         builder = builder.on_behalf_of(resolve_address(&owner)?);
     }
