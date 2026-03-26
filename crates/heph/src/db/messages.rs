@@ -436,9 +436,9 @@ impl DenormalizedFields {
                     && let Some(v) = serde_json::to_value(&payment.payment_type)
                         .ok()
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    {
-                        fields.payment_type = Some(v);
-                    }
+                {
+                    fields.payment_type = Some(v);
+                }
             }
             MessageContentEnum::Program(prog) => {
                 // Payment type is nested in on/payment objects — use a JSON value approach.
