@@ -206,7 +206,11 @@ pub fn amend_node<A: Account>(
     network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     let action = CoreChannelAction::Amend { details };
-    build_operation(account, CoreChannelContent::new(action, network), Some(node_hash))
+    build_operation(
+        account,
+        CoreChannelContent::new(action, network),
+        Some(node_hash),
+    )
 }
 
 #[cfg(test)]
@@ -249,8 +253,13 @@ mod tests {
     #[test]
     fn test_create_ccn() {
         let account = TestAccount::new();
-        let msg =
-            create_ccn(&account, "My CCN", "/ip4/1.2.3.4/tcp/4025/p2p/QmTest", "mainnet").unwrap();
+        let msg = create_ccn(
+            &account,
+            "My CCN",
+            "/ip4/1.2.3.4/tcp/4025/p2p/QmTest",
+            "mainnet",
+        )
+        .unwrap();
 
         assert_eq!(msg.message_type, MessageType::Post);
 
