@@ -34,6 +34,24 @@ pub struct Payment {
     pub payment_type: PaymentType,
 }
 
+impl Payment {
+    pub fn credits() -> Self {
+        Self {
+            chain: None,
+            receiver: None,
+            payment_type: PaymentType::Credit,
+        }
+    }
+
+    pub fn hold() -> Self {
+        Self {
+            chain: None,
+            receiver: None,
+            payment_type: PaymentType::Hold,
+        }
+    }
+}
+
 ///Two types of program interfaces supported: plain binaries and ASGI apps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -21,6 +21,13 @@ pub fn process_store(
         }
     };
 
+    // Step 2 — validate payment type (only hold and credit allowed).
+    if !store_content.has_valid_payment() {
+        return Err(ProcessingError::InvalidPaymentMethod(
+            "only 'hold' and 'credit' payment types are supported for store messages".into(),
+        ));
+    }
+
     let file_hash = store_content.file_hash().to_string();
     let owner = content.address.as_str().to_string();
     let item_hash = msg.item_hash.to_string();
@@ -394,7 +401,51 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: FileStore write/read round-trip
+    // Test 7: STORE with credit payment succeeds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_store_with_credit_payment() {
+        let key = [26u8; 32];
+        let addr = addr_for_key(&key);
+        let fh = fake_file_hash(12);
+        let ic = format!(
+            r#"{{"address":"{}","time":1000.0,"item_type":"storage","item_hash":"{}","payment":{{"type":"credit"}}}}"#,
+            addr, fh
+        );
+        let msg = sign_store_message(&key, 1_000.0, ic);
+        let db = Db::open_in_memory().unwrap();
+        process_message(&db, &msg).expect("store with credit payment should succeed");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: STORE with superfluid payment is rejected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_store_with_superfluid_payment_rejected() {
+        let key = [27u8; 32];
+        let addr = addr_for_key(&key);
+        let fh = fake_file_hash(13);
+        let ic = format!(
+            r#"{{"address":"{}","time":1000.0,"item_type":"storage","item_hash":"{}","payment":{{"type":"superfluid"}}}}"#,
+            addr, fh
+        );
+        let msg = sign_store_message(&key, 1_000.0, ic);
+        let db = Db::open_in_memory().unwrap();
+        let result = process_message(&db, &msg);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code(),
+            202,
+            "expected InvalidPaymentMethod (202), got {:?}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: FileStore write/read round-trip
     // -----------------------------------------------------------------------
 
     #[test]
