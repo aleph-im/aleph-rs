@@ -77,7 +77,7 @@ struct CoreChannelContent {
 }
 
 impl CoreChannelContent {
-    fn new(action: CoreChannelAction) -> Self {
+    fn new(action: CoreChannelAction, network: &str) -> Self {
         let action_tag = match &action {
             CoreChannelAction::CreateNode { .. } => "create-node",
             CoreChannelAction::CreateResourceNode { .. } => "create-resource-node",
@@ -90,7 +90,7 @@ impl CoreChannelContent {
         };
         Self {
             action,
-            tags: vec![action_tag.to_string(), "mainnet".to_string()],
+            tags: vec![action_tag.to_string(), network.to_string()],
         }
     }
 }
@@ -112,6 +112,7 @@ pub fn create_ccn<A: Account>(
     account: &A,
     name: &str,
     multiaddress: &str,
+    network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     let action = CoreChannelAction::CreateNode {
         details: CreateNodeDetails {
@@ -119,13 +120,14 @@ pub fn create_ccn<A: Account>(
             multiaddress: multiaddress.to_string(),
         },
     };
-    build_operation(account, CoreChannelContent::new(action), None)
+    build_operation(account, CoreChannelContent::new(action, network), None)
 }
 
 pub fn create_crn<A: Account>(
     account: &A,
     name: &str,
     address: &str,
+    network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     let action = CoreChannelAction::CreateResourceNode {
         details: CreateResourceNodeDetails {
@@ -134,16 +136,17 @@ pub fn create_crn<A: Account>(
             node_type: "compute".to_string(),
         },
     };
-    build_operation(account, CoreChannelContent::new(action), None)
+    build_operation(account, CoreChannelContent::new(action, network), None)
 }
 
 pub fn link_crn<A: Account>(
     account: &A,
     crn_hash: NodeHash,
+    network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     build_operation(
         account,
-        CoreChannelContent::new(CoreChannelAction::Link),
+        CoreChannelContent::new(CoreChannelAction::Link, network),
         Some(crn_hash),
     )
 }
@@ -151,10 +154,11 @@ pub fn link_crn<A: Account>(
 pub fn unlink_crn<A: Account>(
     account: &A,
     crn_hash: NodeHash,
+    network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     build_operation(
         account,
-        CoreChannelContent::new(CoreChannelAction::Unlink),
+        CoreChannelContent::new(CoreChannelAction::Unlink, network),
         Some(crn_hash),
     )
 }
@@ -162,10 +166,11 @@ pub fn unlink_crn<A: Account>(
 pub fn stake<A: Account>(
     account: &A,
     node_hash: NodeHash,
+    network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     build_operation(
         account,
-        CoreChannelContent::new(CoreChannelAction::StakeSplit),
+        CoreChannelContent::new(CoreChannelAction::StakeSplit, network),
         Some(node_hash),
     )
 }
@@ -173,10 +178,11 @@ pub fn stake<A: Account>(
 pub fn unstake<A: Account>(
     account: &A,
     node_hash: NodeHash,
+    network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     build_operation(
         account,
-        CoreChannelContent::new(CoreChannelAction::Unstake),
+        CoreChannelContent::new(CoreChannelAction::Unstake, network),
         Some(node_hash),
     )
 }
@@ -184,10 +190,11 @@ pub fn unstake<A: Account>(
 pub fn drop_node<A: Account>(
     account: &A,
     node_hash: NodeHash,
+    network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     build_operation(
         account,
-        CoreChannelContent::new(CoreChannelAction::DropNode),
+        CoreChannelContent::new(CoreChannelAction::DropNode, network),
         Some(node_hash),
     )
 }
@@ -196,9 +203,14 @@ pub fn amend_node<A: Account>(
     account: &A,
     node_hash: NodeHash,
     details: AmendDetails,
+    network: &str,
 ) -> Result<PendingMessage, MessageBuildError> {
     let action = CoreChannelAction::Amend { details };
-    build_operation(account, CoreChannelContent::new(action), Some(node_hash))
+    build_operation(
+        account,
+        CoreChannelContent::new(action, network),
+        Some(node_hash),
+    )
 }
 
 #[cfg(test)]
@@ -241,7 +253,13 @@ mod tests {
     #[test]
     fn test_create_ccn() {
         let account = TestAccount::new();
-        let msg = create_ccn(&account, "My CCN", "/ip4/1.2.3.4/tcp/4025/p2p/QmTest").unwrap();
+        let msg = create_ccn(
+            &account,
+            "My CCN",
+            "/ip4/1.2.3.4/tcp/4025/p2p/QmTest",
+            "mainnet",
+        )
+        .unwrap();
 
         assert_eq!(msg.message_type, MessageType::Post);
 
@@ -263,7 +281,7 @@ mod tests {
     #[test]
     fn test_create_crn() {
         let account = TestAccount::new();
-        let msg = create_crn(&account, "My CRN", "https://crn.example.com/").unwrap();
+        let msg = create_crn(&account, "My CRN", "https://crn.example.com/", "mainnet").unwrap();
 
         assert_eq!(msg.message_type, MessageType::Post);
 
@@ -287,7 +305,7 @@ mod tests {
     fn test_link_crn() {
         let account = TestAccount::new();
         let crn_hash = test_node_hash();
-        let msg = link_crn(&account, crn_hash).unwrap();
+        let msg = link_crn(&account, crn_hash, "mainnet").unwrap();
 
         assert_eq!(msg.message_type, MessageType::Post);
 
@@ -308,7 +326,7 @@ mod tests {
     fn test_unlink_crn() {
         let account = TestAccount::new();
         let crn_hash = test_node_hash();
-        let msg = unlink_crn(&account, crn_hash).unwrap();
+        let msg = unlink_crn(&account, crn_hash, "mainnet").unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
         assert_eq!(parsed["content"]["action"], "unlink");
@@ -326,7 +344,7 @@ mod tests {
     fn test_stake() {
         let account = TestAccount::new();
         let node_hash = test_node_hash();
-        let msg = stake(&account, node_hash).unwrap();
+        let msg = stake(&account, node_hash, "mainnet").unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
         assert_eq!(parsed["content"]["action"], "stake-split");
@@ -344,7 +362,7 @@ mod tests {
     fn test_unstake() {
         let account = TestAccount::new();
         let node_hash = test_node_hash();
-        let msg = unstake(&account, node_hash).unwrap();
+        let msg = unstake(&account, node_hash, "mainnet").unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
         assert_eq!(parsed["content"]["action"], "unstake");
@@ -362,7 +380,7 @@ mod tests {
     fn test_drop_node() {
         let account = TestAccount::new();
         let node_hash = test_node_hash();
-        let msg = drop_node(&account, node_hash).unwrap();
+        let msg = drop_node(&account, node_hash, "mainnet").unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg.item_content).unwrap();
         assert_eq!(parsed["content"]["action"], "drop-node");
@@ -385,7 +403,7 @@ mod tests {
             reward: Some("0xNewRewardAddress".to_string()),
             ..Default::default()
         };
-        let msg = amend_node(&account, node_hash, details).unwrap();
+        let msg = amend_node(&account, node_hash, details, "mainnet").unwrap();
 
         assert_eq!(msg.message_type, MessageType::Post);
 

@@ -700,6 +700,10 @@ pub struct CreateCcnArgs {
     #[arg(long)]
     pub multiaddress: String,
 
+    /// Network tag (e.g. mainnet, testnet).
+    #[arg(long, default_value = "mainnet")]
+    pub network: String,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -714,6 +718,10 @@ pub struct CreateCrnArgs {
     #[arg(long)]
     pub address: String,
 
+    /// Network tag (e.g. mainnet, testnet).
+    #[arg(long, default_value = "mainnet")]
+    pub network: String,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -723,6 +731,10 @@ pub struct LinkCrnArgs {
     /// Hash of the CRN to link.
     #[arg(long)]
     pub crn: NodeHash,
+
+    /// Network tag (e.g. mainnet, testnet).
+    #[arg(long, default_value = "mainnet")]
+    pub network: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -734,6 +746,10 @@ pub struct UnlinkCrnArgs {
     #[arg(long)]
     pub crn: NodeHash,
 
+    /// Network tag (e.g. mainnet, testnet).
+    #[arg(long, default_value = "mainnet")]
+    pub network: String,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -743,6 +759,10 @@ pub struct StakeArgs {
     /// Hash of the node to stake on.
     #[arg(long)]
     pub node: NodeHash,
+
+    /// Network tag (e.g. mainnet, testnet).
+    #[arg(long, default_value = "mainnet")]
+    pub network: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -754,6 +774,10 @@ pub struct UnstakeArgs {
     #[arg(long)]
     pub node: NodeHash,
 
+    /// Network tag (e.g. mainnet, testnet).
+    #[arg(long, default_value = "mainnet")]
+    pub network: String,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -763,6 +787,10 @@ pub struct DropNodeArgs {
     /// Hash of the node to remove.
     #[arg(long)]
     pub node: NodeHash,
+
+    /// Network tag (e.g. mainnet, testnet).
+    #[arg(long, default_value = "mainnet")]
+    pub network: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -825,6 +853,10 @@ pub struct AmendNodeArgs {
     /// Terms and conditions hash or URL.
     #[arg(long)]
     pub terms_and_conditions: Option<String>,
+
+    /// Network tag (e.g. mainnet, testnet).
+    #[arg(long, default_value = "mainnet")]
+    pub network: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
