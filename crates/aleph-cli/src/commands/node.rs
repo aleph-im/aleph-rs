@@ -4,6 +4,7 @@ use aleph_sdk::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CcnInfo, Crn
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::corechannel::{self, AmendDetails};
 use aleph_types::account::Account;
+use aleph_types::chain::Address;
 use serde::Serialize;
 use url::Url;
 
@@ -105,8 +106,12 @@ async fn list_nodes(
         }
     };
 
+    let cc_address = match &args.corechannel_address {
+        Some(addr) => Address::from(addr.clone()),
+        None => CORECHANNEL_ADDRESS.clone(),
+    };
     let aggregate = aleph_client
-        .get_corechannel_aggregate(&CORECHANNEL_ADDRESS)
+        .get_corechannel_aggregate(&cc_address)
         .await?;
 
     let mut nodes: Vec<NodeInfo> = Vec::new();

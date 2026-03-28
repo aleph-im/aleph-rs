@@ -2044,7 +2044,9 @@ impl AlephAggregateClient for AlephClient {
             .get(url)
             .query(&[("keys", key)])
             .send()
-            .await?;
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
         let aggregate_response: AggregateResponse<T> = response
             .json()
             .await
