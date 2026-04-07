@@ -5,5 +5,6 @@ pub mod client;
 pub mod corechannel;
 pub mod crn;
 pub mod messages;
+mod proto;
 pub mod verify;
 pub mod ws;

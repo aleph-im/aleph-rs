@@ -2,6 +2,10 @@
 heph_version := `grep '^version = ' crates/heph/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'`
 heph_image := "alephim/heph"
 
+# Regenerate prost code from .proto files (requires protoc)
+generate-proto:
+    ./scripts/generate-proto.sh
+
 # Run clippy on all targets
 check-typing:
     cargo clippy --all-targets --all-features -- -D warnings
