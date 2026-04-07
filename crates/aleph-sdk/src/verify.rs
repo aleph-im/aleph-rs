@@ -49,12 +49,8 @@ fn encode_pbnode_canonical(node: &merkledag::PbNode) -> Vec<u8> {
     buf
 }
 
-mod merkledag {
-    include!(concat!(env!("OUT_DIR"), "/merkledag.rs"));
-}
-mod unixfs {
-    include!(concat!(env!("OUT_DIR"), "/unixfs.rs"));
-}
+use crate::proto::merkledag;
+use crate::proto::unixfs;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
