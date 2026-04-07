@@ -110,9 +110,7 @@ async fn list_nodes(
         Some(addr) => Address::from(addr.clone()),
         None => CORECHANNEL_ADDRESS.clone(),
     };
-    let aggregate = aleph_client
-        .get_corechannel_aggregate(&cc_address)
-        .await?;
+    let aggregate = aleph_client.get_corechannel_aggregate(&cc_address).await?;
 
     let mut nodes: Vec<NodeInfo> = Vec::new();
 
