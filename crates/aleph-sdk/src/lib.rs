@@ -1,10 +1,10 @@
 pub mod aggregate_models;
-mod proto;
 pub mod authorization;
 pub mod builder;
 pub mod client;
 pub mod corechannel;
 pub mod crn;
 pub mod messages;
+mod proto;
 pub mod verify;
 pub mod ws;
