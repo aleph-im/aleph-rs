@@ -8,8 +8,8 @@ members = [
 ]
 
 [workspace.dependencies]
-aleph-sdk = { path = "crates/aleph-sdk", version = "0.8.3" }
-aleph-types = { path = "crates/aleph-types", version = "0.8.3" }
+aleph-sdk = { path = "crates/aleph-sdk", version = "0.8.4" }
+aleph-types = { path = "crates/aleph-types", version = "0.8.4" }
 memsizes = { version = "1.0.0", features = ["serde"] }
 async-trait = { version = "0.1" }
 anyhow = { version = "1.0.100" }
