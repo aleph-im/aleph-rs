@@ -680,6 +680,10 @@ pub struct NodeListArgs {
     #[arg(long, value_enum, rename_all = "lowercase")]
     pub r#type: Option<NodeTypeCli>,
 
+    /// Address of the corechannel aggregate owner. Defaults to the mainnet address.
+    #[arg(long)]
+    pub corechannel_address: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
