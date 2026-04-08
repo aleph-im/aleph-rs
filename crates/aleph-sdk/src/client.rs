@@ -1504,7 +1504,8 @@ impl AlephClient {
     /// Like [`get_messages_raw`] but uses cursor-based pagination.
     ///
     /// `cursor` is the opaque cursor from a previous response's `next_cursor`,
-    /// or `None` for the first request.
+    /// or `None` for the first request (sends `cursor=` empty string to activate
+    /// cursor mode on the server).
     async fn get_messages_cursor(
         &self,
         filter: &MessageFilter,
@@ -1516,11 +1517,12 @@ impl AlephClient {
             .join("/api/v0/messages.json")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let mut req = self.http_client.get(url).query(&filter);
-        if let Some(c) = cursor {
-            req = req.query(&[("cursor", c)]);
-        }
-        req = req.query(&[("pagination", &pagination.to_string())]);
+        let req = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .query(&[("cursor", cursor.unwrap_or(""))])
+            .query(&[("pagination", &pagination.to_string())]);
 
         let response = req
             .send()
@@ -2110,11 +2112,12 @@ impl AlephClient {
             .join("/api/v0/posts.json")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let mut req = self.http_client.get(url).query(&filter);
-        if let Some(c) = cursor {
-            req = req.query(&[("cursor", c)]);
-        }
-        req = req.query(&[("pagination", &pagination.to_string())]);
+        let req = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .query(&[("cursor", cursor.unwrap_or(""))])
+            .query(&[("pagination", &pagination.to_string())]);
 
         let response = req
             .send()
@@ -2140,11 +2143,12 @@ impl AlephClient {
             .join("/api/v1/posts.json")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let mut req = self.http_client.get(url).query(&filter);
-        if let Some(c) = cursor {
-            req = req.query(&[("cursor", c)]);
-        }
-        req = req.query(&[("pagination", &pagination.to_string())]);
+        let req = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .query(&[("cursor", cursor.unwrap_or(""))])
+            .query(&[("pagination", &pagination.to_string())]);
 
         let response = req
             .send()
