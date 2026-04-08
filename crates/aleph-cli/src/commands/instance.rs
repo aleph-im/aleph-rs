@@ -1,10 +1,14 @@
-use crate::cli::{InstanceCommand, InstanceCreateArgs, parse_size_to_mib};
+use crate::cli::{InstanceCommand, InstanceCreateArgs, InstancePriceArgs, parse_size_to_mib};
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
-use aleph_sdk::client::AlephClient;
+use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::messages::InstanceBuilder;
 use aleph_types::channel::Channel;
+use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::{Payment, PaymentType};
-use aleph_types::message::execution::environment::Hypervisor;
+use aleph_types::message::execution::environment::{
+    GpuDeviceClass, GpuProperties, HostRequirements, Hypervisor, NodeRequirements,
+    TrustedExecutionEnvironment,
+};
 use aleph_types::message::execution::volume::{
     BaseVolume, EphemeralVolume, ImmutableVolume, MachineVolume, PersistentVolume,
     PersistentVolumeSize, VolumePersistence,
@@ -21,6 +25,9 @@ pub async fn handle_instance_command(
     match command {
         InstanceCommand::Create(args) => {
             handle_instance_create(aleph_client, ccn_url, json, args).await?;
+        }
+        InstanceCommand::Price(args) => {
+            handle_instance_price(aleph_client, json, args).await?;
         }
     }
     Ok(())
@@ -193,12 +200,44 @@ async fn handle_instance_create(
         ssh_keys.push(key);
     }
 
-    let rootfs_size = PersistentVolumeSize::try_from(args.rootfs_size)
-        .map_err(|e| format!("invalid rootfs size: {e}"))?;
+    // Resolve instance specs: either from --size (tier lookup) or explicit flags.
+    let (vcpus, memory_mib, disk_size_mib) = if let Some(slug) = &args.size {
+        let pricing = aleph_client
+            .get_pricing_aggregate()
+            .await
+            .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
+        let instance_pricing = &pricing.pricing.instance;
 
-    let mut builder = InstanceBuilder::new(&account, args.rootfs, rootfs_size)
-        .vcpus(args.vcpus)
-        .memory(MiB::from(args.memory))
+        let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
+            let available = instance_pricing.available_slugs().join(", ");
+            format!("unknown size '{slug}'. Available sizes: {available}")
+        })?;
+
+        let vcpus = args.vcpus.unwrap_or(tier.vcpus);
+        let memory_mib = args.memory.unwrap_or(tier.memory_mib);
+        let disk_size_mib = args.disk_size.unwrap_or(tier.disk_mib);
+
+        eprintln!(
+            "Size '{slug}': {vcpus} vCPUs, {} MiB memory, {} MiB disk",
+            memory_mib, disk_size_mib,
+        );
+
+        (vcpus, memory_mib, disk_size_mib)
+    } else {
+        let disk_size_mib = args
+            .disk_size
+            .ok_or("--disk-size is required when --size is not used")?;
+        let vcpus = args.vcpus.unwrap_or(1);
+        let memory_mib = args.memory.unwrap_or(2048);
+        (vcpus, memory_mib, disk_size_mib)
+    };
+
+    let disk_size = PersistentVolumeSize::try_from(disk_size_mib)
+        .map_err(|e| format!("invalid disk size: {e}"))?;
+
+    let mut builder = InstanceBuilder::new(&account, args.image, disk_size)
+        .vcpus(vcpus)
+        .memory(MiB::from(memory_mib))
         .hypervisor(Hypervisor::Qemu)
         .payment(Payment {
             chain: None,
@@ -215,6 +254,44 @@ async fn handle_instance_create(
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("name".to_string(), serde_json::json!(name));
         builder = builder.metadata(metadata);
+    }
+
+    // Confidential VM
+    if args.confidential {
+        let firmware: ItemHash = args
+            .confidential_firmware
+            .parse()
+            .map_err(|e| format!("invalid confidential firmware hash: {e}"))?;
+        builder = builder.trusted_execution(TrustedExecutionEnvironment {
+            firmware: Some(firmware),
+            policy: 0x1, // NoDebug
+        });
+    }
+
+    // GPU requirements
+    let gpu_props = if let Some(gpu_names) = &args.gpu {
+        let mut gpus = Vec::new();
+        for name in gpu_names {
+            gpus.push(resolve_gpu(name)?);
+        }
+        Some(gpus)
+    } else {
+        None
+    };
+
+    // Build host requirements if CRN hash or GPU is specified
+    if args.crn_hash.is_some() || gpu_props.is_some() {
+        let requirements = HostRequirements {
+            cpu: None,
+            node: args.crn_hash.map(|hash| NodeRequirements {
+                owner: None,
+                address_regex: None,
+                node_hash: Some(hash),
+                terms_and_conditions: None,
+            }),
+            gpu: gpu_props,
+        };
+        builder = builder.requirements(requirements);
     }
 
     // Parse volumes
@@ -240,10 +317,189 @@ async fn handle_instance_create(
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
 }
 
+/// Known GPU presets: (slug, pricing_model, vendor, device_name, device_class, device_id).
+/// `pricing_model` matches the `model` field in pricing aggregate tiers.
+const GPU_PRESETS: &[(&str, &str, &str, &str, &str, &str)] = &[
+    ("rtx3090",    "RTX 3090",     "NVIDIA", "GA102 [GeForce RTX 3090]",             "0300", "10de:2204"),
+    ("rtx4000ada", "RTX 4000 ADA", "NVIDIA", "AD104GL [RTX 4000 SFF Ada Generation]", "0300", "10de:27b0"),
+    ("rtx4090",    "RTX 4090",     "NVIDIA", "AD102 [GeForce RTX 4090]",             "0300", "10de:2684"),
+    ("rtx5090",    "RTX 5090",     "NVIDIA", "GB202 [GeForce RTX 5090]",             "0300", "10de:2684"),
+    ("l40s",       "L40S",         "NVIDIA", "AD102GL [L40S]",                       "0302", "10de:26b9"),
+    ("a100",       "A100",         "NVIDIA", "GA100 [A100 PCIe 80GB]",               "0302", "10de:20b5"),
+    ("h100",       "H100",         "NVIDIA", "GH100 [H100 PCIe]",                    "0302", "10de:2331"),
+];
+
+fn resolve_gpu(name: &str) -> Result<GpuProperties, Box<dyn std::error::Error>> {
+    let lower = name.to_ascii_lowercase();
+    for &(slug, _, vendor, device_name, class, device_id) in GPU_PRESETS {
+        if lower == slug {
+            let device_class = match class {
+                "0300" => GpuDeviceClass::VgaCompatibleController,
+                "0302" => GpuDeviceClass::_3DController,
+                _ => unreachable!(),
+            };
+            return Ok(GpuProperties {
+                vendor: vendor.to_string(),
+                device_name: device_name.to_string(),
+                device_class,
+                device_id: device_id.to_string(),
+            });
+        }
+    }
+    let available: Vec<&str> = GPU_PRESETS.iter().map(|(n, ..)| *n).collect();
+    Err(format!(
+        "unknown GPU model '{name}'. Available models: {}",
+        available.join(", ")
+    )
+    .into())
+}
+
+fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingData) {
+    let models = pricing.available_gpu_models();
+    if models.is_empty() {
+        eprintln!("No GPU models available.");
+        return;
+    }
+    eprintln!("Available GPU models:");
+    for gpu in &models {
+        let vram = gpu
+            .vram_mib
+            .map(|v| format!("{} GiB VRAM", v / 1024))
+            .unwrap_or_default();
+        eprintln!(
+            "  {:<16} {:>3} CU  {}  ({})",
+            gpu.name, gpu.compute_units, vram, gpu.tier
+        );
+    }
+}
+
+async fn handle_instance_price(
+    aleph_client: &AlephClient,
+    json: bool,
+    args: InstancePriceArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pricing = aleph_client
+        .get_pricing_aggregate()
+        .await
+        .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
+
+    if args.gpu.as_deref() == Some("") {
+        print_available_gpus(&pricing.pricing);
+        return Ok(());
+    }
+
+    // Match the user-provided GPU name against pricing tier model names
+    let gpu_tier_model = if let Some(slug) = args.gpu.as_deref() {
+        let models = pricing.pricing.available_gpu_models();
+        let matched = models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(slug))
+            .map(|m| m.name.clone());
+        if matched.is_none() {
+            let names: Vec<&str> = models.iter().map(|m| m.name.as_str()).collect();
+            return Err(format!(
+                "unknown GPU model '{slug}'. Available models: {}",
+                names.join(", ")
+            )
+            .into());
+        }
+        matched
+    } else {
+        None
+    };
+    let instance_pricing = pricing
+        .pricing
+        .for_instance(args.confidential, gpu_tier_model.as_deref());
+
+    let cu_price = instance_pricing
+        .price
+        .get("compute_unit")
+        .ok_or("missing compute_unit price in pricing aggregate")?;
+
+    let credit_per_cu: f64 = cu_price
+        .credit
+        .parse()
+        .map_err(|_| format!("invalid credit price: '{}'", cu_price.credit))?;
+
+    // Resolve specs: from --size tier with overrides, or fully manual
+    let (size_slug, compute_units, vcpus, memory_mib, disk_mib) =
+        if let Some(slug) = &args.size {
+            let tier =
+                instance_pricing
+                    .find_tier_by_slug(slug)
+                    .ok_or_else(|| {
+                        let available = instance_pricing.available_slugs().join(", ");
+                        format!("unknown size '{slug}'. Available sizes: {available}")
+                    })?;
+            (
+                Some(slug.clone()),
+                tier.compute_units,
+                args.vcpus.unwrap_or(tier.vcpus),
+                args.memory.unwrap_or(tier.memory_mib),
+                args.disk_size.unwrap_or(tier.disk_mib),
+            )
+        } else {
+            match (args.vcpus, args.memory, args.disk_size) {
+                (Some(vcpus), Some(memory), Some(disk)) => {
+                    let cu = &instance_pricing.compute_unit;
+                    let cu_from_vcpus = (vcpus + cu.vcpus - 1) / cu.vcpus;
+                    let cu_from_mem =
+                        ((memory + cu.memory_mib - 1) / cu.memory_mib) as u32;
+                    let compute_units = cu_from_vcpus.max(cu_from_mem);
+                    (None, compute_units, vcpus, memory, disk)
+                }
+                _ => {
+                    return Err(
+                        "--size is required unless --vcpus, --memory, and --disk-size are all specified".into(),
+                    );
+                }
+            }
+        };
+
+    let total_credits = credit_per_cu * compute_units as f64;
+    let total_dollars = total_credits * 1e-6;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "size": size_slug,
+                "compute_units": compute_units,
+                "vcpus": vcpus,
+                "memory_mib": memory_mib,
+                "disk_mib": disk_mib,
+                "gpu": args.gpu,
+                "confidential": args.confidential,
+                "credits_per_hour": total_credits,
+                "dollars_per_hour": total_dollars,
+            }))?
+        );
+    } else {
+        if let Some(slug) = &size_slug {
+            eprintln!("Size:    {slug}");
+        }
+        if let Some(gpu) = &args.gpu {
+            eprintln!("GPU:     {gpu}");
+        }
+        if args.confidential {
+            eprintln!("Type:    confidential");
+        }
+        eprintln!("vCPUs:   {}", vcpus);
+        eprintln!("Memory:  {} MiB", memory_mib);
+        eprintln!("Disk:    {} MiB", disk_mib);
+        eprintln!(
+            "Cost:    {:.0} credits/hour (${:.4}/hour)",
+            total_credits, total_dollars
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::parse_size_to_mib;
+    use crate::cli::{parse_image, parse_size_to_mib};
 
     #[test]
     fn parse_kv_pairs_basic() {
@@ -407,5 +663,39 @@ mod tests {
     fn validate_ssh_pubkey_rejects_garbage() {
         let path = std::path::Path::new("garbage.txt");
         assert!(validate_ssh_pubkey("not a key at all", path).is_err());
+    }
+
+    #[test]
+    fn parse_image_preset_ubuntu24() {
+        let hash = parse_image("ubuntu24").unwrap();
+        assert_eq!(
+            hash.to_string(),
+            "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+        );
+    }
+
+    #[test]
+    fn parse_image_preset_case_insensitive() {
+        let hash = parse_image("Ubuntu22").unwrap();
+        assert_eq!(
+            hash.to_string(),
+            "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
+        );
+    }
+
+    #[test]
+    fn parse_image_raw_hash() {
+        let hash = parse_image("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c")
+            .unwrap();
+        assert_eq!(
+            hash.to_string(),
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+    }
+
+    #[test]
+    fn parse_image_invalid() {
+        assert!(parse_image("windows11").is_err());
+        assert!(parse_image("abc").is_err());
     }
 }

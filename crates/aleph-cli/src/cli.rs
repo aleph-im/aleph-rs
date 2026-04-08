@@ -53,6 +53,38 @@ pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
     Ok(mib_rounded)
 }
 
+/// Well-known rootfs image presets.
+const IMAGE_PRESETS: &[(&str, &str)] = &[
+    (
+        "ubuntu22",
+        "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c",
+    ),
+    (
+        "ubuntu24",
+        "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e",
+    ),
+    (
+        "debian12",
+        "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717",
+    ),
+];
+
+/// Parse an image argument: either a preset name or a raw 64-char item hash.
+pub fn parse_image(s: &str) -> Result<ItemHash, String> {
+    for (name, hash) in IMAGE_PRESETS {
+        if s.eq_ignore_ascii_case(name) {
+            return hash.parse().map_err(|e| format!("{e}"));
+        }
+    }
+    s.parse().map_err(|_| {
+        let preset_names: Vec<&str> = IMAGE_PRESETS.iter().map(|(n, _)| *n).collect();
+        format!(
+            "'{s}' is not a valid image. Use a preset ({}) or a 64-character item hash.",
+            preset_names.join(", ")
+        )
+    })
+}
+
 #[derive(Parser)]
 #[command(name = "aleph", version, about = "Aleph CLI")]
 pub struct Cli {
@@ -1059,25 +1091,61 @@ pub struct FileDownloadArgs {
 pub enum InstanceCommand {
     /// Create a new instance (VM)
     Create(InstanceCreateArgs),
+    /// Show pricing for an instance size
+    Price(InstancePriceArgs),
+}
+
+#[derive(Args)]
+pub struct InstancePriceArgs {
+    /// Instance size as a doctl-style slug (e.g. 1vcpu-2gb, 4vcpu-8gb).
+    /// Optional if --vcpus, --memory, and --rootfs-size are all specified.
+    #[arg(long)]
+    pub size: Option<String>,
+
+    /// Number of virtual CPUs. Overrides the value from --size.
+    #[arg(long)]
+    pub vcpus: Option<u32>,
+
+    /// Memory size (e.g. 2GB, 2048MB, 2GiB). Overrides the value from --size.
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub memory: Option<u64>,
+
+    /// Disk size (e.g. 20GB, 1024MB, 1TiB). Overrides the value from --size.
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub disk_size: Option<u64>,
+
+    /// GPU model name (e.g. rtx4090, a100, l40s). Uses GPU-specific pricing tiers.
+    /// Pass --gpu with no value to list available models.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub gpu: Option<String>,
+
+    /// Launch a confidential VM. Uses confidential pricing tiers.
+    #[arg(long, default_value = "false")]
+    pub confidential: bool,
 }
 
 #[derive(Args)]
 pub struct InstanceCreateArgs {
-    /// Root filesystem image hash (STORE message hash).
-    #[arg(long)]
-    pub rootfs: ItemHash,
+    /// Root filesystem image: a preset name (ubuntu22, ubuntu24, debian12) or a STORE message hash.
+    #[arg(long, value_parser = parse_image)]
+    pub image: ItemHash,
 
-    /// Root filesystem size (e.g. 20GB, 1024MB, 1TiB).
+    /// Disk size (e.g. 20GB, 1024MB, 1TiB). Required unless --size is used.
     #[arg(long, value_parser = parse_size_to_mib)]
-    pub rootfs_size: u64,
+    pub disk_size: Option<u64>,
 
-    /// Number of virtual CPUs.
-    #[arg(long, default_value = "1")]
-    pub vcpus: u32,
+    /// Instance size as a doctl-style slug (e.g. 1vcpu-2gb, 4vcpu-8gb).
+    /// Fetches pricing tiers from the network and derives vcpus, memory, and disk-size.
+    #[arg(long)]
+    pub size: Option<String>,
 
-    /// Memory size (e.g. 2GB, 2048MB, 2GiB).
-    #[arg(long, value_parser = parse_size_to_mib, default_value = "2GiB")]
-    pub memory: u64,
+    /// Number of virtual CPUs. Overrides the value from --size.
+    #[arg(long)]
+    pub vcpus: Option<u32>,
+
+    /// Memory size (e.g. 2GB, 2048MB, 2GiB). Overrides the value from --size.
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub memory: Option<u64>,
 
     /// Path to an SSH public key file. Can be repeated for multiple keys.
     #[arg(long, required = true)]
@@ -1105,6 +1173,23 @@ pub struct InstanceCreateArgs {
     /// Can be repeated for multiple volumes.
     #[arg(long)]
     pub immutable_volume: Option<Vec<String>>,
+
+    /// Launch a confidential VM (AMD SEV).
+    #[arg(long, default_value = "false")]
+    pub confidential: bool,
+
+    /// UEFI firmware hash for confidential VMs.
+    #[arg(long, default_value = "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff")]
+    pub confidential_firmware: String,
+
+    /// GPU model name (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
+    /// Use `aleph instance price --gpu` to list available models.
+    #[arg(long)]
+    pub gpu: Option<Vec<String>>,
+
+    /// CRN node hash. Required for GPU and confidential instances.
+    #[arg(long)]
+    pub crn_hash: Option<String>,
 
     /// Sign on behalf of another address (requires an authorization from that address).
     #[arg(long)]

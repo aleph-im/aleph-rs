@@ -1,4 +1,5 @@
 use crate::aggregate_models::corechannel::CoreChannelAggregate;
+use crate::aggregate_models::pricing::{PRICING_ADDRESS, PricingAggregate};
 use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
 use crate::messages::StoreBuilder;
 use crate::verify::Hasher;
@@ -648,6 +649,14 @@ struct PostMessageBody<'a> {
     message: &'a PendingMessage,
 }
 
+/// Response from the `/api/v0/price/estimate` endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceEstimate {
+    pub required_tokens: f64,
+    pub payment_type: String,
+    pub cost: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct FileMetadata {
     #[serde(rename = "ref")]
@@ -1120,6 +1129,13 @@ pub trait AlephAggregateClient {
         self.get_aggregate(address, "corechannel")
     }
 
+    /// Returns the pricing aggregate that describes compute pricing tiers on the network.
+    fn get_pricing_aggregate(
+        &self,
+    ) -> impl Future<Output = Result<PricingAggregate, MessageError>> + Send {
+        self.get_aggregate(&PRICING_ADDRESS, "pricing")
+    }
+
     /// Returns the most recent version of multiple aggregates, keyed by their aggregate key.
     ///
     /// The result map only contains keys that exist on the server. Keys that
@@ -1531,6 +1547,38 @@ impl AlephClient {
             .await
             .map_err(reqwest_middleware::Error::from)?;
         Ok(get_messages_response)
+    }
+
+    /// Estimate the cost of a message before submitting it.
+    ///
+    /// Calls `POST /api/v0/price/estimate` on the CCN.
+    pub async fn estimate_price(
+        &self,
+        message: &PendingMessage,
+    ) -> Result<PriceEstimate, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/price/estimate")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let body = serde_json::json!({ "message": message });
+
+        let response = self.http_client.post(url).json(&body).send().await?;
+
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(MessageError::ApiError {
+                status: status.as_u16(),
+                body: body_text,
+            });
+        }
+
+        let estimate: PriceEstimate = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(estimate)
     }
 
     /// Fetches messages matching the filter, returning only the headers (without content).
