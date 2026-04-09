@@ -219,7 +219,7 @@ async fn handle_instance_create(
     } else {
         let disk_size_mib = args
             .disk_size
-            .ok_or("--disk-size is required when --size is not used")?;
+            .ok_or("--disk-size is required when --size is not used (or use --size to specify a tier slug like 1vcpu-2gb)")?;
         let vcpus = args.vcpus.unwrap_or(1);
         let memory_mib = args.memory.unwrap_or(2048);
         (vcpus, memory_mib, disk_size_mib)

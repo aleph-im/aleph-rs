@@ -64,20 +64,19 @@ impl PricingData {
     }
 
     /// Select the pricing entity based on instance type.
+    ///
+    /// Returns the standard instance pricing if the GPU model is not found in either GPU tier.
     pub fn for_instance(&self, confidential: bool, gpu_model: Option<&str>) -> &PricingPerEntity {
         if confidential {
             return &self.instance_confidential;
         }
         if let Some(model) = gpu_model {
-            let is_premium = self
-                .instance_gpu_premium
-                .tiers
-                .iter()
-                .any(|t| t.model.as_deref() == Some(model));
-            if is_premium {
+            if self.instance_gpu_premium.tiers.iter().any(|t| t.model.as_deref() == Some(model)) {
                 return &self.instance_gpu_premium;
             }
-            return &self.instance_gpu_standard;
+            if self.instance_gpu_standard.tiers.iter().any(|t| t.model.as_deref() == Some(model)) {
+                return &self.instance_gpu_standard;
+            }
         }
         &self.instance
     }
