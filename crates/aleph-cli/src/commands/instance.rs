@@ -320,13 +320,62 @@ async fn handle_instance_create(
 /// Known GPU presets: (slug, pricing_model, vendor, device_name, device_class, device_id).
 /// `pricing_model` matches the `model` field in pricing aggregate tiers.
 const GPU_PRESETS: &[(&str, &str, &str, &str, &str, &str)] = &[
-    ("rtx3090",    "RTX 3090",     "NVIDIA", "GA102 [GeForce RTX 3090]",             "0300", "10de:2204"),
-    ("rtx4000ada", "RTX 4000 ADA", "NVIDIA", "AD104GL [RTX 4000 SFF Ada Generation]", "0300", "10de:27b0"),
-    ("rtx4090",    "RTX 4090",     "NVIDIA", "AD102 [GeForce RTX 4090]",             "0300", "10de:2684"),
-    ("rtx5090",    "RTX 5090",     "NVIDIA", "GB202 [GeForce RTX 5090]",             "0300", "10de:2684"),
-    ("l40s",       "L40S",         "NVIDIA", "AD102GL [L40S]",                       "0302", "10de:26b9"),
-    ("a100",       "A100",         "NVIDIA", "GA100 [A100 PCIe 80GB]",               "0302", "10de:20b5"),
-    ("h100",       "H100",         "NVIDIA", "GH100 [H100 PCIe]",                    "0302", "10de:2331"),
+    (
+        "rtx3090",
+        "RTX 3090",
+        "NVIDIA",
+        "GA102 [GeForce RTX 3090]",
+        "0300",
+        "10de:2204",
+    ),
+    (
+        "rtx4000ada",
+        "RTX 4000 ADA",
+        "NVIDIA",
+        "AD104GL [RTX 4000 SFF Ada Generation]",
+        "0300",
+        "10de:27b0",
+    ),
+    (
+        "rtx4090",
+        "RTX 4090",
+        "NVIDIA",
+        "AD102 [GeForce RTX 4090]",
+        "0300",
+        "10de:2684",
+    ),
+    (
+        "rtx5090",
+        "RTX 5090",
+        "NVIDIA",
+        "GB202 [GeForce RTX 5090]",
+        "0300",
+        "10de:2684",
+    ),
+    (
+        "l40s",
+        "L40S",
+        "NVIDIA",
+        "AD102GL [L40S]",
+        "0302",
+        "10de:26b9",
+    ),
+    (
+        "a100",
+        "A100",
+        "NVIDIA",
+        "GA100 [A100 PCIe 80GB]",
+        "0302",
+        "10de:20b5",
+    ),
+    (
+        "h100",
+        "H100",
+        "NVIDIA",
+        "GH100 [H100 PCIe]",
+        "0302",
+        "10de:2331",
+    ),
 ];
 
 fn resolve_gpu(name: &str) -> Result<GpuProperties, Box<dyn std::error::Error>> {
@@ -422,39 +471,34 @@ async fn handle_instance_price(
         .map_err(|_| format!("invalid credit price: '{}'", cu_price.credit))?;
 
     // Resolve specs: from --size tier with overrides, or fully manual
-    let (size_slug, compute_units, vcpus, memory_mib, disk_mib) =
-        if let Some(slug) = &args.size {
-            let tier =
-                instance_pricing
-                    .find_tier_by_slug(slug)
-                    .ok_or_else(|| {
-                        let available = instance_pricing.available_slugs().join(", ");
-                        format!("unknown size '{slug}'. Available sizes: {available}")
-                    })?;
-            (
-                Some(slug.clone()),
-                tier.compute_units,
-                args.vcpus.unwrap_or(tier.vcpus),
-                args.memory.unwrap_or(tier.memory_mib),
-                args.disk_size.unwrap_or(tier.disk_mib),
-            )
-        } else {
-            match (args.vcpus, args.memory, args.disk_size) {
-                (Some(vcpus), Some(memory), Some(disk)) => {
-                    let cu = &instance_pricing.compute_unit;
-                    let cu_from_vcpus = (vcpus + cu.vcpus - 1) / cu.vcpus;
-                    let cu_from_mem =
-                        ((memory + cu.memory_mib - 1) / cu.memory_mib) as u32;
-                    let compute_units = cu_from_vcpus.max(cu_from_mem);
-                    (None, compute_units, vcpus, memory, disk)
-                }
-                _ => {
-                    return Err(
+    let (size_slug, compute_units, vcpus, memory_mib, disk_mib) = if let Some(slug) = &args.size {
+        let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
+            let available = instance_pricing.available_slugs().join(", ");
+            format!("unknown size '{slug}'. Available sizes: {available}")
+        })?;
+        (
+            Some(slug.clone()),
+            tier.compute_units,
+            args.vcpus.unwrap_or(tier.vcpus),
+            args.memory.unwrap_or(tier.memory_mib),
+            args.disk_size.unwrap_or(tier.disk_mib),
+        )
+    } else {
+        match (args.vcpus, args.memory, args.disk_size) {
+            (Some(vcpus), Some(memory), Some(disk)) => {
+                let cu = &instance_pricing.compute_unit;
+                let cu_from_vcpus = vcpus.div_ceil(cu.vcpus);
+                let cu_from_mem = memory.div_ceil(cu.memory_mib) as u32;
+                let compute_units = cu_from_vcpus.max(cu_from_mem);
+                (None, compute_units, vcpus, memory, disk)
+            }
+            _ => {
+                return Err(
                         "--size is required unless --vcpus, --memory, and --disk-size are all specified".into(),
                     );
-                }
             }
-        };
+        }
+    };
 
     // Compute cost (credits/hour)
     let compute_credits = credit_per_cu * compute_units as f64;
@@ -468,8 +512,7 @@ async fn handle_instance_price(
         .unwrap_or(0.0);
 
     let storage_credits = storage_credit_per_mib * disk_mib as f64;
-    let included_storage_mib =
-        instance_pricing.compute_unit.disk_mib as f64 * compute_units as f64;
+    let included_storage_mib = instance_pricing.compute_unit.disk_mib as f64 * compute_units as f64;
     let max_storage_discount = storage_credit_per_mib * included_storage_mib;
     let storage_discount = storage_credits.min(max_storage_discount);
     let extra_storage_credits = storage_credits - storage_discount;
