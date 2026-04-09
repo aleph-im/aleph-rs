@@ -358,6 +358,117 @@ pub fn query_messages(
     Ok((messages, total))
 }
 
+/// Result of a cursor-based message query.
+pub struct CursorMessagesResult {
+    pub messages: Vec<StoredMessage>,
+    pub next_cursor: Option<String>,
+}
+
+/// Query messages with cursor-based pagination.
+///
+/// If `cursor` is `None`, returns the first page. Otherwise, returns results
+/// after the cursor position. Fetches `per_page + 1` to detect whether there
+/// are more results. The extra row is trimmed and `next_cursor` is built from
+/// the last returned item.
+pub fn query_messages_cursor(
+    conn: &Connection,
+    filter: &MessageFilter,
+    cursor: Option<&crate::cursor::MessageCursor>,
+    per_page: u32,
+) -> SqlResult<CursorMessagesResult> {
+    let (mut where_sql, mut params) = build_where_clause(filter);
+
+    // Cursor keyset condition
+    if let Some(c) = cursor {
+        let clause = if filter.sort_order >= 0 {
+            // ASC: time > cursor_time OR (time == cursor_time AND item_hash > cursor_hash)
+            params.push(Box::new(c.time_f64));
+            let t_idx = params.len();
+            params.push(Box::new(c.item_hash.clone()));
+            let h_idx = params.len();
+            format!("(time > ?{t_idx} OR (time = ?{t_idx} AND item_hash > ?{h_idx}))")
+        } else {
+            // DESC: time < cursor_time OR (time == cursor_time AND item_hash > cursor_hash)
+            params.push(Box::new(c.time_f64));
+            let t_idx = params.len();
+            params.push(Box::new(c.item_hash.clone()));
+            let h_idx = params.len();
+            format!("(time < ?{t_idx} OR (time = ?{t_idx} AND item_hash > ?{h_idx}))")
+        };
+        if where_sql.is_empty() {
+            where_sql = format!(" WHERE {clause}");
+        } else {
+            where_sql = format!("{where_sql} AND {clause}");
+        }
+    }
+
+    let sort_col = match filter.sort_by.as_str() {
+        "time" => "time",
+        "reception_time" => "reception_time",
+        _ => "time",
+    };
+    let sort_dir = if filter.sort_order >= 0 {
+        "ASC"
+    } else {
+        "DESC"
+    };
+
+    // Fetch one extra to detect has_more
+    let limit = per_page + 1;
+    let query_sql = format!(
+        "SELECT
+            item_hash, type, chain, sender, signature,
+            item_type, item_content, channel, time,
+            size, status, reception_time,
+            owner, content_type, content_ref, content_key, content_item_hash, payment_type
+         FROM messages{where_sql} ORDER BY {sort_col} {sort_dir}, item_hash ASC LIMIT {limit}"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&query_sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(StoredMessage {
+            item_hash: row.get(0)?,
+            message_type: row.get(1)?,
+            chain: row.get(2)?,
+            sender: row.get(3)?,
+            signature: row.get(4)?,
+            item_type: row.get(5)?,
+            item_content: row.get(6)?,
+            channel: row.get(7)?,
+            time: row.get(8)?,
+            size: row.get(9)?,
+            status: row.get(10)?,
+            reception_time: row.get(11)?,
+            owner: row.get(12)?,
+            content_type: row.get(13)?,
+            content_ref: row.get(14)?,
+            content_key: row.get(15)?,
+            content_item_hash: row.get(16)?,
+            payment_type: row.get(17)?,
+        })
+    })?;
+
+    let mut messages: Vec<StoredMessage> = rows.collect::<SqlResult<_>>()?;
+    let has_more = messages.len() > per_page as usize;
+    if has_more {
+        messages.truncate(per_page as usize);
+    }
+
+    let next_cursor = if has_more {
+        messages
+            .last()
+            .map(|m| crate::cursor::encode_message_cursor(m.time, &m.item_hash))
+    } else {
+        None
+    };
+
+    Ok(CursorMessagesResult {
+        messages,
+        next_cursor,
+    })
+}
+
 /// Query just item_hash values with filtering and pagination.
 pub fn query_message_hashes(
     conn: &Connection,

@@ -116,6 +116,8 @@ pub async fn post_message(
 pub struct MessageQuery {
     pub pagination: Option<u32>,
     pub page: Option<u32>,
+    /// Opaque cursor for cursor-based pagination. When present, `page` is ignored.
+    pub cursor: Option<String>,
     #[serde(rename = "msgType")]
     pub msg_type: Option<String>,
     #[serde(rename = "msgTypes")]
@@ -244,6 +246,58 @@ pub async fn list_messages(
     state: web::Data<AppState>,
     query: web::Query<MessageQuery>,
 ) -> impl Responder {
+    let cursor_param = query.cursor.clone();
+
+    // Cursor mode
+    if let Some(ref cursor_str) = cursor_param {
+        let filter = query_to_filter(&query, None);
+        let raw_pagination = filter.per_page;
+        let per_page = match crate::cursor::validate_cursor_pagination(raw_pagination) {
+            Ok(v) => v,
+            Err(msg) => {
+                return HttpResponse::UnprocessableEntity()
+                    .json(serde_json::json!({ "error": msg }));
+            }
+        };
+
+        let decoded = if cursor_str.is_empty() {
+            None
+        } else {
+            match crate::cursor::decode_message_cursor(cursor_str) {
+                Ok(c) => Some(c),
+                Err(msg) => {
+                    return HttpResponse::UnprocessableEntity()
+                        .json(serde_json::json!({ "error": msg }));
+                }
+            }
+        };
+
+        let db = state.db.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            db.with_conn(|conn| {
+                messages::query_messages_cursor(conn, &filter, decoded.as_ref(), per_page)
+            })
+        })
+        .await
+        .unwrap();
+
+        return match result {
+            Ok(cr) => {
+                let messages: Vec<MessageResponse> =
+                    cr.messages.iter().map(stored_to_response).collect();
+                HttpResponse::Ok().json(serde_json::json!({
+                    "messages": messages,
+                    "pagination_per_page": per_page,
+                    "next_cursor": cr.next_cursor,
+                }))
+            }
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": e.to_string()
+            })),
+        };
+    }
+
+    // Page mode (legacy)
     let filter = query_to_filter(&query, None);
     let per_page = filter.per_page;
     let page = filter.page;
@@ -775,6 +829,113 @@ mod tests {
         let hashes = body["hashes"].as_array().unwrap();
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0], hash1);
+    }
+
+    #[actix_web::test]
+    async fn test_list_messages_cursor_pagination() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        // Post 5 messages with distinct times
+        for i in 0..5u8 {
+            let (msg, _) = sign_test_post(&[10 + i; 32], 1_700_000_000.0 + i as f64);
+            let req = test::TestRequest::post()
+                .uri("/api/v0/messages")
+                .set_json(serde_json::json!({ "sync": true, "message": msg }))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert!(resp.status().is_success());
+        }
+
+        // First cursor request (empty cursor = start from beginning), page size 2
+        let req = test::TestRequest::get()
+            .uri("/api/v0/messages.json?cursor=&pagination=2")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(body["next_cursor"].is_string(), "should have next_cursor");
+        // Should NOT have page-mode fields
+        assert!(body.get("pagination_total").is_none());
+        assert!(body.get("pagination_page").is_none());
+
+        // Collect all messages across pages
+        let mut all_hashes: Vec<String> = msgs
+            .iter()
+            .map(|m| m["item_hash"].as_str().unwrap().to_string())
+            .collect();
+        let mut cursor = body["next_cursor"].as_str().unwrap().to_string();
+
+        // Walk remaining pages
+        loop {
+            let uri = format!("/api/v0/messages.json?cursor={}&pagination=2", cursor);
+            let req = test::TestRequest::get().uri(&uri).to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), 200);
+
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            let msgs = body["messages"].as_array().unwrap();
+            for m in msgs {
+                all_hashes.push(m["item_hash"].as_str().unwrap().to_string());
+            }
+            match body["next_cursor"].as_str() {
+                Some(c) => cursor = c.to_string(),
+                None => break,
+            }
+        }
+
+        assert_eq!(all_hashes.len(), 5, "should retrieve all 5 messages");
+        // No duplicates
+        let unique: std::collections::HashSet<_> = all_hashes.iter().collect();
+        assert_eq!(unique.len(), 5, "no duplicates");
+    }
+
+    #[actix_web::test]
+    async fn test_cursor_pagination_invalid_cursor() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v0/messages.json?cursor=not-valid-base64!!!")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 422);
+    }
+
+    #[actix_web::test]
+    async fn test_cursor_pagination_zero_rejected() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/v0/messages.json?cursor=&pagination=0")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 422);
     }
 
     #[actix_web::test]

@@ -395,6 +395,16 @@ impl std::fmt::Display for SortOrder {
     }
 }
 
+/// Pagination parameters for page-mode list endpoints.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PaginationParams {
+    /// Maximum number of items per page.
+    pub pagination: Option<u32>,
+    /// Page number (starts at 1).
+    pub page: Option<u32>,
+}
+
 #[skip_serializing_none]
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize)]
@@ -452,9 +462,6 @@ pub struct MessageFilter {
     #[serde(rename = "msgStatuses")]
     #[serde_as(as = "Option<StringWithSeparator<CommaSeparator, MessageStatus>>")]
     pub message_statuses: Option<Vec<MessageStatus>>,
-
-    pub pagination: Option<u32>,
-    pub page: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -506,12 +513,6 @@ pub struct PostFilter {
     /// End date filter (exclusive).
     #[serde(rename = "endDate")]
     pub end_date: Option<Timestamp>,
-
-    /// Maximum number of posts to return per page.
-    pub pagination: Option<u32>,
-
-    /// Page number (starts at 1).
-    pub page: Option<u32>,
 
     /// Sort key.
     #[serde(rename = "sortBy")]
@@ -752,19 +753,21 @@ pub trait AlephMessageClient {
     fn get_messages(
         &self,
         filter: &MessageFilter,
+        pagination: PaginationParams,
     ) -> impl Future<Output = Result<Vec<Message>, MessageError>> + Send;
 
     /// Returns a stream that automatically paginates through all messages matching the filter.
     ///
     /// Items are yielded one at a time. Pages are fetched lazily — the first HTTP request
-    /// happens on the first `.next()` call. If `filter.page` is set, iteration starts from
-    /// that page; otherwise it starts from page 1.
+    /// happens on the first `.next()` call. Uses cursor-based pagination internally.
     ///
-    /// The stream terminates when all pages have been consumed, or on the first error
+    /// The stream terminates when all results have been consumed, or on the first error
     /// (after the retry middleware has exhausted its retries).
+    /// `pagination` controls items per page (default 200, max 200).
     fn get_messages_iterator(
         &self,
         filter: MessageFilter,
+        pagination: Option<u32>,
     ) -> impl Stream<Item = Result<Message, MessageError>> + Send + '_;
 
     fn subscribe_to_messages(
@@ -1139,6 +1142,7 @@ pub trait AlephPostClient {
     fn get_posts_v0(
         &self,
         filter: &PostFilter,
+        pagination: PaginationParams,
     ) -> impl Future<Output = Result<GetPostsV0Response, MessageError>> + Send;
 
     /// Queries posts matching the given filter using the v1 format.
@@ -1148,87 +1152,39 @@ pub trait AlephPostClient {
     fn get_posts_v1(
         &self,
         filter: &PostFilter,
+        pagination: PaginationParams,
     ) -> impl Future<Output = Result<GetPostsV1Response, MessageError>> + Send;
 
     /// Returns a stream that automatically paginates through all posts matching the filter
     /// using the v0 (legacy) format.
     ///
     /// Items are yielded one at a time. Pages are fetched lazily — the first HTTP request
-    /// happens on the first `.next()` call. If `filter.page` is set, iteration starts from
-    /// that page; otherwise it starts from page 1.
+    /// happens on the first `.next()` call. Uses cursor-based pagination internally.
     ///
-    /// The stream terminates when all pages have been consumed, or on the first error
+    /// The stream terminates when all results have been consumed, or on the first error
     /// (after the retry middleware has exhausted its retries).
+    /// `pagination` controls items per page (default 200, max 200).
     fn get_posts_v0_iterator(
         &self,
         filter: PostFilter,
-    ) -> impl Stream<Item = Result<PostV0, MessageError>> + Send + '_
-    where
-        Self: Sync,
-    {
-        async_stream::try_stream! {
-            let mut filter = filter;
-            let mut page = filter.page.unwrap_or(1);
-            loop {
-                filter.page = Some(page);
-                let response = self.get_posts_v0(&filter).await?;
-                for post in response.posts {
-                    yield post;
-                }
-                // Guard against malformed server response (pagination_per_page == 0
-                // would cause a division-by-zero panic in div_ceil).
-                if response.pagination_per_page == 0 {
-                    break;
-                }
-                let total_pages = response.pagination_total
-                    .div_ceil(response.pagination_per_page);
-                if page >= total_pages {
-                    break;
-                }
-                page += 1;
-            }
-        }
-    }
+        pagination: Option<u32>,
+    ) -> impl Stream<Item = Result<PostV0, MessageError>> + Send + '_;
 
     /// Returns a stream that automatically paginates through all posts matching the filter
     /// using the v1 format.
     ///
     /// Items are yielded one at a time. Pages are fetched lazily — the first HTTP request
-    /// happens on the first `.next()` call. If `filter.page` is set, iteration starts from
-    /// that page; otherwise it starts from page 1.
+    /// happens on the first `.next()` call. Uses cursor-based pagination internally.
     ///
-    /// The stream terminates when all pages have been consumed, or on the first error
+    /// The stream terminates when all results have been consumed, or on the first error
     /// (after the retry middleware has exhausted its retries).
+    ///
+    /// `pagination` controls items per page (default 200, max 200).
     fn get_posts_v1_iterator(
         &self,
         filter: PostFilter,
-    ) -> impl Stream<Item = Result<PostV1, MessageError>> + Send + '_
-    where
-        Self: Sync,
-    {
-        async_stream::try_stream! {
-            let mut filter = filter;
-            let mut page = filter.page.unwrap_or(1);
-            loop {
-                filter.page = Some(page);
-                let response = self.get_posts_v1(&filter).await?;
-                for post in response.posts {
-                    yield post;
-                }
-                // Guard against malformed server response (pagination_per_page == 0
-                // would cause a division-by-zero panic in div_ceil).
-                if response.pagination_per_page == 0 {
-                    break;
-                }
-                let total_pages = response.pagination_total
-                    .div_ceil(response.pagination_per_page);
-                if page >= total_pages {
-                    break;
-                }
-                page += 1;
-            }
-        }
-    }
+        pagination: Option<u32>,
+    ) -> impl Stream<Item = Result<PostV1, MessageError>> + Send + '_;
 }
 
 /// Configuration for HTTP retry behavior on transient errors (429, 5xx).
@@ -1408,33 +1364,35 @@ impl AlephMessageClient for AlephClient {
         Ok(get_message_response.message)
     }
 
-    async fn get_messages(&self, filter: &MessageFilter) -> Result<Vec<Message>, MessageError> {
-        Ok(self.get_messages_raw(filter).await?.messages)
+    async fn get_messages(
+        &self,
+        filter: &MessageFilter,
+        pagination: PaginationParams,
+    ) -> Result<Vec<Message>, MessageError> {
+        Ok(self.get_messages_raw(filter, &pagination).await?.messages)
     }
 
     fn get_messages_iterator(
         &self,
-        mut filter: MessageFilter,
+        filter: MessageFilter,
+        pagination: Option<u32>,
     ) -> impl Stream<Item = Result<Message, MessageError>> + Send + '_ {
+        let pagination = pagination
+            .unwrap_or(CURSOR_DEFAULT_PAGINATION)
+            .min(CURSOR_MAX_PAGINATION);
         async_stream::try_stream! {
-            let mut page = filter.page.unwrap_or(1);
+            let mut cursor: Option<String> = None;
             loop {
-                filter.page = Some(page);
-                let response = self.get_messages_raw(&filter).await?;
+                let response = self
+                    .get_messages_cursor(&filter, cursor.as_deref(), pagination)
+                    .await?;
                 for message in response.messages {
                     yield message;
                 }
-                // Guard against malformed server response (pagination_per_page == 0
-                // would cause a division-by-zero panic in div_ceil).
-                if response.pagination_per_page == 0 {
-                    break;
-                }
-                let total_pages = response.pagination_total
-                    .div_ceil(response.pagination_per_page);
-                if page >= total_pages {
-                    break;
-                }
-                page += 1;
+                cursor = match response.next_cursor {
+                    Some(c) => Some(c),
+                    None => break,
+                };
             }
         }
     }
@@ -1502,15 +1460,40 @@ impl AlephMessageClient for AlephClient {
     }
 }
 
+/// Maximum items per page in cursor mode (server caps at 200 too).
+const CURSOR_MAX_PAGINATION: u32 = 200;
+const CURSOR_DEFAULT_PAGINATION: u32 = 200;
+
+/// Cursor-mode response for messages. Private — only used by the iterators.
+#[derive(Debug, Deserialize)]
+struct MessagesCursorResponse {
+    messages: Vec<Message>,
+    next_cursor: Option<String>,
+}
+
+/// Cursor-mode response for v0 posts. Private — only used by the iterators.
+#[derive(Debug, Deserialize)]
+struct PostsV0CursorResponse {
+    posts: Vec<PostV0>,
+    next_cursor: Option<String>,
+}
+
+/// Cursor-mode response for v1 posts. Private — only used by the iterators.
+#[derive(Debug, Deserialize)]
+struct PostsV1CursorResponse {
+    posts: Vec<PostV1>,
+    next_cursor: Option<String>,
+}
+
 impl AlephClient {
     /// Fetches messages matching the filter, returning the full response including
     /// pagination metadata.
     ///
-    /// Used by [`get_messages`](AlephMessageClient::get_messages) and
-    /// [`get_messages_iterator`](AlephMessageClient::get_messages_iterator).
+    /// Used by [`get_messages`](AlephMessageClient::get_messages).
     async fn get_messages_raw(
         &self,
         filter: &MessageFilter,
+        pagination: &PaginationParams,
     ) -> Result<GetMessagesResponse, MessageError> {
         let url = self
             .ccn_url
@@ -1521,6 +1504,7 @@ impl AlephClient {
             .http_client
             .get(url)
             .query(&filter)
+            .query(&pagination)
             .send()
             .await?
             .error_for_status()
@@ -1531,6 +1515,42 @@ impl AlephClient {
             .await
             .map_err(reqwest_middleware::Error::from)?;
         Ok(get_messages_response)
+    }
+
+    /// Like [`get_messages_raw`] but uses cursor-based pagination.
+    ///
+    /// `cursor` is the opaque cursor from a previous response's `next_cursor`,
+    /// or `None` for the first request (sends `cursor=` empty string to activate
+    /// cursor mode on the server).
+    async fn get_messages_cursor(
+        &self,
+        filter: &MessageFilter,
+        cursor: Option<&str>,
+        pagination: u32,
+    ) -> Result<MessagesCursorResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/messages.json")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let req = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .query(&[("cursor", cursor.unwrap_or(""))])
+            .query(&[("pagination", &pagination.to_string())]);
+
+        let response = req
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let resp: MessagesCursorResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(resp)
     }
 
     /// Fetches messages matching the filter, returning only the headers (without content).
@@ -2096,8 +2116,76 @@ impl AlephAggregateClient for AlephClient {
     }
 }
 
+impl AlephClient {
+    async fn get_posts_v0_cursor(
+        &self,
+        filter: &PostFilter,
+        cursor: Option<&str>,
+        pagination: u32,
+    ) -> Result<PostsV0CursorResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/posts.json")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let req = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .query(&[("cursor", cursor.unwrap_or(""))])
+            .query(&[("pagination", &pagination.to_string())]);
+
+        let response = req
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let resp: PostsV0CursorResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(resp)
+    }
+
+    async fn get_posts_v1_cursor(
+        &self,
+        filter: &PostFilter,
+        cursor: Option<&str>,
+        pagination: u32,
+    ) -> Result<PostsV1CursorResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v1/posts.json")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let req = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .query(&[("cursor", cursor.unwrap_or(""))])
+            .query(&[("pagination", &pagination.to_string())]);
+
+        let response = req
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let resp: PostsV1CursorResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(resp)
+    }
+}
+
 impl AlephPostClient for AlephClient {
-    async fn get_posts_v0(&self, filter: &PostFilter) -> Result<GetPostsV0Response, MessageError> {
+    async fn get_posts_v0(
+        &self,
+        filter: &PostFilter,
+        pagination: PaginationParams,
+    ) -> Result<GetPostsV0Response, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v0/posts.json")
@@ -2107,6 +2195,7 @@ impl AlephPostClient for AlephClient {
             .http_client
             .get(url)
             .query(&filter)
+            .query(&pagination)
             .send()
             .await?
             .error_for_status()
@@ -2119,7 +2208,11 @@ impl AlephPostClient for AlephClient {
         Ok(posts_response)
     }
 
-    async fn get_posts_v1(&self, filter: &PostFilter) -> Result<GetPostsV1Response, MessageError> {
+    async fn get_posts_v1(
+        &self,
+        filter: &PostFilter,
+        pagination: PaginationParams,
+    ) -> Result<GetPostsV1Response, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v1/posts.json")
@@ -2129,6 +2222,7 @@ impl AlephPostClient for AlephClient {
             .http_client
             .get(url)
             .query(&filter)
+            .query(&pagination)
             .send()
             .await?
             .error_for_status()
@@ -2139,6 +2233,56 @@ impl AlephPostClient for AlephClient {
             .await
             .map_err(reqwest_middleware::Error::from)?;
         Ok(posts_response)
+    }
+
+    fn get_posts_v0_iterator(
+        &self,
+        filter: PostFilter,
+        pagination: Option<u32>,
+    ) -> impl Stream<Item = Result<PostV0, MessageError>> + Send + '_ {
+        let pagination = pagination
+            .unwrap_or(CURSOR_DEFAULT_PAGINATION)
+            .min(CURSOR_MAX_PAGINATION);
+        async_stream::try_stream! {
+            let mut cursor: Option<String> = None;
+            loop {
+                let response = self
+                    .get_posts_v0_cursor(&filter, cursor.as_deref(), pagination)
+                    .await?;
+                for post in response.posts {
+                    yield post;
+                }
+                cursor = match response.next_cursor {
+                    Some(c) => Some(c),
+                    None => break,
+                };
+            }
+        }
+    }
+
+    fn get_posts_v1_iterator(
+        &self,
+        filter: PostFilter,
+        pagination: Option<u32>,
+    ) -> impl Stream<Item = Result<PostV1, MessageError>> + Send + '_ {
+        let pagination = pagination
+            .unwrap_or(CURSOR_DEFAULT_PAGINATION)
+            .min(CURSOR_MAX_PAGINATION);
+        async_stream::try_stream! {
+            let mut cursor: Option<String> = None;
+            loop {
+                let response = self
+                    .get_posts_v1_cursor(&filter, cursor.as_deref(), pagination)
+                    .await?;
+                for post in response.posts {
+                    yield post;
+                }
+                cursor = match response.next_cursor {
+                    Some(c) => Some(c),
+                    None => break,
+                };
+            }
+        }
     }
 }
 
@@ -2506,6 +2650,7 @@ mod tests {
             async fn get_messages(
                 &self,
                 _filter: &MessageFilter,
+                _pagination: PaginationParams,
             ) -> Result<Vec<Message>, MessageError> {
                 unimplemented!()
             }
@@ -2513,6 +2658,7 @@ mod tests {
             fn get_messages_iterator(
                 &self,
                 _filter: MessageFilter,
+                _pagination: Option<u32>,
             ) -> impl Stream<Item = Result<Message, MessageError>> + Send + '_ {
                 futures_util::stream::empty()
             }

@@ -2,7 +2,7 @@ use actix_web::{HttpResponse, Responder, web};
 use serde::Deserialize;
 
 use crate::api::AppState;
-use crate::db::posts::{self, PostFilter};
+use crate::db::posts::{self, PostFilter, PostWithMessage};
 
 // ---------------------------------------------------------------------------
 // Query params shared by v0 and v1
@@ -23,6 +23,8 @@ pub struct PostQuery {
     pub end_date: Option<f64>,
     pub pagination: Option<u32>,
     pub page: Option<u32>,
+    /// Opaque cursor for cursor-based pagination. When present, `page` is ignored.
+    pub cursor: Option<String>,
     #[serde(rename = "sortBy")]
     pub sort_by: Option<String>,
     #[serde(rename = "sortOrder")]
@@ -55,6 +57,109 @@ fn query_to_filter(q: &PostQuery) -> (PostFilter, u32, u32) {
     (filter, page, per_page)
 }
 
+fn post_to_v0_json(pwm: &PostWithMessage) -> serde_json::Value {
+    let effective = &pwm.msg;
+    let original = pwm.original_msg.as_ref().unwrap_or(&pwm.msg);
+
+    let effective_parsed: serde_json::Value = effective
+        .item_content
+        .as_deref()
+        .and_then(|ic| serde_json::from_str(ic).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let content_body = effective_parsed
+        .get("content")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let original_parsed: serde_json::Value = original
+        .item_content
+        .as_deref()
+        .and_then(|ic| serde_json::from_str(ic).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let original_type = original_parsed
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let ref_val = pwm
+        .post
+        .ref_
+        .as_deref()
+        .map(serde_json::Value::from)
+        .unwrap_or(serde_json::Value::Null);
+
+    serde_json::json!({
+        "chain": effective.chain,
+        "item_hash": effective.item_hash,
+        "sender": effective.sender,
+        "type": effective.message_type,
+        "channel": effective.channel,
+        "confirmed": false,
+        "content": content_body,
+        "item_content": effective.item_content,
+        "item_type": effective.item_type,
+        "signature": effective.signature,
+        "size": effective.size,
+        "time": effective.time,
+        "confirmations": [],
+        "original_item_hash": original.item_hash,
+        "original_signature": original.signature,
+        "original_type": original_type,
+        "hash": original.item_hash,
+        "address": pwm.post.address,
+        "ref": ref_val,
+    })
+}
+
+fn post_to_v1_json(pwm: &PostWithMessage) -> serde_json::Value {
+    let effective = &pwm.msg;
+    let original = pwm.original_msg.as_ref().unwrap_or(&pwm.msg);
+
+    let effective_parsed: serde_json::Value = effective
+        .item_content
+        .as_deref()
+        .and_then(|ic| serde_json::from_str(ic).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let content_body = effective_parsed
+        .get("content")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let original_parsed: serde_json::Value = original
+        .item_content
+        .as_deref()
+        .and_then(|ic| serde_json::from_str(ic).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let original_type = original_parsed
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let ref_val = pwm
+        .post
+        .ref_
+        .as_deref()
+        .map(serde_json::Value::from)
+        .unwrap_or(serde_json::Value::Null);
+
+    let time_str = format_time_iso(original.time);
+    let last_updated_str = format_time_iso(effective.time);
+
+    serde_json::json!({
+        "item_hash": effective.item_hash,
+        "content": content_body,
+        "original_item_hash": original.item_hash,
+        "original_type": original_type,
+        "address": pwm.post.address,
+        "ref": ref_val,
+        "channel": pwm.post.channel,
+        "created": time_str,
+        "last_updated": last_updated_str,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/v0/posts.json  (spec 9.18) — V0 legacy format
 // ---------------------------------------------------------------------------
@@ -63,6 +168,58 @@ pub async fn list_posts_v0(
     state: web::Data<AppState>,
     query: web::Query<PostQuery>,
 ) -> impl Responder {
+    let cursor_param = query.cursor.clone();
+
+    // Cursor mode
+    if let Some(ref cursor_str) = cursor_param {
+        let (filter, _, _) = query_to_filter(&query);
+        let raw_pagination = filter.per_page;
+        let per_page = match crate::cursor::validate_cursor_pagination(raw_pagination) {
+            Ok(v) => v,
+            Err(msg) => {
+                return HttpResponse::UnprocessableEntity()
+                    .json(serde_json::json!({ "error": msg }));
+            }
+        };
+
+        let decoded = if cursor_str.is_empty() {
+            None
+        } else {
+            match crate::cursor::decode_message_cursor(cursor_str) {
+                Ok(c) => Some(c),
+                Err(msg) => {
+                    return HttpResponse::UnprocessableEntity()
+                        .json(serde_json::json!({ "error": msg }));
+                }
+            }
+        };
+
+        let db = state.db.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            db.with_conn(|conn| {
+                posts::query_posts_cursor(conn, &filter, decoded.as_ref(), per_page)
+            })
+        })
+        .await
+        .unwrap();
+
+        return match result {
+            Ok(cr) => {
+                let posts_out: Vec<serde_json::Value> =
+                    cr.posts.iter().map(post_to_v0_json).collect();
+                HttpResponse::Ok().json(serde_json::json!({
+                    "posts": posts_out,
+                    "pagination_per_page": per_page,
+                    "next_cursor": cr.next_cursor,
+                }))
+            }
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": e.to_string()
+            })),
+        };
+    }
+
+    // Page mode (legacy)
     let (filter, page, per_page) = query_to_filter(&query);
     let db = state.db.clone();
 
@@ -73,64 +230,8 @@ pub async fn list_posts_v0(
 
     match result {
         Ok((posts_with_msgs, total)) => {
-            let posts_out: Vec<serde_json::Value> = posts_with_msgs
-                .iter()
-                .map(|pwm| {
-                    let effective = &pwm.msg;
-                    let original = pwm.original_msg.as_ref().unwrap_or(&pwm.msg);
-
-                    let effective_parsed: serde_json::Value = effective
-                        .item_content
-                        .as_deref()
-                        .and_then(|ic| serde_json::from_str(ic).ok())
-                        .unwrap_or(serde_json::Value::Null);
-                    let content_body = effective_parsed
-                        .get("content")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-
-                    let original_parsed: serde_json::Value = original
-                        .item_content
-                        .as_deref()
-                        .and_then(|ic| serde_json::from_str(ic).ok())
-                        .unwrap_or(serde_json::Value::Null);
-                    let original_type = original_parsed
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let ref_val = pwm
-                        .post
-                        .ref_
-                        .as_deref()
-                        .map(serde_json::Value::from)
-                        .unwrap_or(serde_json::Value::Null);
-
-                    serde_json::json!({
-                        "chain": effective.chain,
-                        "item_hash": effective.item_hash,
-                        "sender": effective.sender,
-                        "type": effective.message_type,
-                        "channel": effective.channel,
-                        "confirmed": false,
-                        "content": content_body,
-                        "item_content": effective.item_content,
-                        "item_type": effective.item_type,
-                        "signature": effective.signature,
-                        "size": effective.size,
-                        "time": effective.time,
-                        "confirmations": [],
-                        "original_item_hash": original.item_hash,
-                        "original_signature": original.signature,
-                        "original_type": original_type,
-                        "hash": original.item_hash,
-                        "address": pwm.post.address,
-                        "ref": ref_val,
-                    })
-                })
-                .collect();
-
+            let posts_out: Vec<serde_json::Value> =
+                posts_with_msgs.iter().map(post_to_v0_json).collect();
             HttpResponse::Ok().json(serde_json::json!({
                 "posts": posts_out,
                 "pagination_page": page,
@@ -153,6 +254,58 @@ pub async fn list_posts_v1(
     state: web::Data<AppState>,
     query: web::Query<PostQuery>,
 ) -> impl Responder {
+    let cursor_param = query.cursor.clone();
+
+    // Cursor mode
+    if let Some(ref cursor_str) = cursor_param {
+        let (filter, _, _) = query_to_filter(&query);
+        let raw_pagination = filter.per_page;
+        let per_page = match crate::cursor::validate_cursor_pagination(raw_pagination) {
+            Ok(v) => v,
+            Err(msg) => {
+                return HttpResponse::UnprocessableEntity()
+                    .json(serde_json::json!({ "error": msg }));
+            }
+        };
+
+        let decoded = if cursor_str.is_empty() {
+            None
+        } else {
+            match crate::cursor::decode_message_cursor(cursor_str) {
+                Ok(c) => Some(c),
+                Err(msg) => {
+                    return HttpResponse::UnprocessableEntity()
+                        .json(serde_json::json!({ "error": msg }));
+                }
+            }
+        };
+
+        let db = state.db.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            db.with_conn(|conn| {
+                posts::query_posts_cursor(conn, &filter, decoded.as_ref(), per_page)
+            })
+        })
+        .await
+        .unwrap();
+
+        return match result {
+            Ok(cr) => {
+                let posts_out: Vec<serde_json::Value> =
+                    cr.posts.iter().map(post_to_v1_json).collect();
+                HttpResponse::Ok().json(serde_json::json!({
+                    "posts": posts_out,
+                    "pagination_per_page": per_page,
+                    "next_cursor": cr.next_cursor,
+                }))
+            }
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": e.to_string()
+            })),
+        };
+    }
+
+    // Page mode (legacy)
     let (filter, page, per_page) = query_to_filter(&query);
     let db = state.db.clone();
 
@@ -163,61 +316,8 @@ pub async fn list_posts_v1(
 
     match result {
         Ok((posts_with_msgs, total)) => {
-            let posts_out: Vec<serde_json::Value> = posts_with_msgs
-                .iter()
-                .map(|pwm| {
-                    let effective = &pwm.msg;
-                    let original = pwm.original_msg.as_ref().unwrap_or(&pwm.msg);
-
-                    let effective_parsed: serde_json::Value = effective
-                        .item_content
-                        .as_deref()
-                        .and_then(|ic| serde_json::from_str(ic).ok())
-                        .unwrap_or(serde_json::Value::Null);
-                    let content_body = effective_parsed
-                        .get("content")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-
-                    let original_parsed: serde_json::Value = original
-                        .item_content
-                        .as_deref()
-                        .and_then(|ic| serde_json::from_str(ic).ok())
-                        .unwrap_or(serde_json::Value::Null);
-                    let original_type = original_parsed
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let ref_val = pwm
-                        .post
-                        .ref_
-                        .as_deref()
-                        .map(serde_json::Value::from)
-                        .unwrap_or(serde_json::Value::Null);
-
-                    // Use the post's created_at (from posts table) if available; else fall back to message time.
-                    // For v1 we use ISO8601 strings. Since posts table has created_at, we'd need it.
-                    // We'll format time as ISO8601 for now (the posts table stores created_at but we
-                    // didn't join it in query_posts; use time as fallback).
-                    let time_str = format_time_iso(original.time);
-                    let last_updated_str = format_time_iso(effective.time);
-
-                    serde_json::json!({
-                        "item_hash": effective.item_hash,
-                        "content": content_body,
-                        "original_item_hash": original.item_hash,
-                        "original_type": original_type,
-                        "address": pwm.post.address,
-                        "ref": ref_val,
-                        "channel": pwm.post.channel,
-                        "created": time_str,
-                        "last_updated": last_updated_str,
-                    })
-                })
-                .collect();
-
+            let posts_out: Vec<serde_json::Value> =
+                posts_with_msgs.iter().map(post_to_v1_json).collect();
             HttpResponse::Ok().json(serde_json::json!({
                 "posts": posts_out,
                 "pagination_page": page,
@@ -424,6 +524,121 @@ mod tests {
         // original hash preserved
         assert_eq!(posts[0]["original_item_hash"], orig_hash);
         assert_eq!(posts[0]["hash"], orig_hash);
+    }
+
+    #[actix_web::test]
+    async fn test_list_posts_v0_cursor_pagination() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        // Post 4 messages with distinct times
+        for i in 0..4u8 {
+            let (msg, _) = sign_post_msg(&[60 + i; 32], 1_700_000_000.0 + i as f64);
+            let req = test::TestRequest::post()
+                .uri("/api/v0/messages")
+                .set_json(serde_json::json!({ "sync": true, "message": msg }))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert!(resp.status().is_success());
+        }
+
+        // Cursor pagination with page size 2
+        let req = test::TestRequest::get()
+            .uri("/api/v0/posts.json?cursor=&pagination=2")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let posts = body["posts"].as_array().unwrap();
+        assert_eq!(posts.len(), 2);
+        assert!(body["next_cursor"].is_string());
+
+        let mut all_hashes: Vec<String> = posts
+            .iter()
+            .map(|p| p["item_hash"].as_str().unwrap().to_string())
+            .collect();
+        let mut cursor = body["next_cursor"].as_str().unwrap().to_string();
+
+        loop {
+            let uri = format!("/api/v0/posts.json?cursor={}&pagination=2", cursor);
+            let req = test::TestRequest::get().uri(&uri).to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), 200);
+
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            let posts = body["posts"].as_array().unwrap();
+            for p in posts {
+                all_hashes.push(p["item_hash"].as_str().unwrap().to_string());
+            }
+            match body["next_cursor"].as_str() {
+                Some(c) => cursor = c.to_string(),
+                None => break,
+            }
+        }
+
+        assert_eq!(all_hashes.len(), 4);
+        let unique: std::collections::HashSet<_> = all_hashes.iter().collect();
+        assert_eq!(unique.len(), 4, "no duplicates");
+    }
+
+    #[actix_web::test]
+    async fn test_list_posts_v1_cursor_pagination() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        for i in 0..3u8 {
+            let (msg, _) = sign_post_msg(&[70 + i; 32], 1_700_000_000.0 + i as f64);
+            let req = test::TestRequest::post()
+                .uri("/api/v0/messages")
+                .set_json(serde_json::json!({ "sync": true, "message": msg }))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert!(resp.status().is_success());
+        }
+
+        let req = test::TestRequest::get()
+            .uri("/api/v1/posts.json?cursor=&pagination=2")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let posts = body["posts"].as_array().unwrap();
+        assert_eq!(posts.len(), 2);
+        assert!(body["next_cursor"].is_string());
+        // V1 format should have created/last_updated
+        assert!(posts[0]["created"].is_string());
+        assert!(posts[0]["last_updated"].is_string());
+
+        // Follow cursor to get remaining
+        let cursor = body["next_cursor"].as_str().unwrap();
+        let uri = format!("/api/v1/posts.json?cursor={}&pagination=2", cursor);
+        let req = test::TestRequest::get().uri(&uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let posts = body["posts"].as_array().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert!(
+            body["next_cursor"].is_null(),
+            "last page should have null next_cursor"
+        );
     }
 
     #[actix_web::test]

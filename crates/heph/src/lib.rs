@@ -2,6 +2,7 @@ pub mod api;
 pub mod config;
 pub mod corechannel;
 pub mod cost;
+pub mod cursor;
 pub mod db;
 pub mod files;
 pub mod handlers;

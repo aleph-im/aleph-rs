@@ -317,6 +317,191 @@ pub fn query_posts(
     Ok((result, total))
 }
 
+/// Result of a cursor-based post query.
+pub struct CursorPostsResult {
+    pub posts: Vec<PostWithMessage>,
+    pub next_cursor: Option<String>,
+}
+
+/// Query posts with cursor-based pagination.
+///
+/// Like [`query_posts`] but uses keyset pagination instead of OFFSET.
+/// Fetches `per_page + 1` to detect whether more results exist.
+pub fn query_posts_cursor(
+    conn: &Connection,
+    filter: &PostFilter,
+    cursor: Option<&crate::cursor::MessageCursor>,
+    per_page: u32,
+) -> SqlResult<CursorPostsResult> {
+    let mut clauses: Vec<String> = vec!["p.original_item_hash IS NULL".to_string()];
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    fn add_in(
+        clauses: &mut Vec<String>,
+        params: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+        col: &str,
+        values: &[String],
+    ) {
+        if values.is_empty() {
+            return;
+        }
+        let ph: Vec<String> = values
+            .iter()
+            .map(|v| {
+                params.push(Box::new(v.clone()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        clauses.push(format!("{col} IN ({})", ph.join(",")));
+    }
+
+    add_in(&mut clauses, &mut params, "p.address", &filter.addresses);
+    add_in(&mut clauses, &mut params, "p.item_hash", &filter.hashes);
+    add_in(&mut clauses, &mut params, "p.ref_", &filter.refs);
+    add_in(&mut clauses, &mut params, "p.post_type", &filter.types);
+    add_in(&mut clauses, &mut params, "p.channel", &filter.channels);
+
+    if let Some(start) = filter.start_date {
+        params.push(Box::new(start));
+        clauses.push(format!("p.time >= ?{}", params.len()));
+    }
+    if let Some(end) = filter.end_date {
+        params.push(Box::new(end));
+        clauses.push(format!("p.time <= ?{}", params.len()));
+    }
+
+    // Cursor keyset condition
+    if let Some(c) = cursor {
+        let clause = if filter.sort_order >= 0 {
+            params.push(Box::new(c.time_f64));
+            let t_idx = params.len();
+            params.push(Box::new(c.item_hash.clone()));
+            let h_idx = params.len();
+            format!("(p.time > ?{t_idx} OR (p.time = ?{t_idx} AND p.item_hash > ?{h_idx}))")
+        } else {
+            params.push(Box::new(c.time_f64));
+            let t_idx = params.len();
+            params.push(Box::new(c.item_hash.clone()));
+            let h_idx = params.len();
+            format!("(p.time < ?{t_idx} OR (p.time = ?{t_idx} AND p.item_hash > ?{h_idx}))")
+        };
+        clauses.push(clause);
+    }
+
+    let where_sql = format!(" WHERE {}", clauses.join(" AND "));
+
+    let sort_col = match filter.sort_by.as_str() {
+        "time" => "p.time",
+        _ => "p.time",
+    };
+    let sort_dir = if filter.sort_order >= 0 {
+        "ASC"
+    } else {
+        "DESC"
+    };
+
+    let limit = per_page + 1;
+    let query_sql = format!(
+        "SELECT
+            p.item_hash, p.address, p.post_type, p.ref_, p.content, p.channel, p.time,
+            p.original_item_hash, p.latest_amend,
+            om.item_hash, om.type, om.chain, om.sender, om.signature,
+            om.item_type, om.item_content, om.channel, om.time, om.size, om.status,
+            am.item_hash, am.type, am.chain, am.sender, am.signature,
+            am.item_type, am.item_content, am.channel, am.time, am.size, am.status
+         FROM posts p
+         LEFT JOIN messages om ON om.item_hash = p.item_hash
+         LEFT JOIN messages am ON am.item_hash = p.latest_amend
+         {where_sql} ORDER BY {sort_col} {sort_dir}, p.item_hash ASC LIMIT {limit}"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&query_sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        let post = PostRecord {
+            item_hash: row.get(0)?,
+            address: row.get(1)?,
+            post_type: row.get(2)?,
+            ref_: row.get(3)?,
+            content: row.get(4)?,
+            channel: row.get(5)?,
+            time: row.get(6)?,
+            original_item_hash: row.get(7)?,
+            latest_amend: row.get(8)?,
+        };
+        let orig_item_hash: Option<String> = row.get(9)?;
+        let orig_msg = if let Some(item_hash) = orig_item_hash {
+            Some(StoredMessage {
+                item_hash,
+                message_type: row.get(10)?,
+                chain: row.get(11)?,
+                sender: row.get(12)?,
+                signature: row.get(13)?,
+                item_type: row.get(14)?,
+                item_content: row.get(15)?,
+                channel: row.get(16)?,
+                time: row.get(17)?,
+                size: row.get(18)?,
+                status: row.get(19)?,
+            })
+        } else {
+            None
+        };
+        let amend_item_hash: Option<String> = row.get(20)?;
+        let amend_msg = if let Some(item_hash) = amend_item_hash {
+            Some(StoredMessage {
+                item_hash,
+                message_type: row.get(21)?,
+                chain: row.get(22)?,
+                sender: row.get(23)?,
+                signature: row.get(24)?,
+                item_type: row.get(25)?,
+                item_content: row.get(26)?,
+                channel: row.get(27)?,
+                time: row.get(28)?,
+                size: row.get(29)?,
+                status: row.get(30)?,
+            })
+        } else {
+            None
+        };
+        Ok((post, orig_msg, amend_msg))
+    })?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        let (post, orig_msg_opt, amend_msg_opt) = row?;
+        let (msg, original_msg) = match (orig_msg_opt, amend_msg_opt) {
+            (Some(orig), Some(amend)) => (amend, Some(orig)),
+            (Some(orig), None) => (orig, None),
+            _ => continue,
+        };
+        result.push(PostWithMessage {
+            post,
+            msg,
+            original_msg,
+        });
+    }
+
+    let has_more = result.len() > per_page as usize;
+    if has_more {
+        result.truncate(per_page as usize);
+    }
+
+    let next_cursor = if has_more {
+        result
+            .last()
+            .map(|pwm| crate::cursor::encode_message_cursor(pwm.post.time, &pwm.post.item_hash))
+    } else {
+        None
+    };
+
+    Ok(CursorPostsResult {
+        posts: result,
+        next_cursor,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
