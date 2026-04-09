@@ -456,7 +456,25 @@ async fn handle_instance_price(
             }
         };
 
-    let total_credits = credit_per_cu * compute_units as f64;
+    // Compute cost (credits/hour)
+    let compute_credits = credit_per_cu * compute_units as f64;
+
+    // Storage cost (credits/hour): all disk is charged, then a discount is applied
+    // for the storage included in each compute unit.
+    let storage_credit_per_mib: f64 = instance_pricing
+        .price
+        .get("storage")
+        .map(|p| p.credit.parse::<f64>().unwrap_or(0.0))
+        .unwrap_or(0.0);
+
+    let storage_credits = storage_credit_per_mib * disk_mib as f64;
+    let included_storage_mib =
+        instance_pricing.compute_unit.disk_mib as f64 * compute_units as f64;
+    let max_storage_discount = storage_credit_per_mib * included_storage_mib;
+    let storage_discount = storage_credits.min(max_storage_discount);
+    let extra_storage_credits = storage_credits - storage_discount;
+
+    let total_credits = compute_credits + extra_storage_credits;
     let total_dollars = total_credits * 1e-6;
 
     if json {
@@ -470,7 +488,9 @@ async fn handle_instance_price(
                 "disk_mib": disk_mib,
                 "gpu": args.gpu,
                 "confidential": args.confidential,
-                "credits_per_hour": total_credits,
+                "compute_credits_per_hour": compute_credits,
+                "storage_credits_per_hour": extra_storage_credits,
+                "total_credits_per_hour": total_credits,
                 "dollars_per_hour": total_dollars,
             }))?
         );
@@ -487,10 +507,17 @@ async fn handle_instance_price(
         eprintln!("vCPUs:   {}", vcpus);
         eprintln!("Memory:  {} MiB", memory_mib);
         eprintln!("Disk:    {} MiB", disk_mib);
-        eprintln!(
-            "Cost:    {:.0} credits/hour (${:.4}/hour)",
-            total_credits, total_dollars
-        );
+        if extra_storage_credits > 0.0 {
+            eprintln!(
+                "Cost:    {:.0} credits/hour (${:.4}/hour) — compute: {:.0}, extra storage: {:.0}",
+                total_credits, total_dollars, compute_credits, extra_storage_credits
+            );
+        } else {
+            eprintln!(
+                "Cost:    {:.0} credits/hour (${:.4}/hour)",
+                total_credits, total_dollars
+            );
+        }
     }
 
     Ok(())
