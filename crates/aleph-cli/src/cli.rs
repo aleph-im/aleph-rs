@@ -53,6 +53,38 @@ pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
     Ok(mib_rounded)
 }
 
+/// Well-known rootfs image presets.
+const IMAGE_PRESETS: &[(&str, &str)] = &[
+    (
+        "ubuntu22",
+        "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c",
+    ),
+    (
+        "ubuntu24",
+        "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e",
+    ),
+    (
+        "debian12",
+        "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717",
+    ),
+];
+
+/// Parse an image argument: either a preset name or an item hash (native hex or IPFS CID).
+pub fn parse_image(s: &str) -> Result<ItemHash, String> {
+    for (name, hash) in IMAGE_PRESETS {
+        if s.eq_ignore_ascii_case(name) {
+            return hash.parse().map_err(|e| format!("{e}"));
+        }
+    }
+    ItemHash::try_from(s).map_err(|_| {
+        let preset_names: Vec<&str> = IMAGE_PRESETS.iter().map(|(n, _)| *n).collect();
+        format!(
+            "'{s}' is not a valid image. Use a preset ({}) or an item hash.",
+            preset_names.join(", ")
+        )
+    })
+}
+
 #[derive(Parser)]
 #[command(name = "aleph", version, about = "Aleph CLI")]
 pub struct Cli {
@@ -1063,13 +1095,13 @@ pub enum InstanceCommand {
 
 #[derive(Args)]
 pub struct InstanceCreateArgs {
-    /// Root filesystem image hash (STORE message hash).
-    #[arg(long)]
-    pub rootfs: ItemHash,
+    /// Root filesystem image: a preset name (ubuntu22, ubuntu24, debian12) or an item hash (hex or IPFS CID).
+    #[arg(long, value_parser = parse_image)]
+    pub image: ItemHash,
 
-    /// Root filesystem size (e.g. 20GB, 1024MB, 1TiB).
+    /// Disk size (e.g. 20GB, 1024MB, 1TiB).
     #[arg(long, value_parser = parse_size_to_mib)]
-    pub rootfs_size: u64,
+    pub disk_size: u64,
 
     /// Number of virtual CPUs.
     #[arg(long, default_value = "1")]

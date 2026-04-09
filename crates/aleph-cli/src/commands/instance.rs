@@ -193,10 +193,10 @@ async fn handle_instance_create(
         ssh_keys.push(key);
     }
 
-    let rootfs_size = PersistentVolumeSize::try_from(args.rootfs_size)
-        .map_err(|e| format!("invalid rootfs size: {e}"))?;
+    let disk_size = PersistentVolumeSize::try_from(args.disk_size)
+        .map_err(|e| format!("invalid disk size: {e}"))?;
 
-    let mut builder = InstanceBuilder::new(&account, args.rootfs, rootfs_size)
+    let mut builder = InstanceBuilder::new(&account, args.image, disk_size)
         .vcpus(args.vcpus)
         .memory(MiB::from(args.memory))
         .hypervisor(Hypervisor::Qemu)
@@ -243,7 +243,7 @@ async fn handle_instance_create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::parse_size_to_mib;
+    use crate::cli::{parse_image, parse_size_to_mib};
 
     #[test]
     fn parse_kv_pairs_basic() {
@@ -407,5 +407,45 @@ mod tests {
     fn validate_ssh_pubkey_rejects_garbage() {
         let path = std::path::Path::new("garbage.txt");
         assert!(validate_ssh_pubkey("not a key at all", path).is_err());
+    }
+
+    #[test]
+    fn parse_image_preset_ubuntu24() {
+        let hash = parse_image("ubuntu24").unwrap();
+        assert_eq!(
+            hash.to_string(),
+            "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+        );
+    }
+
+    #[test]
+    fn parse_image_preset_case_insensitive() {
+        let hash = parse_image("Ubuntu22").unwrap();
+        assert_eq!(
+            hash.to_string(),
+            "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
+        );
+    }
+
+    #[test]
+    fn parse_image_raw_hash() {
+        let hash = parse_image("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c")
+            .unwrap();
+        assert_eq!(
+            hash.to_string(),
+            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
+        );
+    }
+
+    #[test]
+    fn parse_image_ipfs_cid() {
+        let hash = parse_image("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG").unwrap();
+        assert!(matches!(hash, aleph_types::item_hash::ItemHash::Ipfs(_)));
+    }
+
+    #[test]
+    fn parse_image_invalid() {
+        assert!(parse_image("windows11").is_err());
+        assert!(parse_image("abc").is_err());
     }
 }
