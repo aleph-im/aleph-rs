@@ -71,10 +71,20 @@ impl PricingData {
             return &self.instance_confidential;
         }
         if let Some(model) = gpu_model {
-            if self.instance_gpu_premium.tiers.iter().any(|t| t.model.as_deref() == Some(model)) {
+            if self
+                .instance_gpu_premium
+                .tiers
+                .iter()
+                .any(|t| t.model.as_deref() == Some(model))
+            {
                 return &self.instance_gpu_premium;
             }
-            if self.instance_gpu_standard.tiers.iter().any(|t| t.model.as_deref() == Some(model)) {
+            if self
+                .instance_gpu_standard
+                .tiers
+                .iter()
+                .any(|t| t.model.as_deref() == Some(model))
+            {
                 return &self.instance_gpu_standard;
             }
         }
