@@ -490,7 +490,9 @@ async fn handle_instance_price(
                 let cu_from_vcpus = vcpus.div_ceil(cu.vcpus);
                 let cu_from_mem = memory.div_ceil(cu.memory_mib) as u32;
                 let compute_units = cu_from_vcpus.max(cu_from_mem);
-                (None, compute_units, vcpus, memory, disk)
+                let actual_vcpus = compute_units * cu.vcpus;
+                let actual_memory = compute_units as u64 * cu.memory_mib;
+                (None, compute_units, actual_vcpus, actual_memory, disk)
             }
             _ => {
                 return Err(

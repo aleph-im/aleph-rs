@@ -1117,7 +1117,7 @@ pub struct InstancePriceArgs {
     pub gpu: Option<String>,
 
     /// Launch a confidential VM. Uses confidential pricing tiers.
-    #[arg(long, default_value = "false")]
+    #[arg(long)]
     pub confidential: bool,
 }
 
@@ -1172,7 +1172,7 @@ pub struct InstanceCreateArgs {
     pub immutable_volume: Option<Vec<String>>,
 
     /// Launch a confidential VM (AMD SEV).
-    #[arg(long, default_value = "false")]
+    #[arg(long)]
     pub confidential: bool,
 
     /// UEFI firmware hash for confidential VMs.
@@ -1187,7 +1187,7 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub gpu: Option<Vec<String>>,
 
-    /// CRN node hash. Required for GPU and confidential instances.
+    /// CRN node hash. Pins the instance to a specific compute node.
     #[arg(long)]
     pub crn_hash: Option<String>,
 
