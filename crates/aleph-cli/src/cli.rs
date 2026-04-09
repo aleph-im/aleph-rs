@@ -1087,6 +1087,37 @@ pub struct FileDownloadArgs {
 pub enum InstanceCommand {
     /// Create a new instance (VM)
     Create(InstanceCreateArgs),
+    /// Show pricing for an instance size
+    Price(InstancePriceArgs),
+}
+
+#[derive(Args)]
+pub struct InstancePriceArgs {
+    /// Instance size as a doctl-style slug (e.g. 1vcpu-2gb, 4vcpu-8gb).
+    /// Optional if --vcpus, --memory, and --disk-size are all specified.
+    #[arg(long)]
+    pub size: Option<String>,
+
+    /// Number of virtual CPUs. Overrides the value from --size.
+    #[arg(long)]
+    pub vcpus: Option<u32>,
+
+    /// Memory size (e.g. 2GB, 2048MB, 2GiB). Overrides the value from --size.
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub memory: Option<u64>,
+
+    /// Disk size (e.g. 20GB, 1024MB, 1TiB). Overrides the value from --size.
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub disk_size: Option<u64>,
+
+    /// GPU model name (e.g. rtx4090, a100, l40s). Uses GPU-specific pricing tiers.
+    /// Pass --gpu with no value to list available models.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub gpu: Option<String>,
+
+    /// Launch a confidential VM. Uses confidential pricing tiers.
+    #[arg(long, default_value = "false")]
+    pub confidential: bool,
 }
 
 #[derive(Args)]
@@ -1138,6 +1169,23 @@ pub struct InstanceCreateArgs {
     /// Can be repeated for multiple volumes.
     #[arg(long)]
     pub immutable_volume: Option<Vec<String>>,
+
+    /// Launch a confidential VM (AMD SEV).
+    #[arg(long, default_value = "false")]
+    pub confidential: bool,
+
+    /// UEFI firmware hash for confidential VMs.
+    #[arg(long, default_value = "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff")]
+    pub confidential_firmware: String,
+
+    /// GPU model name (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
+    /// Use `aleph instance price --gpu` to list available models.
+    #[arg(long)]
+    pub gpu: Option<Vec<String>>,
+
+    /// CRN node hash. Required for GPU and confidential instances.
+    #[arg(long)]
+    pub crn_hash: Option<String>,
 
     /// Sign on behalf of another address (requires an authorization from that address).
     #[arg(long)]
