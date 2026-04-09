@@ -36,6 +36,13 @@ pub struct GpuModel {
     pub tier: String,
 }
 
+impl GpuModel {
+    /// Lowercase, hyphen-separated slug for display and matching (e.g. "rtx-4000-ada").
+    pub fn slug(&self) -> String {
+        self.name.to_lowercase().replace(' ', "-")
+    }
+}
+
 impl PricingData {
     /// List all GPU models from standard and premium tiers.
     pub fn available_gpu_models(&self) -> Vec<GpuModel> {

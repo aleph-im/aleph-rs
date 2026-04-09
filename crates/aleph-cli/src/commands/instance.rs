@@ -416,8 +416,11 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
             .map(|v| format!("{} GiB VRAM", v / 1024))
             .unwrap_or_default();
         eprintln!(
-            "  {:<16} {:>3} CU  {}  ({})",
-            gpu.name, gpu.compute_units, vram, gpu.tier
+            "  {:<20} {:>3} CU  {}  ({})",
+            gpu.slug(),
+            gpu.compute_units,
+            vram,
+            gpu.tier
         );
     }
 }
@@ -432,33 +435,42 @@ async fn handle_instance_price(
         .await
         .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
 
+    if args.confidential && args.gpu.is_some() {
+        return Err("--confidential and --gpu cannot be combined".into());
+    }
+
     if args.gpu.as_deref() == Some("") {
         print_available_gpus(&pricing.pricing);
         return Ok(());
     }
 
     // Match the user-provided GPU name against pricing tier model names
-    let gpu_tier_model = if let Some(slug) = args.gpu.as_deref() {
-        let models = pricing.pricing.available_gpu_models();
-        let matched = models
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(slug))
-            .map(|m| m.name.clone());
-        if matched.is_none() {
-            let names: Vec<&str> = models.iter().map(|m| m.name.as_str()).collect();
-            return Err(format!(
-                "unknown GPU model '{slug}'. Available models: {}",
-                names.join(", ")
-            )
-            .into());
+    let gpu_model = if let Some(slug) = args.gpu.as_deref() {
+        if args.size.is_some() || args.vcpus.is_some() || args.memory.is_some() {
+            return Err(
+                "--size, --vcpus, and --memory cannot be used with --gpu (the GPU model determines the instance size)".into(),
+            );
         }
-        matched
+        let models = pricing.pricing.available_gpu_models();
+        let matched = models.iter().find(|m| m.slug() == slug);
+        match matched {
+            Some(m) => Some(m.clone()),
+            None => {
+                let names: Vec<String> = models.iter().map(|m| m.slug()).collect();
+                return Err(format!(
+                    "unknown GPU model '{slug}'. Available models: {}",
+                    names.join(", ")
+                )
+                .into());
+            }
+        }
     } else {
         None
     };
-    let instance_pricing = pricing
-        .pricing
-        .for_instance(args.confidential, gpu_tier_model.as_deref());
+    let instance_pricing = pricing.pricing.for_instance(
+        args.confidential,
+        gpu_model.as_ref().map(|m| m.name.as_str()),
+    );
 
     let cu_price = instance_pricing
         .price
@@ -470,8 +482,26 @@ async fn handle_instance_price(
         .parse()
         .map_err(|_| format!("invalid credit price: '{}'", cu_price.credit))?;
 
-    // Resolve specs: from --size tier with overrides, or fully manual
-    let (size_slug, compute_units, vcpus, memory_mib, disk_mib) = if let Some(slug) = &args.size {
+    // Resolve specs: GPU tier, --size tier, or fully manual
+    let (size_slug, compute_units, vcpus, memory_mib, disk_mib) = if let Some(gpu) = &gpu_model {
+        // GPU: fixed CU count from the tier, disk can be overridden
+        let tier = instance_pricing
+            .tiers
+            .iter()
+            .find(|t| t.model.as_deref() == Some(&gpu.name))
+            .ok_or_else(|| format!("GPU tier not found for '{}'", gpu.name))?;
+        let cu = tier.compute_units;
+        let disk = args
+            .disk_size
+            .unwrap_or(cu as u64 * instance_pricing.compute_unit.disk_mib);
+        (
+            None,
+            cu,
+            cu * instance_pricing.compute_unit.vcpus,
+            cu as u64 * instance_pricing.compute_unit.memory_mib,
+            disk,
+        )
+    } else if let Some(slug) = &args.size {
         let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
             let available = instance_pricing.available_slugs().join(", ");
             format!("unknown size '{slug}'. Available sizes: {available}")
@@ -531,7 +561,7 @@ async fn handle_instance_price(
                 "vcpus": vcpus,
                 "memory_mib": memory_mib,
                 "disk_mib": disk_mib,
-                "gpu": args.gpu,
+                "gpu": gpu_model.as_ref().map(|m| m.slug()),
                 "confidential": args.confidential,
                 "compute_credits_per_hour": compute_credits,
                 "storage_credits_per_hour": extra_storage_credits,
@@ -543,8 +573,8 @@ async fn handle_instance_price(
         if let Some(slug) = &size_slug {
             eprintln!("Size:    {slug}");
         }
-        if let Some(gpu) = &args.gpu {
-            eprintln!("GPU:     {gpu}");
+        if let Some(gpu) = &gpu_model {
+            eprintln!("GPU:     {}", gpu.slug());
         }
         if args.confidential {
             eprintln!("Type:    confidential");
