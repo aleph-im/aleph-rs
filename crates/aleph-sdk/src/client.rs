@@ -1359,12 +1359,15 @@ impl AlephMessageClient for AlephClient {
 
     fn get_messages_iterator(
         &self,
-        filter: MessageFilter,
+        mut filter: MessageFilter,
     ) -> impl Stream<Item = Result<Message, MessageError>> + Send + '_ {
         let pagination = filter
             .pagination
             .unwrap_or(CURSOR_DEFAULT_PAGINATION)
             .min(CURSOR_MAX_PAGINATION);
+        // Clear pagination/page from filter — the cursor method controls these.
+        filter.pagination = None;
+        filter.page = None;
         async_stream::try_stream! {
             let mut cursor: Option<String> = None;
             loop {
@@ -2211,12 +2214,14 @@ impl AlephPostClient for AlephClient {
 
     fn get_posts_v0_iterator(
         &self,
-        filter: PostFilter,
+        mut filter: PostFilter,
     ) -> impl Stream<Item = Result<PostV0, MessageError>> + Send + '_ {
         let pagination = filter
             .pagination
             .unwrap_or(CURSOR_DEFAULT_PAGINATION)
             .min(CURSOR_MAX_PAGINATION);
+        filter.pagination = None;
+        filter.page = None;
         async_stream::try_stream! {
             let mut cursor: Option<String> = None;
             loop {
@@ -2236,12 +2241,14 @@ impl AlephPostClient for AlephClient {
 
     fn get_posts_v1_iterator(
         &self,
-        filter: PostFilter,
+        mut filter: PostFilter,
     ) -> impl Stream<Item = Result<PostV1, MessageError>> + Send + '_ {
         let pagination = filter
             .pagination
             .unwrap_or(CURSOR_DEFAULT_PAGINATION)
             .min(CURSOR_MAX_PAGINATION);
+        filter.pagination = None;
+        filter.page = None;
         async_stream::try_stream! {
             let mut cursor: Option<String> = None;
             loop {
