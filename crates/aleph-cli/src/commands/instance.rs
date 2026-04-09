@@ -438,6 +438,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_image_ipfs_cid() {
+        let hash = parse_image("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG").unwrap();
+        assert!(matches!(hash, aleph_types::item_hash::ItemHash::Ipfs(_)));
+    }
+
+    #[test]
     fn parse_image_invalid() {
         assert!(parse_image("windows11").is_err());
         assert!(parse_image("abc").is_err());

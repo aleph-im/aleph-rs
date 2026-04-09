@@ -69,17 +69,17 @@ const IMAGE_PRESETS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Parse an image argument: either a preset name or a raw 64-char item hash.
+/// Parse an image argument: either a preset name or an item hash (native hex or IPFS CID).
 pub fn parse_image(s: &str) -> Result<ItemHash, String> {
     for (name, hash) in IMAGE_PRESETS {
         if s.eq_ignore_ascii_case(name) {
             return hash.parse().map_err(|e| format!("{e}"));
         }
     }
-    s.parse().map_err(|_| {
+    ItemHash::try_from(s).map_err(|_| {
         let preset_names: Vec<&str> = IMAGE_PRESETS.iter().map(|(n, _)| *n).collect();
         format!(
-            "'{s}' is not a valid image. Use a preset ({}) or a 64-character item hash.",
+            "'{s}' is not a valid image. Use a preset ({}) or an item hash.",
             preset_names.join(", ")
         )
     })
@@ -1095,7 +1095,7 @@ pub enum InstanceCommand {
 
 #[derive(Args)]
 pub struct InstanceCreateArgs {
-    /// Root filesystem image: a preset name (ubuntu22, ubuntu24, debian12) or a STORE message hash.
+    /// Root filesystem image: a preset name (ubuntu22, ubuntu24, debian12) or an item hash (hex or IPFS CID).
     #[arg(long, value_parser = parse_image)]
     pub image: ItemHash,
 
