@@ -1,4 +1,5 @@
 use crate::aggregate_models::corechannel::CoreChannelAggregate;
+use crate::aggregate_models::pricing::{PRICING_ADDRESS, PricingAggregate};
 use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
 use crate::messages::StoreBuilder;
 use crate::verify::Hasher;
@@ -1118,6 +1119,13 @@ pub trait AlephAggregateClient {
         address: &Address,
     ) -> impl Future<Output = Result<CoreChannelAggregate, MessageError>> + Send {
         self.get_aggregate(address, "corechannel")
+    }
+
+    /// Returns the pricing aggregate that describes compute pricing tiers on the network.
+    fn get_pricing_aggregate(
+        &self,
+    ) -> impl Future<Output = Result<PricingAggregate, MessageError>> + Send {
+        self.get_aggregate(&PRICING_ADDRESS, "pricing")
     }
 
     /// Returns the most recent version of multiple aggregates, keyed by their aggregate key.

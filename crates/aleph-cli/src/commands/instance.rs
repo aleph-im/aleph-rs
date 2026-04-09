@@ -1,6 +1,6 @@
 use crate::cli::{InstanceCommand, InstanceCreateArgs, parse_size_to_mib};
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
-use aleph_sdk::client::AlephClient;
+use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::messages::InstanceBuilder;
 use aleph_types::channel::Channel;
 use aleph_types::message::execution::base::{Payment, PaymentType};
@@ -193,12 +193,44 @@ async fn handle_instance_create(
         ssh_keys.push(key);
     }
 
-    let disk_size = PersistentVolumeSize::try_from(args.disk_size)
+    // Resolve instance specs: either from --size (tier lookup) or explicit flags.
+    let (vcpus, memory_mib, disk_size_mib) = if let Some(slug) = &args.size {
+        let pricing = aleph_client
+            .get_pricing_aggregate()
+            .await
+            .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
+        let instance_pricing = &pricing.pricing.instance;
+
+        let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
+            let available = instance_pricing.available_slugs().join(", ");
+            format!("unknown size '{slug}'. Available sizes: {available}")
+        })?;
+
+        let vcpus = args.vcpus.unwrap_or(tier.vcpus);
+        let memory_mib = args.memory.unwrap_or(tier.memory_mib);
+        let disk_size_mib = args.disk_size.unwrap_or(tier.disk_mib);
+
+        eprintln!(
+            "Size '{slug}': {vcpus} vCPUs, {} MiB memory, {} MiB disk",
+            memory_mib, disk_size_mib,
+        );
+
+        (vcpus, memory_mib, disk_size_mib)
+    } else {
+        let disk_size_mib = args
+            .disk_size
+            .ok_or("--disk-size is required when --size is not used")?;
+        let vcpus = args.vcpus.unwrap_or(1);
+        let memory_mib = args.memory.unwrap_or(2048);
+        (vcpus, memory_mib, disk_size_mib)
+    };
+
+    let disk_size = PersistentVolumeSize::try_from(disk_size_mib)
         .map_err(|e| format!("invalid disk size: {e}"))?;
 
     let mut builder = InstanceBuilder::new(&account, args.image, disk_size)
-        .vcpus(args.vcpus)
-        .memory(MiB::from(args.memory))
+        .vcpus(vcpus)
+        .memory(MiB::from(memory_mib))
         .hypervisor(Hypervisor::Qemu)
         .payment(Payment {
             chain: None,
