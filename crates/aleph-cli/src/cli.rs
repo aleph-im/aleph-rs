@@ -1095,17 +1095,22 @@ pub struct InstanceCreateArgs {
     #[arg(long, value_parser = parse_image)]
     pub image: ItemHash,
 
-    /// Disk size (e.g. 20GB, 1024MB, 1TiB).
+    /// Disk size (e.g. 20GB, 1024MB, 1TiB). Required unless --size is used.
     #[arg(long, value_parser = parse_size_to_mib)]
-    pub disk_size: u64,
+    pub disk_size: Option<u64>,
 
-    /// Number of virtual CPUs.
-    #[arg(long, default_value = "1")]
-    pub vcpus: u32,
+    /// Instance size as a doctl-style slug (e.g. 1vcpu-2gb, 4vcpu-8gb).
+    /// Fetches pricing tiers from the network and derives vcpus, memory, and disk-size.
+    #[arg(long)]
+    pub size: Option<String>,
 
-    /// Memory size (e.g. 2GB, 2048MB, 2GiB).
-    #[arg(long, value_parser = parse_size_to_mib, default_value = "2GiB")]
-    pub memory: u64,
+    /// Number of virtual CPUs. Overrides the value from --size.
+    #[arg(long)]
+    pub vcpus: Option<u32>,
+
+    /// Memory size (e.g. 2GB, 2048MB, 2GiB). Overrides the value from --size.
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub memory: Option<u64>,
 
     /// Path to an SSH public key file. Can be repeated for multiple keys.
     #[arg(long, required = true)]
