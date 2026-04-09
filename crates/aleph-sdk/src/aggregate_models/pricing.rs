@@ -173,12 +173,42 @@ mod tests {
                 disk_mib: 20480,
             },
             tiers: vec![
-                Tier { id: "tier-1".into(), compute_units: 1, model: None, vram: None },
-                Tier { id: "tier-2".into(), compute_units: 2, model: None, vram: None },
-                Tier { id: "tier-3".into(), compute_units: 4, model: None, vram: None },
-                Tier { id: "tier-4".into(), compute_units: 6, model: None, vram: None },
-                Tier { id: "tier-5".into(), compute_units: 8, model: None, vram: None },
-                Tier { id: "tier-6".into(), compute_units: 12, model: None, vram: None },
+                Tier {
+                    id: "tier-1".into(),
+                    compute_units: 1,
+                    model: None,
+                    vram: None,
+                },
+                Tier {
+                    id: "tier-2".into(),
+                    compute_units: 2,
+                    model: None,
+                    vram: None,
+                },
+                Tier {
+                    id: "tier-3".into(),
+                    compute_units: 4,
+                    model: None,
+                    vram: None,
+                },
+                Tier {
+                    id: "tier-4".into(),
+                    compute_units: 6,
+                    model: None,
+                    vram: None,
+                },
+                Tier {
+                    id: "tier-5".into(),
+                    compute_units: 8,
+                    model: None,
+                    vram: None,
+                },
+                Tier {
+                    id: "tier-6".into(),
+                    compute_units: 12,
+                    model: None,
+                    vram: None,
+                },
             ],
             price: HashMap::from([(
                 "compute_unit".to_string(),
