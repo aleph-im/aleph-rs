@@ -1084,6 +1084,7 @@ pub struct FileDownloadArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum InstanceCommand {
     /// Create a new instance (VM)
     Create(InstanceCreateArgs),
@@ -1175,7 +1176,10 @@ pub struct InstanceCreateArgs {
     pub confidential: bool,
 
     /// UEFI firmware hash for confidential VMs.
-    #[arg(long, default_value = "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff")]
+    #[arg(
+        long,
+        default_value = "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff"
+    )]
     pub confidential_firmware: String,
 
     /// GPU model name (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
