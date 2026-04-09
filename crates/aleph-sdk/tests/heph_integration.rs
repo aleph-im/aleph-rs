@@ -212,11 +212,10 @@ async fn test_get_messages_iterator_multi_page() {
     // Iterate with pagination=2 to force at least 2 pages for 3 messages.
     let filter = MessageFilter {
         content_types: Some(vec![tag.clone()]),
-        pagination: Some(2),
         ..Default::default()
     };
     let items: Vec<_> = client
-        .get_messages_iterator(filter)
+        .get_messages_iterator(filter, Some(2))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -245,7 +244,7 @@ async fn test_get_messages_iterator_empty() {
         ..Default::default()
     };
     let items: Vec<_> = client
-        .get_messages_iterator(filter)
+        .get_messages_iterator(filter, None)
         .collect::<Vec<_>>()
         .await;
 
@@ -278,11 +277,10 @@ async fn test_get_posts_v0_iterator_multi_page() {
 
     let filter = PostFilter {
         post_types: Some(vec![tag.clone()]),
-        pagination: Some(2),
         ..Default::default()
     };
     let items: Vec<_> = client
-        .get_posts_v0_iterator(filter)
+        .get_posts_v0_iterator(filter, Some(2))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -323,11 +321,10 @@ async fn test_get_posts_v1_iterator_multi_page() {
 
     let filter = PostFilter {
         post_types: Some(vec![tag.clone()]),
-        pagination: Some(2),
         ..Default::default()
     };
     let items: Vec<_> = client
-        .get_posts_v1_iterator(filter)
+        .get_posts_v1_iterator(filter, Some(2))
         .collect::<Vec<_>>()
         .await
         .into_iter()

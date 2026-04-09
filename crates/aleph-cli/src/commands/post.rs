@@ -14,14 +14,16 @@ pub async fn handle_post_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         PostCommand::List(args) => {
+            let pagination = Some(args.filter.pagination);
+            let page = Some(args.filter.page);
             let filter = args.filter.into();
             match args.api_version {
                 0 => {
-                    let response = aleph_client.get_posts_v0(&filter).await?;
+                    let response = aleph_client.get_posts_v0(&filter, pagination, page).await?;
                     println!("{}", serde_json::to_string_pretty(&response.posts)?);
                 }
                 1 => {
-                    let response = aleph_client.get_posts_v1(&filter).await?;
+                    let response = aleph_client.get_posts_v1(&filter, pagination, page).await?;
                     println!("{}", serde_json::to_string_pretty(&response.posts)?);
                 }
                 v => {

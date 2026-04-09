@@ -469,8 +469,6 @@ impl From<MessageFilterCli> for MessageFilter {
             message_statuses: c
                 .message_statuses
                 .map(|v| v.into_iter().map(Into::into).collect()),
-            pagination: Some(c.pagination),
-            page: Some(c.page),
         }
     }
 }
@@ -539,8 +537,6 @@ impl From<PostFilterCli> for PostFilter {
             end_date: c.end_date,
             sort_by: c.sort_by.map(Into::into),
             sort_order: c.sort_order.map(Into::into),
-            pagination: Some(c.pagination),
-            page: Some(c.page),
         }
     }
 }

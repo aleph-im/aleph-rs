@@ -18,7 +18,11 @@ pub async fn handle_message_command(
             println!("{}", serde_json::to_string_pretty(&message)?);
         }
         MessageCommand::List(message_filter) => {
-            let messages = aleph_client.get_messages(&(*message_filter).into()).await?;
+            let pagination = Some(message_filter.pagination);
+            let page = Some(message_filter.page);
+            let messages = aleph_client
+                .get_messages(&(*message_filter).into(), pagination, page)
+                .await?;
             println!("{}", serde_json::to_string_pretty(&messages)?);
         }
         MessageCommand::Sync(sync_args) => {
