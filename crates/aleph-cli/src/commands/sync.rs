@@ -15,7 +15,10 @@ pub async fn handle_sync(args: SyncArgs) -> Result<(), Box<dyn std::error::Error
     let target_client = AlephClient::new(target_url);
 
     let filter: aleph_sdk::client::MessageFilter = args.filter.into();
-    let pagination = Some(args.count);
+    let pagination = aleph_sdk::client::PaginationParams {
+        pagination: Some(args.count),
+        page: Some(1),
+    };
 
     // Fetch from both nodes concurrently
     eprintln!(
@@ -23,8 +26,8 @@ pub async fn handle_sync(args: SyncArgs) -> Result<(), Box<dyn std::error::Error
         args.count
     );
     let (source_messages, target_messages) = tokio::try_join!(
-        source_client.get_messages(&filter, pagination, Some(1)),
-        target_client.get_messages(&filter, pagination, Some(1)),
+        source_client.get_messages(&filter, pagination.clone()),
+        target_client.get_messages(&filter, pagination),
     )?;
     eprintln!(
         "  Found {} messages on source, {} on target.",

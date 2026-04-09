@@ -395,6 +395,16 @@ impl std::fmt::Display for SortOrder {
     }
 }
 
+/// Pagination parameters for page-mode list endpoints.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PaginationParams {
+    /// Maximum number of items per page.
+    pub pagination: Option<u32>,
+    /// Page number (starts at 1).
+    pub page: Option<u32>,
+}
+
 #[skip_serializing_none]
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize)]
@@ -743,8 +753,7 @@ pub trait AlephMessageClient {
     fn get_messages(
         &self,
         filter: &MessageFilter,
-        pagination: Option<u32>,
-        page: Option<u32>,
+        pagination: PaginationParams,
     ) -> impl Future<Output = Result<Vec<Message>, MessageError>> + Send;
 
     /// Returns a stream that automatically paginates through all messages matching the filter.
@@ -1133,8 +1142,7 @@ pub trait AlephPostClient {
     fn get_posts_v0(
         &self,
         filter: &PostFilter,
-        pagination: Option<u32>,
-        page: Option<u32>,
+        pagination: PaginationParams,
     ) -> impl Future<Output = Result<GetPostsV0Response, MessageError>> + Send;
 
     /// Queries posts matching the given filter using the v1 format.
@@ -1144,8 +1152,7 @@ pub trait AlephPostClient {
     fn get_posts_v1(
         &self,
         filter: &PostFilter,
-        pagination: Option<u32>,
-        page: Option<u32>,
+        pagination: PaginationParams,
     ) -> impl Future<Output = Result<GetPostsV1Response, MessageError>> + Send;
 
     /// Returns a stream that automatically paginates through all posts matching the filter
@@ -1360,13 +1367,9 @@ impl AlephMessageClient for AlephClient {
     async fn get_messages(
         &self,
         filter: &MessageFilter,
-        pagination: Option<u32>,
-        page: Option<u32>,
+        pagination: PaginationParams,
     ) -> Result<Vec<Message>, MessageError> {
-        Ok(self
-            .get_messages_raw(filter, pagination, page)
-            .await?
-            .messages)
+        Ok(self.get_messages_raw(filter, &pagination).await?.messages)
     }
 
     fn get_messages_iterator(
@@ -1490,27 +1493,18 @@ impl AlephClient {
     async fn get_messages_raw(
         &self,
         filter: &MessageFilter,
-        pagination: Option<u32>,
-        page: Option<u32>,
+        pagination: &PaginationParams,
     ) -> Result<GetMessagesResponse, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v0/messages.json")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let mut pairs: Vec<(&str, String)> = Vec::new();
-        if let Some(p) = pagination {
-            pairs.push(("pagination", p.to_string()));
-        }
-        if let Some(p) = page {
-            pairs.push(("page", p.to_string()));
-        }
-
         let response = self
             .http_client
             .get(url)
             .query(&filter)
-            .query(&pairs)
+            .query(&pagination)
             .send()
             .await?
             .error_for_status()
@@ -2190,27 +2184,18 @@ impl AlephPostClient for AlephClient {
     async fn get_posts_v0(
         &self,
         filter: &PostFilter,
-        pagination: Option<u32>,
-        page: Option<u32>,
+        pagination: PaginationParams,
     ) -> Result<GetPostsV0Response, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v0/posts.json")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let mut pairs: Vec<(&str, String)> = Vec::new();
-        if let Some(p) = pagination {
-            pairs.push(("pagination", p.to_string()));
-        }
-        if let Some(p) = page {
-            pairs.push(("page", p.to_string()));
-        }
-
         let response = self
             .http_client
             .get(url)
             .query(&filter)
-            .query(&pairs)
+            .query(&pagination)
             .send()
             .await?
             .error_for_status()
@@ -2226,27 +2211,18 @@ impl AlephPostClient for AlephClient {
     async fn get_posts_v1(
         &self,
         filter: &PostFilter,
-        pagination: Option<u32>,
-        page: Option<u32>,
+        pagination: PaginationParams,
     ) -> Result<GetPostsV1Response, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v1/posts.json")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let mut pairs: Vec<(&str, String)> = Vec::new();
-        if let Some(p) = pagination {
-            pairs.push(("pagination", p.to_string()));
-        }
-        if let Some(p) = page {
-            pairs.push(("page", p.to_string()));
-        }
-
         let response = self
             .http_client
             .get(url)
             .query(&filter)
-            .query(&pairs)
+            .query(&pagination)
             .send()
             .await?
             .error_for_status()
@@ -2674,8 +2650,7 @@ mod tests {
             async fn get_messages(
                 &self,
                 _filter: &MessageFilter,
-                _pagination: Option<u32>,
-                _page: Option<u32>,
+                _pagination: PaginationParams,
             ) -> Result<Vec<Message>, MessageError> {
                 unimplemented!()
             }
