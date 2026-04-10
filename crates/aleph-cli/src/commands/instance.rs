@@ -409,10 +409,7 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
         eprintln!("No GPU models available.");
         return;
     }
-    eprintln!(
-        "  {:<20} {:<16} {:<16} Tier",
-        "Model", "Min size", "VRAM"
-    );
+    eprintln!("  {:<20} {:<16} {:<16} Tier", "Model", "Min size", "VRAM");
     for gpu in &models {
         let entity = match gpu.tier.as_str() {
             "standard" => &pricing.instance_gpu_standard,
