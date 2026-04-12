@@ -36,6 +36,13 @@ pub struct GpuModel {
     pub tier: String,
 }
 
+impl GpuModel {
+    /// Lowercase, hyphen-separated slug for display and matching (e.g. "rtx-4000-ada").
+    pub fn slug(&self) -> String {
+        self.name.to_lowercase().replace(' ', "-")
+    }
+}
+
 impl PricingData {
     /// List all GPU models from standard and premium tiers.
     pub fn available_gpu_models(&self) -> Vec<GpuModel> {
@@ -140,11 +147,16 @@ pub struct ResolvedTier {
 }
 
 impl PricingPerEntity {
-    /// Generate a doctl-style slug for a tier (e.g. "4vcpu-8gb").
-    pub fn tier_slug(&self, tier: &Tier) -> String {
-        let vcpus = tier.compute_units * self.compute_unit.vcpus;
-        let memory_gib = (tier.compute_units as u64 * self.compute_unit.memory_mib) / 1024;
+    /// Generate a size slug for a given number of compute units (e.g. "4vcpu-8gb").
+    pub fn slug_for_compute_units(&self, compute_units: u32) -> String {
+        let vcpus = compute_units * self.compute_unit.vcpus;
+        let memory_gib = (compute_units as u64 * self.compute_unit.memory_mib) / 1024;
         format!("{vcpus}vcpu-{memory_gib}gb")
+    }
+
+    /// Generate a slug for a tier (e.g. "4vcpu-8gb").
+    pub fn tier_slug(&self, tier: &Tier) -> String {
+        self.slug_for_compute_units(tier.compute_units)
     }
 
     /// Find a tier matching a slug. Returns resolved specs.

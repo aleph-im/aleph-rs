@@ -650,6 +650,14 @@ struct PostMessageBody<'a> {
     message: &'a PendingMessage,
 }
 
+/// Response from the `/api/v0/price/estimate` endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceEstimate {
+    pub required_tokens: f64,
+    pub payment_type: String,
+    pub cost: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct FileMetadata {
     #[serde(rename = "ref")]
@@ -1559,6 +1567,38 @@ impl AlephClient {
             .await
             .map_err(reqwest_middleware::Error::from)?;
         Ok(resp)
+    }
+
+    /// Estimate the cost of a message before submitting it.
+    ///
+    /// Calls `POST /api/v0/price/estimate` on the CCN.
+    pub async fn estimate_price(
+        &self,
+        message: &PendingMessage,
+    ) -> Result<PriceEstimate, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/price/estimate")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let body = serde_json::json!({ "message": message });
+
+        let response = self.http_client.post(url).json(&body).send().await?;
+
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(MessageError::ApiError {
+                status: status.as_u16(),
+                body: body_text,
+            });
+        }
+
+        let estimate: PriceEstimate = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(estimate)
     }
 
     /// Fetches messages matching the filter, returning only the headers (without content).

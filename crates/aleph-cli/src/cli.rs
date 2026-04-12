@@ -1084,9 +1084,60 @@ pub struct FileDownloadArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum InstanceCommand {
     /// Create a new instance (VM)
     Create(InstanceCreateArgs),
+    /// Show pricing for an instance configuration
+    #[command(long_about = "\
+Show pricing for an instance configuration.
+
+There are three ways to specify the instance:
+
+  1. By size slug:    --size 1vcpu-2gb
+  2. By resources:    --vcpus 4 --memory 8GB --disk-size 100GB
+  3. By GPU model:    --gpu h100
+
+GPU instances have a minimum size determined by the model. Use --size \
+or --vcpus/--memory to request more resources (must be >= the GPU minimum). \
+GPU and confidential instances use separate pricing tiers and cannot \
+be combined.
+
+Examples:
+  aleph instance price --size 4vcpu-8gb
+  aleph instance price --vcpus 2 --memory 4GB --disk-size 50GB
+  aleph instance price --gpu h100
+  aleph instance price --gpu h100 --size 32vcpu-192gb
+  aleph instance price --gpu            # list available GPU models
+  aleph instance price --size 1vcpu-2gb --confidential")]
+    Price(InstancePriceArgs),
+}
+
+#[derive(Args)]
+pub struct InstancePriceArgs {
+    /// Instance size slug (e.g. 1vcpu-2gb, 4vcpu-8gb).
+    #[arg(long)]
+    pub size: Option<String>,
+
+    /// Number of virtual CPUs. Used with --memory and --disk-size for custom sizing.
+    #[arg(long)]
+    pub vcpus: Option<u32>,
+
+    /// Memory size (e.g. 2GB, 2048MB, 2GiB). Used with --vcpus and --disk-size.
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub memory: Option<u64>,
+
+    /// Disk size (e.g. 20GB, 1024MB, 1TiB).
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub disk_size: Option<u64>,
+
+    /// GPU model name (e.g. h100, a100, rtx-4090). Pass --gpu without a value to list models.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub gpu: Option<String>,
+
+    /// Use confidential VM pricing (AMD SEV).
+    #[arg(long)]
+    pub confidential: bool,
 }
 
 #[derive(Args)]
@@ -1099,7 +1150,7 @@ pub struct InstanceCreateArgs {
     #[arg(long, value_parser = parse_size_to_mib)]
     pub disk_size: Option<u64>,
 
-    /// Instance size as a doctl-style slug (e.g. 1vcpu-2gb, 4vcpu-8gb).
+    /// Instance size slug (e.g. 1vcpu-2gb, 4vcpu-8gb).
     /// Fetches pricing tiers from the network and derives vcpus, memory, and disk-size.
     #[arg(long)]
     pub size: Option<String>,
@@ -1138,6 +1189,26 @@ pub struct InstanceCreateArgs {
     /// Can be repeated for multiple volumes.
     #[arg(long)]
     pub immutable_volume: Option<Vec<String>>,
+
+    /// Launch a confidential VM (AMD SEV).
+    #[arg(long)]
+    pub confidential: bool,
+
+    /// UEFI firmware hash for confidential VMs.
+    #[arg(
+        long,
+        default_value = "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff"
+    )]
+    pub confidential_firmware: String,
+
+    /// GPU model name (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
+    /// Use `aleph instance price --gpu` to list available models.
+    #[arg(long)]
+    pub gpu: Option<Vec<String>>,
+
+    /// CRN node hash. Pins the instance to a specific compute node.
+    #[arg(long)]
+    pub crn_hash: Option<String>,
 
     /// Sign on behalf of another address (requires an authorization from that address).
     #[arg(long)]

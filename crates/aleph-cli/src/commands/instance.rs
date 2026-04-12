@@ -1,10 +1,14 @@
-use crate::cli::{InstanceCommand, InstanceCreateArgs, parse_size_to_mib};
+use crate::cli::{InstanceCommand, InstanceCreateArgs, InstancePriceArgs, parse_size_to_mib};
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::messages::InstanceBuilder;
 use aleph_types::channel::Channel;
+use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::{Payment, PaymentType};
-use aleph_types::message::execution::environment::Hypervisor;
+use aleph_types::message::execution::environment::{
+    GpuDeviceClass, GpuProperties, HostRequirements, Hypervisor, NodeRequirements,
+    TrustedExecutionEnvironment,
+};
 use aleph_types::message::execution::volume::{
     BaseVolume, EphemeralVolume, ImmutableVolume, MachineVolume, PersistentVolume,
     PersistentVolumeSize, VolumePersistence,
@@ -21,6 +25,9 @@ pub async fn handle_instance_command(
     match command {
         InstanceCommand::Create(args) => {
             handle_instance_create(aleph_client, ccn_url, json, args).await?;
+        }
+        InstanceCommand::Price(args) => {
+            handle_instance_price(aleph_client, json, args).await?;
         }
     }
     Ok(())
@@ -249,6 +256,44 @@ async fn handle_instance_create(
         builder = builder.metadata(metadata);
     }
 
+    // Confidential VM
+    if args.confidential {
+        let firmware: ItemHash = args
+            .confidential_firmware
+            .parse()
+            .map_err(|e| format!("invalid confidential firmware hash: {e}"))?;
+        builder = builder.trusted_execution(TrustedExecutionEnvironment {
+            firmware: Some(firmware),
+            policy: 0x1, // NoDebug
+        });
+    }
+
+    // GPU requirements
+    let gpu_props = if let Some(gpu_names) = &args.gpu {
+        let mut gpus = Vec::new();
+        for name in gpu_names {
+            gpus.push(resolve_gpu(name)?);
+        }
+        Some(gpus)
+    } else {
+        None
+    };
+
+    // Build host requirements if CRN hash or GPU is specified
+    if args.crn_hash.is_some() || gpu_props.is_some() {
+        let requirements = HostRequirements {
+            cpu: None,
+            node: args.crn_hash.map(|hash| NodeRequirements {
+                owner: None,
+                address_regex: None,
+                node_hash: Some(hash),
+                terms_and_conditions: None,
+            }),
+            gpu: gpu_props,
+        };
+        builder = builder.requirements(requirements);
+    }
+
     // Parse volumes
     let mut volumes = Vec::new();
     if let Some(specs) = &args.persistent_volume {
@@ -270,6 +315,332 @@ async fn handle_instance_create(
 
     let pending = builder.build()?;
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
+/// Known GPU presets: (slug, pricing_model, vendor, device_name, device_class, device_id).
+/// `pricing_model` matches the `model` field in pricing aggregate tiers.
+const GPU_PRESETS: &[(&str, &str, &str, &str, &str, &str)] = &[
+    (
+        "rtx3090",
+        "RTX 3090",
+        "NVIDIA",
+        "GA102 [GeForce RTX 3090]",
+        "0300",
+        "10de:2204",
+    ),
+    (
+        "rtx4000ada",
+        "RTX 4000 ADA",
+        "NVIDIA",
+        "AD104GL [RTX 4000 SFF Ada Generation]",
+        "0300",
+        "10de:27b0",
+    ),
+    (
+        "rtx4090",
+        "RTX 4090",
+        "NVIDIA",
+        "AD102 [GeForce RTX 4090]",
+        "0300",
+        "10de:2684",
+    ),
+    (
+        "rtx5090",
+        "RTX 5090",
+        "NVIDIA",
+        "GB202 [GeForce RTX 5090]",
+        "0300",
+        "10de:2684",
+    ),
+    (
+        "l40s",
+        "L40S",
+        "NVIDIA",
+        "AD102GL [L40S]",
+        "0302",
+        "10de:26b9",
+    ),
+    (
+        "a100",
+        "A100",
+        "NVIDIA",
+        "GA100 [A100 PCIe 80GB]",
+        "0302",
+        "10de:20b5",
+    ),
+    (
+        "h100",
+        "H100",
+        "NVIDIA",
+        "GH100 [H100 PCIe]",
+        "0302",
+        "10de:2331",
+    ),
+];
+
+fn resolve_gpu(name: &str) -> Result<GpuProperties, Box<dyn std::error::Error>> {
+    let lower = name.to_ascii_lowercase();
+    for &(slug, _, vendor, device_name, class, device_id) in GPU_PRESETS {
+        if lower == slug {
+            let device_class = match class {
+                "0300" => GpuDeviceClass::VgaCompatibleController,
+                "0302" => GpuDeviceClass::_3DController,
+                _ => unreachable!(),
+            };
+            return Ok(GpuProperties {
+                vendor: vendor.to_string(),
+                device_name: device_name.to_string(),
+                device_class,
+                device_id: device_id.to_string(),
+            });
+        }
+    }
+    let available: Vec<&str> = GPU_PRESETS.iter().map(|(n, ..)| *n).collect();
+    Err(format!(
+        "unknown GPU model '{name}'. Available models: {}",
+        available.join(", ")
+    )
+    .into())
+}
+
+fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingData) {
+    let models = pricing.available_gpu_models();
+    if models.is_empty() {
+        eprintln!("No GPU models available.");
+        return;
+    }
+    eprintln!("  {:<20} {:<16} {:<16} Tier", "Model", "Min size", "VRAM");
+    for gpu in &models {
+        let entity = match gpu.tier.as_str() {
+            "standard" => &pricing.instance_gpu_standard,
+            "premium" => &pricing.instance_gpu_premium,
+            _ => continue,
+        };
+        let min_size = entity.slug_for_compute_units(gpu.compute_units);
+        let vram = gpu
+            .vram_mib
+            .map(|v| format!("{} GiB", v / 1024))
+            .unwrap_or_default();
+        eprintln!(
+            "  {:<20} {:<16} {:<16} {}",
+            gpu.slug(),
+            min_size,
+            vram,
+            gpu.tier
+        );
+    }
+}
+
+async fn handle_instance_price(
+    aleph_client: &AlephClient,
+    json: bool,
+    args: InstancePriceArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pricing = aleph_client
+        .get_pricing_aggregate()
+        .await
+        .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
+
+    if args.confidential && args.gpu.is_some() {
+        return Err("--confidential and --gpu cannot be combined".into());
+    }
+
+    if args.gpu.as_deref() == Some("") {
+        print_available_gpus(&pricing.pricing);
+        return Ok(());
+    }
+
+    // Match the user-provided GPU name against pricing tier model names
+    let gpu_model = if let Some(slug) = args.gpu.as_deref() {
+        let models = pricing.pricing.available_gpu_models();
+        let matched = models.iter().find(|m| m.slug() == slug);
+        match matched {
+            Some(m) => Some(m.clone()),
+            None => {
+                let names: Vec<String> = models.iter().map(|m| m.slug()).collect();
+                return Err(format!(
+                    "unknown GPU model '{slug}'. Available models: {}",
+                    names.join(", ")
+                )
+                .into());
+            }
+        }
+    } else {
+        None
+    };
+    let instance_pricing = pricing.pricing.for_instance(
+        args.confidential,
+        gpu_model.as_ref().map(|m| m.name.as_str()),
+    );
+
+    let cu_price = instance_pricing
+        .price
+        .get("compute_unit")
+        .ok_or("missing compute_unit price in pricing aggregate")?;
+
+    let credit_per_cu: f64 = cu_price
+        .credit
+        .parse()
+        .map_err(|_| format!("invalid credit price: '{}'", cu_price.credit))?;
+
+    // Resolve specs: GPU tier, --size tier, or fully manual
+    let (size_slug, compute_units, vcpus, memory_mib, disk_mib) = if let Some(gpu) = &gpu_model {
+        // GPU: tier CU count is a lower bound; --size or --vcpus/--memory can raise it.
+        let tier = instance_pricing
+            .tiers
+            .iter()
+            .find(|t| t.model.as_deref() == Some(&gpu.name))
+            .ok_or_else(|| format!("GPU tier not found for '{}'", gpu.name))?;
+        let min_cu = tier.compute_units;
+        let cu_spec = &instance_pricing.compute_unit;
+        let min_slug = instance_pricing.slug_for_compute_units(min_cu);
+
+        let cu = if let Some(slug) = &args.size {
+            // Resolve size slug to CU count and validate against GPU minimum
+            let size_tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
+                let available: Vec<String> = instance_pricing
+                    .tiers
+                    .iter()
+                    .filter(|t| t.model.is_none() && t.compute_units >= min_cu)
+                    .map(|t| instance_pricing.tier_slug(t))
+                    .collect();
+                format!(
+                    "unknown size '{slug}' for GPU tier. Available sizes: {}",
+                    available.join(", ")
+                )
+            })?;
+            if size_tier.compute_units < min_cu {
+                return Err(format!(
+                    "size '{slug}' ({} CU) is below the minimum for GPU '{}' (min: {min_slug}, {min_cu} CU)",
+                    size_tier.compute_units,
+                    gpu.slug(),
+                )
+                .into());
+            }
+            size_tier.compute_units
+        } else if args.vcpus.is_some() || args.memory.is_some() {
+            // Compute CU count from raw resources, validate against GPU minimum
+            let cu_from_vcpus = args.vcpus.map(|v| v.div_ceil(cu_spec.vcpus)).unwrap_or(0);
+            let cu_from_mem = args
+                .memory
+                .map(|m| m.div_ceil(cu_spec.memory_mib) as u32)
+                .unwrap_or(0);
+            let requested_cu = cu_from_vcpus.max(cu_from_mem);
+            if requested_cu < min_cu {
+                return Err(format!(
+                    "requested resources are below the minimum for GPU '{}' (min: {min_slug}, {min_cu} CU)",
+                    gpu.slug(),
+                )
+                .into());
+            }
+            requested_cu
+        } else {
+            min_cu
+        };
+
+        let disk = args.disk_size.unwrap_or(cu as u64 * cu_spec.disk_mib);
+        (
+            None,
+            cu,
+            cu * cu_spec.vcpus,
+            cu as u64 * cu_spec.memory_mib,
+            disk,
+        )
+    } else if let Some(slug) = &args.size {
+        let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
+            let available = instance_pricing.available_slugs().join(", ");
+            format!("unknown size '{slug}'. Available sizes: {available}")
+        })?;
+        (
+            Some(slug.clone()),
+            tier.compute_units,
+            args.vcpus.unwrap_or(tier.vcpus),
+            args.memory.unwrap_or(tier.memory_mib),
+            args.disk_size.unwrap_or(tier.disk_mib),
+        )
+    } else {
+        match (args.vcpus, args.memory, args.disk_size) {
+            (Some(vcpus), Some(memory), Some(disk)) => {
+                let cu = &instance_pricing.compute_unit;
+                let cu_from_vcpus = vcpus.div_ceil(cu.vcpus);
+                let cu_from_mem = memory.div_ceil(cu.memory_mib) as u32;
+                let compute_units = cu_from_vcpus.max(cu_from_mem);
+                let actual_vcpus = compute_units * cu.vcpus;
+                let actual_memory = compute_units as u64 * cu.memory_mib;
+                (None, compute_units, actual_vcpus, actual_memory, disk)
+            }
+            _ => {
+                return Err(
+                        "--size is required unless --vcpus, --memory, and --disk-size are all specified".into(),
+                    );
+            }
+        }
+    };
+
+    // Compute cost (credits/hour)
+    let compute_credits = credit_per_cu * compute_units as f64;
+
+    // Storage cost (credits/hour): all disk is charged, then a discount is applied
+    // for the storage included in each compute unit.
+    let storage_credit_per_mib: f64 = instance_pricing
+        .price
+        .get("storage")
+        .map(|p| p.credit.parse::<f64>().unwrap_or(0.0))
+        .unwrap_or(0.0);
+
+    let storage_credits = storage_credit_per_mib * disk_mib as f64;
+    let included_storage_mib = instance_pricing.compute_unit.disk_mib as f64 * compute_units as f64;
+    let max_storage_discount = storage_credit_per_mib * included_storage_mib;
+    let storage_discount = storage_credits.min(max_storage_discount);
+    let extra_storage_credits = storage_credits - storage_discount;
+
+    let total_credits = compute_credits + extra_storage_credits;
+    let total_dollars = total_credits * 1e-6;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "size": size_slug,
+                "compute_units": compute_units,
+                "vcpus": vcpus,
+                "memory_mib": memory_mib,
+                "disk_mib": disk_mib,
+                "gpu": gpu_model.as_ref().map(|m| m.slug()),
+                "confidential": args.confidential,
+                "compute_credits_per_hour": compute_credits,
+                "storage_credits_per_hour": extra_storage_credits,
+                "total_credits_per_hour": total_credits,
+                "dollars_per_hour": total_dollars,
+            }))?
+        );
+    } else {
+        if let Some(slug) = &size_slug {
+            eprintln!("Size:    {slug}");
+        }
+        if let Some(gpu) = &gpu_model {
+            eprintln!("GPU:     {}", gpu.slug());
+        }
+        if args.confidential {
+            eprintln!("Type:    confidential");
+        }
+        eprintln!("vCPUs:   {}", vcpus);
+        eprintln!("Memory:  {} MiB", memory_mib);
+        eprintln!("Disk:    {} MiB", disk_mib);
+        if extra_storage_credits > 0.0 {
+            eprintln!(
+                "Cost:    {:.0} credits/hour (${:.4}/hour) — compute: {:.0}, extra storage: {:.0}",
+                total_credits, total_dollars, compute_credits, extra_storage_credits
+            );
+        } else {
+            eprintln!(
+                "Cost:    {:.0} credits/hour (${:.4}/hour)",
+                total_credits, total_dollars
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
