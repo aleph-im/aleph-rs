@@ -1,5 +1,6 @@
 pub mod generate;
 pub mod ledger;
+pub mod migrate;
 pub mod store;
 
 use aleph_types::account::{Account, EvmAccount, SignError, SolanaAccount};

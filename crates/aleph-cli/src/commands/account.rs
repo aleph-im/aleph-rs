@@ -2,8 +2,8 @@ use crate::account::generate::generate_key;
 use crate::account::store::{AccountKind, AccountStore};
 use crate::cli::{
     AccountBalanceArgs, AccountCommand, AccountCreateArgs, AccountDeleteArgs, AccountExportArgs,
-    AccountImportArgs, AccountShowArgs, AccountUseArgs, AliasAddArgs, AliasCommand,
-    AliasRemoveArgs,
+    AccountImportArgs, AccountMigrateArgs, AccountShowArgs, AccountUseArgs, AliasAddArgs,
+    AliasCommand, AliasRemoveArgs,
 };
 use aleph_sdk::client::{AccountBalance, AlephAccountClient, AlephClient};
 use aleph_types::account::Account;
@@ -22,6 +22,7 @@ pub async fn handle_account_command(
         AccountCommand::Create(args) => handle_create(&store, args, json),
         AccountCommand::Import(args) => handle_import(&store, args, json),
         AccountCommand::List => handle_list(client, &store, json).await,
+        AccountCommand::Migrate(args) => handle_migrate(&store, args, json),
         AccountCommand::Show(args) => handle_show(client, &store, args, json).await,
         AccountCommand::Balance(args) => handle_balance(client, &store, args, json).await,
         AccountCommand::Delete(args) => handle_delete(&store, args),
@@ -57,19 +58,23 @@ fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> R
         return handle_import_ledger(store, args, json);
     }
 
-    // Existing private-key import flow
     let chain: aleph_types::chain::Chain = args.chain.into();
 
-    let key_hex = match args.private_key {
-        Some(k) => k,
-        None => match std::env::var("ALEPH_PRIVATE_KEY") {
-            Ok(k) => k,
-            Err(_) => rpassword::prompt_password("Enter private key (hex): ")
-                .context("failed to read private key from stdin")?,
-        },
+    let key_hex = if let Some(path) = &args.from_file {
+        // Read from key file (raw binary or hex text)
+        crate::account::migrate::read_key_file(path).context("failed to read key file")?
+    } else {
+        // Existing flow: CLI flag, env var, or interactive stdin
+        let raw = match args.private_key {
+            Some(k) => k,
+            None => match std::env::var("ALEPH_PRIVATE_KEY") {
+                Ok(k) => k,
+                Err(_) => rpassword::prompt_password("Enter private key (hex): ")
+                    .context("failed to read private key from stdin")?,
+            },
+        };
+        Zeroizing::new(raw.strip_prefix("0x").unwrap_or(&raw).to_string())
     };
-
-    let key_hex = Zeroizing::new(key_hex.strip_prefix("0x").unwrap_or(&key_hex).to_string());
 
     let account = crate::account::load_account(Some(&key_hex), chain.clone())?;
     let address = account.address().to_string();
@@ -169,6 +174,104 @@ fn handle_import_ledger(store: &AccountStore, args: AccountImportArgs, json: boo
         eprintln!("  Chain:   {chain}");
         eprintln!("  Address: {address_str}");
         eprintln!("  Path:    {path_str}");
+    }
+    Ok(())
+}
+
+fn handle_migrate(store: &AccountStore, args: AccountMigrateArgs, json: bool) -> Result<()> {
+    let python_home = crate::account::migrate::resolve_python_home(args.python_home.as_deref())?;
+
+    if !json {
+        if args.dry_run {
+            eprintln!("Dry run — no accounts will be imported.\n");
+        }
+        eprintln!("Scanning {}...\n", python_home.display());
+    }
+
+    let result = crate::account::migrate::migrate_accounts(store, &python_home, args.dry_run)?;
+
+    if result.migrated.is_empty() && result.skipped.is_empty() {
+        if json {
+            println!("{}", serde_json::json!({"migrated": [], "skipped": []}));
+        } else {
+            eprintln!("No Python CLI accounts found in {}.", python_home.display());
+        }
+        return Ok(());
+    }
+
+    if json {
+        let migrated: Vec<_> = result
+            .migrated
+            .iter()
+            .map(|m| {
+                let mut obj = serde_json::json!({
+                    "name": m.name,
+                    "chain": m.chain,
+                    "address": m.address,
+                    "kind": m.kind,
+                    "default": m.is_default,
+                });
+                if let Some(ref path) = m.derivation_path {
+                    obj["derivation_path"] = serde_json::json!(path);
+                }
+                obj
+            })
+            .collect();
+        let skipped: Vec<_> = result
+            .skipped
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "filename": s.filename,
+                    "reason": s.reason,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "migrated": migrated,
+                "skipped": skipped,
+            }))?
+        );
+        return Ok(());
+    }
+
+    // Human-readable output
+    let verb = if args.dry_run {
+        "Would migrate"
+    } else {
+        "Migrated"
+    };
+    eprintln!(
+        "{verb} {} account(s) from {}:",
+        result.migrated.len(),
+        python_home.display()
+    );
+    for m in &result.migrated {
+        let mut suffix = String::new();
+        if m.kind == "ledger" {
+            suffix.push_str(" (ledger");
+            if let Some(ref path) = m.derivation_path {
+                suffix.push_str(&format!(", {path}"));
+            }
+            suffix.push(')');
+        }
+        if m.is_default {
+            suffix.push_str(" (default)");
+        }
+        eprintln!("  {:<16} {:<6} {}{}", m.name, m.chain, m.address, suffix);
+    }
+
+    if !result.skipped.is_empty() {
+        eprintln!("\nSkipped:");
+        for s in &result.skipped {
+            eprintln!("  {} — {}", s.filename, s.reason);
+        }
+    }
+
+    if !args.dry_run {
+        eprintln!("\nRun `aleph account list` to verify.");
     }
     Ok(())
 }
