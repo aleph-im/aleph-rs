@@ -58,7 +58,10 @@ impl Middleware for ConcurrencyLimit {
 }
 
 /// Read a file in chunks and compute its hash using the given Hasher.
-async fn hash_file(path: &std::path::Path, mut hasher: Hasher) -> Result<ItemHash, StorageError> {
+pub async fn hash_file(
+    path: &std::path::Path,
+    mut hasher: Hasher,
+) -> Result<ItemHash, StorageError> {
     let mut file = tokio::fs::File::open(path).await?;
     let mut buf = vec![0u8; 64 * 1024]; // 64 KiB chunks
     loop {
@@ -815,7 +818,7 @@ pub trait AlephMessageClient {
                 ItemType::Inline => {}
                 ItemType::Storage => {
                     let uploaded = self
-                        .upload_to_storage(message.item_content.as_bytes())
+                        .upload_to_storage(message.item_content.as_bytes(), None)
                         .await?;
                     if uploaded != message.item_hash {
                         return Err(MessageError::HashMismatch {
@@ -843,23 +846,36 @@ pub trait AlephMessageClient {
     /// This is a convenience that combines `upload_file_to_storage`/`upload_file_to_ipfs`,
     /// `StoreBuilder`, and `post_message`. For more control (setting reference,
     /// metadata, or channel), use those components directly.
+    ///
+    /// For the native storage engine, the file is hashed locally and uploaded
+    /// together with the signed STORE message in a single authenticated request.
+    /// For IPFS, the file is uploaded first and the message is posted separately.
     fn create_store(
         &self,
         account: &impl Account,
         path: impl AsRef<std::path::Path> + Send,
         storage_engine: StorageEngine,
-        sync: bool,
-    ) -> impl Future<Output = Result<PostMessageResponse, MessageError>> + Send
+        _sync: bool,
+    ) -> impl Future<Output = Result<ItemHash, MessageError>> + Send
     where
         Self: AlephStorageClient + Sync,
     {
         async move {
+            let path = path.as_ref();
             let file_hash = match storage_engine {
-                StorageEngine::Storage => self.upload_file_to_storage(path).await?,
-                StorageEngine::Ipfs => self.upload_file_to_ipfs(path).await?,
+                StorageEngine::Storage => hash_file(path, Hasher::for_storage()).await?,
+                StorageEngine::Ipfs => {
+                    // IPFS authenticated upload not yet supported — fall back to old flow
+                    let file_hash = self.upload_file_to_ipfs(path).await?;
+                    let message =
+                        StoreBuilder::new(account, file_hash.clone(), storage_engine).build()?;
+                    self.post_message(&message, _sync).await?;
+                    return Ok(file_hash);
+                }
             };
-            let message = StoreBuilder::new(account, file_hash, storage_engine).build()?;
-            self.post_message(&message, sync).await
+            let message = StoreBuilder::new(account, file_hash.clone(), storage_engine).build()?;
+            self.upload_file_to_storage(path, Some(&message)).await?;
+            Ok(file_hash)
         }
     }
 
@@ -1065,6 +1081,7 @@ pub trait AlephStorageClient {
     fn upload_to_storage(
         &self,
         data: &[u8],
+        message: Option<&PendingMessage>,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
 
     /// Uploads raw bytes to the node's IPFS backend.
@@ -1082,6 +1099,7 @@ pub trait AlephStorageClient {
     fn upload_file_to_storage(
         &self,
         path: impl AsRef<std::path::Path> + Send,
+        message: Option<&PendingMessage>,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
 
     /// Uploads a file from disk to IPFS, streaming without loading the
@@ -1786,7 +1804,11 @@ impl AlephStorageClient for AlephClient {
         Ok(FileDownload::new(response, file_hash.clone()))
     }
 
-    async fn upload_to_storage(&self, data: &[u8]) -> Result<ItemHash, StorageError> {
+    async fn upload_to_storage(
+        &self,
+        data: &[u8],
+        message: Option<&PendingMessage>,
+    ) -> Result<ItemHash, StorageError> {
         let url = self
             .ccn_url
             .join("/api/v0/storage/add_file")
@@ -1796,7 +1818,15 @@ impl AlephStorageClient for AlephClient {
             .file_name("upload")
             .mime_str("application/octet-stream")
             .expect("valid mime type");
-        let form = reqwest::multipart::Form::new().part("file", part);
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+
+        if let Some(msg) = message {
+            let metadata = serde_json::json!({"message": msg, "sync": false});
+            let meta_part = reqwest::multipart::Part::text(metadata.to_string())
+                .mime_str("application/json")
+                .expect("valid mime type");
+            form = form.part("metadata", meta_part);
+        }
 
         // Use the plain client — multipart bodies are not cloneable, so the
         // retry middleware would fail with "Request object is not cloneable".
@@ -1880,6 +1910,7 @@ impl AlephStorageClient for AlephClient {
     async fn upload_file_to_storage(
         &self,
         path: impl AsRef<std::path::Path> + Send,
+        message: Option<&PendingMessage>,
     ) -> Result<ItemHash, StorageError> {
         let path = path.as_ref();
 
@@ -1897,7 +1928,15 @@ impl AlephStorageClient for AlephClient {
             .await?
             .mime_str("application/octet-stream")
             .expect("valid mime type");
-        let form = reqwest::multipart::Form::new().part("file", part);
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+
+        if let Some(msg) = message {
+            let metadata = serde_json::json!({"message": msg, "sync": false});
+            let meta_part = reqwest::multipart::Part::text(metadata.to_string())
+                .mime_str("application/json")
+                .expect("valid mime type");
+            form = form.part("metadata", meta_part);
+        }
 
         let response = self
             .upload_client
@@ -2778,6 +2817,7 @@ mod tests {
             fn upload_to_storage(
                 &self,
                 _data: &[u8],
+                _message: Option<&PendingMessage>,
             ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send {
                 self.upload_storage_called.store(true, Ordering::SeqCst);
                 let hash = self.upload_hash.clone();
@@ -2796,6 +2836,7 @@ mod tests {
             async fn upload_file_to_storage(
                 &self,
                 _path: impl AsRef<std::path::Path> + Send,
+                _message: Option<&PendingMessage>,
             ) -> Result<ItemHash, StorageError> {
                 unimplemented!()
             }

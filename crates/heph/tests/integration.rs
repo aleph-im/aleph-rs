@@ -554,7 +554,10 @@ async fn test_cli_file_upload() {
     std::fs::write(&file_path, file_content).unwrap();
 
     // Replicate the CLI handler logic: upload → build STORE → submit
-    let file_hash = client.upload_file_to_storage(&file_path).await.unwrap();
+    let file_hash = client
+        .upload_file_to_storage(&file_path, None)
+        .await
+        .unwrap();
 
     let pending = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Storage)
         .reference("my-test-ref")
@@ -600,7 +603,10 @@ async fn test_cli_file_download() {
     let file_content = b"download integration test content";
     std::fs::write(&file_path, file_content).unwrap();
 
-    let file_hash = client.upload_file_to_storage(&file_path).await.unwrap();
+    let file_hash = client
+        .upload_file_to_storage(&file_path, None)
+        .await
+        .unwrap();
     let pending = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Storage)
         .reference("download-test-ref")
         .build()
@@ -660,7 +666,10 @@ async fn test_store_builder_e2e() {
     std::fs::write(&file_path, file_content).unwrap();
 
     // Upload file and get local hash
-    let file_hash = client.upload_file_to_storage(&file_path).await.unwrap();
+    let file_hash = client
+        .upload_file_to_storage(&file_path, None)
+        .await
+        .unwrap();
 
     // Build and submit STORE message
     let pending = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Storage)
@@ -701,12 +710,16 @@ async fn test_create_store_convenience() {
     let file_path = tmpdir.path().join("create-store-test.txt");
     std::fs::write(&file_path, b"create_store convenience test").unwrap();
 
-    // One-call: upload + build + submit
-    let resp = client
+    // One-call: hash + upload with message
+    let file_hash = client
         .create_store(&account, &file_path, StorageEngine::Storage, true)
         .await
         .unwrap();
-    assert_eq!(resp.message_status, "processed");
+    assert_eq!(
+        file_hash.to_string().len(),
+        64,
+        "should be a valid SHA-256 hash"
+    );
 }
 
 /// Test that get_aggregate works correctly against heph with key filtering.
