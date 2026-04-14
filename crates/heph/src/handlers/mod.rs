@@ -505,6 +505,16 @@ fn insert_cost_records(
     Ok(())
 }
 
+/// Public wrapper around the private `check_balance` function, for use by the
+/// authenticated upload path in the storage API.
+pub fn check_balance_public(
+    db: &Db,
+    msg: &IncomingMessage,
+    content: &MessageContent,
+) -> ProcessingResult<()> {
+    check_balance(db, msg, content)
+}
+
 pub mod aggregate;
 pub mod forget;
 pub mod instance;

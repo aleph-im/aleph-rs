@@ -2,11 +2,26 @@ use actix_multipart::Multipart;
 use actix_web::{HttpRequest, HttpResponse, Responder, web};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json;
+use sha2::{Digest, Sha256};
 
 use crate::api::AppState;
 use crate::db::files;
 use crate::db::messages;
+use crate::handlers::IncomingMessage;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// Metadata submitted alongside a file upload for authenticated storage.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct StorageMetadata {
+    pub message: IncomingMessage,
+    #[serde(default)]
+    pub sync: bool,
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -392,37 +407,155 @@ async fn add_file_multipart(state: web::Data<AppState>, mut multipart: Multipart
         }));
     }
 
-    let file_store = state.file_store.clone();
-    let hash = match tokio::task::spawn_blocking(move || file_store.write(&data))
-        .await
-        .unwrap()
-    {
-        Ok(h) => h,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": e.to_string()
+    if let Some(meta_str) = metadata_str {
+        // ── Authenticated path ──────────────────────────────────────────
+        // (a) Deserialize metadata.
+        let meta: StorageMetadata = match serde_json::from_str(&meta_str) {
+            Ok(m) => m,
+            Err(e) => {
+                return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                    "error": format!("could not decode metadata: {e}")
+                }));
+            }
+        };
+
+        let msg = &meta.message;
+
+        // (b) Validate message_type == STORE and item_type == Inline.
+        if msg.message_type != aleph_types::message::MessageType::Store {
+            return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                "error": "metadata message must be a STORE message"
             }));
         }
-    };
+        if msg.item_type != aleph_types::message::item_type::ItemType::Inline {
+            return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                "error": "metadata message must have inline item_type"
+            }));
+        }
 
-    // If metadata contains a message, process it (best-effort).
-    if let Some(meta_str) = metadata_str
-        && let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str)
-        && let Some(msg_val) = meta.get("message")
-        && let Ok(msg) = serde_json::from_value::<crate::handlers::IncomingMessage>(msg_val.clone())
-    {
+        // (c) Verify signature.
+        if let Err(_e) = crate::handlers::verify_signature(msg) {
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "invalid signature"
+            }));
+        }
+
+        // (d) Parse item_content as StoreContent.
+        let item_content_str = match &msg.item_content {
+            Some(s) => s.clone(),
+            None => {
+                return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                    "error": "store message content needed"
+                }));
+            }
+        };
+
+        let content = match aleph_types::message::MessageContent::deserialize_with_type(
+            aleph_types::message::MessageType::Store,
+            item_content_str.as_bytes(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                    "error": format!("invalid store message content: {e}")
+                }));
+            }
+        };
+
+        let store_content = match &content.content {
+            aleph_types::message::MessageContentEnum::Store(s) => s,
+            _ => {
+                return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                    "error": "content is not a STORE message"
+                }));
+            }
+        };
+
+        // (e) Compute SHA-256 of uploaded file bytes, check it matches file_hash.
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let computed_hash = hex::encode(hasher.finalize());
+        let expected_hash = store_content.file_hash().to_string();
+
+        if computed_hash != expected_hash {
+            return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                "error": format!(
+                    "file hash does not match ({computed_hash} != {expected_hash})"
+                )
+            }));
+        }
+
+        // (f) Check balance.
+        let db_balance = state.db.clone();
+        let msg_balance = msg.clone();
+        let content_balance = content.clone();
+        let balance_result = tokio::task::spawn_blocking(move || {
+            crate::handlers::check_balance_public(&db_balance, &msg_balance, &content_balance)
+        })
+        .await
+        .unwrap();
+
+        if let Err(_e) = balance_result {
+            return HttpResponse::PaymentRequired().json(serde_json::json!({
+                "error": "insufficient balance"
+            }));
+        }
+
+        // (g) Store file.
+        let file_store = state.file_store.clone();
+        let hash = match tokio::task::spawn_blocking(move || file_store.write(&data))
+            .await
+            .unwrap()
+        {
+            Ok(h) => h,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e.to_string()
+                }));
+            }
+        };
+
+        // (h) Process the STORE message (insert message + file pin + cost records).
         let db = state.db.clone();
         let fs = state.file_store.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::handlers::process_message_with_store(&db, &msg, Some(&fs))
+        let msg_clone = msg.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::handlers::process_message_with_store(&db, &msg_clone, Some(&fs))
         })
-        .await;
-    }
+        .await
+        .unwrap();
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": "success",
-        "hash": hash
-    }))
+        if let Err(e) = result {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("message processing failed: {e}")
+            }));
+        }
+
+        // (i) Return success.
+        HttpResponse::Ok().json(serde_json::json!({
+            "status": "success",
+            "hash": hash
+        }))
+    } else {
+        // ── Unauthenticated path ────────────────────────────────────────
+        let file_store = state.file_store.clone();
+        let hash = match tokio::task::spawn_blocking(move || file_store.write(&data))
+            .await
+            .unwrap()
+        {
+            Ok(h) => h,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e.to_string()
+                }));
+            }
+        };
+
+        HttpResponse::Ok().json(serde_json::json!({
+            "status": "success",
+            "hash": hash
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -729,5 +862,266 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 404);
+    }
+
+    // -----------------------------------------------------------------------
+    // Authenticated upload tests
+    // -----------------------------------------------------------------------
+
+    use aleph_types::account::{Account, EvmAccount, sign_message};
+    use aleph_types::chain::Chain;
+    use aleph_types::item_hash::{AlephItemHash, ItemHash};
+    use aleph_types::message::MessageType;
+    use aleph_types::message::item_type::ItemType;
+    use aleph_types::message::unsigned::UnsignedMessage;
+    use aleph_types::timestamp::Timestamp;
+    use sha2::{Digest, Sha256};
+
+    /// Build a valid multipart body with `file` and optional `metadata` fields.
+    fn build_multipart_body(file_bytes: &[u8], metadata: Option<&str>) -> (Vec<u8>, String) {
+        let boundary = "----TestBoundary12345";
+        let mut body = Vec::new();
+
+        // File field.
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes()
+        );
+        body.extend_from_slice(file_bytes);
+        body.extend_from_slice(b"\r\n");
+
+        // Metadata field.
+        if let Some(meta) = metadata {
+            body.extend_from_slice(
+                format!("--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n").as_bytes()
+            );
+            body.extend_from_slice(meta.as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        (body, content_type)
+    }
+
+    /// Build a signed STORE metadata JSON string for authenticated upload.
+    fn build_store_metadata(key: &[u8; 32], file_hash: &str) -> String {
+        build_store_metadata_with_size(key, file_hash, None).0
+    }
+
+    /// Build a signed STORE metadata JSON string, optionally including a `size` field.
+    /// Returns (metadata_json, sender_address).
+    fn build_store_metadata_with_size(
+        key: &[u8; 32],
+        file_hash: &str,
+        size: Option<u64>,
+    ) -> (String, String) {
+        let account = EvmAccount::new(Chain::Ethereum, key).unwrap();
+        let addr_str = account.address().as_str().to_string();
+
+        let item_content = if let Some(sz) = size {
+            format!(
+                r#"{{"address":"{}","time":1700000000.0,"item_type":"storage","item_hash":"{}","size":{}}}"#,
+                addr_str, file_hash, sz
+            )
+        } else {
+            format!(
+                r#"{{"address":"{}","time":1700000000.0,"item_type":"storage","item_hash":"{}"}}"#,
+                addr_str, file_hash
+            )
+        };
+        let item_hash = ItemHash::Native(AlephItemHash::from_bytes(item_content.as_bytes()));
+
+        let unsigned = UnsignedMessage {
+            message_type: MessageType::Store,
+            item_type: ItemType::Inline,
+            item_content: item_content.clone(),
+            item_hash: item_hash.clone(),
+            time: Timestamp::from(1_700_000_000.0),
+            channel: None,
+        };
+
+        let pending = sign_message(&account, unsigned).unwrap();
+
+        // Serialize the PendingMessage and wrap in StorageMetadata.
+        let msg_json = serde_json::to_value(&pending).unwrap();
+        let meta = serde_json::json!({
+            "message": msg_json,
+            "sync": false
+        });
+        (serde_json::to_string(&meta).unwrap(), addr_str)
+    }
+
+    #[actix_web::test]
+    async fn test_authenticated_upload_succeeds() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        let file_data = b"hello authenticated upload";
+        let mut hasher = Sha256::new();
+        hasher.update(file_data);
+        let file_hash = hex::encode(hasher.finalize());
+
+        let metadata = build_store_metadata(&[10u8; 32], &file_hash);
+        let (body, content_type) = build_multipart_body(file_data, Some(&metadata));
+
+        let req = test::TestRequest::post()
+            .uri("/api/v0/storage/add_file")
+            .insert_header(("content-type", content_type))
+            .set_payload(body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200, "authenticated upload should return 200");
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["status"], "success");
+        assert_eq!(body["hash"], file_hash);
+
+        // Verify the file was stored.
+        assert!(state.file_store.exists(&file_hash));
+    }
+
+    #[actix_web::test]
+    async fn test_authenticated_upload_bad_signature_returns_403() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        let file_data = b"bad signature test";
+        let mut hasher = Sha256::new();
+        hasher.update(file_data);
+        let file_hash = hex::encode(hasher.finalize());
+
+        let metadata_str = build_store_metadata(&[11u8; 32], &file_hash);
+        // Corrupt the signature by replacing it.
+        let mut meta_val: serde_json::Value = serde_json::from_str(&metadata_str).unwrap();
+        meta_val["message"]["signature"] = serde_json::json!(
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef00"
+        );
+        let corrupted_metadata = serde_json::to_string(&meta_val).unwrap();
+
+        let (body, content_type) = build_multipart_body(file_data, Some(&corrupted_metadata));
+
+        let req = test::TestRequest::post()
+            .uri("/api/v0/storage/add_file")
+            .insert_header(("content-type", content_type))
+            .set_payload(body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            403,
+            "bad signature should return 403 Forbidden"
+        );
+
+        // File should NOT be stored.
+        assert!(
+            !state.file_store.exists(&file_hash),
+            "file should not be stored when signature is invalid"
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_authenticated_upload_hash_mismatch_returns_422() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        let file_data = b"hash mismatch test";
+        let mut hasher = Sha256::new();
+        hasher.update(file_data);
+        let actual_file_hash = hex::encode(hasher.finalize());
+
+        // Use a wrong file hash in the metadata.
+        let wrong_file_hash = "0".repeat(64);
+        let metadata = build_store_metadata(&[12u8; 32], &wrong_file_hash);
+        let (body, content_type) = build_multipart_body(file_data, Some(&metadata));
+
+        let req = test::TestRequest::post()
+            .uri("/api/v0/storage/add_file")
+            .insert_header(("content-type", content_type))
+            .set_payload(body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            422,
+            "hash mismatch should return 422 Unprocessable Entity"
+        );
+
+        // File should NOT be stored.
+        assert!(
+            !state.file_store.exists(&actual_file_hash),
+            "file should not be stored when hash does not match"
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_authenticated_upload_insufficient_balance_returns_402() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        // Create a non-empty file so storage cost is non-zero.
+        let file_data = vec![0u8; 1024 * 1024]; // 1 MiB
+        let mut hasher = Sha256::new();
+        hasher.update(&file_data);
+        let file_hash = hex::encode(hasher.finalize());
+
+        // Build metadata WITH a size field so cost is non-zero.
+        let file_size = file_data.len() as u64;
+        let (metadata, sender_addr) =
+            build_store_metadata_with_size(&[13u8; 32], &file_hash, Some(file_size));
+
+        // Pre-seed the sender's credit balance to 0 so the check fails.
+        state
+            .db
+            .with_conn(|conn| crate::db::balances::set_credit_balance(conn, &sender_addr, 0))
+            .unwrap();
+
+        let (body, content_type) = build_multipart_body(&file_data, Some(&metadata));
+
+        let req = test::TestRequest::post()
+            .uri("/api/v0/storage/add_file")
+            .insert_header(("content-type", content_type))
+            .set_payload(body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            402,
+            "insufficient balance should return 402 Payment Required"
+        );
+
+        // File should NOT be stored.
+        assert!(
+            !state.file_store.exists(&file_hash),
+            "file should not be stored when balance is insufficient"
+        );
     }
 }

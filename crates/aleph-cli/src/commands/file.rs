@@ -1,7 +1,8 @@
 use crate::cli::{FileCommand, FileDownloadArgs, FileUploadArgs, StorageEngineCli};
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
-use aleph_sdk::client::{AlephClient, AlephStorageClient};
+use aleph_sdk::client::{AlephClient, AlephStorageClient, hash_file};
 use aleph_sdk::messages::StoreBuilder;
+use aleph_sdk::verify::Hasher;
 use aleph_types::channel::Channel;
 use aleph_types::message::execution::base::Payment;
 use aleph_types::message::{FileRef, StorageEngine};
@@ -45,13 +46,13 @@ async fn handle_file_upload(
         return Err(format!("not a file: {}", args.path.display()).into());
     }
 
-    // Upload file and get locally-verified hash
+    // Hash file locally
     if !json {
-        eprintln!("Uploading {}...", args.path.display());
+        eprintln!("Hashing {}...", args.path.display());
     }
     let file_hash = match storage_engine {
-        StorageEngine::Storage => aleph_client.upload_file_to_storage(&args.path).await?,
-        StorageEngine::Ipfs => aleph_client.upload_file_to_ipfs(&args.path).await?,
+        StorageEngine::Storage => hash_file(&args.path, Hasher::for_storage()).await?,
+        StorageEngine::Ipfs => hash_file(&args.path, Hasher::for_ipfs()).await?,
     };
     if !json {
         eprintln!("  File hash: {file_hash}");
@@ -59,7 +60,7 @@ async fn handle_file_upload(
 
     // Build STORE message
     let mut builder =
-        StoreBuilder::new(&account, file_hash, storage_engine).payment(Payment::credits());
+        StoreBuilder::new(&account, file_hash.clone(), storage_engine).payment(Payment::credits());
     if let Some(owner) = args.on_behalf_of {
         builder = builder.on_behalf_of(resolve_address(&owner)?);
     }
@@ -70,7 +71,41 @@ async fn handle_file_upload(
         builder = builder.channel(Channel::from(ch));
     }
     let pending = builder.build()?;
-    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+
+    // Dry run: print message preview without uploading
+    if dry_run {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&pending)?);
+        } else {
+            eprintln!("Dry run — message not submitted.\n");
+            println!("{}", serde_json::to_string_pretty(&pending)?);
+        }
+        return Ok(());
+    }
+
+    if !json {
+        eprintln!("Uploading {}...", args.path.display());
+    }
+
+    match storage_engine {
+        StorageEngine::Storage => {
+            // Authenticated upload: file + signed STORE message in one request
+            aleph_client
+                .upload_file_to_storage(&args.path, Some(&pending))
+                .await?;
+        }
+        StorageEngine::Ipfs => {
+            // IPFS: fall back to old two-step flow (no authenticated upload support)
+            aleph_client.upload_file_to_ipfs(&args.path).await?;
+            submit_or_preview(aleph_client, ccn_url, &pending, false, json).await?;
+        }
+    }
+
+    if !json {
+        eprintln!("  File hash: {file_hash}");
+    }
+
+    Ok(())
 }
 
 async fn handle_file_download(
