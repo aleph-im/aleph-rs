@@ -65,6 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get-version.outputs.version }}
+      is-prerelease: ${{ steps.get-version.outputs.is-prerelease }}
       types-version: ${{ steps.get-version.outputs.types-version }}
       sdk-version: ${{ steps.get-version.outputs.sdk-version }}
       cli-version: ${{ steps.get-version.outputs.cli-version }}
@@ -81,7 +82,13 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/v}
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          
+
+          IS_PRERELEASE="false"
+          if [[ "$VERSION" == *-* ]]; then
+            IS_PRERELEASE="true"
+          fi
+          echo "is-prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+
           # Extract versions from Cargo.toml files
           TYPES_VERSION=$(grep '^version = ' crates/aleph-types/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           SDK_VERSION=$(grep '^version = ' crates/aleph-sdk/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
@@ -216,6 +223,7 @@ jobs:
   publish-apt:
     name: Publish to APT Repository
     needs: [check-versions, build-binaries]
+    if: needs.check-versions.outputs.is-prerelease != 'true'
     runs-on: ubuntu-latest
     environment: apt
     permissions:
@@ -319,6 +327,7 @@ jobs:
   publish-brew:
     name: Publish to Homebrew Tap
     needs: [check-versions, build-binaries]
+    if: needs.check-versions.outputs.is-prerelease != 'true'
     runs-on: ubuntu-latest
     environment: brew
     steps:
