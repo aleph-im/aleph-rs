@@ -247,6 +247,66 @@ fn build_verified(
     }
 }
 
+/// Verifies raw content and builds a [`VerifiedMessage`] from a [`MessageHeader`].
+///
+/// For inline messages, verification is done locally by hashing the `item_content` string.
+/// For non-inline messages (storage/ipfs), the raw content is downloaded from
+/// `/api/v0/storage/raw/{item_hash}` and its hash is verified.
+///
+/// The message content is always deserialized from the verified raw bytes, never from
+/// the CCN's pre-deserialized `content` field.
+async fn verify_message_header<C: AlephStorageClient + Sync + ?Sized>(
+    client: &C,
+    header: MessageHeader,
+) -> Result<VerifiedMessage, VerifyMessageError> {
+    // Verify signature first — it's cheap (no I/O) and catches forgeries
+    // before we spend time downloading or hashing content.
+    if let Err(e) = header.verify_signature() {
+        return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
+            header,
+            error: IntegrityError::SignatureVerificationFailed(e),
+        })));
+    }
+
+    match &header.content_source {
+        ContentSource::Inline { item_content } => {
+            if let Some(Err((expected, actual))) =
+                header.content_source.verify_inline_hash(&header.item_hash)
+            {
+                return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
+                    header,
+                    error: IntegrityError::HashMismatch { expected, actual },
+                })));
+            }
+            // NLL: the borrow of item_content ends after this call since
+            // the returned MessageContent owns its data.
+            let content =
+                MessageContent::deserialize_with_type(header.message_type, item_content.as_bytes());
+            build_verified(header, content)
+        }
+        ContentSource::Storage | ContentSource::Ipfs => {
+            let download = client
+                .download_file_by_hash(&header.item_hash)
+                .await
+                .map_err(VerifyMessageError::Fetch)?;
+            let raw_bytes = match download.with_verification().bytes().await {
+                Ok(bytes) => bytes,
+                Err(MessageError::Storage(StorageError::IntegrityError(
+                    crate::verify::VerifyError::IntegrityMismatch { expected, actual },
+                ))) => {
+                    return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
+                        header,
+                        error: IntegrityError::HashMismatch { expected, actual },
+                    })));
+                }
+                Err(e) => return Err(VerifyMessageError::Fetch(e)),
+            };
+            let content = MessageContent::deserialize_with_type(header.message_type, &raw_bytes);
+            build_verified(header, content)
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovalReason {
@@ -879,74 +939,6 @@ pub trait AlephMessageClient {
         }
     }
 
-    /// Verifies raw content and builds a [`VerifiedMessage`] from a [`MessageHeader`].
-    ///
-    /// For inline messages, verification is done locally by hashing the `item_content` string.
-    /// For non-inline messages (storage/ipfs), the raw content is downloaded from
-    /// `/api/v0/storage/raw/{item_hash}` and its hash is verified.
-    ///
-    /// The message content is always deserialized from the verified raw bytes, never from
-    /// the CCN's pre-deserialized `content` field.
-    fn verify_message_header(
-        &self,
-        header: MessageHeader,
-    ) -> impl Future<Output = Result<VerifiedMessage, VerifyMessageError>> + Send
-    where
-        Self: AlephStorageClient + Sync,
-    {
-        async {
-            // Verify signature first — it's cheap (no I/O) and catches forgeries
-            // before we spend time downloading or hashing content.
-            if let Err(e) = header.verify_signature() {
-                return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
-                    header,
-                    error: IntegrityError::SignatureVerificationFailed(e),
-                })));
-            }
-
-            match &header.content_source {
-                ContentSource::Inline { item_content } => {
-                    if let Some(Err((expected, actual))) =
-                        header.content_source.verify_inline_hash(&header.item_hash)
-                    {
-                        return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
-                            header,
-                            error: IntegrityError::HashMismatch { expected, actual },
-                        })));
-                    }
-                    // NLL: the borrow of item_content ends after this call since
-                    // the returned MessageContent owns its data.
-                    let content = MessageContent::deserialize_with_type(
-                        header.message_type,
-                        item_content.as_bytes(),
-                    );
-                    build_verified(header, content)
-                }
-                ContentSource::Storage | ContentSource::Ipfs => {
-                    let download = self
-                        .download_file_by_hash(&header.item_hash)
-                        .await
-                        .map_err(VerifyMessageError::Fetch)?;
-                    let raw_bytes = match download.with_verification().bytes().await {
-                        Ok(bytes) => bytes,
-                        Err(MessageError::Storage(StorageError::IntegrityError(
-                            crate::verify::VerifyError::IntegrityMismatch { expected, actual },
-                        ))) => {
-                            return Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
-                                header,
-                                error: IntegrityError::HashMismatch { expected, actual },
-                            })));
-                        }
-                        Err(e) => return Err(VerifyMessageError::Fetch(e)),
-                    };
-                    let content =
-                        MessageContent::deserialize_with_type(header.message_type, &raw_bytes);
-                    build_verified(header, content)
-                }
-            }
-        }
-    }
-
     /// Verifies a fully-fetched [`Message`] by re-checking its raw content.
     ///
     /// Takes ownership of the message, verifies the raw content hash, and returns
@@ -959,11 +951,10 @@ pub trait AlephMessageClient {
     where
         Self: AlephStorageClient + Sync,
     {
-        self.verify_message_header(MessageHeader::from(message))
-            .map_err(|e| match e {
-                VerifyMessageError::Fetch(e) => e,
-                VerifyMessageError::Integrity(invalid) => invalid.error.into(),
-            })
+        verify_message_header(self, MessageHeader::from(message)).map_err(|e| match e {
+            VerifyMessageError::Fetch(e) => e,
+            VerifyMessageError::Integrity(invalid) => invalid.error.into(),
+        })
     }
 
     /// Fetches a single message and verifies its integrity.
@@ -1478,7 +1469,7 @@ impl AlephMessageClient for AlephClient {
         let headers = self.get_message_headers(filter).await?;
 
         let verify_futures = headers.into_iter().map(|header| async {
-            match self.verify_message_header(header).await {
+            match verify_message_header(self, header).await {
                 Ok(verified) => Ok(Ok(verified)),
                 Err(VerifyMessageError::Integrity(invalid)) => Ok(Err(*invalid)),
                 Err(VerifyMessageError::Fetch(e)) => Err(e),
