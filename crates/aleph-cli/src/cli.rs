@@ -913,6 +913,8 @@ pub enum AccountCommand {
     Import(AccountImportArgs),
     /// List all stored accounts
     List,
+    /// Migrate accounts from the Python CLI (~/.aleph-im/)
+    Migrate(AccountMigrateArgs),
     /// Show details of an account (defaults to the active account)
     Show(AccountShowArgs),
     /// Set the default account used for signing
@@ -944,6 +946,10 @@ pub struct AccountImportArgs {
     #[arg(long, conflicts_with = "ledger")]
     pub private_key: Option<String>,
 
+    /// Import from a key file (raw 32-byte binary or hex text).
+    #[arg(long, conflicts_with_all = ["private_key", "ledger"])]
+    pub from_file: Option<PathBuf>,
+
     /// Import from a Ledger hardware wallet instead of a private key.
     #[arg(long)]
     pub ledger: bool,
@@ -955,6 +961,17 @@ pub struct AccountImportArgs {
     /// Number of addresses to fetch from the Ledger (only with --ledger).
     #[arg(long, requires = "ledger", default_value = "5")]
     pub ledger_count: usize,
+}
+
+#[derive(Args)]
+pub struct AccountMigrateArgs {
+    /// Path to the Python CLI config directory (defaults to ~/.aleph-im).
+    #[arg(long)]
+    pub python_home: Option<PathBuf>,
+
+    /// Show what would be imported without actually importing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
