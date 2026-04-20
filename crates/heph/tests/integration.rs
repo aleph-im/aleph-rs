@@ -555,7 +555,7 @@ async fn test_cli_file_upload() {
 
     // Replicate the CLI handler logic: upload → build STORE → submit
     let file_hash = client
-        .upload_file_to_storage(&file_path, None)
+        .upload_file_to_storage(&file_path, None, false)
         .await
         .unwrap();
 
@@ -604,7 +604,7 @@ async fn test_cli_file_download() {
     std::fs::write(&file_path, file_content).unwrap();
 
     let file_hash = client
-        .upload_file_to_storage(&file_path, None)
+        .upload_file_to_storage(&file_path, None, false)
         .await
         .unwrap();
     let pending = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Storage)
@@ -667,7 +667,7 @@ async fn test_store_builder_e2e() {
 
     // Upload file and get local hash
     let file_hash = client
-        .upload_file_to_storage(&file_path, None)
+        .upload_file_to_storage(&file_path, None, false)
         .await
         .unwrap();
 

@@ -878,7 +878,7 @@ pub trait AlephMessageClient {
                 ItemType::Inline => {}
                 ItemType::Storage => {
                     let uploaded = self
-                        .upload_to_storage(message.item_content.as_bytes(), None)
+                        .upload_to_storage(message.item_content.as_bytes(), None, false)
                         .await?;
                     if uploaded != message.item_hash {
                         return Err(MessageError::HashMismatch {
@@ -915,7 +915,7 @@ pub trait AlephMessageClient {
         account: &impl Account,
         path: impl AsRef<std::path::Path> + Send,
         storage_engine: StorageEngine,
-        _sync: bool,
+        sync: bool,
     ) -> impl Future<Output = Result<ItemHash, MessageError>> + Send
     where
         Self: AlephStorageClient + Sync,
@@ -929,12 +929,13 @@ pub trait AlephMessageClient {
                     let file_hash = self.upload_file_to_ipfs(path).await?;
                     let message =
                         StoreBuilder::new(account, file_hash.clone(), storage_engine).build()?;
-                    self.post_message(&message, _sync).await?;
+                    self.post_message(&message, sync).await?;
                     return Ok(file_hash);
                 }
             };
             let message = StoreBuilder::new(account, file_hash.clone(), storage_engine).build()?;
-            self.upload_file_to_storage(path, Some(&message)).await?;
+            self.upload_file_to_storage(path, Some(&message), sync)
+                .await?;
             Ok(file_hash)
         }
     }
@@ -1069,10 +1070,15 @@ pub trait AlephStorageClient {
     ///
     /// Sends a `POST /api/v0/storage/add_file` multipart request and returns
     /// the SHA-256 hash of the uploaded content.
+    ///
+    /// When `message` is provided, `sync` controls whether the server waits
+    /// for the STORE message to be processed before responding. Ignored when
+    /// no message is attached.
     fn upload_to_storage(
         &self,
         data: &[u8],
         message: Option<&PendingMessage>,
+        sync: bool,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
 
     /// Uploads raw bytes to the node's IPFS backend.
@@ -1087,10 +1093,15 @@ pub trait AlephStorageClient {
     /// Uploads a file from disk to native storage, streaming without
     /// loading the full file into memory. Returns the locally-computed
     /// SHA-256 hash, verified against the server's response.
+    ///
+    /// When `message` is provided, `sync` controls whether the server waits
+    /// for the STORE message to be processed before responding. Ignored when
+    /// no message is attached.
     fn upload_file_to_storage(
         &self,
         path: impl AsRef<std::path::Path> + Send,
         message: Option<&PendingMessage>,
+        sync: bool,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
 
     /// Uploads a file from disk to IPFS, streaming without loading the
@@ -1799,6 +1810,7 @@ impl AlephStorageClient for AlephClient {
         &self,
         data: &[u8],
         message: Option<&PendingMessage>,
+        sync: bool,
     ) -> Result<ItemHash, StorageError> {
         let url = self
             .ccn_url
@@ -1812,7 +1824,7 @@ impl AlephStorageClient for AlephClient {
         let mut form = reqwest::multipart::Form::new().part("file", part);
 
         if let Some(msg) = message {
-            let metadata = serde_json::json!({"message": msg, "sync": false});
+            let metadata = serde_json::json!({"message": msg, "sync": sync});
             let meta_part = reqwest::multipart::Part::text(metadata.to_string())
                 .mime_str("application/json")
                 .expect("valid mime type");
@@ -1902,6 +1914,7 @@ impl AlephStorageClient for AlephClient {
         &self,
         path: impl AsRef<std::path::Path> + Send,
         message: Option<&PendingMessage>,
+        sync: bool,
     ) -> Result<ItemHash, StorageError> {
         let path = path.as_ref();
 
@@ -1922,7 +1935,7 @@ impl AlephStorageClient for AlephClient {
         let mut form = reqwest::multipart::Form::new().part("file", part);
 
         if let Some(msg) = message {
-            let metadata = serde_json::json!({"message": msg, "sync": false});
+            let metadata = serde_json::json!({"message": msg, "sync": sync});
             let meta_part = reqwest::multipart::Part::text(metadata.to_string())
                 .mime_str("application/json")
                 .expect("valid mime type");
@@ -2809,6 +2822,7 @@ mod tests {
                 &self,
                 _data: &[u8],
                 _message: Option<&PendingMessage>,
+                _sync: bool,
             ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send {
                 self.upload_storage_called.store(true, Ordering::SeqCst);
                 let hash = self.upload_hash.clone();
@@ -2828,6 +2842,7 @@ mod tests {
                 &self,
                 _path: impl AsRef<std::path::Path> + Send,
                 _message: Option<&PendingMessage>,
+                _sync: bool,
             ) -> Result<ItemHash, StorageError> {
                 unimplemented!()
             }

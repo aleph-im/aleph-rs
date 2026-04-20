@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::time::Duration;
 
-use aleph_sdk::client::{AlephMessageClient, MessageError, PostMessageResponse};
+use aleph_sdk::client::{AlephMessageClient, MessageError};
 use aleph_types::message::pending::PendingMessage;
 use url::Url;
 
@@ -81,18 +81,40 @@ pub async fn submit_or_preview(
         Err(e) => return Err(e.into()),
     };
 
+    print_submission_result(
+        ccn_url,
+        pending,
+        &response.publication_status.status,
+        &response.message_status,
+        json,
+    )
+}
+
+/// Emit the CLI's standard "message submitted" envelope.
+///
+/// Used by both the generic `submit_or_preview` path and the authenticated
+/// file-upload path, which gets a server-side guarantee that the message has
+/// been processed but no structured status response body to draw from.
+pub fn print_submission_result(
+    ccn_url: &Url,
+    pending: &PendingMessage,
+    publication_status: &str,
+    message_status: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if json {
-        print_json_result(ccn_url, pending, &response)?;
+        print_json_result(ccn_url, pending, publication_status, message_status)
     } else {
-        print_human_result(ccn_url, pending, &response);
+        print_human_result(ccn_url, pending, message_status);
+        Ok(())
     }
-    Ok(())
 }
 
 fn print_json_result(
     ccn_url: &Url,
     pending: &PendingMessage,
-    response: &PostMessageResponse,
+    publication_status: &str,
+    message_status: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let explorer_url = format!("{}api/v0/messages/{}", ccn_url.as_str(), pending.item_hash);
     let output = serde_json::json!({
@@ -103,19 +125,16 @@ fn print_json_result(
         "channel": pending.channel.as_ref().map(|c| serde_json::to_value(c).unwrap()),
         "time": pending.time,
         "explorer_url": explorer_url,
-        "publication_status": response.publication_status.status,
-        "message_status": response.message_status,
+        "publication_status": publication_status,
+        "message_status": message_status,
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 
-fn print_human_result(ccn_url: &Url, pending: &PendingMessage, response: &PostMessageResponse) {
+fn print_human_result(ccn_url: &Url, pending: &PendingMessage, message_status: &str) {
     let explorer_url = format!("{}api/v0/messages/{}", ccn_url.as_str(), pending.item_hash);
-    eprintln!(
-        "Message {} ({})",
-        response.message_status, pending.message_type
-    );
+    eprintln!("Message {} ({})", message_status, pending.message_type);
     eprintln!("  Item hash: {}", pending.item_hash);
     eprintln!("  Sender:    {}", pending.sender);
     if let Some(ch) = &pending.channel {
