@@ -122,7 +122,7 @@ fn print_json_result(
         "type": pending.message_type.to_string(),
         "chain": pending.chain.to_string(),
         "sender": pending.sender.to_string(),
-        "channel": pending.channel.as_ref().map(|c| serde_json::to_value(c).unwrap()),
+        "channel": &pending.channel,
         "time": pending.time,
         "explorer_url": explorer_url,
         "publication_status": publication_status,

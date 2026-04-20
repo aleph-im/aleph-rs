@@ -104,10 +104,6 @@ async fn handle_file_upload(
         }
     }
 
-    if !json {
-        eprintln!("  File hash: {file_hash}");
-    }
-
     Ok(())
 }
 
