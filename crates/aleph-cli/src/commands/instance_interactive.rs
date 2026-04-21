@@ -6,10 +6,11 @@
 //! (the instance gets pinned to the chosen CRN via `node_hash`).
 
 use crate::cli::{IMAGE_PRESETS, InstanceCreateArgs, parse_image};
-use aleph_sdk::client::AlephClient;
-use aleph_sdk::crns_list::{CrnFilter, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list};
+use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+use aleph_sdk::crns_list::{CrnFilter, CrnListEntry, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list};
 use aleph_types::item_hash::ItemHash;
-use dialoguer::{Input, Select};
+use dialoguer::{Confirm, FuzzySelect, Input, Select};
+use std::cmp::Ordering;
 use tokio::task::JoinHandle;
 
 pub async fn resolve_interactive(
@@ -54,8 +55,6 @@ pub async fn resolve_interactive(
 }
 
 async fn prompt_size(aleph_client: &AlephClient) -> Result<String, Box<dyn std::error::Error>> {
-    use aleph_sdk::client::AlephAggregateClient;
-
     let pricing = aleph_client
         .get_pricing_aggregate()
         .await
@@ -121,8 +120,6 @@ async fn resolve_specs_for_filter(
     args: &InstanceCreateArgs,
     aleph_client: &AlephClient,
 ) -> Result<(u32, u64, u64), Box<dyn std::error::Error>> {
-    use aleph_sdk::client::AlephAggregateClient;
-
     if let Some(slug) = &args.size {
         let pricing = aleph_client.get_pricing_aggregate().await?;
         let tier = pricing
@@ -164,8 +161,6 @@ fn prompt_image() -> Result<ItemHash, Box<dyn std::error::Error>> {
         parse_image(&raw).map_err(Into::into)
     }
 }
-
-use aleph_sdk::crns_list::CrnListEntry;
 
 fn format_crn_table(entries: &[&CrnListEntry]) -> String {
     let mut out = String::new();
@@ -214,9 +209,6 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-use dialoguer::{Confirm, FuzzySelect};
-use std::cmp::Ordering;
-
 fn prompt_crn<'a>(
     entries: &'a [&CrnListEntry],
 ) -> Result<&'a CrnListEntry, Box<dyn std::error::Error>> {
@@ -255,6 +247,28 @@ fn prompt_crn<'a>(
         }
         // User said no → back to FuzzySelect.
     }
+}
+
+async fn accept_terms_and_conditions(
+    _aleph_client: &AlephClient,
+    chosen: &CrnListEntry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(tac_hash) = chosen.terms_and_conditions.as_deref() else {
+        return Ok(());
+    };
+    eprintln!(
+        "\nThis CRN requires accepting terms & conditions.\n\
+         Document item hash: {tac_hash}\n\
+         Review with: `aleph file download --message-hash {tac_hash}`\n",
+    );
+    if !Confirm::new()
+        .with_prompt("Accept the CRN's terms & conditions?")
+        .default(false)
+        .interact()?
+    {
+        return Err("Terms & Conditions rejected: instance creation aborted.".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -301,26 +315,4 @@ mod tests {
         let names: Vec<&str> = sorted.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["c", "b", "a"]);
     }
-}
-
-async fn accept_terms_and_conditions(
-    _aleph_client: &AlephClient,
-    chosen: &CrnListEntry,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(tac_hash) = chosen.terms_and_conditions.as_deref() else {
-        return Ok(());
-    };
-    eprintln!(
-        "\nThis CRN requires accepting terms & conditions.\n\
-         Document item hash: {tac_hash}\n\
-         Review with: `aleph file download --message-hash {tac_hash}`\n",
-    );
-    if !Confirm::new()
-        .with_prompt("Accept the CRN's terms & conditions?")
-        .default(false)
-        .interact()?
-    {
-        return Err("Terms & Conditions rejected: instance creation aborted.".into());
-    }
-    Ok(())
 }
