@@ -1179,8 +1179,12 @@ pub struct InstancePriceArgs {
 #[derive(Args)]
 pub struct InstanceCreateArgs {
     /// Root filesystem image: a preset name (ubuntu22, ubuntu24, debian12) or an item hash (hex or IPFS CID).
-    #[arg(long, value_parser = parse_image)]
-    pub image: ItemHash,
+    #[arg(
+        long,
+        value_parser = parse_image,
+        required_unless_present = "interactive"
+    )]
+    pub image: Option<ItemHash>,
 
     /// Disk size (e.g. 20GB, 1024MB, 1TiB). Required unless --size is used.
     #[arg(long, value_parser = parse_size_to_mib)]
@@ -1200,7 +1204,7 @@ pub struct InstanceCreateArgs {
     pub memory: Option<u64>,
 
     /// Path to an SSH public key file. Can be repeated for multiple keys.
-    #[arg(long, required = true)]
+    #[arg(long)]
     pub ssh_pubkey_file: Vec<PathBuf>,
 
     /// Instance name.
@@ -1249,6 +1253,11 @@ pub struct InstanceCreateArgs {
     /// Sign on behalf of another address (requires an authorization from that address).
     #[arg(long)]
     pub on_behalf_of: Option<String>,
+
+    /// Prompt interactively for any values not provided on the command line.
+    /// Always runs the CRN picker.
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
 
     #[command(flatten)]
     pub signing: SigningArgs,

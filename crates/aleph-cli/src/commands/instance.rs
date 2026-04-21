@@ -450,7 +450,8 @@ async fn handle_instance_create(
     let disk_size = PersistentVolumeSize::try_from(disk_size_mib)
         .map_err(|e| format!("invalid disk size: {e}"))?;
 
-    let mut builder = InstanceBuilder::new(&account, args.image, disk_size)
+    let image = args.image.ok_or("--image is required (or use -i)")?;
+    let mut builder = InstanceBuilder::new(&account, image, disk_size)
         .vcpus(vcpus)
         .memory(MiB::from(memory_mib))
         .hypervisor(Hypervisor::Qemu)

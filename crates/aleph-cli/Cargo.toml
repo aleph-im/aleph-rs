@@ -30,7 +30,7 @@ ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
 zeroize = { workspace = true }
 coins-ledger = { workspace = true }
-dialoguer = { workspace = true }
+dialoguer = { workspace = true, features = ["fuzzy-select"] }
 bs58 = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
