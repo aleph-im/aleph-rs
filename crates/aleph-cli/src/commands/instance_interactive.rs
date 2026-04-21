@@ -39,6 +39,10 @@ async fn prompt_size(aleph_client: &AlephClient) -> Result<String, Box<dyn std::
         .collect();
     tiers.sort_by_key(|t| t.compute_units);
 
+    if tiers.is_empty() {
+        return Err("no instance tiers available in the pricing aggregate".into());
+    }
+
     let cu = &instance_pricing.compute_unit;
     let items: Vec<String> = tiers
         .iter()
