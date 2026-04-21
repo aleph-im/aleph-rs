@@ -34,6 +34,9 @@ pub async fn resolve_interactive(
         .await
         .map_err(|e| format!("background task error: {e}"))??;
     let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aleph_client).await?;
+    // `ipv6: true` filters the CRN's own infrastructure. CRNs without working IPv6
+    // can't route traffic to their VMs, so they can't host usable instances. This is
+    // unrelated to the user's local IPv6 connectivity. Matches the Python CLI.
     let filter = CrnFilter {
         ipv6: true,
         min_vcpus: Some(vcpus),
@@ -51,7 +54,7 @@ pub async fn resolve_interactive(
         ).into());
     }
     let chosen = prompt_crn(&filtered)?;
-    accept_terms_and_conditions(aleph_client, chosen).await?;
+    accept_terms_and_conditions(chosen).await?;
     args.crn_hash = Some(chosen.hash.clone());
 
     if args.name.is_none() {
@@ -176,6 +179,12 @@ fn prompt_image() -> Result<ItemHash, Box<dyn std::error::Error>> {
     }
 }
 
+/// Score suitable for sorting: `None` (or NaN) becomes `None` so those entries
+/// sort after every finite score.
+fn score_key(e: &CrnListEntry) -> Option<f64> {
+    e.score.filter(|s| !s.is_nan())
+}
+
 fn format_crn_table(entries: &[&CrnListEntry]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -226,9 +235,17 @@ fn truncate(s: &str, max: usize) -> String {
 fn prompt_crn<'a>(
     entries: &'a [&CrnListEntry],
 ) -> Result<&'a CrnListEntry, Box<dyn std::error::Error>> {
-    // Pre-sort by score desc; None scores sort last.
+    // Pre-sort by score desc; None (and NaN) sort last.
+    //
+    // JSON doesn't encode NaN, so in practice `score` is always finite or None.
+    // We still normalize defensively: a stray NaN `unwrap_or(Equal)` would make
+    // the NaN entry's position non-deterministic relative to finite scores.
     let mut sorted: Vec<&CrnListEntry> = entries.to_vec();
-    sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        score_key(b)
+            .partial_cmp(&score_key(a))
+            .unwrap_or(Ordering::Equal)
+    });
 
     loop {
         eprintln!("{}", format_crn_table(&sorted));
@@ -284,7 +301,6 @@ fn effective_tac_hash(chosen: &CrnListEntry) -> Option<&str> {
 }
 
 async fn accept_terms_and_conditions(
-    _aleph_client: &AlephClient,
     chosen: &CrnListEntry,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(tac_hash) = effective_tac_hash(chosen) else {
@@ -371,11 +387,9 @@ mod tests {
         assert_eq!(truncate("abcdefghij", 5), "abcd…");
     }
 
-    #[test]
-    fn sort_puts_none_score_last() {
-        use aleph_sdk::crns_list::CrnListEntry;
+    fn entry_with_score(name: &str, score: Option<f64>) -> CrnListEntry {
         use std::collections::HashMap;
-        let make = |name: &str, score: Option<f64>| CrnListEntry {
+        CrnListEntry {
             hash: name.into(),
             name: name.into(),
             address: "https://x.y".into(),
@@ -390,20 +404,33 @@ mod tests {
             compatible_available_gpus: None,
             terms_and_conditions: None,
             extra: HashMap::new(),
-        };
-        let a = make("a", None);
-        let b = make("b", Some(0.5));
-        let c = make("c", Some(0.9));
-        let entries = vec![&a, &b, &c];
+        }
+    }
 
-        let mut sorted: Vec<&CrnListEntry> = entries.clone();
+    fn sort_by_score(entries: Vec<&CrnListEntry>) -> Vec<&str> {
+        let mut sorted = entries;
         sorted.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
+            score_key(b)
+                .partial_cmp(&score_key(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let names: Vec<&str> = sorted.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["c", "b", "a"]);
+        sorted.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn sort_puts_none_score_last() {
+        let a = entry_with_score("a", None);
+        let b = entry_with_score("b", Some(0.5));
+        let c = entry_with_score("c", Some(0.9));
+        assert_eq!(sort_by_score(vec![&a, &b, &c]), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn sort_puts_nan_score_last() {
+        let a = entry_with_score("a", Some(f64::NAN));
+        let b = entry_with_score("b", Some(0.5));
+        let c = entry_with_score("c", Some(0.9));
+        assert_eq!(sort_by_score(vec![&a, &b, &c]), ["c", "b", "a"]);
     }
 
     fn entry_with_tac(tac: Option<&str>) -> CrnListEntry {

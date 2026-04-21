@@ -56,17 +56,24 @@ pub struct SystemUsage {
     pub disk: DiskInfo,
 }
 
+/// The aggregator's `cpu` payload also includes `load_average`, `core_frequencies`,
+/// etc. — we deliberately model only the fields consumers of this SDK read today.
+/// Unknown fields are silently ignored by serde (no data loss; they stay in the JSON
+/// and can be materialized later by adding them here).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CpuInfo {
     pub count: u32,
 }
 
+/// The aggregator reports `total_kB` and `available_kB`. Only `available_kB` is
+/// read by downstream consumers; the total is ignored to keep the type minimal.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MemoryInfo {
     #[serde(rename = "available_kB")]
     pub available_kb: u64,
 }
 
+/// See `MemoryInfo` — same minimalism convention applies to disk metrics.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiskInfo {
     #[serde(rename = "available_kB")]
