@@ -175,6 +175,18 @@ pub fn format_api_error(status: u16, body: &str, json: bool) -> String {
         if let Some(msg) = message {
             return format!("Message {status_str} (HTTP {status}): {msg}");
         }
+
+        // The CCN often rejects messages without a reason — e.g. insufficient
+        // credits, invalid signature, unknown image hash. Give the user a hint
+        // instead of dumping the raw envelope.
+        if status_str == "rejected" {
+            return format!(
+                "Message rejected by the CCN (HTTP {status}) — no reason provided. \
+                 Common causes: insufficient credit balance, invalid signature, \
+                 or an unknown/forgotten reference (image, volume, T&C). \
+                 Check your credits and inputs, then retry."
+            );
+        }
     }
 
     format!("API error (HTTP {status}): {body}")
@@ -337,6 +349,25 @@ mod tests {
     fn format_api_error_falls_back_to_raw_body() {
         let formatted = format_api_error(500, "internal server error", false);
         assert_eq!(formatted, "API error (HTTP 500): internal server error");
+    }
+
+    #[test]
+    fn format_api_error_rejected_without_reason_gives_hint() {
+        // The exact envelope the CCN emits for e.g. insufficient credits.
+        let body = r#"{"publication_status":{"status":"success","failed":[]},"message_status":"rejected"}"#;
+        let formatted = format_api_error(422, body, false);
+        assert!(
+            formatted.contains("Message rejected by the CCN"),
+            "got: {formatted}",
+        );
+        assert!(
+            formatted.contains("insufficient credit balance"),
+            "got: {formatted}",
+        );
+        assert!(
+            !formatted.contains("publication_status"),
+            "got: {formatted}"
+        );
     }
 
     #[test]
