@@ -259,7 +259,7 @@ const SSH_PUBKEY_PREFIXES: &[&str] = &[
     "sk-ecdsa-sha2-nistp256@openssh.com",
 ];
 
-fn validate_ssh_pubkey(
+pub(crate) fn validate_ssh_pubkey(
     key: &str,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {

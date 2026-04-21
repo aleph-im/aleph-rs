@@ -6,6 +6,7 @@
 //! (the instance gets pinned to the chosen CRN via `node_hash`).
 
 use crate::cli::{IMAGE_PRESETS, InstanceCreateArgs, parse_image};
+use crate::commands::instance::validate_ssh_pubkey;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::crns_list::{CrnFilter, CrnListEntry, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list};
 use aleph_types::item_hash::ItemHash;
@@ -50,6 +51,13 @@ pub async fn resolve_interactive(
     let chosen = prompt_crn(&filtered)?;
     accept_terms_and_conditions(aleph_client, chosen).await?;
     args.crn_hash = Some(chosen.hash.clone());
+
+    if args.name.is_none() {
+        args.name = prompt_name_optional()?;
+    }
+    if args.ssh_pubkey_file.is_empty() {
+        args.ssh_pubkey_file = vec![prompt_ssh_pubkey_path()?];
+    }
 
     Ok(())
 }
@@ -269,6 +277,54 @@ async fn accept_terms_and_conditions(
         return Err("Terms & Conditions rejected: instance creation aborted.".into());
     }
     Ok(())
+}
+
+fn prompt_name_optional() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let raw: String = Input::new()
+        .with_prompt("Instance name (optional, press enter to skip)")
+        .allow_empty(true)
+        .interact_text()?;
+    Ok(if raw.trim().is_empty() { None } else { Some(raw) })
+}
+
+fn prompt_ssh_pubkey_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let default = default_ssh_pubkey_path();
+    loop {
+        let raw: String = Input::new()
+            .with_prompt("Path to SSH public key file")
+            .default(default.display().to_string())
+            .interact_text()?;
+        let path = std::path::PathBuf::from(expand_tilde(&raw));
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                if let Err(e) = validate_ssh_pubkey(content.trim(), &path) {
+                    eprintln!("  ✗ {e}");
+                    continue;
+                }
+                return Ok(path);
+            }
+            Err(e) => {
+                eprintln!("  ✗ failed to read '{}': {e}", path.display());
+                continue;
+            }
+        }
+    }
+}
+
+fn default_ssh_pubkey_path() -> std::path::PathBuf {
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().to_path_buf())
+        .unwrap_or_default()
+        .join(".ssh/id_rsa.pub")
+}
+
+fn expand_tilde(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(u) = directories::UserDirs::new()
+    {
+        return u.home_dir().join(rest).display().to_string();
+    }
+    s.to_string()
 }
 
 #[cfg(test)]
