@@ -228,6 +228,7 @@ pub async fn handle_instance_command(
     json: bool,
     command: InstanceCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use super::crn;
     match command {
         InstanceCommand::Create(args) => {
             handle_instance_create(aleph_client, ccn_url, json, args).await?;
@@ -238,6 +239,11 @@ pub async fn handle_instance_command(
         InstanceCommand::List(args) => {
             handle_instance_list(aleph_client, json, args).await?;
         }
+        InstanceCommand::Start(args) => crn::handle_start(json, args).await?,
+        InstanceCommand::Stop(args) => crn::handle_operation(json, args, "stop").await?,
+        InstanceCommand::Reboot(args) => crn::handle_operation(json, args, "reboot").await?,
+        InstanceCommand::Erase(args) => crn::handle_operation(json, args, "erase").await?,
+        InstanceCommand::Logs(args) => crn::handle_logs(json, args).await?,
     }
     Ok(())
 }
