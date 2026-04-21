@@ -169,8 +169,8 @@ use aleph_sdk::crns_list::CrnListEntry;
 fn format_crn_table(entries: &[&CrnListEntry]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "{:>4}  {:>5}  {:<24}  {:<9}  {:>9}  {:>10}  {:<3}  {:<3}  {}\n",
-        "#", "Score", "Name", "Version", "Free RAM", "Free Disk", "🔒", "GPU", "URL",
+        "{:>4}  {:>6}  {:<24}  {:<9}  {:>12}  {:>12}  {:<4}  {:<3}  {}\n",
+        "#", "Score", "Name", "Version", "Free RAM", "Free Disk", "Conf", "GPU", "URL",
     ));
     for (i, e) in entries.iter().enumerate() {
         let score = e
@@ -188,7 +188,7 @@ fn format_crn_table(entries: &[&CrnListEntry]) -> String {
         let conf = if e.confidential_support { "✓" } else { " " };
         let gpu = if e.gpu_support { "✓" } else { " " };
         out.push_str(&format!(
-            "{:>4}  {:>5}  {:<24}  {:<9}  {:>9}  {:>10}  {:<3}  {:<3}  {}\n",
+            "{:>4}  {:>6}  {:<24}  {:<9}  {:>12}  {:>12}  {:<4}  {:<3}  {}\n",
             i + 1,
             score,
             truncate(&e.name, 24),
@@ -221,12 +221,7 @@ fn prompt_crn<'a>(
 ) -> Result<&'a CrnListEntry, Box<dyn std::error::Error>> {
     // Pre-sort by score desc; None scores sort last.
     let mut sorted: Vec<&CrnListEntry> = entries.to_vec();
-    sorted.sort_by(|a, b| match (b.score, a.score) {
-        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    });
+    sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
 
     loop {
         eprintln!("{}", format_crn_table(&sorted));
@@ -273,5 +268,36 @@ mod tests {
     #[test]
     fn truncate_long_string_appends_ellipsis() {
         assert_eq!(truncate("abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn sort_puts_none_score_last() {
+        use aleph_sdk::crns_list::CrnListEntry;
+        use std::collections::HashMap;
+        let make = |name: &str, score: Option<f64>| CrnListEntry {
+            hash: name.into(),
+            name: name.into(),
+            address: "https://x.y".into(),
+            score,
+            version: None,
+            payment_receiver_address: None,
+            gpu_support: false,
+            confidential_support: false,
+            qemu_support: false,
+            ipv6_check: None,
+            system_usage: None,
+            compatible_available_gpus: None,
+            terms_and_conditions: None,
+            extra: HashMap::new(),
+        };
+        let a = make("a", None);
+        let b = make("b", Some(0.5));
+        let c = make("c", Some(0.9));
+        let entries = vec![&a, &b, &c];
+
+        let mut sorted: Vec<&CrnListEntry> = entries.clone();
+        sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        let names: Vec<&str> = sorted.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["c", "b", "a"]);
     }
 }
