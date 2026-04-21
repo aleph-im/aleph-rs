@@ -80,6 +80,77 @@ pub struct Gpu {
     pub compatible: bool,
 }
 
+/// Filter options for the CRN list. All fields default to "no constraint".
+#[derive(Debug, Clone, Default)]
+pub struct CrnFilter {
+    /// If true, require every value in `ipv6_check` to be `true`.
+    pub ipv6: bool,
+    /// Require the CRN to report at least this many vCPUs.
+    pub min_vcpus: Option<u32>,
+    /// Require at least this much available memory (MiB).
+    pub min_memory_mib: Option<u64>,
+    /// Require at least this much available disk (MiB).
+    pub min_disk_mib: Option<u64>,
+    /// Require `confidential_support == true`.
+    pub confidential: bool,
+    /// Require `gpu_support == true` with at least one compatible available GPU.
+    pub gpu: bool,
+}
+
+impl CrnListResponse {
+    /// Return references to entries matching the filter.
+    pub fn filter(&self, f: &CrnFilter) -> Vec<&CrnListEntry> {
+        self.crns.iter().filter(|e| matches_filter(e, f)).collect()
+    }
+}
+
+fn matches_filter(entry: &CrnListEntry, f: &CrnFilter) -> bool {
+    if f.ipv6 {
+        let ok = entry
+            .ipv6_check
+            .as_ref()
+            .is_some_and(|m| m.values().all(|v| *v));
+        if !ok {
+            return false;
+        }
+    }
+    if f.confidential && !entry.confidential_support {
+        return false;
+    }
+    if f.gpu {
+        let has_gpu = entry.gpu_support
+            && entry
+                .compatible_available_gpus
+                .as_ref()
+                .is_some_and(|g| !g.is_empty());
+        if !has_gpu {
+            return false;
+        }
+    }
+    let needs_usage = f.min_vcpus.is_some() || f.min_memory_mib.is_some() || f.min_disk_mib.is_some();
+    if needs_usage {
+        let Some(u) = entry.system_usage.as_ref() else {
+            return false;
+        };
+        if let Some(v) = f.min_vcpus
+            && u.cpu.count < v
+        {
+            return false;
+        }
+        if let Some(m) = f.min_memory_mib
+            && u.mem.available_kb / 1024 < m
+        {
+            return false;
+        }
+        if let Some(d) = f.min_disk_mib
+            && u.disk.available_kb / 1024 < d
+        {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +180,46 @@ mod tests {
 
         let epsilon = &parsed.crns[4];
         assert!(epsilon.system_usage.is_none());
+    }
+
+    #[test]
+    fn filter_ipv6_drops_beta() {
+        let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
+        let f = CrnFilter { ipv6: true, ..Default::default() };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "gamma-low-ram", "delta-gpu", "epsilon-nousage"]);
+    }
+
+    #[test]
+    fn filter_min_memory_drops_gamma() {
+        let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
+        let f = CrnFilter { min_memory_mib: Some(4096), ..Default::default() };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        // epsilon has no system_usage so it's also dropped by resource filter
+        assert_eq!(names, ["alpha", "beta-noipv6", "delta-gpu"]);
+    }
+
+    #[test]
+    fn filter_gpu_keeps_only_delta() {
+        let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
+        let f = CrnFilter { gpu: true, ..Default::default() };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["delta-gpu"]);
+    }
+
+    #[test]
+    fn filter_confidential_keeps_only_gamma() {
+        let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
+        let f = CrnFilter { confidential: true, ..Default::default() };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["gamma-low-ram"]);
+    }
+
+    #[test]
+    fn filter_combined_ipv6_and_vcpus() {
+        let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
+        let f = CrnFilter { ipv6: true, min_vcpus: Some(8), ..Default::default() };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "delta-gpu"]);
     }
 }
