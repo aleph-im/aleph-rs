@@ -1,6 +1,6 @@
 [package]
 name = "aleph-types"
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 description = "Definitions for the most commonly used types in the Aleph Cloud network."
 license = "MIT"
