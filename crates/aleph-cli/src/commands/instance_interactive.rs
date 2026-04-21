@@ -12,12 +12,55 @@ use dialoguer::{Input, Select};
 
 pub async fn resolve_interactive(
     args: &mut InstanceCreateArgs,
-    _aleph_client: &AlephClient,
+    aleph_client: &AlephClient,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if args.image.is_none() {
         args.image = Some(prompt_image()?);
     }
+    if args.size.is_none() && args.disk_size.is_none() {
+        args.size = Some(prompt_size(aleph_client).await?);
+    }
     Ok(())
+}
+
+async fn prompt_size(aleph_client: &AlephClient) -> Result<String, Box<dyn std::error::Error>> {
+    use aleph_sdk::client::AlephAggregateClient;
+
+    let pricing = aleph_client
+        .get_pricing_aggregate()
+        .await
+        .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
+    let instance_pricing = &pricing.pricing.instance;
+
+    let mut tiers: Vec<_> = instance_pricing
+        .tiers
+        .iter()
+        .filter(|t| t.model.is_none())
+        .collect();
+    tiers.sort_by_key(|t| t.compute_units);
+
+    let cu = &instance_pricing.compute_unit;
+    let items: Vec<String> = tiers
+        .iter()
+        .map(|t| {
+            let slug = instance_pricing.tier_slug(t);
+            let vcpus = t.compute_units * cu.vcpus;
+            let memory_mib = t.compute_units as u64 * cu.memory_mib;
+            let disk_mib = t.compute_units as u64 * cu.disk_mib;
+            format!(
+                "{:<14}  {} vCPU · {} MiB RAM · {} MiB disk",
+                slug, vcpus, memory_mib, disk_mib,
+            )
+        })
+        .collect();
+
+    let idx = Select::new()
+        .with_prompt("Size")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    Ok(instance_pricing.tier_slug(tiers[idx]))
 }
 
 fn prompt_image() -> Result<ItemHash, Box<dyn std::error::Error>> {
