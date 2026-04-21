@@ -47,6 +47,7 @@ pub async fn resolve_interactive(
         ).into());
     }
     let chosen = prompt_crn(&filtered)?;
+    accept_terms_and_conditions(aleph_client, chosen).await?;
     args.crn_hash = Some(chosen.hash.clone());
 
     Ok(())
@@ -300,4 +301,26 @@ mod tests {
         let names: Vec<&str> = sorted.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["c", "b", "a"]);
     }
+}
+
+async fn accept_terms_and_conditions(
+    _aleph_client: &AlephClient,
+    chosen: &CrnListEntry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(tac_hash) = chosen.terms_and_conditions.as_deref() else {
+        return Ok(());
+    };
+    eprintln!(
+        "\nThis CRN requires accepting terms & conditions.\n\
+         Document item hash: {tac_hash}\n\
+         Review with: `aleph file download --message-hash {tac_hash}`\n",
+    );
+    if !Confirm::new()
+        .with_prompt("Accept the CRN's terms & conditions?")
+        .default(false)
+        .interact()?
+    {
+        return Err("Terms & Conditions rejected: instance creation aborted.".into());
+    }
+    Ok(())
 }
