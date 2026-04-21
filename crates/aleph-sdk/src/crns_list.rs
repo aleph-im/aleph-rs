@@ -4,8 +4,13 @@
 //! This is not an aleph aggregate — it is an HTTP endpoint scraping every
 //! active CRN's status and bundling scoring results.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
+
+/// Deserialize a bool field that may be `null` in JSON (treat `null` as `false`).
+fn deserialize_bool_or_null<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
+}
 
 /// Top-level response from `crns.json`.
 #[derive(Debug, Clone, Deserialize)]
@@ -26,11 +31,11 @@ pub struct CrnListEntry {
     pub version: Option<String>,
     #[serde(default)]
     pub payment_receiver_address: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_or_null")]
     pub gpu_support: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_or_null")]
     pub confidential_support: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_or_null")]
     pub qemu_support: bool,
     #[serde(default)]
     pub ipv6_check: Option<HashMap<String, bool>>,
@@ -76,7 +81,7 @@ pub struct Gpu {
     pub device_class: String,
     pub pci_host: String,
     pub device_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_or_null")]
     pub compatible: bool,
 }
 
@@ -151,6 +156,35 @@ fn matches_filter(entry: &CrnListEntry, f: &CrnFilter) -> bool {
     true
 }
 
+/// Default URL for the CRN list aggregator. Override with the
+/// `ALEPH_CRN_LIST_URL` env var or by passing a custom `url` to `fetch_crns_list`.
+pub const DEFAULT_CRN_LIST_URL: &str = "https://crns-list.aleph.sh/crns.json";
+
+#[derive(Debug, thiserror::Error)]
+pub enum CrnListError {
+    #[error("HTTP request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("Failed to parse CRN list response: {0}")]
+    Parse(#[from] serde_json::Error),
+}
+
+/// Fetch and parse the CRN list from `url`.
+///
+/// If `only_active` is true, inactive CRNs are filtered out by the server
+/// (adds `?filter_inactive=true`).
+pub async fn fetch_crns_list(
+    http: &reqwest::Client,
+    url: &url::Url,
+    only_active: bool,
+) -> Result<CrnListResponse, CrnListError> {
+    let mut url = url.clone();
+    url.query_pairs_mut()
+        .append_pair("filter_inactive", if only_active { "true" } else { "false" });
+    let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
+    let parsed = serde_json::from_slice(&bytes)?;
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +255,14 @@ mod tests {
         let f = CrnFilter { ipv6: true, min_vcpus: Some(8), ..Default::default() };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["alpha", "delta-gpu"]);
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live CRN list aggregator"]
+    async fn fetch_live_crns_list() {
+        let http = reqwest::Client::new();
+        let url = DEFAULT_CRN_LIST_URL.parse().unwrap();
+        let list = fetch_crns_list(&http, &url, true).await.unwrap();
+        assert!(!list.crns.is_empty(), "aggregator returned no CRNs");
     }
 }
