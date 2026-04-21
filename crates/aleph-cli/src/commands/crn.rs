@@ -2,21 +2,8 @@ use aleph_sdk::crn::CrnClient;
 use futures_util::StreamExt;
 use url::Url;
 
-use crate::cli::{CrnArgs, CrnCommand, CrnStartArgs, SigningArgs};
+use crate::cli::{CrnArgs, CrnStartArgs, SigningArgs};
 use crate::common::resolve_account;
-
-pub async fn handle_crn_command(
-    json: bool,
-    command: CrnCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match command {
-        CrnCommand::Start(args) => handle_start(json, args).await,
-        CrnCommand::Stop(args) => handle_operation(json, args, "stop").await,
-        CrnCommand::Reboot(args) => handle_operation(json, args, "reboot").await,
-        CrnCommand::Erase(args) => handle_operation(json, args, "erase").await,
-        CrnCommand::Logs(args) => handle_logs(json, args).await,
-    }
-}
 
 fn build_client(
     crn_url: &str,
@@ -27,7 +14,10 @@ fn build_client(
     Ok(CrnClient::new(&account, url)?)
 }
 
-async fn handle_start(json: bool, args: CrnStartArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn handle_start(
+    json: bool,
+    args: CrnStartArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = build_client(&args.crn_url, &args.signing)?;
     let response = client.start_instance(&args.vm_id).await?;
 
@@ -56,7 +46,7 @@ async fn handle_start(json: bool, args: CrnStartArgs) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-async fn handle_operation(
+pub async fn handle_operation(
     json: bool,
     args: CrnArgs,
     operation: &str,
@@ -122,7 +112,7 @@ fn sanitize_log(s: &str) -> String {
     result
 }
 
-async fn handle_logs(json: bool, args: CrnArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn handle_logs(json: bool, args: CrnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let client = build_client(&args.crn_url, &args.signing)?;
     let mut stream = std::pin::pin!(client.stream_logs(&args.vm_id).await?);
 

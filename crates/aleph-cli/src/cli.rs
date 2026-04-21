@@ -126,11 +126,6 @@ pub enum Commands {
         #[clap(subcommand)]
         command: ConfigCommand,
     },
-    /// Control VMs on a Compute Resource Node (CRN)
-    Crn {
-        #[clap(subcommand)]
-        command: CrnCommand,
-    },
     /// Upload and download files
     File {
         #[clap(subcommand)]
@@ -1105,6 +1100,16 @@ pub struct FileDownloadArgs {
 pub enum InstanceCommand {
     /// Create a new instance (VM)
     Create(InstanceCreateArgs),
+    /// Erase a VM instance's data on the CRN
+    Erase(CrnArgs),
+    /// List instances belonging to an account.
+    ///
+    /// Lists instances where the address is either the sender (signer) or the
+    /// owner (resource address). When --address is omitted, the current default
+    /// account's address is used.
+    List(InstanceListArgs),
+    /// Stream logs from a running VM instance
+    Logs(CrnArgs),
     /// Show pricing for an instance configuration
     #[command(long_about = "\
 Show pricing for an instance configuration.
@@ -1128,12 +1133,12 @@ Examples:
   aleph instance price --gpu            # list available GPU models
   aleph instance price --size 1vcpu-2gb --confidential")]
     Price(InstancePriceArgs),
-    /// List instances belonging to an account.
-    ///
-    /// Lists instances where the address is either the sender (signer) or the
-    /// owner (resource address). When --address is omitted, the current default
-    /// account's address is used.
-    List(InstanceListArgs),
+    /// Reboot a VM instance
+    Reboot(CrnArgs),
+    /// Start (allocate) a VM instance on the CRN
+    Start(CrnStartArgs),
+    /// Stop a running VM instance
+    Stop(CrnArgs),
 }
 
 #[derive(Args)]
@@ -1331,20 +1336,6 @@ pub struct AuthorizationRevokeArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
-}
-
-#[derive(Subcommand)]
-pub enum CrnCommand {
-    /// Erase a VM instance's data
-    Erase(CrnArgs),
-    /// Stream logs from a running VM instance
-    Logs(CrnArgs),
-    /// Reboot a VM instance
-    Reboot(CrnArgs),
-    /// Start (allocate) a VM instance on the CRN
-    Start(CrnStartArgs),
-    /// Stop a running VM instance
-    Stop(CrnArgs),
 }
 
 #[derive(Args)]
