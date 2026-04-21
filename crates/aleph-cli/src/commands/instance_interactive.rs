@@ -8,7 +8,9 @@
 use crate::cli::{IMAGE_PRESETS, InstanceCreateArgs, parse_image};
 use crate::commands::instance::validate_ssh_pubkey;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
-use aleph_sdk::crns_list::{CrnFilter, CrnListEntry, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list};
+use aleph_sdk::crns_list::{
+    CrnFilter, CrnListEntry, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list,
+};
 use aleph_types::item_hash::ItemHash;
 use dialoguer::{Confirm, FuzzySelect, Input, Select};
 use std::cmp::Ordering;
@@ -105,7 +107,8 @@ async fn prompt_size(aleph_client: &AlephClient) -> Result<String, Box<dyn std::
 }
 
 fn crn_list_url() -> Result<url::Url, Box<dyn std::error::Error>> {
-    let raw = std::env::var("ALEPH_CRN_LIST_URL").unwrap_or_else(|_| DEFAULT_CRN_LIST_URL.to_string());
+    let raw =
+        std::env::var("ALEPH_CRN_LIST_URL").unwrap_or_else(|_| DEFAULT_CRN_LIST_URL.to_string());
     Ok(url::Url::parse(&raw)?)
 }
 
@@ -142,13 +145,18 @@ async fn resolve_specs_for_filter(
         ))
     } else {
         crate::commands::instance::resolve_instance_specs_from_flags(
-            args.vcpus, args.memory, args.disk_size,
+            args.vcpus,
+            args.memory,
+            args.disk_size,
         )
     }
 }
 
 fn prompt_image() -> Result<ItemHash, Box<dyn std::error::Error>> {
-    let mut items: Vec<String> = IMAGE_PRESETS.iter().map(|(name, _)| name.to_string()).collect();
+    let mut items: Vec<String> = IMAGE_PRESETS
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
     items.push("custom hash or IPFS CID…".into());
 
     let idx = Select::new()
@@ -162,9 +170,7 @@ fn prompt_image() -> Result<ItemHash, Box<dyn std::error::Error>> {
     } else {
         let raw: String = Input::new()
             .with_prompt("Image (item hash or IPFS CID)")
-            .validate_with(|s: &String| -> Result<(), String> {
-                parse_image(s).map(|_| ())
-            })
+            .validate_with(|s: &String| -> Result<(), String> { parse_image(s).map(|_| ()) })
             .interact_text()?;
         parse_image(&raw).map_err(Into::into)
     }
@@ -230,7 +236,10 @@ fn prompt_crn<'a>(
         let labels: Vec<String> = sorted
             .iter()
             .map(|e| {
-                let score = e.score.map(|s| format!("{:.1}%", s * 100.0)).unwrap_or("-".into());
+                let score = e
+                    .score
+                    .map(|s| format!("{:.1}%", s * 100.0))
+                    .unwrap_or("-".into());
                 format!("{:<6} {:<24} {}", score, truncate(&e.name, 24), e.address)
             })
             .collect();
@@ -246,11 +255,18 @@ fn prompt_crn<'a>(
             chosen.name,
             chosen.hash,
             chosen.address,
-            chosen.score.map(|s| format!("{:.1}%", s * 100.0)).unwrap_or("-".into()),
+            chosen
+                .score
+                .map(|s| format!("{:.1}%", s * 100.0))
+                .unwrap_or("-".into()),
             chosen.version.as_deref().unwrap_or("-"),
         );
 
-        if Confirm::new().with_prompt("Deploy on this node?").default(true).interact()? {
+        if Confirm::new()
+            .with_prompt("Deploy on this node?")
+            .default(true)
+            .interact()?
+        {
             return Ok(chosen);
         }
         // User said no → back to FuzzySelect.
@@ -284,7 +300,11 @@ fn prompt_name_optional() -> Result<Option<String>, Box<dyn std::error::Error>> 
         .with_prompt("Instance name (optional, press enter to skip)")
         .allow_empty(true)
         .interact_text()?;
-    Ok(if raw.trim().is_empty() { None } else { Some(raw) })
+    Ok(if raw.trim().is_empty() {
+        None
+    } else {
+        Some(raw)
+    })
 }
 
 fn prompt_ssh_pubkey_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
@@ -367,7 +387,11 @@ mod tests {
         let entries = vec![&a, &b, &c];
 
         let mut sorted: Vec<&CrnListEntry> = entries.clone();
-        sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let names: Vec<&str> = sorted.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["c", "b", "a"]);
     }

@@ -132,7 +132,8 @@ fn matches_filter(entry: &CrnListEntry, f: &CrnFilter) -> bool {
             return false;
         }
     }
-    let needs_usage = f.min_vcpus.is_some() || f.min_memory_mib.is_some() || f.min_disk_mib.is_some();
+    let needs_usage =
+        f.min_vcpus.is_some() || f.min_memory_mib.is_some() || f.min_disk_mib.is_some();
     if needs_usage {
         let Some(u) = entry.system_usage.as_ref() else {
             return false;
@@ -178,9 +179,17 @@ pub async fn fetch_crns_list(
     only_active: bool,
 ) -> Result<CrnListResponse, CrnListError> {
     let mut url = url.clone();
-    url.query_pairs_mut()
-        .append_pair("filter_inactive", if only_active { "true" } else { "false" });
-    let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
+    url.query_pairs_mut().append_pair(
+        "filter_inactive",
+        if only_active { "true" } else { "false" },
+    );
+    let bytes = http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
     let parsed = serde_json::from_slice(&bytes)?;
     Ok(parsed)
 }
@@ -219,15 +228,24 @@ mod tests {
     #[test]
     fn filter_ipv6_drops_beta() {
         let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
-        let f = CrnFilter { ipv6: true, ..Default::default() };
+        let f = CrnFilter {
+            ipv6: true,
+            ..Default::default()
+        };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["alpha", "gamma-low-ram", "delta-gpu", "epsilon-nousage"]);
+        assert_eq!(
+            names,
+            ["alpha", "gamma-low-ram", "delta-gpu", "epsilon-nousage"]
+        );
     }
 
     #[test]
     fn filter_min_memory_drops_gamma() {
         let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
-        let f = CrnFilter { min_memory_mib: Some(4096), ..Default::default() };
+        let f = CrnFilter {
+            min_memory_mib: Some(4096),
+            ..Default::default()
+        };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
         // epsilon has no system_usage so it's also dropped by resource filter
         assert_eq!(names, ["alpha", "beta-noipv6", "delta-gpu"]);
@@ -236,7 +254,10 @@ mod tests {
     #[test]
     fn filter_gpu_keeps_only_delta() {
         let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
-        let f = CrnFilter { gpu: true, ..Default::default() };
+        let f = CrnFilter {
+            gpu: true,
+            ..Default::default()
+        };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["delta-gpu"]);
     }
@@ -244,7 +265,10 @@ mod tests {
     #[test]
     fn filter_confidential_keeps_only_gamma() {
         let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
-        let f = CrnFilter { confidential: true, ..Default::default() };
+        let f = CrnFilter {
+            confidential: true,
+            ..Default::default()
+        };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["gamma-low-ram"]);
     }
@@ -252,7 +276,11 @@ mod tests {
     #[test]
     fn filter_combined_ipv6_and_vcpus() {
         let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
-        let f = CrnFilter { ipv6: true, min_vcpus: Some(8), ..Default::default() };
+        let f = CrnFilter {
+            ipv6: true,
+            min_vcpus: Some(8),
+            ..Default::default()
+        };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["alpha", "delta-gpu"]);
     }
