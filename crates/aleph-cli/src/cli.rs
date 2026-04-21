@@ -1204,7 +1204,7 @@ pub struct InstanceCreateArgs {
     pub memory: Option<u64>,
 
     /// Path to an SSH public key file. Can be repeated for multiple keys.
-    #[arg(long)]
+    #[arg(long, required_unless_present = "interactive")]
     pub ssh_pubkey_file: Vec<PathBuf>,
 
     /// Instance name.
