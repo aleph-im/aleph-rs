@@ -1128,6 +1128,20 @@ Examples:
   aleph instance price --gpu            # list available GPU models
   aleph instance price --size 1vcpu-2gb --confidential")]
     Price(InstancePriceArgs),
+    /// List instances belonging to an account.
+    ///
+    /// Lists instances where the address is either the sender (signer) or the
+    /// owner (resource address). When --address is omitted, the current default
+    /// account's address is used.
+    List(InstanceListArgs),
+}
+
+#[derive(Args)]
+pub struct InstanceListArgs {
+    /// Address to query, as a hex address (`0x…`) or a local account/alias name.
+    /// Defaults to the address of the current default account.
+    #[arg(long)]
+    pub address: Option<String>,
 }
 
 #[derive(Args)]
