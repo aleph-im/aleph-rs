@@ -393,15 +393,11 @@ fn parse_immutable_volumes(
 }
 
 /// Resolve (vcpus, memory_mib, disk_mib) from flags when no `--size` slug is used.
-/// Defaults: 1 vCPU, 2048 MiB memory, disk must be provided.
-///
-/// `_size_slug` is accepted for symmetry with the tier-based resolver but unused here —
-/// this function is the "no size slug" path.
+/// Defaults: 1 vCPU, 2048 MiB memory; disk must be provided.
 pub(crate) fn resolve_instance_specs_from_flags(
     vcpus: Option<u32>,
     memory_mib: Option<u64>,
     disk_mib: Option<u64>,
-    _size_slug: Option<&str>,
 ) -> Result<(u32, u64, u64), Box<dyn std::error::Error>> {
     let disk_mib = disk_mib.ok_or(
         "--disk-size is required when --size is not used \
@@ -457,7 +453,7 @@ async fn handle_instance_create(
 
         (vcpus, memory_mib, disk_size_mib)
     } else {
-        resolve_instance_specs_from_flags(args.vcpus, args.memory, args.disk_size, None)?
+        resolve_instance_specs_from_flags(args.vcpus, args.memory, args.disk_size)?
     };
 
     let disk_size = PersistentVolumeSize::try_from(disk_size_mib)
@@ -1280,18 +1276,18 @@ mod tests {
 
     #[test]
     fn resolve_instance_specs_without_size_uses_defaults() {
-        let specs = resolve_instance_specs_from_flags(None, None, Some(20 * 1024), None);
+        let specs = resolve_instance_specs_from_flags(None, None, Some(20 * 1024));
         assert_eq!(specs.unwrap(), (1, 2048, 20 * 1024));
     }
 
     #[test]
     fn resolve_instance_specs_without_size_requires_disk() {
-        assert!(resolve_instance_specs_from_flags(None, None, None, None).is_err());
+        assert!(resolve_instance_specs_from_flags(None, None, None).is_err());
     }
 
     #[test]
     fn resolve_instance_specs_applies_overrides() {
-        let specs = resolve_instance_specs_from_flags(Some(4), Some(8192), Some(40 * 1024), None);
+        let specs = resolve_instance_specs_from_flags(Some(4), Some(8192), Some(40 * 1024));
         assert_eq!(specs.unwrap(), (4, 8192, 40 * 1024));
     }
 }
