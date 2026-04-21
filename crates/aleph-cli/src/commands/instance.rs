@@ -410,10 +410,14 @@ async fn handle_instance_create(
     aleph_client: &AlephClient,
     ccn_url: &Url,
     json: bool,
-    args: InstanceCreateArgs,
+    mut args: InstanceCreateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing)?;
+
+    if args.interactive {
+        crate::commands::instance_interactive::resolve_interactive(&mut args, aleph_client).await?;
+    }
 
     // Read and validate SSH public keys
     let mut ssh_keys = Vec::new();
