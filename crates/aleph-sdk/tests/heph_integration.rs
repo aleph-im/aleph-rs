@@ -39,7 +39,7 @@ async fn test_upload_to_storage() {
     let data = b"hello aleph storage";
 
     let hash = client
-        .upload_to_storage(data, None)
+        .upload_to_storage(data, None, false)
         .await
         .expect("upload should succeed");
 
@@ -59,7 +59,7 @@ async fn test_get_file_size() {
     let data = b"size-check payload";
 
     let hash = client
-        .upload_to_storage(data, None)
+        .upload_to_storage(data, None, false)
         .await
         .expect("upload should succeed");
 
@@ -77,7 +77,7 @@ async fn test_download_file_by_hash() {
     let data = b"download-by-hash payload";
 
     let hash = client
-        .upload_to_storage(data, None)
+        .upload_to_storage(data, None, false)
         .await
         .expect("upload should succeed");
 
@@ -98,7 +98,7 @@ async fn test_download_file_to_disk() {
     let data = b"download-to-disk payload";
 
     let hash = client
-        .upload_to_storage(data, None)
+        .upload_to_storage(data, None, false)
         .await
         .expect("upload should succeed");
 
@@ -128,7 +128,7 @@ async fn test_download_file_with_verification() {
     let data = b"verified-download payload";
 
     let hash = client
-        .upload_to_storage(data, None)
+        .upload_to_storage(data, None, false)
         .await
         .expect("upload should succeed");
 
@@ -153,7 +153,7 @@ async fn test_download_file_to_disk_with_verification() {
     let data = b"verified-disk-download payload";
 
     let hash = client
-        .upload_to_storage(data, None)
+        .upload_to_storage(data, None, false)
         .await
         .expect("upload should succeed");
 

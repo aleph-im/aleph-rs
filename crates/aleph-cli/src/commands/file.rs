@@ -1,5 +1,5 @@
 use crate::cli::{FileCommand, FileDownloadArgs, FileUploadArgs, StorageEngineCli};
-use crate::common::{resolve_account, resolve_address, submit_or_preview};
+use crate::common::{print_submission_result, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::{AlephClient, AlephStorageClient, hash_file};
 use aleph_sdk::messages::StoreBuilder;
 use aleph_sdk::verify::Hasher;
@@ -89,20 +89,19 @@ async fn handle_file_upload(
 
     match storage_engine {
         StorageEngine::Storage => {
-            // Authenticated upload: file + signed STORE message in one request
+            // Authenticated upload: file + signed STORE message in one request.
+            // sync=true makes the server wait until the STORE message is
+            // processed before responding, so a 2xx guarantees "processed".
             aleph_client
-                .upload_file_to_storage(&args.path, Some(&pending))
+                .upload_file_to_storage(&args.path, Some(&pending), true)
                 .await?;
+            print_submission_result(ccn_url, &pending, "success", "processed", json)?;
         }
         StorageEngine::Ipfs => {
             // IPFS: fall back to old two-step flow (no authenticated upload support)
             aleph_client.upload_file_to_ipfs(&args.path).await?;
             submit_or_preview(aleph_client, ccn_url, &pending, false, json).await?;
         }
-    }
-
-    if !json {
-        eprintln!("  File hash: {file_hash}");
     }
 
     Ok(())

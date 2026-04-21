@@ -279,6 +279,7 @@ dependencies = [
 name = "aleph-cli"
 version = "0.9.1"
 dependencies = [
+ "actix-web",
  "aleph-sdk",
  "aleph-types",
  "anyhow",
@@ -290,6 +291,7 @@ dependencies = [
  "directories",
  "ed25519-dalek",
  "futures-util",
+ "heph",
  "hex",
  "k256",
  "keyring",
