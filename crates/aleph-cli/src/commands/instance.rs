@@ -138,28 +138,30 @@ async fn handle_instance_list(
     render_rows(&rows, json)
 }
 
-fn render_rows(rows: &[InstanceRow], json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if json {
-        let value: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "item_hash": r.item_hash.to_string(),
-                    "name": r.name,
-                    "owner": r.owner.to_string(),
-                    "node_hash": r.node_hash,
-                    "created_at": r.created_at
-                        .to_datetime()
-                        .ok()
-                        .map(|dt| dt.to_rfc3339()),
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(());
-    }
+const MISSING_VALUE: &str = "-";
 
-    const PLACEHOLDER: &str = "—";
+fn format_rows_json(rows: &[InstanceRow]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "item_hash": r.item_hash.to_string(),
+                "name": r.name,
+                "owner": r.owner.to_string(),
+                "node_hash": r.node_hash,
+                "created_at": r.created_at
+                    .to_datetime()
+                    .ok()
+                    .map(|dt| dt.to_rfc3339()),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items)
+}
+
+fn format_rows_text(rows: &[InstanceRow]) -> String {
+    use std::fmt::Write;
+
     let hash_w = rows
         .iter()
         .map(|r| r.item_hash.to_string().len())
@@ -168,7 +170,7 @@ fn render_rows(rows: &[InstanceRow], json: bool) -> Result<(), Box<dyn std::erro
         .unwrap_or("ITEM HASH".len());
     let name_w = rows
         .iter()
-        .map(|r| r.name.as_deref().unwrap_or(PLACEHOLDER).len())
+        .map(|r| r.name.as_deref().unwrap_or(MISSING_VALUE).len())
         .chain(std::iter::once("NAME".len()))
         .max()
         .unwrap_or("NAME".len());
@@ -179,7 +181,9 @@ fn render_rows(rows: &[InstanceRow], json: bool) -> Result<(), Box<dyn std::erro
         .max()
         .unwrap_or("OWNER".len());
 
-    println!(
+    let mut out = String::new();
+    writeln!(
+        out,
         "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  NODE",
         "ITEM HASH",
         "NAME",
@@ -187,12 +191,14 @@ fn render_rows(rows: &[InstanceRow], json: bool) -> Result<(), Box<dyn std::erro
         hash_w = hash_w,
         name_w = name_w,
         owner_w = owner_w,
-    );
+    )
+    .expect("writing to String cannot fail");
 
     for row in rows {
-        let name = row.name.as_deref().unwrap_or(PLACEHOLDER);
-        let node = row.node_hash.as_deref().unwrap_or(PLACEHOLDER);
-        println!(
+        let name = row.name.as_deref().unwrap_or(MISSING_VALUE);
+        let node = row.node_hash.as_deref().unwrap_or(MISSING_VALUE);
+        writeln!(
+            out,
             "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {}",
             row.item_hash,
             name,
@@ -201,7 +207,17 @@ fn render_rows(rows: &[InstanceRow], json: bool) -> Result<(), Box<dyn std::erro
             hash_w = hash_w,
             name_w = name_w,
             owner_w = owner_w,
-        );
+        )
+        .expect("writing to String cannot fail");
+    }
+    out
+}
+
+fn render_rows(rows: &[InstanceRow], json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&format_rows_json(rows))?);
+    } else {
+        print!("{}", format_rows_text(rows));
     }
     Ok(())
 }
@@ -1134,5 +1150,111 @@ mod tests {
             row.node_hash.as_deref(),
             Some("dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04")
         );
+    }
+
+    fn sample_row(
+        hash: &str,
+        name: Option<&str>,
+        node: Option<&str>,
+        epoch_seconds: f64,
+    ) -> InstanceRow {
+        InstanceRow {
+            item_hash: hash.parse().expect("valid item hash"),
+            name: name.map(|s| s.to_string()),
+            owner: Address::from("0xAbCd1234567890aBcDEf1234567890AbCdEF1234".to_string()),
+            node_hash: node.map(|s| s.to_string()),
+            created_at: Timestamp::from(epoch_seconds),
+        }
+    }
+
+    #[test]
+    fn format_rows_json_shape() {
+        // Unix epoch 1_700_000_000 = 2023-11-14T22:13:20Z — used as a known-good
+        // anchor to verify `created_at` is emitted as RFC 3339.
+        let rows = vec![
+            sample_row(
+                "0000000000000000000000000000000000000000000000000000000000000001",
+                Some("vm-a"),
+                Some("aa00"),
+                1_700_000_000.0,
+            ),
+            sample_row(
+                "0000000000000000000000000000000000000000000000000000000000000002",
+                None,
+                None,
+                1_700_000_001.0,
+            ),
+        ];
+        let value = format_rows_json(&rows);
+        let arr = value.as_array().expect("top-level is array");
+        assert_eq!(arr.len(), 2);
+
+        // First row: all fields populated.
+        assert_eq!(
+            arr[0]["item_hash"],
+            "0000000000000000000000000000000000000000000000000000000000000001"
+        );
+        assert_eq!(arr[0]["name"], "vm-a");
+        assert_eq!(
+            arr[0]["owner"],
+            "0xAbCd1234567890aBcDEf1234567890AbCdEF1234"
+        );
+        assert_eq!(arr[0]["node_hash"], "aa00");
+        assert_eq!(arr[0]["created_at"], "2023-11-14T22:13:20+00:00");
+
+        // Second row: missing name and node_hash serialize as JSON null.
+        assert!(arr[1]["name"].is_null());
+        assert!(arr[1]["node_hash"].is_null());
+    }
+
+    #[test]
+    fn format_rows_text_header_and_placeholders() {
+        let rows = vec![
+            sample_row(
+                "0000000000000000000000000000000000000000000000000000000000000001",
+                Some("vm-a"),
+                Some("aa00"),
+                1_700_000_000.0,
+            ),
+            sample_row(
+                "0000000000000000000000000000000000000000000000000000000000000002",
+                None,
+                None,
+                1_700_000_001.0,
+            ),
+        ];
+        let text = format_rows_text(&rows);
+        let lines: Vec<&str> = text.lines().collect();
+
+        // Header + two data rows.
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("ITEM HASH"));
+        assert!(lines[0].contains("NAME"));
+        assert!(lines[0].contains("OWNER"));
+        assert!(lines[0].contains("NODE"));
+
+        // Populated row renders the real values.
+        assert!(
+            lines[1].contains("0000000000000000000000000000000000000000000000000000000000000001")
+        );
+        assert!(lines[1].contains("vm-a"));
+        assert!(lines[1].contains("aa00"));
+
+        // Missing fields use the ASCII `-` placeholder (not `—`).
+        assert!(!lines[2].contains('—'));
+        // Exactly two `-` placeholders on the missing-fields row: one for NAME
+        // and one for NODE. Check with word boundaries (space on each side).
+        assert_eq!(
+            lines[2].matches(" - ").count() + lines[2].ends_with(" -") as usize,
+            2
+        );
+    }
+
+    #[test]
+    fn format_rows_text_empty_has_header_only() {
+        let text = format_rows_text(&[]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("ITEM HASH"));
     }
 }
