@@ -273,11 +273,21 @@ fn prompt_crn<'a>(
     }
 }
 
+/// The CRN's T&C hash, or `None` if unset/empty.
+/// The aggregator serves `""` as well as absent; both mean "no T&C".
+fn effective_tac_hash(chosen: &CrnListEntry) -> Option<&str> {
+    chosen
+        .terms_and_conditions
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
 async fn accept_terms_and_conditions(
     _aleph_client: &AlephClient,
     chosen: &CrnListEntry,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(tac_hash) = chosen.terms_and_conditions.as_deref() else {
+    let Some(tac_hash) = effective_tac_hash(chosen) else {
         return Ok(());
     };
     eprintln!(
@@ -394,5 +404,44 @@ mod tests {
         });
         let names: Vec<&str> = sorted.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["c", "b", "a"]);
+    }
+
+    fn entry_with_tac(tac: Option<&str>) -> CrnListEntry {
+        use std::collections::HashMap;
+        CrnListEntry {
+            hash: "h".into(),
+            name: "n".into(),
+            address: "https://x.y".into(),
+            score: None,
+            version: None,
+            payment_receiver_address: None,
+            gpu_support: false,
+            confidential_support: false,
+            qemu_support: false,
+            ipv6_check: None,
+            system_usage: None,
+            compatible_available_gpus: None,
+            terms_and_conditions: tac.map(str::to_string),
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn effective_tac_hash_none_when_absent() {
+        assert_eq!(effective_tac_hash(&entry_with_tac(None)), None);
+    }
+
+    #[test]
+    fn effective_tac_hash_none_when_empty_or_whitespace() {
+        assert_eq!(effective_tac_hash(&entry_with_tac(Some(""))), None);
+        assert_eq!(effective_tac_hash(&entry_with_tac(Some("   "))), None);
+    }
+
+    #[test]
+    fn effective_tac_hash_returns_trimmed() {
+        assert_eq!(
+            effective_tac_hash(&entry_with_tac(Some("  abc123  "))),
+            Some("abc123")
+        );
     }
 }
