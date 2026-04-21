@@ -54,7 +54,7 @@ pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
 }
 
 /// Well-known rootfs image presets.
-const IMAGE_PRESETS: &[(&str, &str)] = &[
+pub(crate) const IMAGE_PRESETS: &[(&str, &str)] = &[
     (
         "ubuntu22",
         "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c",
