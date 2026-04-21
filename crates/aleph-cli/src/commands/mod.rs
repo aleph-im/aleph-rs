@@ -5,6 +5,7 @@ pub mod config;
 pub mod crn;
 pub mod file;
 pub mod instance;
+pub mod instance_interactive;
 pub mod message;
 pub mod node;
 pub mod post;

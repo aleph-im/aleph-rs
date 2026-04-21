@@ -4,6 +4,7 @@ pub mod builder;
 pub mod client;
 pub mod corechannel;
 pub mod crn;
+pub mod crns_list;
 pub mod messages;
 mod proto;
 pub mod verify;

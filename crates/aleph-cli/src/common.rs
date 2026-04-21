@@ -1,7 +1,8 @@
 use std::io::Read;
 use std::time::Duration;
 
-use aleph_sdk::client::{AlephMessageClient, MessageError};
+use aleph_sdk::client::{AlephMessageClient, MessageError, MessageWithStatus};
+use aleph_types::item_hash::ItemHash;
 use aleph_types::message::pending::PendingMessage;
 use url::Url;
 
@@ -76,7 +77,12 @@ pub async fn submit_or_preview(
     let response = match client.submit_message(pending, true).await {
         Ok(r) => r,
         Err(MessageError::ApiError { status, body }) => {
-            return Err(format_api_error(status, &body, json).into());
+            let rejection_code = if status == 422 && is_rejection_body(&body) {
+                fetch_rejection_error_code(client, &pending.item_hash).await
+            } else {
+                None
+            };
+            return Err(format_api_error(status, &body, rejection_code, json).into());
         }
         Err(e) => return Err(e.into()),
     };
@@ -148,13 +154,30 @@ fn print_human_result(ccn_url: &Url, pending: &PendingMessage, message_status: &
 
 /// Format an API error for display. Tries to extract a human-readable message
 /// from the JSON body; falls back to the raw body if parsing fails.
-pub fn format_api_error(status: u16, body: &str, json: bool) -> String {
+///
+/// `rejection_code` is the `error_code` from the rejected-message record when
+/// the caller has already fetched it (see `fetch_rejection_error_code`). Pass
+/// `None` when unknown.
+pub fn format_api_error(
+    status: u16,
+    body: &str,
+    rejection_code: Option<i64>,
+    json: bool,
+) -> String {
     if json {
         // In JSON mode, output structured error to stdout and return a short message
         let error_json = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-            serde_json::json!({ "error": parsed, "http_status": status })
+            serde_json::json!({
+                "error": parsed,
+                "http_status": status,
+                "rejection_code": rejection_code,
+            })
         } else {
-            serde_json::json!({ "error": body, "http_status": status })
+            serde_json::json!({
+                "error": body,
+                "http_status": status,
+                "rejection_code": rejection_code,
+            })
         };
         // Print the structured error to stdout for tooling to parse
         println!(
@@ -175,9 +198,77 @@ pub fn format_api_error(status: u16, body: &str, json: bool) -> String {
         if let Some(msg) = message {
             return format!("Message {status_str} (HTTP {status}): {msg}");
         }
+
+        if status_str == "rejected" {
+            if let Some(code) = rejection_code {
+                return format!(
+                    "Message rejected by the CCN (HTTP {status}): {reason} (error code {code}).",
+                    reason = describe_rejection_error_code(code),
+                );
+            }
+            return format!(
+                "Message rejected by the CCN (HTTP {status}) — no reason provided. \
+                 Common causes: insufficient credit balance, invalid signature, \
+                 or an unknown/forgotten reference (image, volume, T&C). \
+                 Check your credits and inputs, then retry."
+            );
+        }
     }
 
     format!("API error (HTTP {status}): {body}")
+}
+
+/// Returns true if `body` is a CCN rejection envelope (`message_status: rejected`).
+fn is_rejection_body(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["message_status"].as_str().map(str::to_string))
+        .is_some_and(|s| s == "rejected")
+}
+
+/// Best-effort lookup: fetch the rejected message from the CCN and return its
+/// `error_code`. Returns `None` on any failure (message not yet queryable, network,
+/// etc.) — the caller falls back to a generic hint.
+async fn fetch_rejection_error_code(
+    client: &aleph_sdk::client::AlephClient,
+    hash: &ItemHash,
+) -> Option<i64> {
+    match client.get_message(hash).await.ok()? {
+        MessageWithStatus::Rejected { error_code, .. } => Some(error_code),
+        _ => None,
+    }
+}
+
+/// Human-readable label for a pyaleph `ErrorCode`. Mirrors
+/// `aleph.types.message_status.ErrorCode`.
+fn describe_rejection_error_code(code: i64) -> &'static str {
+    match code {
+        -1 => "internal server error",
+        0 => "invalid message format",
+        1 => "invalid signature",
+        2 => "permission denied",
+        3 => "referenced content unavailable",
+        4 => "referenced file unavailable",
+        5 => "insufficient $ALEPH balance",
+        6 => "insufficient credit balance",
+        100 => "post amend: no target specified",
+        101 => "post amend: target not found",
+        102 => "post amend: cannot amend an amend",
+        200 => "store: reference not found",
+        201 => "store update: cannot update an update",
+        202 => "invalid payment method",
+        300 => "VM: reference not found",
+        301 => "VM: volume not found",
+        302 => "VM: amend not allowed",
+        303 => "VM: cannot update an update",
+        304 => "VM: volume too small",
+        500 => "forget: no target specified",
+        501 => "forget: target not found",
+        502 => "forget: cannot forget a forget",
+        503 => "forget: not allowed",
+        504 => "message already forgotten",
+        _ => "unknown rejection reason",
+    }
 }
 
 use aleph_types::chain::Address;
@@ -319,7 +410,7 @@ mod tests {
     #[test]
     fn format_api_error_extracts_nested_message() {
         let body = r#"{"error":{"code":503,"message":"forget address does not match"},"message_status":"rejected"}"#;
-        let formatted = format_api_error(422, body, false);
+        let formatted = format_api_error(422, body, None, false);
         assert_eq!(
             formatted,
             "Message rejected (HTTP 422): forget address does not match"
@@ -329,20 +420,70 @@ mod tests {
     #[test]
     fn format_api_error_extracts_top_level_message() {
         let body = r#"{"message":"bad request"}"#;
-        let formatted = format_api_error(400, body, false);
+        let formatted = format_api_error(400, body, None, false);
         assert_eq!(formatted, "Message error (HTTP 400): bad request");
     }
 
     #[test]
     fn format_api_error_falls_back_to_raw_body() {
-        let formatted = format_api_error(500, "internal server error", false);
+        let formatted = format_api_error(500, "internal server error", None, false);
         assert_eq!(formatted, "API error (HTTP 500): internal server error");
+    }
+
+    #[test]
+    fn format_api_error_rejected_without_code_gives_generic_hint() {
+        // No rejection_code → fall back to the generic hint, not the raw envelope.
+        let body = r#"{"publication_status":{"status":"success","failed":[]},"message_status":"rejected"}"#;
+        let formatted = format_api_error(422, body, None, false);
+        assert!(formatted.contains("no reason provided"), "got: {formatted}");
+        assert!(
+            !formatted.contains("publication_status"),
+            "got: {formatted}"
+        );
+    }
+
+    #[test]
+    fn format_api_error_rejected_with_code_surfaces_reason() {
+        let body = r#"{"publication_status":{"status":"success","failed":[]},"message_status":"rejected"}"#;
+        // Error code 6 = CREDIT_INSUFFICIENT.
+        let formatted = format_api_error(422, body, Some(6), false);
+        assert!(
+            formatted.contains("insufficient credit balance"),
+            "got: {formatted}",
+        );
+        assert!(formatted.contains("error code 6"), "got: {formatted}");
+    }
+
+    #[test]
+    fn describe_rejection_error_code_covers_known_codes() {
+        assert_eq!(
+            describe_rejection_error_code(5),
+            "insufficient $ALEPH balance"
+        );
+        assert_eq!(
+            describe_rejection_error_code(6),
+            "insufficient credit balance"
+        );
+        assert_eq!(describe_rejection_error_code(1), "invalid signature");
+        assert_eq!(describe_rejection_error_code(301), "VM: volume not found");
+        assert_eq!(
+            describe_rejection_error_code(9999),
+            "unknown rejection reason"
+        );
+    }
+
+    #[test]
+    fn is_rejection_body_detects_envelope() {
+        assert!(is_rejection_body(r#"{"message_status":"rejected"}"#));
+        assert!(!is_rejection_body(r#"{"message_status":"processed"}"#));
+        assert!(!is_rejection_body("not json"));
+        assert!(!is_rejection_body("{}"));
     }
 
     #[test]
     fn format_api_error_json_mode() {
         let body = r#"{"error":"something broke"}"#;
-        let formatted = format_api_error(422, body, true);
+        let formatted = format_api_error(422, body, None, true);
         assert_eq!(formatted, "API request failed (HTTP 422)");
     }
 }

@@ -259,7 +259,7 @@ const SSH_PUBKEY_PREFIXES: &[&str] = &[
     "sk-ecdsa-sha2-nistp256@openssh.com",
 ];
 
-fn validate_ssh_pubkey(
+pub(crate) fn validate_ssh_pubkey(
     key: &str,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -392,14 +392,32 @@ fn parse_immutable_volumes(
         .collect()
 }
 
+/// Resolve (vcpus, memory_mib, disk_mib) from flags when no `--size` slug is used.
+/// Defaults: 1 vCPU, 2048 MiB memory; disk must be provided.
+pub(crate) fn resolve_instance_specs_from_flags(
+    vcpus: Option<u32>,
+    memory_mib: Option<u64>,
+    disk_mib: Option<u64>,
+) -> Result<(u32, u64, u64), Box<dyn std::error::Error>> {
+    let disk_mib = disk_mib.ok_or(
+        "--disk-size is required when --size is not used \
+         (or use --size to specify a tier slug like 1vcpu-2gb)",
+    )?;
+    Ok((vcpus.unwrap_or(1), memory_mib.unwrap_or(2048), disk_mib))
+}
+
 async fn handle_instance_create(
     aleph_client: &AlephClient,
     ccn_url: &Url,
     json: bool,
-    args: InstanceCreateArgs,
+    mut args: InstanceCreateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing)?;
+
+    if args.interactive {
+        crate::commands::instance_interactive::resolve_interactive(&mut args, aleph_client).await?;
+    }
 
     // Read and validate SSH public keys
     let mut ssh_keys = Vec::new();
@@ -439,18 +457,14 @@ async fn handle_instance_create(
 
         (vcpus, memory_mib, disk_size_mib)
     } else {
-        let disk_size_mib = args
-            .disk_size
-            .ok_or("--disk-size is required when --size is not used (or use --size to specify a tier slug like 1vcpu-2gb)")?;
-        let vcpus = args.vcpus.unwrap_or(1);
-        let memory_mib = args.memory.unwrap_or(2048);
-        (vcpus, memory_mib, disk_size_mib)
+        resolve_instance_specs_from_flags(args.vcpus, args.memory, args.disk_size)?
     };
 
     let disk_size = PersistentVolumeSize::try_from(disk_size_mib)
         .map_err(|e| format!("invalid disk size: {e}"))?;
 
-    let mut builder = InstanceBuilder::new(&account, args.image, disk_size)
+    let image = args.image.ok_or("--image is required (or use -i)")?;
+    let mut builder = InstanceBuilder::new(&account, image, disk_size)
         .vcpus(vcpus)
         .memory(MiB::from(memory_mib))
         .hypervisor(Hypervisor::Qemu)
@@ -1262,5 +1276,22 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("ITEM HASH"));
+    }
+
+    #[test]
+    fn resolve_instance_specs_without_size_uses_defaults() {
+        let specs = resolve_instance_specs_from_flags(None, None, Some(20 * 1024));
+        assert_eq!(specs.unwrap(), (1, 2048, 20 * 1024));
+    }
+
+    #[test]
+    fn resolve_instance_specs_without_size_requires_disk() {
+        assert!(resolve_instance_specs_from_flags(None, None, None).is_err());
+    }
+
+    #[test]
+    fn resolve_instance_specs_applies_overrides() {
+        let specs = resolve_instance_specs_from_flags(Some(4), Some(8192), Some(40 * 1024));
+        assert_eq!(specs.unwrap(), (4, 8192, 40 * 1024));
     }
 }
