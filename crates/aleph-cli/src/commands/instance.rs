@@ -1,7 +1,11 @@
-use crate::cli::{InstanceCommand, InstanceCreateArgs, InstancePriceArgs, parse_size_to_mib};
+use crate::cli::{
+    InstanceCommand, InstanceCreateArgs, InstanceListArgs, InstancePriceArgs, parse_size_to_mib,
+};
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
-use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter};
 use aleph_sdk::messages::InstanceBuilder;
+use aleph_types::account::Account;
+use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::{Payment, PaymentType};
@@ -13,8 +17,210 @@ use aleph_types::message::execution::volume::{
     BaseVolume, EphemeralVolume, ImmutableVolume, MachineVolume, PersistentVolume,
     PersistentVolumeSize, VolumePersistence,
 };
+use aleph_types::message::{Message, MessageContentEnum, MessageType};
+use aleph_types::timestamp::Timestamp;
+use futures_util::StreamExt;
 use memsizes::MiB;
 use url::Url;
+
+/// One row of `aleph instance list` output, extracted from an INSTANCE message.
+#[derive(Debug, Clone)]
+pub(crate) struct InstanceRow {
+    pub item_hash: ItemHash,
+    pub name: Option<String>,
+    pub owner: Address,
+    pub node_hash: Option<String>,
+    pub created_at: Timestamp,
+}
+
+fn name_from_metadata(
+    metadata: Option<&std::collections::HashMap<String, serde_json::Value>>,
+) -> Option<String> {
+    metadata
+        .and_then(|m| m.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn node_from_requirements(requirements: Option<&HostRequirements>) -> Option<String> {
+    requirements
+        .and_then(|r| r.node.as_ref())
+        .and_then(|n| n.node_hash.clone())
+}
+
+/// Convert an INSTANCE message into a row. Returns `None` for non-instance
+/// messages (defensive — callers already filter by `MessageType::Instance`,
+/// but the CCN can occasionally return a mis-typed payload).
+pub(crate) fn extract_instance_row(message: &Message) -> Option<InstanceRow> {
+    let MessageContentEnum::Instance(instance) = message.content() else {
+        return None;
+    };
+    Some(InstanceRow {
+        item_hash: message.item_hash.clone(),
+        name: name_from_metadata(instance.base.metadata.as_ref()),
+        owner: message.owner().clone(),
+        node_hash: node_from_requirements(instance.base.requirements.as_ref()),
+        created_at: message.content.time.clone(),
+    })
+}
+
+/// Fetch all INSTANCE rows for `address`, deduped by item_hash.
+/// Runs the sender filter and the owner filter in sequence and merges them
+/// (the CCN ANDs `addresses` and `owners`; we want OR).
+async fn fetch_instance_rows(
+    aleph_client: &AlephClient,
+    address: &Address,
+) -> Result<Vec<InstanceRow>, Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+
+    let mut by_hash: HashMap<ItemHash, InstanceRow> = HashMap::new();
+
+    for filter in [
+        MessageFilter {
+            message_type: Some(MessageType::Instance),
+            addresses: Some(vec![address.clone()]),
+            ..Default::default()
+        },
+        MessageFilter {
+            message_type: Some(MessageType::Instance),
+            owners: Some(vec![address.clone()]),
+            ..Default::default()
+        },
+    ] {
+        let mut stream = Box::pin(aleph_client.get_messages_iterator(filter, None));
+        while let Some(message) = stream.next().await {
+            let message = message?;
+            if let Some(row) = extract_instance_row(&message) {
+                by_hash.entry(row.item_hash.clone()).or_insert(row);
+            } else {
+                eprintln!(
+                    "warning: skipping message {} with non-instance content",
+                    message.item_hash
+                );
+            }
+        }
+    }
+
+    let mut rows: Vec<InstanceRow> = by_hash.into_values().collect();
+    // Newest first: sort by content.time descending.
+    rows.sort_by(|a, b| {
+        b.created_at
+            .as_f64()
+            .partial_cmp(&a.created_at.as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(rows)
+}
+
+async fn handle_instance_list(
+    aleph_client: &AlephClient,
+    json: bool,
+    args: InstanceListArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let address = match args.address.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => {
+            // Fall back to the current default signing account's address.
+            // SigningArgs has no Default impl, so construct one with the same
+            // defaults clap would assign (no --account, no --private-key, eth chain).
+            let signing = crate::cli::SigningArgs {
+                account: None,
+                private_key: None,
+                chain: crate::cli::ChainCli::Eth,
+                dry_run: false,
+            };
+            let account = resolve_account(&signing)?;
+            account.address().clone()
+        }
+    };
+
+    let rows = fetch_instance_rows(aleph_client, &address).await?;
+    render_rows(&rows, json)
+}
+
+const MISSING_VALUE: &str = "-";
+
+fn format_rows_json(rows: &[InstanceRow]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "item_hash": r.item_hash.to_string(),
+                "name": r.name,
+                "owner": r.owner.to_string(),
+                "node_hash": r.node_hash,
+                "created_at": r.created_at
+                    .to_datetime()
+                    .ok()
+                    .map(|dt| dt.to_rfc3339()),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items)
+}
+
+fn format_rows_text(rows: &[InstanceRow]) -> String {
+    use std::fmt::Write;
+
+    let hash_w = rows
+        .iter()
+        .map(|r| r.item_hash.to_string().len())
+        .chain(std::iter::once("ITEM HASH".len()))
+        .max()
+        .unwrap_or("ITEM HASH".len());
+    let name_w = rows
+        .iter()
+        .map(|r| r.name.as_deref().unwrap_or(MISSING_VALUE).len())
+        .chain(std::iter::once("NAME".len()))
+        .max()
+        .unwrap_or("NAME".len());
+    let owner_w = rows
+        .iter()
+        .map(|r| r.owner.to_string().len())
+        .chain(std::iter::once("OWNER".len()))
+        .max()
+        .unwrap_or("OWNER".len());
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  NODE",
+        "ITEM HASH",
+        "NAME",
+        "OWNER",
+        hash_w = hash_w,
+        name_w = name_w,
+        owner_w = owner_w,
+    )
+    .expect("writing to String cannot fail");
+
+    for row in rows {
+        let name = row.name.as_deref().unwrap_or(MISSING_VALUE);
+        let node = row.node_hash.as_deref().unwrap_or(MISSING_VALUE);
+        writeln!(
+            out,
+            "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {}",
+            row.item_hash,
+            name,
+            row.owner,
+            node,
+            hash_w = hash_w,
+            name_w = name_w,
+            owner_w = owner_w,
+        )
+        .expect("writing to String cannot fail");
+    }
+    out
+}
+
+fn render_rows(rows: &[InstanceRow], json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&format_rows_json(rows))?);
+    } else {
+        print!("{}", format_rows_text(rows));
+    }
+    Ok(())
+}
 
 pub async fn handle_instance_command(
     aleph_client: &AlephClient,
@@ -28,6 +234,9 @@ pub async fn handle_instance_command(
         }
         InstanceCommand::Price(args) => {
             handle_instance_price(aleph_client, json, args).await?;
+        }
+        InstanceCommand::List(args) => {
+            handle_instance_list(aleph_client, json, args).await?;
         }
     }
     Ok(())
@@ -850,5 +1059,202 @@ mod tests {
     fn parse_image_invalid() {
         assert!(parse_image("windows11").is_err());
         assert!(parse_image("abc").is_err());
+    }
+
+    use std::collections::HashMap;
+
+    #[test]
+    fn name_from_metadata_returns_string_value() {
+        let mut meta = HashMap::new();
+        meta.insert("name".to_string(), serde_json::json!("my-vm"));
+        assert_eq!(name_from_metadata(Some(&meta)), Some("my-vm".to_string()));
+    }
+
+    #[test]
+    fn name_from_metadata_returns_none_when_missing() {
+        assert_eq!(name_from_metadata(None), None);
+        let empty: HashMap<String, serde_json::Value> = HashMap::new();
+        assert_eq!(name_from_metadata(Some(&empty)), None);
+    }
+
+    #[test]
+    fn name_from_metadata_returns_none_for_non_string() {
+        let mut meta = HashMap::new();
+        meta.insert("name".to_string(), serde_json::json!(42));
+        assert_eq!(name_from_metadata(Some(&meta)), None);
+    }
+
+    #[test]
+    fn node_from_requirements_returns_node_hash() {
+        let req = HostRequirements {
+            cpu: None,
+            node: Some(NodeRequirements {
+                owner: None,
+                address_regex: None,
+                node_hash: Some("aa00".to_string()),
+                terms_and_conditions: None,
+            }),
+            gpu: None,
+        };
+        assert_eq!(node_from_requirements(Some(&req)), Some("aa00".to_string()));
+    }
+
+    #[test]
+    fn node_from_requirements_returns_none_when_no_requirements() {
+        assert_eq!(node_from_requirements(None), None);
+    }
+
+    #[test]
+    fn node_from_requirements_returns_none_when_no_node() {
+        let req = HostRequirements {
+            cpu: None,
+            node: None,
+            gpu: None,
+        };
+        assert_eq!(node_from_requirements(Some(&req)), None);
+    }
+
+    #[test]
+    fn node_from_requirements_returns_none_when_node_hash_missing() {
+        let req = HostRequirements {
+            cpu: None,
+            node: Some(NodeRequirements {
+                owner: None,
+                address_regex: None,
+                node_hash: None,
+                terms_and_conditions: None,
+            }),
+            gpu: None,
+        };
+        assert_eq!(node_from_requirements(Some(&req)), None);
+    }
+
+    #[test]
+    fn extract_instance_row_from_fixture() {
+        const FIXTURE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/instance/instance-gpu-payg.json"
+        ));
+        let message: Message = serde_json::from_str(FIXTURE).expect("fixture parses");
+        let row = extract_instance_row(&message).expect("instance row extracted");
+        assert_eq!(
+            row.item_hash.to_string(),
+            "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564"
+        );
+        assert_eq!(row.name.as_deref(), Some("gpu-l40s-2"));
+        assert_eq!(
+            row.owner.to_string(),
+            "0x238224C744F4b90b4494516e074D2676ECfC6803"
+        );
+        assert_eq!(
+            row.node_hash.as_deref(),
+            Some("dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04")
+        );
+    }
+
+    fn sample_row(
+        hash: &str,
+        name: Option<&str>,
+        node: Option<&str>,
+        epoch_seconds: f64,
+    ) -> InstanceRow {
+        InstanceRow {
+            item_hash: hash.parse().expect("valid item hash"),
+            name: name.map(|s| s.to_string()),
+            owner: Address::from("0xAbCd1234567890aBcDEf1234567890AbCdEF1234".to_string()),
+            node_hash: node.map(|s| s.to_string()),
+            created_at: Timestamp::from(epoch_seconds),
+        }
+    }
+
+    #[test]
+    fn format_rows_json_shape() {
+        // Unix epoch 1_700_000_000 = 2023-11-14T22:13:20Z — used as a known-good
+        // anchor to verify `created_at` is emitted as RFC 3339.
+        let rows = vec![
+            sample_row(
+                "0000000000000000000000000000000000000000000000000000000000000001",
+                Some("vm-a"),
+                Some("aa00"),
+                1_700_000_000.0,
+            ),
+            sample_row(
+                "0000000000000000000000000000000000000000000000000000000000000002",
+                None,
+                None,
+                1_700_000_001.0,
+            ),
+        ];
+        let value = format_rows_json(&rows);
+        let arr = value.as_array().expect("top-level is array");
+        assert_eq!(arr.len(), 2);
+
+        // First row: all fields populated.
+        assert_eq!(
+            arr[0]["item_hash"],
+            "0000000000000000000000000000000000000000000000000000000000000001"
+        );
+        assert_eq!(arr[0]["name"], "vm-a");
+        assert_eq!(
+            arr[0]["owner"],
+            "0xAbCd1234567890aBcDEf1234567890AbCdEF1234"
+        );
+        assert_eq!(arr[0]["node_hash"], "aa00");
+        assert_eq!(arr[0]["created_at"], "2023-11-14T22:13:20+00:00");
+
+        // Second row: missing name and node_hash serialize as JSON null.
+        assert!(arr[1]["name"].is_null());
+        assert!(arr[1]["node_hash"].is_null());
+    }
+
+    #[test]
+    fn format_rows_text_header_and_placeholders() {
+        let rows = vec![
+            sample_row(
+                "0000000000000000000000000000000000000000000000000000000000000001",
+                Some("vm-a"),
+                Some("aa00"),
+                1_700_000_000.0,
+            ),
+            sample_row(
+                "0000000000000000000000000000000000000000000000000000000000000002",
+                None,
+                None,
+                1_700_000_001.0,
+            ),
+        ];
+        let text = format_rows_text(&rows);
+        let lines: Vec<&str> = text.lines().collect();
+
+        // Header + two data rows.
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("ITEM HASH"));
+        assert!(lines[0].contains("NAME"));
+        assert!(lines[0].contains("OWNER"));
+        assert!(lines[0].contains("NODE"));
+
+        // Populated row renders the real values.
+        assert!(
+            lines[1].contains("0000000000000000000000000000000000000000000000000000000000000001")
+        );
+        assert!(lines[1].contains("vm-a"));
+        assert!(lines[1].contains("aa00"));
+
+        // Missing fields use the ASCII `-` placeholder (not `—`).
+        assert!(!lines[2].contains('—'));
+        // Exactly two `-` placeholders on the missing-fields row: one for NAME
+        // and one for NODE. Check with word boundaries (space on each side).
+        assert_eq!(
+            lines[2].matches(" - ").count() + lines[2].ends_with(" -") as usize,
+            2
+        );
+    }
+
+    #[test]
+    fn format_rows_text_empty_has_header_only() {
+        let text = format_rows_text(&[]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("ITEM HASH"));
     }
 }
