@@ -38,8 +38,16 @@ pub async fn resolve_interactive(
         confidential: args.confidential,
         gpu: args.gpu.is_some(),
     };
-    let _filtered = crn_list.filter(&filter);
-    // (CRN picker implemented in Task 10.)
+    let filtered = crn_list.filter(&filter);
+    if filtered.is_empty() {
+        return Err(format!(
+            "No CRN matches the requirements (vcpus={}, memory_mib={}, disk_mib={}, confidential={}, gpu={}). \
+             Try a smaller size or wait for capacity.",
+            vcpus, memory_mib, disk_mib, filter.confidential, filter.gpu
+        ).into());
+    }
+    let chosen = prompt_crn(&filtered)?;
+    args.crn_hash = Some(chosen.hash.clone());
 
     Ok(())
 }
@@ -153,5 +161,117 @@ fn prompt_image() -> Result<ItemHash, Box<dyn std::error::Error>> {
             })
             .interact_text()?;
         parse_image(&raw).map_err(Into::into)
+    }
+}
+
+use aleph_sdk::crns_list::CrnListEntry;
+
+fn format_crn_table(entries: &[&CrnListEntry]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:>4}  {:>5}  {:<24}  {:<9}  {:>9}  {:>10}  {:<3}  {:<3}  {}\n",
+        "#", "Score", "Name", "Version", "Free RAM", "Free Disk", "🔒", "GPU", "URL",
+    ));
+    for (i, e) in entries.iter().enumerate() {
+        let score = e
+            .score
+            .map(|s| format!("{:.1}%", s * 100.0))
+            .unwrap_or_else(|| "-".into());
+        let version = e.version.clone().unwrap_or_else(|| "-".into());
+        let (ram, disk) = match &e.system_usage {
+            Some(u) => (
+                format!("{} MiB", u.mem.available_kb / 1024),
+                format!("{} MiB", u.disk.available_kb / 1024),
+            ),
+            None => ("-".into(), "-".into()),
+        };
+        let conf = if e.confidential_support { "✓" } else { " " };
+        let gpu = if e.gpu_support { "✓" } else { " " };
+        out.push_str(&format!(
+            "{:>4}  {:>5}  {:<24}  {:<9}  {:>9}  {:>10}  {:<3}  {:<3}  {}\n",
+            i + 1,
+            score,
+            truncate(&e.name, 24),
+            truncate(&version, 9),
+            ram,
+            disk,
+            conf,
+            gpu,
+            e.address,
+        ));
+    }
+    out
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    }
+}
+
+use dialoguer::{Confirm, FuzzySelect};
+use std::cmp::Ordering;
+
+fn prompt_crn<'a>(
+    entries: &'a [&CrnListEntry],
+) -> Result<&'a CrnListEntry, Box<dyn std::error::Error>> {
+    // Pre-sort by score desc; None scores sort last.
+    let mut sorted: Vec<&CrnListEntry> = entries.to_vec();
+    sorted.sort_by(|a, b| match (b.score, a.score) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
+
+    loop {
+        eprintln!("{}", format_crn_table(&sorted));
+
+        let labels: Vec<String> = sorted
+            .iter()
+            .map(|e| {
+                let score = e.score.map(|s| format!("{:.1}%", s * 100.0)).unwrap_or("-".into());
+                format!("{:<6} {:<24} {}", score, truncate(&e.name, 24), e.address)
+            })
+            .collect();
+        let idx = FuzzySelect::new()
+            .with_prompt("Choose a CRN (type to search)")
+            .items(&labels)
+            .default(0)
+            .interact()?;
+
+        let chosen = sorted[idx];
+        eprintln!(
+            "\nSelected CRN:\n  name:    {}\n  hash:    {}\n  url:     {}\n  score:   {}\n  version: {}\n",
+            chosen.name,
+            chosen.hash,
+            chosen.address,
+            chosen.score.map(|s| format!("{:.1}%", s * 100.0)).unwrap_or("-".into()),
+            chosen.version.as_deref().unwrap_or("-"),
+        );
+
+        if Confirm::new().with_prompt("Deploy on this node?").default(true).interact()? {
+            return Ok(chosen);
+        }
+        // User said no → back to FuzzySelect.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string_appends_ellipsis() {
+        assert_eq!(truncate("abcdefghij", 5), "abcd…");
     }
 }
