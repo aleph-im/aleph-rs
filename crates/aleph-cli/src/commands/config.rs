@@ -102,17 +102,18 @@ fn handle_network_show(
     json: bool,
     cli_network: Option<&str>,
 ) -> Result<()> {
+    let default_network = store.default_network_name()?;
     let name = match args.name {
         Some(n) => n,
         None => cli_network
             .map(str::to_string)
-            .or(store.default_network_name()?)
+            .or_else(|| default_network.clone())
             .ok_or_else(|| {
                 anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
             })?,
     };
     let net = store.get_network(&name)?;
-    let is_default = store.default_network_name()?.as_deref() == Some(name.as_str());
+    let is_default = default_network.as_deref() == Some(name.as_str());
     if json {
         let output = serde_json::json!({
             "name": net.name,
