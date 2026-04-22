@@ -254,11 +254,6 @@ impl ConfigStore {
         self.save_manifest(&manifest)
     }
 
-    #[allow(dead_code)]
-    pub fn list_ccns(&self, network: &str) -> Result<Vec<CcnEntry>, ConfigError> {
-        Ok(self.get_network(network)?.ccns)
-    }
-
     pub fn list_all_ccns(&self) -> Result<Vec<(String, CcnEntry)>, ConfigError> {
         let manifest = self.load_manifest()?;
         let mut out = Vec::new();
@@ -550,16 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn list_ccns_in_network() {
-        let (_dir, store) = temp_store();
-        store.add_network("mainnet").unwrap();
-        store.add_ccn("mainnet", "a", "https://a.example").unwrap();
-        store.add_ccn("mainnet", "b", "https://b.example").unwrap();
-        let ccns = store.list_ccns("mainnet").unwrap();
-        assert_eq!(ccns.len(), 2);
-    }
-
-    #[test]
     fn get_ccn_not_in_network_errors() {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
@@ -574,7 +559,7 @@ mod tests {
         store.add_ccn("mainnet", "a", "https://a.example").unwrap();
         store.add_ccn("mainnet", "b", "https://b.example").unwrap();
         store.remove_ccn("mainnet", "b").unwrap();
-        let ccns = store.list_ccns("mainnet").unwrap();
+        let ccns = store.get_network("mainnet").unwrap().ccns;
         assert_eq!(ccns.len(), 1);
         assert_eq!(ccns[0].name, "a");
     }
