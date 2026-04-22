@@ -977,7 +977,8 @@ pub struct AccountShowArgs {
 
 #[derive(Args)]
 pub struct AccountBalanceArgs {
-    /// Address to query (e.g. 0x...). If omitted, uses the default account.
+    /// Address to query, as a hex address (`0x…`) or a local account/alias
+    /// name. If omitted, uses the default account.
     pub address: Option<String>,
 }
 
