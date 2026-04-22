@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 pub const BUILTIN_CCN_NAME: &str = "official";
 pub const BUILTIN_CCN_URL: &str = "https://api.aleph.im";
+pub const BUILTIN_NETWORK_NAME: &str = "mainnet";
 
 /// One named CCN endpoint inside a network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,7 +269,22 @@ impl ConfigStore {
 
     // Built-in seeding — implemented in Task 4
     fn ensure_builtin(&self) -> Result<(), ConfigError> {
-        Ok(())
+        let mut manifest = self.load_manifest()?;
+        if !manifest.networks.is_empty() {
+            return Ok(());
+        }
+        manifest.networks.push(NetworkEntry {
+            name: BUILTIN_NETWORK_NAME.to_string(),
+            default_ccn: Some(BUILTIN_CCN_NAME.to_string()),
+            ccns: vec![CcnEntry {
+                name: BUILTIN_CCN_NAME.to_string(),
+                url: BUILTIN_CCN_URL.to_string(),
+            }],
+        });
+        if manifest.default_network.is_none() {
+            manifest.default_network = Some(BUILTIN_NETWORK_NAME.to_string());
+        }
+        self.save_manifest(&manifest)
     }
 }
 
@@ -588,5 +604,40 @@ mod tests {
         // no orphaned CCNs in list_all
         let all = store.list_all_ccns().unwrap();
         assert!(all.iter().all(|(n, _)| n != "testnet"));
+    }
+
+    #[test]
+    fn ensure_builtin_seeds_mainnet() {
+        let (_dir, store) = temp_store();
+        store.ensure_builtin().unwrap();
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "mainnet");
+        assert_eq!(nets[0].default_ccn.as_deref(), Some(BUILTIN_CCN_NAME));
+        assert_eq!(nets[0].ccns.len(), 1);
+        assert_eq!(nets[0].ccns[0].name, BUILTIN_CCN_NAME);
+        assert_eq!(nets[0].ccns[0].url, BUILTIN_CCN_URL);
+        assert_eq!(store.default_network_name().unwrap().as_deref(), Some("mainnet"));
+    }
+
+    #[test]
+    fn ensure_builtin_is_idempotent() {
+        let (_dir, store) = temp_store();
+        store.ensure_builtin().unwrap();
+        store.ensure_builtin().unwrap();
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].ccns.len(), 1);
+    }
+
+    #[test]
+    fn ensure_builtin_noop_when_networks_exist() {
+        let (_dir, store) = temp_store();
+        store.add_network("testnet").unwrap();
+        store.ensure_builtin().unwrap();
+        // mainnet not added because networks is non-empty
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "testnet");
     }
 }
