@@ -53,66 +53,6 @@ impl Account for CliAccount {
     }
 }
 
-/// Resolve the hex-encoded private key from explicit arg, env var, or account store.
-///
-/// Resolution order:
-/// 1. `private_key` argument (if Some)
-/// 2. `ALEPH_PRIVATE_KEY` environment variable
-/// 3. Named account from store (if `account_name` is Some)
-/// 4. Default account from store
-///
-/// Returns the hex-encoded key (without 0x prefix) wrapped in Zeroizing.
-/// Errors if the resolved account is a Ledger account (no raw key available).
-pub fn resolve_key_hex(
-    private_key: Option<&str>,
-    account_name: Option<&str>,
-) -> Result<Zeroizing<String>> {
-    // 1. Explicit private key takes precedence
-    if let Some(k) = private_key {
-        let hex = k.strip_prefix("0x").unwrap_or(k).to_string();
-        return Ok(Zeroizing::new(hex));
-    }
-
-    // 2. Environment variable
-    if let Ok(k) = std::env::var("ALEPH_PRIVATE_KEY") {
-        let hex = k.strip_prefix("0x").unwrap_or(&k).to_string();
-        return Ok(Zeroizing::new(hex));
-    }
-
-    // 3-4. Account store
-    let store = store::AccountStore::open()
-        .map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
-
-    let name = match account_name {
-        Some(name) => name.to_string(),
-        None => store
-            .default_account_name()
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .ok_or_else(|| anyhow::anyhow!(
-                "no account specified and no default account set.\n\
-                 Use --private-key, --account, or create an account with: aleph account create --name <NAME>"
-            ))?
-            .to_string(),
-    };
-
-    let entry = store
-        .get_account(&name)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    match entry.kind {
-        store::AccountKind::Local => {
-            let key_hex = store
-                .get_private_key(&name)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let hex = key_hex.strip_prefix("0x").unwrap_or(&key_hex).to_string();
-            Ok(Zeroizing::new(hex))
-        }
-        store::AccountKind::Ledger => {
-            bail!("Ledger accounts are not supported for credit purchases. Use a local account.")
-        }
-    }
-}
-
 /// Load an account from a hex-encoded private key and chain.
 ///
 /// The private key is read from `private_key` if provided, otherwise

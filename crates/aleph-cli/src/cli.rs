@@ -1549,15 +1549,6 @@ pub struct BuyCreditArgs {
     #[arg(long, default_value = "https://eth.llamarpc.com")]
     pub rpc_url: String,
 
-    /// Named account from keystore
-    #[arg(long)]
-    pub account: Option<String>,
-
-    /// Hex-encoded private key
-    #[arg(long)]
-    pub private_key: Option<String>,
-
-    /// Show estimate without submitting
-    #[arg(long)]
-    pub dry_run: bool,
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
