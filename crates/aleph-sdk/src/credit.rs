@@ -73,7 +73,7 @@ impl std::str::FromStr for PriceSource {
 
 /// Ethereum settlement config for a network.
 ///
-/// Lives inside [`crate::config`]-style network profiles on the CLI side, but
+/// Lives inside the CLI's network profiles (`aleph config network …`), but
 /// the shape is owned by the SDK because the SDK is what transacts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EthereumConfig {
