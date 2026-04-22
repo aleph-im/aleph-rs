@@ -56,7 +56,11 @@ fn handle_network_list(store: &ConfigStore, json: bool) -> Result<()> {
     }
     eprintln!("{:<2} {:<16} {:<6} DEFAULT CCN", "", "NAME", "CCNS");
     for n in &networks {
-        let marker = if default.as_deref() == Some(&n.name) { "*" } else { " " };
+        let marker = if default.as_deref() == Some(&n.name) {
+            "*"
+        } else {
+            " "
+        };
         let default_ccn = n.default_ccn.as_deref().unwrap_or("-");
         eprintln!(
             "{:<2} {:<16} {:<6} {}",
@@ -85,9 +89,9 @@ fn handle_network_use(store: &ConfigStore, args: NetworkUseArgs, json: bool) -> 
 fn handle_network_show(store: &ConfigStore, args: NetworkShowArgs, json: bool) -> Result<()> {
     let name = match args.name {
         Some(n) => n,
-        None => store
-            .default_network_name()?
-            .ok_or_else(|| anyhow::anyhow!("no default network set; use: aleph config network use <NAME>"))?,
+        None => store.default_network_name()?.ok_or_else(|| {
+            anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
+        })?,
     };
     let net = store.get_network(&name)?;
     let is_default = store.default_network_name()?.as_deref() == Some(name.as_str());
@@ -102,16 +106,17 @@ fn handle_network_show(store: &ConfigStore, args: NetworkShowArgs, json: bool) -
     } else {
         eprintln!("Name:        {}", net.name);
         eprintln!("Default:     {}", if is_default { "yes" } else { "no" });
-        eprintln!(
-            "Default CCN: {}",
-            net.default_ccn.as_deref().unwrap_or("-")
-        );
+        eprintln!("Default CCN: {}", net.default_ccn.as_deref().unwrap_or("-"));
         eprintln!("CCNs:");
         if net.ccns.is_empty() {
             eprintln!("  (none)");
         } else {
             for c in &net.ccns {
-                let marker = if net.default_ccn.as_deref() == Some(&c.name) { "*" } else { " " };
+                let marker = if net.default_ccn.as_deref() == Some(&c.name) {
+                    "*"
+                } else {
+                    " "
+                };
                 eprintln!("  {} {:<16} {}", marker, c.name, c.url);
             }
         }
@@ -137,17 +142,12 @@ fn handle_network_remove(store: &ConfigStore, args: NetworkRemoveArgs, json: boo
 /// If `override_name` is `Some`, that network is loaded (errors with
 /// `NetworkNotFound` if unknown). Otherwise the current `default_network`
 /// is used — errors if no default is set.
-fn resolve_ccn_scope(
-    store: &ConfigStore,
-    override_name: Option<&str>,
-) -> Result<NetworkEntry> {
+fn resolve_ccn_scope(store: &ConfigStore, override_name: Option<&str>) -> Result<NetworkEntry> {
     let name = match override_name {
         Some(n) => n.to_string(),
-        None => store
-            .default_network_name()?
-            .ok_or_else(|| anyhow::anyhow!(
-                "no default network set; use: aleph config network use <NAME>"
-            ))?,
+        None => store.default_network_name()?.ok_or_else(|| {
+            anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
+        })?,
     };
     Ok(store.get_network(&name)?)
 }
@@ -208,11 +208,13 @@ fn handle_list(store: &ConfigStore, args: CcnListArgs, json: bool) -> Result<()>
         if json {
             let items: Vec<_> = rows
                 .iter()
-                .map(|(net, c)| serde_json::json!({
-                    "network": net,
-                    "name": c.name,
-                    "url": c.url,
-                }))
+                .map(|(net, c)| {
+                    serde_json::json!({
+                        "network": net,
+                        "name": c.name,
+                        "url": c.url,
+                    })
+                })
                 .collect();
             println!("{}", serde_json::to_string_pretty(&items)?);
             return Ok(());
@@ -234,7 +236,11 @@ fn handle_list(store: &ConfigStore, args: CcnListArgs, json: bool) -> Result<()>
     eprintln!("Network: {}", net.name);
     eprintln!("{:<2} {:<16} URL", "", "NAME");
     for c in &net.ccns {
-        let marker = if net.default_ccn.as_deref() == Some(&c.name) { "*" } else { " " };
+        let marker = if net.default_ccn.as_deref() == Some(&c.name) {
+            "*"
+        } else {
+            " "
+        };
         eprintln!("{:<2} {:<16} {}", marker, c.name, c.url);
     }
     Ok(())
@@ -256,11 +262,13 @@ async fn handle_show(store: &ConfigStore, args: CcnShowArgs, json: bool) -> Resu
         .iter()
         .find(|c| c.name == name)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!(
-            "ccn '{ccn}' not found in network '{network}'",
-            ccn = name,
-            network = net.name,
-        ))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ccn '{ccn}' not found in network '{network}'",
+                ccn = name,
+                network = net.name,
+            )
+        })?;
     let is_default = net.default_ccn.as_deref() == Some(name.as_str());
     let version = fetch_ccn_version(&entry.url).await;
 

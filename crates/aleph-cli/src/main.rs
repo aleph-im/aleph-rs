@@ -35,7 +35,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let ccn_url = common::resolve_ccn_url(cli.ccn_url.as_deref(), cli.ccn.as_deref())?;
+    let ccn_url = common::resolve_ccn_url(
+        cli.ccn_url.as_deref(),
+        cli.ccn.as_deref(),
+        cli.network.as_deref(),
+    )?;
     let aleph_client = AlephClient::new(ccn_url.clone());
 
     match cli.command {

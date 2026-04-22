@@ -88,7 +88,7 @@ pub fn parse_image(s: &str) -> Result<ItemHash, String> {
 #[derive(Parser)]
 #[command(name = "aleph", version, about = "Aleph CLI")]
 pub struct Cli {
-    /// CCN endpoint URL (overrides --ccn and config default).
+    /// CCN endpoint URL (overrides --ccn and config default; bypasses --network lookup).
     #[arg(long, conflicts_with = "ccn")]
     pub ccn_url: Option<String>,
 
@@ -125,7 +125,7 @@ pub enum Commands {
         #[clap(subcommand)]
         command: AuthorizationCommand,
     },
-    /// Manage CLI configuration (CCN endpoints, etc.)
+    /// Manage CLI configuration (networks, CCN endpoints, etc.)
     Config {
         #[clap(subcommand)]
         command: ConfigCommand,

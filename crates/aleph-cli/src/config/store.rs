@@ -35,7 +35,9 @@ pub enum ConfigError {
     NetworkAlreadyExists(String),
     #[error("network '{0}' not found")]
     NetworkNotFound(String),
-    #[error("cannot remove network '{0}': it is the default network; use 'aleph config network use <name>' to switch first")]
+    #[error(
+        "cannot remove network '{0}': it is the default network; use 'aleph config network use <name>' to switch first"
+    )]
     CannotRemoveDefaultNetwork(String),
     #[error("ccn '{ccn}' already exists in network '{network}'")]
     CcnAlreadyExists { network: String, ccn: String },
@@ -252,6 +254,7 @@ impl ConfigStore {
         self.save_manifest(&manifest)
     }
 
+    #[allow(dead_code)]
     pub fn list_ccns(&self, network: &str) -> Result<Vec<CcnEntry>, ConfigError> {
         Ok(self.get_network(network)?.ccns)
     }
@@ -383,7 +386,10 @@ mod tests {
     fn first_network_becomes_default() {
         let (_dir, store) = temp_store();
         store.add_network("testnet").unwrap();
-        assert_eq!(store.default_network_name().unwrap().as_deref(), Some("testnet"));
+        assert_eq!(
+            store.default_network_name().unwrap().as_deref(),
+            Some("testnet")
+        );
     }
 
     #[test]
@@ -391,7 +397,10 @@ mod tests {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
         store.add_network("testnet").unwrap();
-        assert_eq!(store.default_network_name().unwrap().as_deref(), Some("mainnet"));
+        assert_eq!(
+            store.default_network_name().unwrap().as_deref(),
+            Some("mainnet")
+        );
     }
 
     #[test]
@@ -422,7 +431,10 @@ mod tests {
         store.add_network("mainnet").unwrap();
         store.add_network("testnet").unwrap();
         store.set_default_network("testnet").unwrap();
-        assert_eq!(store.default_network_name().unwrap().as_deref(), Some("testnet"));
+        assert_eq!(
+            store.default_network_name().unwrap().as_deref(),
+            Some("testnet")
+        );
     }
 
     #[test]
@@ -462,7 +474,9 @@ mod tests {
     fn add_ccn_to_network() {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
-        store.add_ccn("mainnet", "official", "https://api.aleph.im").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
         let entry = store.get_ccn("mainnet", "official").unwrap();
         assert_eq!(entry.url, "https://api.aleph.im");
     }
@@ -471,7 +485,9 @@ mod tests {
     fn first_ccn_becomes_network_default() {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
-        store.add_ccn("mainnet", "official", "https://api.aleph.im").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
         let net = store.get_network("mainnet").unwrap();
         assert_eq!(net.default_ccn.as_deref(), Some("official"));
     }
@@ -480,8 +496,12 @@ mod tests {
     fn second_ccn_does_not_override_network_default() {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
-        store.add_ccn("mainnet", "official", "https://api.aleph.im").unwrap();
-        store.add_ccn("mainnet", "api3", "https://api3.aleph.im").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
+        store
+            .add_ccn("mainnet", "api3", "https://api3.aleph.im")
+            .unwrap();
         let net = store.get_network("mainnet").unwrap();
         assert_eq!(net.default_ccn.as_deref(), Some("official"));
     }
@@ -489,7 +509,9 @@ mod tests {
     #[test]
     fn add_ccn_unknown_network_errors() {
         let (_dir, store) = temp_store();
-        let err = store.add_ccn("nope", "official", "https://api.aleph.im").unwrap_err();
+        let err = store
+            .add_ccn("nope", "official", "https://api.aleph.im")
+            .unwrap_err();
         assert!(matches!(err, ConfigError::NetworkNotFound(_)));
     }
 
@@ -497,8 +519,12 @@ mod tests {
     fn add_duplicate_ccn_same_network_errors() {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
-        store.add_ccn("mainnet", "official", "https://api.aleph.im").unwrap();
-        let err = store.add_ccn("mainnet", "official", "https://other.aleph.im").unwrap_err();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
+        let err = store
+            .add_ccn("mainnet", "official", "https://other.aleph.im")
+            .unwrap_err();
         assert!(matches!(err, ConfigError::CcnAlreadyExists { .. }));
     }
 
@@ -507,10 +533,20 @@ mod tests {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
         store.add_network("testnet").unwrap();
-        store.add_ccn("mainnet", "local", "http://one:4024").unwrap();
-        store.add_ccn("testnet", "local", "http://two:4024").unwrap();
-        assert_eq!(store.get_ccn("mainnet", "local").unwrap().url, "http://one:4024");
-        assert_eq!(store.get_ccn("testnet", "local").unwrap().url, "http://two:4024");
+        store
+            .add_ccn("mainnet", "local", "http://one:4024")
+            .unwrap();
+        store
+            .add_ccn("testnet", "local", "http://two:4024")
+            .unwrap();
+        assert_eq!(
+            store.get_ccn("mainnet", "local").unwrap().url,
+            "http://one:4024"
+        );
+        assert_eq!(
+            store.get_ccn("testnet", "local").unwrap().url,
+            "http://two:4024"
+        );
     }
 
     #[test]
@@ -585,11 +621,18 @@ mod tests {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
         store.add_network("testnet").unwrap();
-        store.add_ccn("mainnet", "official", "https://api.aleph.im").unwrap();
-        store.add_ccn("testnet", "local", "http://localhost:4024").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
+        store
+            .add_ccn("testnet", "local", "http://localhost:4024")
+            .unwrap();
         let all = store.list_all_ccns().unwrap();
         assert_eq!(all.len(), 2);
-        assert!(all.iter().any(|(n, c)| n == "mainnet" && c.name == "official"));
+        assert!(
+            all.iter()
+                .any(|(n, c)| n == "mainnet" && c.name == "official")
+        );
         assert!(all.iter().any(|(n, c)| n == "testnet" && c.name == "local"));
     }
 
@@ -598,7 +641,9 @@ mod tests {
         let (_dir, store) = temp_store();
         store.add_network("mainnet").unwrap();
         store.add_network("testnet").unwrap();
-        store.add_ccn("testnet", "local", "http://localhost:4024").unwrap();
+        store
+            .add_ccn("testnet", "local", "http://localhost:4024")
+            .unwrap();
         store.remove_network("testnet").unwrap();
         assert!(store.get_network("testnet").is_err());
         // no orphaned CCNs in list_all
@@ -617,7 +662,10 @@ mod tests {
         assert_eq!(nets[0].ccns.len(), 1);
         assert_eq!(nets[0].ccns[0].name, BUILTIN_CCN_NAME);
         assert_eq!(nets[0].ccns[0].url, BUILTIN_CCN_URL);
-        assert_eq!(store.default_network_name().unwrap().as_deref(), Some("mainnet"));
+        assert_eq!(
+            store.default_network_name().unwrap().as_deref(),
+            Some("mainnet")
+        );
     }
 
     #[test]
