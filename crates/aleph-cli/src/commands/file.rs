@@ -1,9 +1,10 @@
-use crate::cli::{FileCommand, FileDownloadArgs, FileUploadArgs, StorageEngineCli};
+use crate::cli::{FileCommand, FileDownloadArgs, FilePinArgs, FileUploadArgs, StorageEngineCli};
 use crate::common::{print_submission_result, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::{AlephClient, AlephStorageClient, hash_file};
 use aleph_sdk::messages::StoreBuilder;
 use aleph_sdk::verify::Hasher;
 use aleph_types::channel::Channel;
+use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
 use aleph_types::message::{FileRef, StorageEngine};
 use url::Url;
@@ -17,6 +18,9 @@ pub async fn handle_file_command(
     match command {
         FileCommand::Upload(args) => {
             handle_file_upload(aleph_client, ccn_url, json, args).await?;
+        }
+        FileCommand::Pin(args) => {
+            handle_file_pin(aleph_client, ccn_url, json, args).await?;
         }
         FileCommand::Download(args) => {
             handle_file_download(aleph_client, json, args).await?;
@@ -105,6 +109,38 @@ async fn handle_file_upload(
     }
 
     Ok(())
+}
+
+async fn handle_file_pin(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: FilePinArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing)?;
+
+    // Storage engine is implied by the item hash variant; StoreBuilder::build
+    // enforces the pairing so a mismatch is structurally impossible.
+    let storage_engine = match args.item_hash {
+        ItemHash::Native(_) => StorageEngine::Storage,
+        ItemHash::Ipfs(_) => StorageEngine::Ipfs,
+    };
+
+    let mut builder =
+        StoreBuilder::new(&account, args.item_hash, storage_engine).payment(Payment::credits());
+    if let Some(owner) = args.on_behalf_of {
+        builder = builder.on_behalf_of(resolve_address(&owner)?);
+    }
+    if let Some(reference) = args.reference {
+        builder = builder.reference(reference);
+    }
+    if let Some(ch) = args.channel {
+        builder = builder.channel(Channel::from(ch));
+    }
+    let pending = builder.build()?;
+
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
 }
 
 async fn handle_file_download(

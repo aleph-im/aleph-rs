@@ -1031,6 +1031,8 @@ pub struct AliasRemoveArgs {
 pub enum FileCommand {
     /// Download a file by hash, message hash, or ref
     Download(FileDownloadArgs),
+    /// Pin an existing file by creating a STORE message for a known item hash
+    Pin(FilePinArgs),
     /// Upload a file and create a STORE message
     Upload(FileUploadArgs),
 }
@@ -1051,6 +1053,28 @@ pub struct FileUploadArgs {
     /// Storage engine to use.
     #[arg(long, value_enum, default_value = "storage")]
     pub storage_engine: StorageEngineCli,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// User-defined file reference (for updates/versioning).
+    #[arg(long = "ref")]
+    pub reference: Option<String>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct FilePinArgs {
+    /// Item hash of the file to pin. A native hex hash selects the `storage`
+    /// engine; an IPFS CID selects the `ipfs` engine.
+    pub item_hash: ItemHash,
 
     /// Channel name.
     #[arg(long)]
