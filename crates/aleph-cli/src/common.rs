@@ -299,28 +299,28 @@ pub fn resolve_ccn_url_with_store(
         return Ok(Url::parse(raw).map_err(|e| format!("invalid --ccn-url: {e}"))?);
     }
 
-    let network_name: String = match network {
+    let (network_name, network_entry) = match network {
         Some(n) => {
-            store.get_network(n).map_err(|e| anyhow::anyhow!("{e}"))?;
-            n.to_string()
+            let entry = store.get_network(n).map_err(|e| anyhow::anyhow!("{e}"))?;
+            (n.to_string(), entry)
         }
-        None => store
-            .default_network_name()
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .ok_or_else(|| anyhow::anyhow!(
-                "no default network set; use: aleph config network use <NAME>"
-            ))?,
+        None => {
+            let name = store
+                .default_network_name()
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "no default network set; use: aleph config network use <NAME>"
+                ))?;
+            let entry = store.get_network(&name).map_err(|e| anyhow::anyhow!("{e}"))?;
+            (name, entry)
+        }
     };
 
     let ccn_name = match ccn {
         Some(name) => name.to_string(),
-        None => store
-            .get_network(&network_name)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .default_ccn
-            .ok_or_else(|| anyhow::anyhow!(
-                "network '{network_name}' has no default CCN; use: aleph config ccn use <NAME>"
-            ))?,
+        None => network_entry.default_ccn.ok_or_else(|| anyhow::anyhow!(
+            "network '{network_name}' has no default CCN; use: aleph config ccn use <NAME>"
+        ))?,
     };
 
     let entry = store
@@ -413,6 +413,8 @@ pub fn format_address(input: &str, resolved: &Address) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::store::ConfigStore;
+    use tempfile::TempDir;
 
     #[test]
     fn read_content_from_flag() {
@@ -511,9 +513,6 @@ mod tests {
         assert_eq!(formatted, "API request failed (HTTP 422)");
     }
 
-    use crate::config::store::ConfigStore;
-    use tempfile::TempDir;
-
     fn store_with_fixture() -> (TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::with_manifest_path(dir.path().join("config.toml"));
@@ -593,5 +592,18 @@ mod tests {
         let err = resolve_ccn_url_with_store(&store, None, Some("local"), Some("mainnet"))
             .unwrap_err();
         assert!(err.to_string().contains("ccn 'local' not found in network 'mainnet'"));
+    }
+
+    #[test]
+    fn network_without_default_ccn_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::with_manifest_path(dir.path().join("config.toml"));
+        // Add a network but no CCN — so it has no default_ccn.
+        store.add_network("barenet").unwrap();
+        let err = resolve_ccn_url_with_store(&store, None, None, Some("barenet")).unwrap_err();
+        assert!(
+            err.to_string().contains("network 'barenet' has no default CCN"),
+            "unexpected error: {err}"
+        );
     }
 }
