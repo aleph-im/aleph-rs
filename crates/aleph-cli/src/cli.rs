@@ -100,6 +100,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Named network from config (see: aleph config network list).
+    #[arg(long)]
+    pub network: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -1377,24 +1381,29 @@ pub struct CrnStartArgs {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Manage named CCN endpoints
+    /// Manage named CCN endpoints inside the current network
     Ccn {
         #[clap(subcommand)]
         command: CcnCommand,
+    },
+    /// Manage named networks (mainnet, testnet, etc.)
+    Network {
+        #[clap(subcommand)]
+        command: NetworkCommand,
     },
 }
 
 #[derive(Subcommand)]
 pub enum CcnCommand {
-    /// Register a new CCN endpoint
+    /// Register a new CCN endpoint in the current network
     Add(CcnAddArgs),
-    /// List all registered CCN endpoints
-    List,
+    /// List CCN endpoints in the current network (or across all networks with --all)
+    List(CcnListArgs),
     /// Remove a registered CCN endpoint
     Remove(CcnRemoveArgs),
-    /// Show details of a CCN endpoint (defaults to the active one)
+    /// Show details of a CCN endpoint (defaults to the current network's default)
     Show(CcnShowArgs),
-    /// Set the default CCN endpoint
+    /// Set the default CCN for a network
     Use(CcnUseArgs),
 }
 
@@ -1404,22 +1413,82 @@ pub struct CcnAddArgs {
     pub name: String,
     /// URL of the CCN endpoint.
     pub url: String,
+    /// Target network (defaults to the current network).
+    #[arg(long)]
+    pub network: Option<String>,
+}
+
+#[derive(Args)]
+pub struct CcnListArgs {
+    /// Target network (defaults to the current network). Mutually exclusive with --all.
+    #[arg(long, conflicts_with = "all")]
+    pub network: Option<String>,
+    /// List CCNs across every network. Mutually exclusive with --network.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Args)]
 pub struct CcnUseArgs {
-    /// Name of the CCN to set as default.
+    /// Name of the CCN to set as the network's default.
     pub name: String,
+    /// Target network (defaults to the current network).
+    #[arg(long)]
+    pub network: Option<String>,
 }
 
 #[derive(Args)]
 pub struct CcnShowArgs {
-    /// CCN name (defaults to the active CCN).
+    /// CCN name (defaults to the network's default CCN).
     pub name: Option<String>,
+    /// Target network (defaults to the current network).
+    #[arg(long)]
+    pub network: Option<String>,
 }
 
 #[derive(Args)]
 pub struct CcnRemoveArgs {
     /// Name of the CCN to remove.
+    pub name: String,
+    /// Target network (defaults to the current network).
+    #[arg(long)]
+    pub network: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum NetworkCommand {
+    /// Register a new (empty) network
+    Add(NetworkAddArgs),
+    /// List all registered networks
+    List,
+    /// Remove a network and all its CCNs (refuses if it's the default)
+    Remove(NetworkRemoveArgs),
+    /// Show details of a network (defaults to the current one)
+    Show(NetworkShowArgs),
+    /// Set the default (current) network
+    Use(NetworkUseArgs),
+}
+
+#[derive(Args)]
+pub struct NetworkAddArgs {
+    /// Name for this network.
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct NetworkUseArgs {
+    /// Name of the network to set as default.
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct NetworkShowArgs {
+    /// Network name (defaults to the current network).
+    pub name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct NetworkRemoveArgs {
+    /// Name of the network to remove.
     pub name: String,
 }
