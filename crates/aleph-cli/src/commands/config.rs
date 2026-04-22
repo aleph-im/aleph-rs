@@ -132,62 +132,166 @@ fn handle_network_remove(store: &ConfigStore, args: NetworkRemoveArgs, json: boo
     Ok(())
 }
 
+/// Resolve which network a `ccn` subcommand operates on:
+/// the explicit `--network <name>` override if passed, else the current
+/// default network. Errors if no default is set.
+fn resolve_ccn_scope(
+    store: &ConfigStore,
+    override_name: Option<&str>,
+) -> Result<String> {
+    if let Some(name) = override_name {
+        // Validate existence early so errors are consistent.
+        store.get_network(name)?;
+        return Ok(name.to_string());
+    }
+    store
+        .default_network_name()?
+        .ok_or_else(|| anyhow::anyhow!("no default network set; use: aleph config network use <NAME>"))
+}
+
 async fn handle_ccn_command(command: CcnCommand, json: bool) -> Result<()> {
     let store = ConfigStore::open().context("failed to open config store")?;
-
     match command {
         CcnCommand::Add(args) => handle_add(&store, args, json),
         CcnCommand::Use(args) => handle_use(&store, args, json),
-        CcnCommand::List => handle_list(&store, json),
+        CcnCommand::List(args) => handle_list(&store, args, json),
         CcnCommand::Show(args) => handle_show(&store, args, json).await,
         CcnCommand::Remove(args) => handle_remove(&store, args, json),
     }
 }
 
 fn handle_add(store: &ConfigStore, args: CcnAddArgs, json: bool) -> Result<()> {
-    store.add_ccn(&args.name, &args.url)?;
-
+    let network = resolve_ccn_scope(store, args.network.as_deref())?;
+    store.add_ccn(&network, &args.name, &args.url)?;
     if json {
-        let output = serde_json::json!({
-            "name": args.name,
-            "url": args.url,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "network": network,
+                "name": args.name,
+                "url": args.url,
+            }))?
+        );
     } else {
-        eprintln!("CCN '{}' added.", args.name);
+        eprintln!("CCN '{}' added to network '{}'.", args.name, network);
         eprintln!("  URL: {}", args.url);
     }
     Ok(())
 }
 
 fn handle_use(store: &ConfigStore, args: CcnUseArgs, json: bool) -> Result<()> {
-    store.set_default_ccn(&args.name)?;
-
+    let network = resolve_ccn_scope(store, args.network.as_deref())?;
+    store.set_default_ccn(&network, &args.name)?;
     if json {
-        let output = serde_json::json!({ "default_ccn": args.name });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "network": network,
+                "default_ccn": args.name,
+            }))?
+        );
     } else {
-        eprintln!("Default CCN set to '{}'.", args.name);
+        eprintln!(
+            "Default CCN for network '{}' set to '{}'.",
+            network, args.name
+        );
     }
     Ok(())
 }
 
-fn handle_list(store: &ConfigStore, json: bool) -> Result<()> {
-    let manifest = store.load_manifest()?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&manifest.ccns)?);
+fn handle_list(store: &ConfigStore, args: CcnListArgs, json: bool) -> Result<()> {
+    if args.all {
+        let rows = store.list_all_ccns()?;
+        if json {
+            let items: Vec<_> = rows
+                .iter()
+                .map(|(net, c)| serde_json::json!({
+                    "network": net,
+                    "name": c.name,
+                    "url": c.url,
+                }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&items)?);
+            return Ok(());
+        }
+        eprintln!("{:<16} {:<16} URL", "NETWORK", "NAME");
+        for (net, c) in &rows {
+            eprintln!("{:<16} {:<16} {}", net, c.name, c.url);
+        }
         return Ok(());
     }
 
+    let network = resolve_ccn_scope(store, args.network.as_deref())?;
+    let net = store.get_network(&network)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&net.ccns)?);
+        return Ok(());
+    }
+
+    eprintln!("Network: {}", network);
     eprintln!("{:<2} {:<16} URL", "", "NAME");
-    for ccn in &manifest.ccns {
-        let marker = if manifest.default_ccn.as_deref() == Some(&ccn.name) {
-            "*"
-        } else {
-            " "
-        };
-        eprintln!("{:<2} {:<16} {}", marker, ccn.name, ccn.url);
+    for c in &net.ccns {
+        let marker = if net.default_ccn.as_deref() == Some(&c.name) { "*" } else { " " };
+        eprintln!("{:<2} {:<16} {}", marker, c.name, c.url);
+    }
+    Ok(())
+}
+
+async fn handle_show(store: &ConfigStore, args: CcnShowArgs, json: bool) -> Result<()> {
+    let network = resolve_ccn_scope(store, args.network.as_deref())?;
+    let net = store.get_network(&network)?;
+    let name = match args.name {
+        Some(n) => n,
+        None => net.default_ccn.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "network '{network}' has no default CCN; use: aleph config ccn use <NAME> [--network {network}]"
+            )
+        })?,
+    };
+    let entry = store.get_ccn(&network, &name)?;
+    let is_default = net.default_ccn.as_deref() == Some(name.as_str());
+    let version = fetch_ccn_version(&entry.url).await;
+
+    if json {
+        let mut output = serde_json::json!({
+            "network": network,
+            "name": entry.name,
+            "url": entry.url,
+            "default": is_default,
+        });
+        if let Some(v) = &version {
+            output["version"] = serde_json::json!(v);
+        }
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        eprintln!("Network: {}", network);
+        eprintln!("Name:    {}", entry.name);
+        eprintln!("URL:     {}", entry.url);
+        match &version {
+            Some(v) => eprintln!("Version: {v}"),
+            None => eprintln!("Version: (unreachable)"),
+        }
+        if is_default {
+            eprintln!("Default: yes");
+        }
+    }
+    Ok(())
+}
+
+fn handle_remove(store: &ConfigStore, args: CcnRemoveArgs, json: bool) -> Result<()> {
+    let network = resolve_ccn_scope(store, args.network.as_deref())?;
+    store.remove_ccn(&network, &args.name)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "network": network,
+                "removed": args.name,
+            }))?
+        );
+    } else {
+        eprintln!("CCN '{}' removed from network '{}'.", args.name, network);
     }
     Ok(())
 }
@@ -204,51 +308,4 @@ async fn fetch_ccn_version(url: &str) -> Option<String> {
         .ok()?;
     let body: serde_json::Value = resp.json().await.ok()?;
     body["version"].as_str().map(|s| s.to_string())
-}
-
-async fn handle_show(store: &ConfigStore, args: CcnShowArgs, json: bool) -> Result<()> {
-    let name = match args.name {
-        Some(n) => n,
-        None => store.default_ccn_name()?.ok_or_else(|| {
-            anyhow::anyhow!("no default CCN set; use: aleph config ccn use <NAME>")
-        })?,
-    };
-
-    let entry = store.get_ccn(&name)?;
-    let is_default = store.default_ccn_name().ok().flatten().as_deref() == Some(name.as_str());
-    let version = fetch_ccn_version(&entry.url).await;
-
-    if json {
-        let mut output = serde_json::json!({
-            "name": entry.name,
-            "url": entry.url,
-        });
-        if let Some(v) = &version {
-            output["version"] = serde_json::json!(v);
-        }
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        eprintln!("Name:    {}", entry.name);
-        eprintln!("URL:     {}", entry.url);
-        match &version {
-            Some(v) => eprintln!("Version: {v}"),
-            None => eprintln!("Version: (unreachable)"),
-        }
-        if is_default {
-            eprintln!("Default: yes");
-        }
-    }
-    Ok(())
-}
-
-fn handle_remove(store: &ConfigStore, args: CcnRemoveArgs, json: bool) -> Result<()> {
-    store.remove_ccn(&args.name)?;
-
-    if json {
-        let output = serde_json::json!({ "removed": args.name });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        eprintln!("CCN '{}' removed.", args.name);
-    }
-    Ok(())
 }
