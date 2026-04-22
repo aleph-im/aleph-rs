@@ -31,7 +31,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         command: config_command,
     } = cli.command
     {
-        commands::config::handle_config_command(config_command, json).await?;
+        commands::config::handle_config_command(config_command, json, cli.network.as_deref())
+            .await?;
         return Ok(());
     }
 

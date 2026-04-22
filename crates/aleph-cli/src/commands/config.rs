@@ -5,20 +5,30 @@ use crate::cli::{
 use crate::config::store::{ConfigStore, NetworkEntry};
 use anyhow::{Context, Result};
 
-pub async fn handle_config_command(command: ConfigCommand, json: bool) -> Result<()> {
+pub async fn handle_config_command(
+    command: ConfigCommand,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
     match command {
-        ConfigCommand::Ccn { command } => handle_ccn_command(command, json).await,
-        ConfigCommand::Network { command } => handle_network_command(command, json).await,
+        ConfigCommand::Ccn { command } => handle_ccn_command(command, json, cli_network).await,
+        ConfigCommand::Network { command } => {
+            handle_network_command(command, json, cli_network).await
+        }
     }
 }
 
-async fn handle_network_command(command: NetworkCommand, json: bool) -> Result<()> {
+async fn handle_network_command(
+    command: NetworkCommand,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
     let store = ConfigStore::open().context("failed to open config store")?;
     match command {
         NetworkCommand::Add(args) => handle_network_add(&store, args, json),
         NetworkCommand::List => handle_network_list(&store, json),
         NetworkCommand::Use(args) => handle_network_use(&store, args, json),
-        NetworkCommand::Show(args) => handle_network_show(&store, args, json),
+        NetworkCommand::Show(args) => handle_network_show(&store, args, json, cli_network),
         NetworkCommand::Remove(args) => handle_network_remove(&store, args, json),
     }
 }
@@ -86,12 +96,20 @@ fn handle_network_use(store: &ConfigStore, args: NetworkUseArgs, json: bool) -> 
     Ok(())
 }
 
-fn handle_network_show(store: &ConfigStore, args: NetworkShowArgs, json: bool) -> Result<()> {
+fn handle_network_show(
+    store: &ConfigStore,
+    args: NetworkShowArgs,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
     let name = match args.name {
         Some(n) => n,
-        None => store.default_network_name()?.ok_or_else(|| {
-            anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
-        })?,
+        None => cli_network
+            .map(str::to_string)
+            .or(store.default_network_name()?)
+            .ok_or_else(|| {
+                anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
+            })?,
     };
     let net = store.get_network(&name)?;
     let is_default = store.default_network_name()?.as_deref() == Some(name.as_str());
@@ -152,19 +170,28 @@ fn resolve_ccn_scope(store: &ConfigStore, override_name: Option<&str>) -> Result
     Ok(store.get_network(&name)?)
 }
 
-async fn handle_ccn_command(command: CcnCommand, json: bool) -> Result<()> {
+async fn handle_ccn_command(
+    command: CcnCommand,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
     let store = ConfigStore::open().context("failed to open config store")?;
     match command {
-        CcnCommand::Add(args) => handle_add(&store, args, json),
-        CcnCommand::Use(args) => handle_use(&store, args, json),
-        CcnCommand::List(args) => handle_list(&store, args, json),
-        CcnCommand::Show(args) => handle_show(&store, args, json).await,
-        CcnCommand::Remove(args) => handle_remove(&store, args, json),
+        CcnCommand::Add(args) => handle_add(&store, args, json, cli_network),
+        CcnCommand::Use(args) => handle_use(&store, args, json, cli_network),
+        CcnCommand::List(args) => handle_list(&store, args, json, cli_network),
+        CcnCommand::Show(args) => handle_show(&store, args, json, cli_network).await,
+        CcnCommand::Remove(args) => handle_remove(&store, args, json, cli_network),
     }
 }
 
-fn handle_add(store: &ConfigStore, args: CcnAddArgs, json: bool) -> Result<()> {
-    let network = resolve_ccn_scope(store, args.network.as_deref())?.name;
+fn handle_add(
+    store: &ConfigStore,
+    args: CcnAddArgs,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
+    let network = resolve_ccn_scope(store, args.network.as_deref().or(cli_network))?.name;
     store.add_ccn(&network, &args.name, &args.url)?;
     if json {
         println!(
@@ -182,8 +209,13 @@ fn handle_add(store: &ConfigStore, args: CcnAddArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_use(store: &ConfigStore, args: CcnUseArgs, json: bool) -> Result<()> {
-    let network = resolve_ccn_scope(store, args.network.as_deref())?.name;
+fn handle_use(
+    store: &ConfigStore,
+    args: CcnUseArgs,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
+    let network = resolve_ccn_scope(store, args.network.as_deref().or(cli_network))?.name;
     store.set_default_ccn(&network, &args.name)?;
     if json {
         println!(
@@ -202,7 +234,12 @@ fn handle_use(store: &ConfigStore, args: CcnUseArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_list(store: &ConfigStore, args: CcnListArgs, json: bool) -> Result<()> {
+fn handle_list(
+    store: &ConfigStore,
+    args: CcnListArgs,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
     if args.all {
         let rows = store.list_all_ccns()?;
         if json {
@@ -226,7 +263,7 @@ fn handle_list(store: &ConfigStore, args: CcnListArgs, json: bool) -> Result<()>
         return Ok(());
     }
 
-    let net = resolve_ccn_scope(store, args.network.as_deref())?;
+    let net = resolve_ccn_scope(store, args.network.as_deref().or(cli_network))?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&net.ccns)?);
@@ -246,8 +283,13 @@ fn handle_list(store: &ConfigStore, args: CcnListArgs, json: bool) -> Result<()>
     Ok(())
 }
 
-async fn handle_show(store: &ConfigStore, args: CcnShowArgs, json: bool) -> Result<()> {
-    let net = resolve_ccn_scope(store, args.network.as_deref())?;
+async fn handle_show(
+    store: &ConfigStore,
+    args: CcnShowArgs,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
+    let net = resolve_ccn_scope(store, args.network.as_deref().or(cli_network))?;
     let name = match args.name {
         Some(n) => n,
         None => net.default_ccn.clone().ok_or_else(|| {
@@ -298,8 +340,13 @@ async fn handle_show(store: &ConfigStore, args: CcnShowArgs, json: bool) -> Resu
     Ok(())
 }
 
-fn handle_remove(store: &ConfigStore, args: CcnRemoveArgs, json: bool) -> Result<()> {
-    let network = resolve_ccn_scope(store, args.network.as_deref())?.name;
+fn handle_remove(
+    store: &ConfigStore,
+    args: CcnRemoveArgs,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
+    let network = resolve_ccn_scope(store, args.network.as_deref().or(cli_network))?.name;
     store.remove_ccn(&network, &args.name)?;
     if json {
         println!(
