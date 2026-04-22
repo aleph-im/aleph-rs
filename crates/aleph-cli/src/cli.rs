@@ -1,7 +1,14 @@
 use aleph_sdk::aggregate_models::corechannel::NodeHash;
+use aleph_sdk::credit::PriceSource;
 use aleph_types::item_hash::ItemHash;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// Clap adapter for [`PriceSource::from_str`]. Exposed as a named function so
+/// it can be referenced from `value_parser = parse_price_source` attributes.
+fn parse_price_source(s: &str) -> Result<PriceSource, String> {
+    s.parse()
+}
 
 /// Parse a human-readable size string into MiB.
 ///
@@ -1487,7 +1494,7 @@ pub struct CcnRemoveArgs {
 
 #[derive(Subcommand)]
 pub enum NetworkCommand {
-    /// Register a new (empty) network
+    /// Register a new (empty) network, optionally with Ethereum settlement config
     Add(NetworkAddArgs),
     /// List all registered networks
     List,
@@ -1497,12 +1504,42 @@ pub enum NetworkCommand {
     Show(NetworkShowArgs),
     /// Set the default (current) network
     Use(NetworkUseArgs),
+    /// Update a network's Ethereum settlement config in place
+    Set(NetworkSetArgs),
+}
+
+/// Ethereum settlement flags shared by `network add` and `network set`.
+/// All fields are optional; `network add` applies them on top of the
+/// mainnet defaults, `network set` patches the existing config.
+#[derive(Args)]
+pub struct NetworkEthereumArgs {
+    /// Ethereum JSON-RPC endpoint for this network.
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    /// Credit smart-contract address (receives ERC20 transfers).
+    #[arg(long)]
+    pub credit_contract: Option<alloy::primitives::Address>,
+    /// ALEPH ERC20 token address on this network.
+    #[arg(long)]
+    pub aleph_token: Option<alloy::primitives::Address>,
+    /// USDC ERC20 token address on this network.
+    #[arg(long)]
+    pub usdc_token: Option<alloy::primitives::Address>,
+    /// ALEPH/USD price source: `coingecko`, `fixed:<usd>`, or `none`.
+    #[arg(long, value_parser = parse_price_source)]
+    pub price_source: Option<aleph_sdk::credit::PriceSource>,
+    /// Explorer URL prefix for transaction links (e.g. `https://etherscan.io/tx/`).
+    #[arg(long)]
+    pub explorer_tx_base: Option<String>,
 }
 
 #[derive(Args)]
 pub struct NetworkAddArgs {
     /// Name for this network.
     pub name: String,
+
+    #[command(flatten)]
+    pub ethereum: NetworkEthereumArgs,
 }
 
 #[derive(Args)]
@@ -1521,6 +1558,16 @@ pub struct NetworkShowArgs {
 pub struct NetworkRemoveArgs {
     /// Name of the network to remove.
     pub name: String,
+}
+
+#[derive(Args)]
+pub struct NetworkSetArgs {
+    /// Name of the network to update (defaults to the current network).
+    #[arg(long)]
+    pub network: Option<String>,
+
+    #[command(flatten)]
+    pub ethereum: NetworkEthereumArgs,
 }
 
 #[derive(Subcommand)]
@@ -1545,9 +1592,9 @@ pub struct BuyCreditArgs {
     #[arg(long)]
     pub amount: String,
 
-    /// Ethereum JSON-RPC endpoint
-    #[arg(long, default_value = "https://eth.llamarpc.com")]
-    pub rpc_url: String,
+    /// Ethereum JSON-RPC endpoint — overrides the network's configured `rpc_url`.
+    #[arg(long)]
+    pub rpc_url: Option<String>,
 
     #[command(flatten)]
     pub signing: SigningArgs,

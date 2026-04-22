@@ -111,7 +111,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Config { .. } => unreachable!(),
         cli::Commands::Credit {
             command: credit_command,
-        } => commands::credit::handle_credit_command(json, credit_command).await?,
+        } => {
+            commands::credit::handle_credit_command(json, credit_command, cli.network.as_deref())
+                .await?
+        }
     }
 
     Ok(())

@@ -1,3 +1,5 @@
+use aleph_sdk::credit::{EthereumConfig, PriceSource};
+use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -12,13 +14,62 @@ pub struct CcnEntry {
     pub url: String,
 }
 
-/// A named network: CCN endpoints + (future) Ethereum settlement config.
+/// A named network: CCN endpoints + optional Ethereum settlement config
+/// (used by `aleph credit buy`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkEntry {
     pub name: String,
     pub default_ccn: Option<String>,
     #[serde(default)]
     pub ccns: Vec<CcnEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ethereum: Option<EthereumConfig>,
+}
+
+/// Partial update for a network's Ethereum config. Any `Some` field overwrites
+/// the existing value; `None` fields are left untouched. Used by both
+/// `network add` (initial population) and `network set` (partial update).
+#[derive(Debug, Clone, Default)]
+pub struct EthereumPatch {
+    pub rpc_url: Option<String>,
+    pub credit_contract: Option<Address>,
+    pub aleph_token: Option<Address>,
+    pub usdc_token: Option<Address>,
+    pub price_source: Option<PriceSource>,
+    pub explorer_tx_base: Option<String>,
+}
+
+impl EthereumPatch {
+    pub fn is_empty(&self) -> bool {
+        self.rpc_url.is_none()
+            && self.credit_contract.is_none()
+            && self.aleph_token.is_none()
+            && self.usdc_token.is_none()
+            && self.price_source.is_none()
+            && self.explorer_tx_base.is_none()
+    }
+
+    /// Apply the patch to an existing `EthereumConfig`.
+    pub fn apply(&self, config: &mut EthereumConfig) {
+        if let Some(v) = &self.rpc_url {
+            config.rpc_url = v.clone();
+        }
+        if let Some(v) = self.credit_contract {
+            config.credit_contract = v;
+        }
+        if let Some(v) = self.aleph_token {
+            config.aleph_token = v;
+        }
+        if let Some(v) = self.usdc_token {
+            config.usdc_token = v;
+        }
+        if let Some(v) = &self.price_source {
+            config.price_source = v.clone();
+        }
+        if let Some(v) = &self.explorer_tx_base {
+            config.explorer_tx_base = Some(v.clone());
+        }
+    }
 }
 
 /// The on-disk config manifest (`config.toml`).
@@ -134,10 +185,31 @@ impl ConfigStore {
             name: name.to_string(),
             default_ccn: None,
             ccns: Vec::new(),
+            ethereum: None,
         });
         if manifest.default_network.is_none() {
             manifest.default_network = Some(name.to_string());
         }
+        self.save_manifest(&manifest)
+    }
+
+    /// Apply an `EthereumPatch` to a network, creating the ethereum block
+    /// from `mainnet_defaults()` if none existed yet.
+    pub fn update_network_ethereum(
+        &self,
+        network: &str,
+        patch: &EthereumPatch,
+    ) -> Result<(), ConfigError> {
+        let mut manifest = self.load_manifest()?;
+        let net = manifest
+            .networks
+            .iter_mut()
+            .find(|n| n.name == network)
+            .ok_or_else(|| ConfigError::NetworkNotFound(network.to_string()))?;
+        let current = net
+            .ethereum
+            .get_or_insert_with(EthereumConfig::mainnet_defaults);
+        patch.apply(current);
         self.save_manifest(&manifest)
     }
 
@@ -275,6 +347,7 @@ impl ConfigStore {
                 name: BUILTIN_CCN_NAME.to_string(),
                 url: BUILTIN_CCN_URL.to_string(),
             }],
+            ethereum: Some(EthereumConfig::mainnet_defaults()),
         });
         if manifest.default_network.is_none() {
             manifest.default_network = Some(BUILTIN_NETWORK_NAME.to_string());
@@ -295,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_manifest_serde() {
+    fn roundtrip_manifest_serde_without_ethereum() {
         let manifest = ConfigManifest {
             default_network: Some("mainnet".to_string()),
             networks: vec![NetworkEntry {
@@ -305,14 +378,43 @@ mod tests {
                     name: "official".to_string(),
                     url: "https://api.aleph.im".to_string(),
                 }],
+                ethereum: None,
             }],
         };
         let serialized = toml::to_string_pretty(&manifest).unwrap();
+        assert!(
+            !serialized.contains("ethereum"),
+            "None should skip serialization"
+        );
         let deserialized: ConfigManifest = toml::from_str(&serialized).unwrap();
         assert_eq!(deserialized.default_network.as_deref(), Some("mainnet"));
         assert_eq!(deserialized.networks.len(), 1);
         assert_eq!(deserialized.networks[0].name, "mainnet");
         assert_eq!(deserialized.networks[0].ccns[0].url, "https://api.aleph.im");
+        assert!(deserialized.networks[0].ethereum.is_none());
+    }
+
+    #[test]
+    fn roundtrip_manifest_serde_with_ethereum() {
+        let manifest = ConfigManifest {
+            default_network: Some("mainnet".to_string()),
+            networks: vec![NetworkEntry {
+                name: "mainnet".to_string(),
+                default_ccn: Some("official".to_string()),
+                ccns: vec![CcnEntry {
+                    name: "official".to_string(),
+                    url: "https://api.aleph.im".to_string(),
+                }],
+                ethereum: Some(EthereumConfig::mainnet_defaults()),
+            }],
+        };
+        let serialized = toml::to_string_pretty(&manifest).unwrap();
+        assert!(serialized.contains("[networks.ethereum]"));
+        let back: ConfigManifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            back.networks[0].ethereum.as_ref().unwrap(),
+            &EthereumConfig::mainnet_defaults()
+        );
     }
 
     #[test]
@@ -648,6 +750,57 @@ mod tests {
             store.default_network_name().unwrap().as_deref(),
             Some("mainnet")
         );
+    }
+
+    #[test]
+    fn ensure_builtin_seeds_mainnet_ethereum_defaults() {
+        let (_dir, store) = temp_store();
+        store.ensure_builtin().unwrap();
+        let eth = store.get_network("mainnet").unwrap().ethereum.unwrap();
+        assert_eq!(eth, EthereumConfig::mainnet_defaults());
+    }
+
+    #[test]
+    fn update_network_ethereum_creates_from_defaults_then_patches() {
+        let (_dir, store) = temp_store();
+        store.add_network("testnet").unwrap();
+        assert!(store.get_network("testnet").unwrap().ethereum.is_none());
+
+        let patch = EthereumPatch {
+            rpc_url: Some("http://localhost:8545".to_string()),
+            price_source: Some(PriceSource::Fixed { usd: 1.0 }),
+            ..Default::default()
+        };
+        store.update_network_ethereum("testnet", &patch).unwrap();
+        let eth = store.get_network("testnet").unwrap().ethereum.unwrap();
+        assert_eq!(eth.rpc_url, "http://localhost:8545");
+        assert_eq!(eth.price_source, PriceSource::Fixed { usd: 1.0 });
+        // Other fields defaulted from mainnet_defaults().
+        assert_eq!(
+            eth.credit_contract,
+            EthereumConfig::mainnet_defaults().credit_contract
+        );
+    }
+
+    #[test]
+    fn update_network_ethereum_unknown_network_errors() {
+        let (_dir, store) = temp_store();
+        let patch = EthereumPatch {
+            rpc_url: Some("http://example".to_string()),
+            ..Default::default()
+        };
+        let err = store.update_network_ethereum("nope", &patch).unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
+    }
+
+    #[test]
+    fn ethereum_patch_is_empty_detects_no_fields() {
+        assert!(EthereumPatch::default().is_empty());
+        let patch = EthereumPatch {
+            rpc_url: Some("x".to_string()),
+            ..Default::default()
+        };
+        assert!(!patch.is_empty());
     }
 
     #[test]

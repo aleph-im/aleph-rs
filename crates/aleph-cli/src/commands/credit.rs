@@ -1,7 +1,7 @@
 use crate::account::CliAccount;
 use crate::cli::{BuyCreditArgs, CreditCommand, CreditTokenCli, SigningArgs};
-use crate::common::resolve_account;
-use aleph_sdk::credit::{self, CREDIT_CONTRACT, CreditEstimate, CreditToken, format_token_amount};
+use crate::common::{resolve_account, resolve_network};
+use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
 use aleph_types::account::EvmAccount;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
@@ -21,40 +21,70 @@ impl From<CreditTokenCli> for CreditToken {
 pub async fn handle_credit_command(
     json: bool,
     command: CreditCommand,
+    cli_network: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        CreditCommand::Buy(args) => handle_buy(json, args).await,
+        CreditCommand::Buy(args) => handle_buy(json, args, cli_network).await,
     }
 }
 
-async fn handle_buy(json: bool, args: BuyCreditArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_buy(
+    json: bool,
+    args: BuyCreditArgs,
+    cli_network: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let evm_account = resolve_evm_account(&args.signing)?;
+    let network = resolve_network(cli_network)?;
+    let ethereum = network.ethereum.ok_or_else(|| {
+        format!(
+            "network '{}' has no ethereum settlement config; \
+             run: aleph config network set --network {} --rpc-url <URL> --credit-contract <ADDR> \
+                  --aleph-token <ADDR> --usdc-token <ADDR> --price-source <coingecko|fixed:N|none>",
+            network.name, network.name
+        )
+    })?;
+    let rpc_url = args.rpc_url.as_deref().unwrap_or(&ethereum.rpc_url);
+
     let token: CreditToken = args.token.into();
     let amount_raw = credit::parse_token_amount(&args.amount, token.decimals())
         .map_err(|e| format!("invalid amount: {e}"))?;
 
-    let (provider, alloy_address) = build_signer_provider(evm_account, &args.rpc_url)?;
-    let estimate = credit::estimate_credits(token, amount_raw).await?;
+    let (provider, alloy_address) = build_signer_provider(evm_account, rpc_url)?;
+    let estimate = credit::estimate_credits(token, amount_raw, &ethereum.price_source).await?;
 
     // Dry-run must succeed even for under-funded accounts, so we defer the
     // balance check until we know we're actually submitting.
     if args.signing.dry_run {
-        print_dry_run_summary(json, &args.amount, &estimate)?;
+        print_dry_run_summary(json, &args.amount, &estimate, &ethereum)?;
         return Ok(());
     }
 
-    ensure_token_balance(&provider, alloy_address, token, amount_raw, &args.amount).await?;
+    ensure_token_balance(
+        &provider,
+        alloy_address,
+        token,
+        ethereum.token_address(token),
+        amount_raw,
+        &args.amount,
+    )
+    .await?;
 
     if !json {
-        print_human_estimate(&args.amount, &estimate);
+        print_human_estimate(&args.amount, &estimate, &ethereum);
         if !confirm_submission()? {
             eprintln!("Cancelled.");
             return Ok(());
         }
     }
 
-    let receipt = credit::buy_credits(&provider, token, amount_raw).await?;
-    print_submission_result(json, &args.amount, &estimate, &receipt)?;
+    let receipt = credit::buy_credits(
+        &provider,
+        ethereum.token_address(token),
+        ethereum.credit_contract,
+        amount_raw,
+    )
+    .await?;
+    print_submission_result(json, &args.amount, &estimate, &ethereum, &receipt)?;
     Ok(())
 }
 
@@ -87,10 +117,11 @@ async fn ensure_token_balance(
     provider: &impl Provider,
     owner: Address,
     token: CreditToken,
+    token_address: Address,
     amount_raw: U256,
     amount_display: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let balance = credit::check_balance(provider, owner, token).await?;
+    let balance = credit::check_balance(provider, owner, token, token_address).await?;
     if balance < amount_raw {
         let have = format_token_amount(balance, token.decimals());
         return Err(format!(
@@ -112,48 +143,60 @@ fn confirm_submission() -> Result<bool, Box<dyn std::error::Error>> {
 }
 
 /// JSON envelope shared by dry-run and post-submit output.
-fn summary_json(amount_display: &str, estimate: &CreditEstimate) -> serde_json::Value {
+fn summary_json(
+    amount_display: &str,
+    estimate: &CreditEstimate,
+    ethereum: &EthereumConfig,
+) -> serde_json::Value {
     serde_json::json!({
         "token": estimate.token.symbol(),
         "amount": amount_display,
         "estimated_credits": estimate.estimated_credits,
         "price_usd": estimate.price_usd,
         "bonus_ratio": estimate.bonus_ratio,
-        "recipient": format!("{}", CREDIT_CONTRACT),
+        "recipient": format!("{}", ethereum.credit_contract),
     })
 }
 
-fn print_human_estimate(amount_display: &str, estimate: &CreditEstimate) {
+fn print_human_estimate(
+    amount_display: &str,
+    estimate: &CreditEstimate,
+    ethereum: &EthereumConfig,
+) {
     eprintln!(
         "Buying credits with {amount_display} {}",
         estimate.token.symbol()
     );
-    match estimate.token {
-        CreditToken::Aleph => eprintln!(
-            "Estimated credits: ~{:.0} (at ${:.2}/{}, +{:.0}% bonus)",
-            estimate.estimated_credits,
-            estimate.price_usd,
-            estimate.token.symbol(),
-            estimate.bonus_ratio * 100.0,
+    match (
+        estimate.token,
+        estimate.estimated_credits,
+        estimate.price_usd,
+    ) {
+        (CreditToken::Aleph, Some(credits), Some(price)) => eprintln!(
+            "Estimated credits: ~{credits:.0} (at ${price:.2}/{symbol}, +{bonus:.0}% bonus)",
+            symbol = estimate.token.symbol(),
+            bonus = estimate.bonus_ratio * 100.0,
         ),
-        CreditToken::Usdc => {
-            eprintln!("Estimated credits: ~{:.0}", estimate.estimated_credits)
+        (CreditToken::Usdc, Some(credits), _) => {
+            eprintln!("Estimated credits: ~{credits:.0}")
         }
+        _ => eprintln!("Estimated credits: unknown (network has no ALEPH price source)"),
     }
-    eprintln!("Recipient: {}", CREDIT_CONTRACT);
+    eprintln!("Recipient: {}", ethereum.credit_contract);
 }
 
 fn print_dry_run_summary(
     json: bool,
     amount_display: &str,
     estimate: &CreditEstimate,
+    ethereum: &EthereumConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if json {
-        let mut output = summary_json(amount_display, estimate);
+        let mut output = summary_json(amount_display, estimate, ethereum);
         output["dry_run"] = serde_json::Value::Bool(true);
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print_human_estimate(amount_display, estimate);
+        print_human_estimate(amount_display, estimate, ethereum);
         eprintln!("\nDry run — transaction not submitted.");
     }
     Ok(())
@@ -163,16 +206,19 @@ fn print_submission_result(
     json: bool,
     amount_display: &str,
     estimate: &CreditEstimate,
+    ethereum: &EthereumConfig,
     receipt: &TransactionReceipt,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tx_hash = receipt.transaction_hash;
     if json {
-        let mut output = summary_json(amount_display, estimate);
+        let mut output = summary_json(amount_display, estimate, ethereum);
         output["tx_hash"] = serde_json::Value::String(format!("{tx_hash}"));
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         eprintln!("\nTransaction submitted: {tx_hash}");
-        eprintln!("https://etherscan.io/tx/{tx_hash}");
+        if let Some(base) = &ethereum.explorer_tx_base {
+            eprintln!("{}{}", base, tx_hash);
+        }
     }
     Ok(())
 }
@@ -197,8 +243,8 @@ mod tests {
         CreditEstimate {
             token,
             amount_raw: U256::from(100u64) * U256::from(10u64).pow(U256::from(token.decimals())),
-            estimated_credits: 120_000_000.0,
-            price_usd: 1.0,
+            estimated_credits: Some(120_000_000.0),
+            price_usd: Some(1.0),
             bonus_ratio: token.bonus_ratio(),
         }
     }
@@ -206,22 +252,39 @@ mod tests {
     #[test]
     fn summary_json_has_expected_shape() {
         let estimate = sample_estimate(CreditToken::Aleph);
-        let v = summary_json("100", &estimate);
+        let eth = EthereumConfig::mainnet_defaults();
+        let v = summary_json("100", &estimate, &eth);
 
         assert_eq!(v["token"], "ALEPH");
         assert_eq!(v["amount"], "100");
         assert_eq!(v["estimated_credits"], 120_000_000.0);
         assert_eq!(v["price_usd"], 1.0);
         assert_eq!(v["bonus_ratio"], 0.2);
-        assert_eq!(v["recipient"], format!("{CREDIT_CONTRACT}"));
+        assert_eq!(v["recipient"], format!("{}", eth.credit_contract));
         assert!(v.get("tx_hash").is_none(), "tx_hash only set after submit");
         assert!(v.get("dry_run").is_none(), "dry_run only set for dry-run");
     }
 
     #[test]
+    fn summary_json_price_usd_is_null_when_source_is_none() {
+        let estimate = CreditEstimate {
+            token: CreditToken::Aleph,
+            amount_raw: U256::from(1u64),
+            estimated_credits: None,
+            price_usd: None,
+            bonus_ratio: 0.2,
+        };
+        let eth = EthereumConfig::mainnet_defaults();
+        let v = summary_json("1", &estimate, &eth);
+        assert!(v["price_usd"].is_null());
+        assert!(v["estimated_credits"].is_null());
+    }
+
+    #[test]
     fn summary_json_uses_usdc_symbol_for_usdc() {
         let estimate = sample_estimate(CreditToken::Usdc);
-        let v = summary_json("50", &estimate);
+        let eth = EthereumConfig::mainnet_defaults();
+        let v = summary_json("50", &estimate, &eth);
         assert_eq!(v["token"], "USDC");
         assert_eq!(v["bonus_ratio"], 0.0);
     }

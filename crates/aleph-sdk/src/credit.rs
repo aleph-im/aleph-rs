@@ -6,22 +6,108 @@ use alloy::sol;
 use serde::{Deserialize, Serialize};
 
 /// ALEPH ERC20 token on Ethereum mainnet.
-pub const ALEPH_TOKEN_ADDRESS: Address = address!("27702a26126e0B3702af63Ee09aC4d1A084EF628");
+pub const MAINNET_ALEPH_TOKEN_ADDRESS: Address =
+    address!("27702a26126e0B3702af63Ee09aC4d1A084EF628");
 
 /// USDC ERC20 token on Ethereum mainnet.
-pub const USDC_TOKEN_ADDRESS: Address = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+pub const MAINNET_USDC_TOKEN_ADDRESS: Address =
+    address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
 /// Credit contract address on Ethereum mainnet.
-pub const CREDIT_CONTRACT: Address = address!("6b55F32Ea969910838defd03746Ced5E2AE8cB8B");
+pub const MAINNET_CREDIT_CONTRACT: Address = address!("6b55F32Ea969910838defd03746Ced5E2AE8cB8B");
 
-/// Default Ethereum RPC endpoint.
-pub const DEFAULT_RPC_URL: &str = "https://eth.llamarpc.com";
+/// Default Ethereum RPC endpoint for mainnet.
+pub const MAINNET_RPC_URL: &str = "https://eth.llamarpc.com";
+
+/// Etherscan transaction URL prefix for mainnet.
+pub const MAINNET_EXPLORER_TX_BASE: &str = "https://etherscan.io/tx/";
 
 /// Maximum wait for a transaction receipt before giving up.
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Timeout for outbound HTTP calls (e.g. CoinGecko price lookup).
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How to determine the USD price for the ALEPH token.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PriceSource {
+    /// Fetch live ALEPH/USD from CoinGecko.
+    CoinGecko,
+    /// Hard-coded USD price (useful for testnets with mock tokens).
+    Fixed { usd: f64 },
+    /// No price feed available; estimate is unknown.
+    None,
+}
+
+impl std::str::FromStr for PriceSource {
+    type Err = String;
+
+    /// Parse the CLI-facing `<coingecko|fixed:N|none>` form.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            "coingecko" => return Ok(PriceSource::CoinGecko),
+            "none" => return Ok(PriceSource::None),
+            _ => {}
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("fixed:")
+            .or_else(|| trimmed.strip_prefix("FIXED:"))
+        {
+            let usd: f64 = rest.parse().map_err(|e| {
+                format!("invalid fixed price '{rest}': {e} (expected 'fixed:<number>')")
+            })?;
+            if !usd.is_finite() || usd < 0.0 {
+                return Err(format!(
+                    "fixed price must be a non-negative number, got {usd}"
+                ));
+            }
+            return Ok(PriceSource::Fixed { usd });
+        }
+        Err(format!(
+            "invalid price source '{s}': expected 'coingecko', 'fixed:<number>', or 'none'"
+        ))
+    }
+}
+
+/// Ethereum settlement config for a network.
+///
+/// Lives inside [`crate::config`]-style network profiles on the CLI side, but
+/// the shape is owned by the SDK because the SDK is what transacts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EthereumConfig {
+    pub rpc_url: String,
+    pub credit_contract: Address,
+    pub aleph_token: Address,
+    pub usdc_token: Address,
+    pub price_source: PriceSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explorer_tx_base: Option<String>,
+}
+
+impl EthereumConfig {
+    /// Production defaults: Ethereum mainnet tokens + credit contract +
+    /// CoinGecko price feed + etherscan explorer prefix.
+    pub fn mainnet_defaults() -> Self {
+        Self {
+            rpc_url: MAINNET_RPC_URL.to_string(),
+            credit_contract: MAINNET_CREDIT_CONTRACT,
+            aleph_token: MAINNET_ALEPH_TOKEN_ADDRESS,
+            usdc_token: MAINNET_USDC_TOKEN_ADDRESS,
+            price_source: PriceSource::CoinGecko,
+            explorer_tx_base: Some(MAINNET_EXPLORER_TX_BASE.to_string()),
+        }
+    }
+
+    /// Resolve the ERC20 token address for a given [`CreditToken`] variant.
+    pub fn token_address(&self, token: CreditToken) -> Address {
+        match token {
+            CreditToken::Aleph => self.aleph_token,
+            CreditToken::Usdc => self.usdc_token,
+        }
+    }
+}
 
 /// Token types accepted for credit purchase.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -31,14 +117,6 @@ pub enum CreditToken {
 }
 
 impl CreditToken {
-    /// ERC20 contract address on Ethereum mainnet.
-    pub fn contract_address(&self) -> Address {
-        match self {
-            CreditToken::Aleph => ALEPH_TOKEN_ADDRESS,
-            CreditToken::Usdc => USDC_TOKEN_ADDRESS,
-        }
-    }
-
     /// Number of decimal places for the token.
     pub fn decimals(&self) -> u8 {
         match self {
@@ -64,11 +142,15 @@ impl CreditToken {
 }
 
 /// Result of a credit estimate.
+///
+/// `price_usd` and `estimated_credits` are `None` when the network's
+/// [`PriceSource`] is `None` — we still parsed the amount but cannot compute
+/// a USD-denominated credit figure.
 pub struct CreditEstimate {
     pub token: CreditToken,
     pub amount_raw: U256,
-    pub estimated_credits: f64,
-    pub price_usd: f64,
+    pub estimated_credits: Option<f64>,
+    pub price_usd: Option<f64>,
     pub bonus_ratio: f64,
 }
 
@@ -150,8 +232,19 @@ pub fn parse_token_amount(amount_str: &str, decimals: u8) -> Result<U256, String
     Ok(result)
 }
 
-/// Fetch the current ALEPH/USD price from CoinGecko.
-async fn fetch_aleph_price_usd() -> Result<f64, String> {
+/// Resolve the ALEPH/USD price according to the configured [`PriceSource`].
+///
+/// Returns `Ok(None)` for `PriceSource::None` (caller will render an
+/// unknown-estimate state); `Ok(Some(_))` otherwise.
+async fn resolve_aleph_price_usd(source: &PriceSource) -> Result<Option<f64>, String> {
+    match source {
+        PriceSource::CoinGecko => fetch_aleph_price_usd_from_coingecko().await.map(Some),
+        PriceSource::Fixed { usd } => Ok(Some(*usd)),
+        PriceSource::None => Ok(None),
+    }
+}
+
+async fn fetch_aleph_price_usd_from_coingecko() -> Result<f64, String> {
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .build()
@@ -192,20 +285,24 @@ pub(crate) fn u256_to_f64(amount_raw: U256, decimals: u8) -> f64 {
 
 /// Estimate how many credits will be received for a given token amount.
 ///
-/// For USDC: 1 USDC = 1,000,000 credits (1:1, price_usd = 1.0).
-/// For ALEPH: credits = amount * price_usd * (1 + 0.2 bonus).
+/// For USDC the price is always $1.00. For ALEPH the price comes from the
+/// network's [`PriceSource`] — CoinGecko, a fixed USD value, or `None`
+/// (estimate cannot be computed; result carries `price_usd: None`).
 pub async fn estimate_credits(
     token: CreditToken,
     amount_raw: U256,
+    price_source: &PriceSource,
 ) -> Result<CreditEstimate, String> {
     let price_usd = match token {
-        CreditToken::Usdc => 1.0,
-        CreditToken::Aleph => fetch_aleph_price_usd().await?,
+        CreditToken::Usdc => Some(1.0),
+        CreditToken::Aleph => resolve_aleph_price_usd(price_source).await?,
     };
 
-    let amount_f64 = u256_to_f64(amount_raw, token.decimals());
     let bonus = token.bonus_ratio();
-    let estimated_credits = amount_f64 * price_usd * (1.0 + bonus) * 1_000_000.0;
+    let estimated_credits = price_usd.map(|p| {
+        let amount_f64 = u256_to_f64(amount_raw, token.decimals());
+        amount_f64 * p * (1.0 + bonus) * 1_000_000.0
+    });
 
     Ok(CreditEstimate {
         token,
@@ -221,8 +318,9 @@ pub async fn check_balance(
     provider: &impl Provider,
     owner: Address,
     token: CreditToken,
+    token_address: Address,
 ) -> Result<U256, String> {
-    let contract = IERC20::new(token.contract_address(), provider);
+    let contract = IERC20::new(token_address, provider);
     let result = contract
         .balanceOf(owner)
         .call()
@@ -259,11 +357,12 @@ pub fn format_token_amount(amount: U256, decimals: u8) -> String {
 /// Returns the transaction receipt after confirmation.
 pub async fn buy_credits(
     provider: &impl Provider,
-    token: CreditToken,
+    token_address: Address,
+    credit_contract: Address,
     amount_raw: U256,
 ) -> Result<alloy::rpc::types::TransactionReceipt, String> {
-    let contract = IERC20::new(token.contract_address(), provider);
-    let tx = contract.transfer(CREDIT_CONTRACT, amount_raw);
+    let contract = IERC20::new(token_address, provider);
+    let tx = contract.transfer(credit_contract, amount_raw);
     let pending = tx
         .send()
         .await
@@ -355,13 +454,121 @@ mod tests {
 
     #[tokio::test]
     async fn estimate_usdc_credits() {
-        let estimate = estimate_credits(CreditToken::Usdc, U256::from(100_000_000u64))
+        let estimate = estimate_credits(
+            CreditToken::Usdc,
+            U256::from(100_000_000u64),
+            // USDC ignores the price source; any value is fine.
+            &PriceSource::None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(estimate.price_usd, Some(1.0));
+        assert_eq!(estimate.bonus_ratio, 0.0);
+        assert_eq!(estimate.estimated_credits, Some(100_000_000.0));
+    }
+
+    #[tokio::test]
+    async fn estimate_aleph_with_fixed_price() {
+        let one_aleph = U256::from(10u64).pow(U256::from(18u64));
+        let estimate = estimate_credits(
+            CreditToken::Aleph,
+            one_aleph,
+            &PriceSource::Fixed { usd: 0.5 },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(estimate.price_usd, Some(0.5));
+        assert_eq!(estimate.bonus_ratio, 0.2);
+        // 1 ALEPH * $0.5 * 1.2 * 1_000_000 = 600_000.
+        assert_eq!(estimate.estimated_credits, Some(600_000.0));
+    }
+
+    #[tokio::test]
+    async fn estimate_aleph_with_none_price_source_leaves_estimate_empty() {
+        let one_aleph = U256::from(10u64).pow(U256::from(18u64));
+        let estimate = estimate_credits(CreditToken::Aleph, one_aleph, &PriceSource::None)
             .await
             .unwrap();
+        assert_eq!(estimate.price_usd, None);
+        assert_eq!(estimate.estimated_credits, None);
+    }
 
-        assert_eq!(estimate.price_usd, 1.0);
-        assert_eq!(estimate.bonus_ratio, 0.0);
-        assert_eq!(estimate.estimated_credits, 100_000_000.0);
+    #[test]
+    fn mainnet_defaults_wire_up_known_constants() {
+        let cfg = EthereumConfig::mainnet_defaults();
+        assert_eq!(cfg.credit_contract, MAINNET_CREDIT_CONTRACT);
+        assert_eq!(cfg.aleph_token, MAINNET_ALEPH_TOKEN_ADDRESS);
+        assert_eq!(cfg.usdc_token, MAINNET_USDC_TOKEN_ADDRESS);
+        assert_eq!(cfg.rpc_url, MAINNET_RPC_URL);
+        assert_eq!(cfg.price_source, PriceSource::CoinGecko);
+        assert_eq!(
+            cfg.explorer_tx_base.as_deref(),
+            Some(MAINNET_EXPLORER_TX_BASE)
+        );
+    }
+
+    #[test]
+    fn price_source_json_roundtrip_coingecko() {
+        let s = serde_json::to_string(&PriceSource::CoinGecko).unwrap();
+        assert_eq!(s, r#"{"type":"coin_gecko"}"#);
+        let back: PriceSource = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, PriceSource::CoinGecko);
+    }
+
+    #[test]
+    fn price_source_json_roundtrip_fixed() {
+        let s = serde_json::to_string(&PriceSource::Fixed { usd: 0.25 }).unwrap();
+        assert_eq!(s, r#"{"type":"fixed","usd":0.25}"#);
+        let back: PriceSource = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, PriceSource::Fixed { usd: 0.25 });
+    }
+
+    #[test]
+    fn price_source_json_roundtrip_none() {
+        let s = serde_json::to_string(&PriceSource::None).unwrap();
+        assert_eq!(s, r#"{"type":"none"}"#);
+        let back: PriceSource = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, PriceSource::None);
+    }
+
+    #[test]
+    fn ethereum_config_token_address_dispatch() {
+        let cfg = EthereumConfig::mainnet_defaults();
+        assert_eq!(cfg.token_address(CreditToken::Aleph), cfg.aleph_token);
+        assert_eq!(cfg.token_address(CreditToken::Usdc), cfg.usdc_token);
+    }
+
+    #[test]
+    fn price_source_from_str_accepts_cli_forms() {
+        use std::str::FromStr;
+        assert_eq!(
+            PriceSource::from_str("coingecko").unwrap(),
+            PriceSource::CoinGecko
+        );
+        assert_eq!(
+            PriceSource::from_str("CoinGecko").unwrap(),
+            PriceSource::CoinGecko
+        );
+        assert_eq!(PriceSource::from_str("none").unwrap(), PriceSource::None);
+        assert_eq!(
+            PriceSource::from_str("fixed:0.25").unwrap(),
+            PriceSource::Fixed { usd: 0.25 }
+        );
+        assert_eq!(
+            PriceSource::from_str("fixed:1").unwrap(),
+            PriceSource::Fixed { usd: 1.0 }
+        );
+    }
+
+    #[test]
+    fn price_source_from_str_rejects_garbage() {
+        use std::str::FromStr;
+        assert!(PriceSource::from_str("chainlink").is_err());
+        assert!(PriceSource::from_str("fixed:").is_err());
+        assert!(PriceSource::from_str("fixed:abc").is_err());
+        assert!(PriceSource::from_str("fixed:-1").is_err());
     }
 
     #[test]
