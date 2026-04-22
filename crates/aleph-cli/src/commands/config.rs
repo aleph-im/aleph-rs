@@ -2,7 +2,7 @@ use crate::cli::{
     CcnAddArgs, CcnCommand, CcnListArgs, CcnRemoveArgs, CcnShowArgs, CcnUseArgs, ConfigCommand,
     NetworkAddArgs, NetworkCommand, NetworkRemoveArgs, NetworkShowArgs, NetworkUseArgs,
 };
-use crate::config::store::ConfigStore;
+use crate::config::store::{ConfigStore, NetworkEntry};
 use anyhow::{Context, Result};
 
 pub async fn handle_config_command(command: ConfigCommand, json: bool) -> Result<()> {
@@ -132,21 +132,24 @@ fn handle_network_remove(store: &ConfigStore, args: NetworkRemoveArgs, json: boo
     Ok(())
 }
 
-/// Resolve which network a `ccn` subcommand operates on:
-/// the explicit `--network <name>` override if passed, else the current
-/// default network. Errors if no default is set.
+/// Resolve which network a `ccn` subcommand operates on and return its entry.
+///
+/// If `override_name` is `Some`, that network is loaded (errors with
+/// `NetworkNotFound` if unknown). Otherwise the current `default_network`
+/// is used — errors if no default is set.
 fn resolve_ccn_scope(
     store: &ConfigStore,
     override_name: Option<&str>,
-) -> Result<String> {
-    if let Some(name) = override_name {
-        // Validate existence early so errors are consistent.
-        store.get_network(name)?;
-        return Ok(name.to_string());
-    }
-    store
-        .default_network_name()?
-        .ok_or_else(|| anyhow::anyhow!("no default network set; use: aleph config network use <NAME>"))
+) -> Result<NetworkEntry> {
+    let name = match override_name {
+        Some(n) => n.to_string(),
+        None => store
+            .default_network_name()?
+            .ok_or_else(|| anyhow::anyhow!(
+                "no default network set; use: aleph config network use <NAME>"
+            ))?,
+    };
+    Ok(store.get_network(&name)?)
 }
 
 async fn handle_ccn_command(command: CcnCommand, json: bool) -> Result<()> {
@@ -161,7 +164,7 @@ async fn handle_ccn_command(command: CcnCommand, json: bool) -> Result<()> {
 }
 
 fn handle_add(store: &ConfigStore, args: CcnAddArgs, json: bool) -> Result<()> {
-    let network = resolve_ccn_scope(store, args.network.as_deref())?;
+    let network = resolve_ccn_scope(store, args.network.as_deref())?.name;
     store.add_ccn(&network, &args.name, &args.url)?;
     if json {
         println!(
@@ -180,7 +183,7 @@ fn handle_add(store: &ConfigStore, args: CcnAddArgs, json: bool) -> Result<()> {
 }
 
 fn handle_use(store: &ConfigStore, args: CcnUseArgs, json: bool) -> Result<()> {
-    let network = resolve_ccn_scope(store, args.network.as_deref())?;
+    let network = resolve_ccn_scope(store, args.network.as_deref())?.name;
     store.set_default_ccn(&network, &args.name)?;
     if json {
         println!(
@@ -221,15 +224,14 @@ fn handle_list(store: &ConfigStore, args: CcnListArgs, json: bool) -> Result<()>
         return Ok(());
     }
 
-    let network = resolve_ccn_scope(store, args.network.as_deref())?;
-    let net = store.get_network(&network)?;
+    let net = resolve_ccn_scope(store, args.network.as_deref())?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&net.ccns)?);
         return Ok(());
     }
 
-    eprintln!("Network: {}", network);
+    eprintln!("Network: {}", net.name);
     eprintln!("{:<2} {:<16} URL", "", "NAME");
     for c in &net.ccns {
         let marker = if net.default_ccn.as_deref() == Some(&c.name) { "*" } else { " " };
@@ -239,23 +241,32 @@ fn handle_list(store: &ConfigStore, args: CcnListArgs, json: bool) -> Result<()>
 }
 
 async fn handle_show(store: &ConfigStore, args: CcnShowArgs, json: bool) -> Result<()> {
-    let network = resolve_ccn_scope(store, args.network.as_deref())?;
-    let net = store.get_network(&network)?;
+    let net = resolve_ccn_scope(store, args.network.as_deref())?;
     let name = match args.name {
         Some(n) => n,
         None => net.default_ccn.clone().ok_or_else(|| {
             anyhow::anyhow!(
-                "network '{network}' has no default CCN; use: aleph config ccn use <NAME> [--network {network}]"
+                "network '{network}' has no default CCN; use: aleph config ccn use <NAME> [--network {network}]",
+                network = net.name,
             )
         })?,
     };
-    let entry = store.get_ccn(&network, &name)?;
+    let entry = net
+        .ccns
+        .iter()
+        .find(|c| c.name == name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!(
+            "ccn '{ccn}' not found in network '{network}'",
+            ccn = name,
+            network = net.name,
+        ))?;
     let is_default = net.default_ccn.as_deref() == Some(name.as_str());
     let version = fetch_ccn_version(&entry.url).await;
 
     if json {
         let mut output = serde_json::json!({
-            "network": network,
+            "network": net.name,
             "name": entry.name,
             "url": entry.url,
             "default": is_default,
@@ -265,7 +276,7 @@ async fn handle_show(store: &ConfigStore, args: CcnShowArgs, json: bool) -> Resu
         }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        eprintln!("Network: {}", network);
+        eprintln!("Network: {}", net.name);
         eprintln!("Name:    {}", entry.name);
         eprintln!("URL:     {}", entry.url);
         match &version {
@@ -280,7 +291,7 @@ async fn handle_show(store: &ConfigStore, args: CcnShowArgs, json: bool) -> Resu
 }
 
 fn handle_remove(store: &ConfigStore, args: CcnRemoveArgs, json: bool) -> Result<()> {
-    let network = resolve_ccn_scope(store, args.network.as_deref())?;
+    let network = resolve_ccn_scope(store, args.network.as_deref())?.name;
     store.remove_ccn(&network, &args.name)?;
     if json {
         println!(
