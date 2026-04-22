@@ -124,7 +124,6 @@ impl ConfigStore {
         }
     }
 
-    // Network CRUD — implemented in Task 2
     pub fn add_network(&self, name: &str) -> Result<(), ConfigError> {
         Self::validate_name(name)?;
         let mut manifest = self.load_manifest()?;
@@ -179,7 +178,6 @@ impl ConfigStore {
         Ok(self.load_manifest()?.networks)
     }
 
-    // CCN CRUD scoped to a network — implemented in Task 3
     pub fn add_ccn(&self, network: &str, name: &str, url: &str) -> Result<(), ConfigError> {
         Self::validate_name(name)?;
         Self::validate_url(url)?;
@@ -265,7 +263,6 @@ impl ConfigStore {
         Ok(out)
     }
 
-    // Built-in seeding — implemented in Task 4
     fn ensure_builtin(&self) -> Result<(), ConfigError> {
         let mut manifest = self.load_manifest()?;
         if !manifest.networks.is_empty() {

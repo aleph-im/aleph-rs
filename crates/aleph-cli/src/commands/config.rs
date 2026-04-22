@@ -304,12 +304,9 @@ async fn handle_show(
         .iter()
         .find(|c| c.name == name)
         .cloned()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "ccn '{ccn}' not found in network '{network}'",
-                ccn = name,
-                network = net.name,
-            )
+        .ok_or_else(|| crate::config::store::ConfigError::CcnNotFound {
+            network: net.name.clone(),
+            ccn: name.clone(),
         })?;
     let is_default = net.default_ccn.as_deref() == Some(name.as_str());
     let version = fetch_ccn_version(&entry.url).await;
