@@ -122,23 +122,58 @@ impl ConfigStore {
     }
 
     // Network CRUD — implemented in Task 2
-    pub fn add_network(&self, _name: &str) -> Result<(), ConfigError> {
-        unimplemented!()
+    pub fn add_network(&self, name: &str) -> Result<(), ConfigError> {
+        Self::validate_name(name)?;
+        let mut manifest = self.load_manifest()?;
+        if manifest.networks.iter().any(|n| n.name == name) {
+            return Err(ConfigError::NetworkAlreadyExists(name.to_string()));
+        }
+        manifest.networks.push(NetworkEntry {
+            name: name.to_string(),
+            default_ccn: None,
+            ccns: Vec::new(),
+        });
+        if manifest.default_network.is_none() {
+            manifest.default_network = Some(name.to_string());
+        }
+        self.save_manifest(&manifest)
     }
-    pub fn get_network(&self, _name: &str) -> Result<NetworkEntry, ConfigError> {
-        unimplemented!()
+
+    pub fn get_network(&self, name: &str) -> Result<NetworkEntry, ConfigError> {
+        self.load_manifest()?
+            .networks
+            .into_iter()
+            .find(|n| n.name == name)
+            .ok_or_else(|| ConfigError::NetworkNotFound(name.to_string()))
     }
-    pub fn remove_network(&self, _name: &str) -> Result<(), ConfigError> {
-        unimplemented!()
+
+    pub fn remove_network(&self, name: &str) -> Result<(), ConfigError> {
+        let mut manifest = self.load_manifest()?;
+        if !manifest.networks.iter().any(|n| n.name == name) {
+            return Err(ConfigError::NetworkNotFound(name.to_string()));
+        }
+        if manifest.default_network.as_deref() == Some(name) {
+            return Err(ConfigError::CannotRemoveDefaultNetwork(name.to_string()));
+        }
+        manifest.networks.retain(|n| n.name != name);
+        self.save_manifest(&manifest)
     }
-    pub fn set_default_network(&self, _name: &str) -> Result<(), ConfigError> {
-        unimplemented!()
+
+    pub fn set_default_network(&self, name: &str) -> Result<(), ConfigError> {
+        let mut manifest = self.load_manifest()?;
+        if !manifest.networks.iter().any(|n| n.name == name) {
+            return Err(ConfigError::NetworkNotFound(name.to_string()));
+        }
+        manifest.default_network = Some(name.to_string());
+        self.save_manifest(&manifest)
     }
+
     pub fn default_network_name(&self) -> Result<Option<String>, ConfigError> {
-        unimplemented!()
+        Ok(self.load_manifest()?.default_network)
     }
+
     pub fn list_networks(&self) -> Result<Vec<NetworkEntry>, ConfigError> {
-        unimplemented!()
+        Ok(self.load_manifest()?.networks)
     }
 
     // CCN CRUD scoped to a network — implemented in Task 3
@@ -245,5 +280,95 @@ mod tests {
     #[test]
     fn validate_url_accepts_http() {
         assert!(ConfigStore::validate_url("http://localhost:4024").is_ok());
+    }
+
+    #[test]
+    fn add_network_basic() {
+        let (_dir, store) = temp_store();
+        store.add_network("testnet").unwrap();
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "testnet");
+        assert!(nets[0].ccns.is_empty());
+        assert!(nets[0].default_ccn.is_none());
+    }
+
+    #[test]
+    fn first_network_becomes_default() {
+        let (_dir, store) = temp_store();
+        store.add_network("testnet").unwrap();
+        assert_eq!(store.default_network_name().unwrap().as_deref(), Some("testnet"));
+    }
+
+    #[test]
+    fn second_network_does_not_override_default() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        assert_eq!(store.default_network_name().unwrap().as_deref(), Some("mainnet"));
+    }
+
+    #[test]
+    fn add_duplicate_network_errors() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        let err = store.add_network("mainnet").unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkAlreadyExists(_)));
+    }
+
+    #[test]
+    fn add_network_invalid_name_errors() {
+        let (_dir, store) = temp_store();
+        let err = store.add_network("bad name!").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidName(_)));
+    }
+
+    #[test]
+    fn get_nonexistent_network_errors() {
+        let (_dir, store) = temp_store();
+        let err = store.get_network("nope").unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
+    }
+
+    #[test]
+    fn set_default_network() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        store.set_default_network("testnet").unwrap();
+        assert_eq!(store.default_network_name().unwrap().as_deref(), Some("testnet"));
+    }
+
+    #[test]
+    fn set_default_network_unknown_errors() {
+        let (_dir, store) = temp_store();
+        let err = store.set_default_network("nope").unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
+    }
+
+    #[test]
+    fn remove_default_network_refused() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        let err = store.remove_network("mainnet").unwrap_err();
+        assert!(matches!(err, ConfigError::CannotRemoveDefaultNetwork(_)));
+    }
+
+    #[test]
+    fn remove_non_default_network() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        store.remove_network("testnet").unwrap();
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "mainnet");
+    }
+
+    #[test]
+    fn remove_unknown_network_errors() {
+        let (_dir, store) = temp_store();
+        let err = store.remove_network("nope").unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
     }
 }
