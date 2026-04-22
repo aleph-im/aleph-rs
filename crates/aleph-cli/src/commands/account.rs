@@ -5,6 +5,7 @@ use crate::cli::{
     AccountImportArgs, AccountMigrateArgs, AccountShowArgs, AccountUseArgs, AliasAddArgs,
     AliasCommand, AliasRemoveArgs,
 };
+use crate::common::{format_address, resolve_address};
 use aleph_sdk::client::{AccountBalance, AlephAccountClient, AlephClient};
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
@@ -437,8 +438,12 @@ async fn handle_balance(
     args: AccountBalanceArgs,
     json: bool,
 ) -> Result<()> {
-    let address = match args.address {
-        Some(addr) => addr,
+    let (input, address) = match args.address {
+        Some(value) => {
+            let resolved = resolve_address(&value)
+                .map_err(|e| anyhow::anyhow!("failed to resolve '{value}': {e}"))?;
+            (value, resolved.to_string())
+        }
         None => {
             let name = store.default_account_name()?.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -446,7 +451,8 @@ async fn handle_balance(
                      use: aleph account balance <ADDRESS>"
                 )
             })?;
-            store.get_account(&name)?.address
+            let addr = store.get_account(&name)?.address;
+            (name, addr)
         }
     };
 
@@ -463,7 +469,10 @@ async fn handle_balance(
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        eprintln!("Address: {address}");
+        eprintln!(
+            "Address: {}",
+            format_address(&input, &Address::from(address.clone()))
+        );
         eprintln!(
             "ALEPH:   {:.4} (locked: {:.4})",
             balance.aleph_tokens, balance.locked_aleph_tokens
