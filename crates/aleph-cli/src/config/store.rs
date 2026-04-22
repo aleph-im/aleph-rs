@@ -3,29 +3,46 @@ use std::path::PathBuf;
 
 pub const BUILTIN_CCN_NAME: &str = "official";
 pub const BUILTIN_CCN_URL: &str = "https://api.aleph.im";
+pub const BUILTIN_NETWORK_NAME: &str = "mainnet";
 
-/// One named CCN endpoint.
+/// One named CCN endpoint inside a network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CcnEntry {
     pub name: String,
     pub url: String,
 }
 
-/// The on-disk config manifest (`config.toml`).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ConfigManifest {
-    /// Name of the default CCN (used when no --ccn or --ccn-url flag is provided).
+/// A named network: CCN endpoints + (future) Ethereum settlement config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkEntry {
+    pub name: String,
     pub default_ccn: Option<String>,
     #[serde(default)]
     pub ccns: Vec<CcnEntry>,
 }
 
+/// The on-disk config manifest (`config.toml`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConfigManifest {
+    pub default_network: Option<String>,
+    #[serde(default)]
+    pub networks: Vec<NetworkEntry>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("ccn '{0}' already exists")]
-    AlreadyExists(String),
-    #[error("ccn '{0}' not found")]
-    NotFound(String),
+    #[error("network '{0}' already exists")]
+    NetworkAlreadyExists(String),
+    #[error("network '{0}' not found")]
+    NetworkNotFound(String),
+    #[error(
+        "cannot remove network '{0}': it is the default network; use 'aleph config network use <name>' to switch first"
+    )]
+    CannotRemoveDefaultNetwork(String),
+    #[error("ccn '{ccn}' already exists in network '{network}'")]
+    CcnAlreadyExists { network: String, ccn: String },
+    #[error("ccn '{ccn}' not found in network '{network}'")]
+    CcnNotFound { network: String, ccn: String },
     #[error(
         "invalid name '{0}': names must be non-empty and contain only alphanumeric characters, hyphens, and underscores"
     )]
@@ -62,22 +79,6 @@ impl ConfigStore {
         };
         store.ensure_builtin()?;
         Ok(store)
-    }
-
-    /// Ensure the built-in "official" CCN entry exists in the manifest.
-    fn ensure_builtin(&self) -> Result<(), ConfigError> {
-        let mut manifest = self.load_manifest()?;
-        if manifest.ccns.iter().any(|c| c.name == BUILTIN_CCN_NAME) {
-            return Ok(());
-        }
-        manifest.ccns.push(CcnEntry {
-            name: BUILTIN_CCN_NAME.to_string(),
-            url: BUILTIN_CCN_URL.to_string(),
-        });
-        if manifest.default_ccn.is_none() {
-            manifest.default_ccn = Some(BUILTIN_CCN_NAME.to_string());
-        }
-        self.save_manifest(&manifest)
     }
 
     pub fn load_manifest(&self) -> Result<ConfigManifest, ConfigError> {
@@ -123,57 +124,160 @@ impl ConfigStore {
         }
     }
 
-    pub fn add_ccn(&self, name: &str, url: &str) -> Result<(), ConfigError> {
+    pub fn add_network(&self, name: &str) -> Result<(), ConfigError> {
+        Self::validate_name(name)?;
+        let mut manifest = self.load_manifest()?;
+        if manifest.networks.iter().any(|n| n.name == name) {
+            return Err(ConfigError::NetworkAlreadyExists(name.to_string()));
+        }
+        manifest.networks.push(NetworkEntry {
+            name: name.to_string(),
+            default_ccn: None,
+            ccns: Vec::new(),
+        });
+        if manifest.default_network.is_none() {
+            manifest.default_network = Some(name.to_string());
+        }
+        self.save_manifest(&manifest)
+    }
+
+    pub fn get_network(&self, name: &str) -> Result<NetworkEntry, ConfigError> {
+        self.load_manifest()?
+            .networks
+            .into_iter()
+            .find(|n| n.name == name)
+            .ok_or_else(|| ConfigError::NetworkNotFound(name.to_string()))
+    }
+
+    pub fn remove_network(&self, name: &str) -> Result<(), ConfigError> {
+        let mut manifest = self.load_manifest()?;
+        if !manifest.networks.iter().any(|n| n.name == name) {
+            return Err(ConfigError::NetworkNotFound(name.to_string()));
+        }
+        if manifest.default_network.as_deref() == Some(name) {
+            return Err(ConfigError::CannotRemoveDefaultNetwork(name.to_string()));
+        }
+        manifest.networks.retain(|n| n.name != name);
+        self.save_manifest(&manifest)
+    }
+
+    pub fn set_default_network(&self, name: &str) -> Result<(), ConfigError> {
+        let mut manifest = self.load_manifest()?;
+        if !manifest.networks.iter().any(|n| n.name == name) {
+            return Err(ConfigError::NetworkNotFound(name.to_string()));
+        }
+        manifest.default_network = Some(name.to_string());
+        self.save_manifest(&manifest)
+    }
+
+    pub fn default_network_name(&self) -> Result<Option<String>, ConfigError> {
+        Ok(self.load_manifest()?.default_network)
+    }
+
+    pub fn list_networks(&self) -> Result<Vec<NetworkEntry>, ConfigError> {
+        Ok(self.load_manifest()?.networks)
+    }
+
+    pub fn add_ccn(&self, network: &str, name: &str, url: &str) -> Result<(), ConfigError> {
         Self::validate_name(name)?;
         Self::validate_url(url)?;
-
         let mut manifest = self.load_manifest()?;
-        if manifest.ccns.iter().any(|c| c.name == name) {
-            return Err(ConfigError::AlreadyExists(name.to_string()));
+        let net = manifest
+            .networks
+            .iter_mut()
+            .find(|n| n.name == network)
+            .ok_or_else(|| ConfigError::NetworkNotFound(network.to_string()))?;
+        if net.ccns.iter().any(|c| c.name == name) {
+            return Err(ConfigError::CcnAlreadyExists {
+                network: network.to_string(),
+                ccn: name.to_string(),
+            });
         }
-
-        manifest.ccns.push(CcnEntry {
+        net.ccns.push(CcnEntry {
             name: name.to_string(),
             url: url.to_string(),
         });
-        if manifest.default_ccn.is_none() {
-            manifest.default_ccn = Some(name.to_string());
+        if net.default_ccn.is_none() {
+            net.default_ccn = Some(name.to_string());
         }
         self.save_manifest(&manifest)
     }
 
-    pub fn get_ccn(&self, name: &str) -> Result<CcnEntry, ConfigError> {
-        let manifest = self.load_manifest()?;
-        manifest
-            .ccns
-            .iter()
+    pub fn get_ccn(&self, network: &str, name: &str) -> Result<CcnEntry, ConfigError> {
+        let net = self.get_network(network)?;
+        net.ccns
+            .into_iter()
             .find(|c| c.name == name)
-            .cloned()
-            .ok_or_else(|| ConfigError::NotFound(name.to_string()))
+            .ok_or_else(|| ConfigError::CcnNotFound {
+                network: network.to_string(),
+                ccn: name.to_string(),
+            })
     }
 
-    pub fn default_ccn_name(&self) -> Result<Option<String>, ConfigError> {
-        Ok(self.load_manifest()?.default_ccn)
-    }
-
-    pub fn set_default_ccn(&self, name: &str) -> Result<(), ConfigError> {
+    pub fn remove_ccn(&self, network: &str, name: &str) -> Result<(), ConfigError> {
         let mut manifest = self.load_manifest()?;
-        if !manifest.ccns.iter().any(|c| c.name == name) {
-            return Err(ConfigError::NotFound(name.to_string()));
+        let net = manifest
+            .networks
+            .iter_mut()
+            .find(|n| n.name == network)
+            .ok_or_else(|| ConfigError::NetworkNotFound(network.to_string()))?;
+        let len_before = net.ccns.len();
+        net.ccns.retain(|c| c.name != name);
+        if net.ccns.len() == len_before {
+            return Err(ConfigError::CcnNotFound {
+                network: network.to_string(),
+                ccn: name.to_string(),
+            });
         }
-        manifest.default_ccn = Some(name.to_string());
+        if net.default_ccn.as_deref() == Some(name) {
+            net.default_ccn = None;
+        }
         self.save_manifest(&manifest)
     }
 
-    pub fn remove_ccn(&self, name: &str) -> Result<(), ConfigError> {
+    pub fn set_default_ccn(&self, network: &str, name: &str) -> Result<(), ConfigError> {
         let mut manifest = self.load_manifest()?;
-        let len_before = manifest.ccns.len();
-        manifest.ccns.retain(|c| c.name != name);
-        if manifest.ccns.len() == len_before {
-            return Err(ConfigError::NotFound(name.to_string()));
+        let net = manifest
+            .networks
+            .iter_mut()
+            .find(|n| n.name == network)
+            .ok_or_else(|| ConfigError::NetworkNotFound(network.to_string()))?;
+        if !net.ccns.iter().any(|c| c.name == name) {
+            return Err(ConfigError::CcnNotFound {
+                network: network.to_string(),
+                ccn: name.to_string(),
+            });
         }
-        if manifest.default_ccn.as_deref() == Some(name) {
-            manifest.default_ccn = None;
+        net.default_ccn = Some(name.to_string());
+        self.save_manifest(&manifest)
+    }
+
+    pub fn list_all_ccns(&self) -> Result<Vec<(String, CcnEntry)>, ConfigError> {
+        let manifest = self.load_manifest()?;
+        let mut out = Vec::new();
+        for net in manifest.networks {
+            for ccn in net.ccns {
+                out.push((net.name.clone(), ccn));
+            }
+        }
+        Ok(out)
+    }
+
+    fn ensure_builtin(&self) -> Result<(), ConfigError> {
+        let mut manifest = self.load_manifest()?;
+        if !manifest.networks.is_empty() {
+            return Ok(());
+        }
+        manifest.networks.push(NetworkEntry {
+            name: BUILTIN_NETWORK_NAME.to_string(),
+            default_ccn: Some(BUILTIN_CCN_NAME.to_string()),
+            ccns: vec![CcnEntry {
+                name: BUILTIN_CCN_NAME.to_string(),
+                url: BUILTIN_CCN_URL.to_string(),
+            }],
+        });
+        if manifest.default_network.is_none() {
+            manifest.default_network = Some(BUILTIN_NETWORK_NAME.to_string());
         }
         self.save_manifest(&manifest)
     }
@@ -191,36 +295,32 @@ mod tests {
     }
 
     #[test]
-    fn load_empty_manifest_returns_default() {
-        let (_dir, store) = temp_store();
-        let manifest = store.load_manifest().unwrap();
-        assert!(manifest.default_ccn.is_none());
-        assert!(manifest.ccns.is_empty());
+    fn roundtrip_manifest_serde() {
+        let manifest = ConfigManifest {
+            default_network: Some("mainnet".to_string()),
+            networks: vec![NetworkEntry {
+                name: "mainnet".to_string(),
+                default_ccn: Some("official".to_string()),
+                ccns: vec![CcnEntry {
+                    name: "official".to_string(),
+                    url: "https://api.aleph.im".to_string(),
+                }],
+            }],
+        };
+        let serialized = toml::to_string_pretty(&manifest).unwrap();
+        let deserialized: ConfigManifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.default_network.as_deref(), Some("mainnet"));
+        assert_eq!(deserialized.networks.len(), 1);
+        assert_eq!(deserialized.networks[0].name, "mainnet");
+        assert_eq!(deserialized.networks[0].ccns[0].url, "https://api.aleph.im");
     }
 
     #[test]
-    fn roundtrip_manifest_serde() {
-        let manifest = ConfigManifest {
-            default_ccn: Some("api3".to_string()),
-            ccns: vec![
-                CcnEntry {
-                    name: "api3".to_string(),
-                    url: "https://api3.aleph.im".to_string(),
-                },
-                CcnEntry {
-                    name: "local".to_string(),
-                    url: "http://localhost:4024".to_string(),
-                },
-            ],
-        };
-
-        let serialized = toml::to_string_pretty(&manifest).unwrap();
-        let deserialized: ConfigManifest = toml::from_str(&serialized).unwrap();
-
-        assert_eq!(deserialized.default_ccn.as_deref(), Some("api3"));
-        assert_eq!(deserialized.ccns.len(), 2);
-        assert_eq!(deserialized.ccns[0].url, "https://api3.aleph.im");
-        assert_eq!(deserialized.ccns[1].name, "local");
+    fn load_empty_manifest_returns_default() {
+        let (_dir, store) = temp_store();
+        let manifest = store.load_manifest().unwrap();
+        assert!(manifest.default_network.is_none());
+        assert!(manifest.networks.is_empty());
     }
 
     #[test]
@@ -264,118 +364,310 @@ mod tests {
     }
 
     #[test]
-    fn add_and_get_ccn() {
+    fn add_network_basic() {
         let (_dir, store) = temp_store();
-        store.add_ccn("api3", "https://api3.aleph.im").unwrap();
-        let entry = store.get_ccn("api3").unwrap();
-        assert_eq!(entry.name, "api3");
-        assert_eq!(entry.url, "https://api3.aleph.im");
+        store.add_network("testnet").unwrap();
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "testnet");
+        assert!(nets[0].ccns.is_empty());
+        assert!(nets[0].default_ccn.is_none());
     }
 
     #[test]
-    fn add_ccn_sets_first_as_default() {
+    fn first_network_becomes_default() {
         let (_dir, store) = temp_store();
-        store.add_ccn("api3", "https://api3.aleph.im").unwrap();
-        assert_eq!(store.default_ccn_name().unwrap().as_deref(), Some("api3"));
+        store.add_network("testnet").unwrap();
+        assert_eq!(
+            store.default_network_name().unwrap().as_deref(),
+            Some("testnet")
+        );
     }
 
     #[test]
-    fn add_ccn_does_not_override_existing_default() {
+    fn second_network_does_not_override_default() {
         let (_dir, store) = temp_store();
-        store.add_ccn("api3", "https://api3.aleph.im").unwrap();
-        store.add_ccn("local", "http://localhost:4024").unwrap();
-        assert_eq!(store.default_ccn_name().unwrap().as_deref(), Some("api3"));
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        assert_eq!(
+            store.default_network_name().unwrap().as_deref(),
+            Some("mainnet")
+        );
     }
 
     #[test]
-    fn add_duplicate_errors() {
+    fn add_duplicate_network_errors() {
         let (_dir, store) = temp_store();
-        store.add_ccn("api3", "https://api3.aleph.im").unwrap();
-        let err = store.add_ccn("api3", "https://other.aleph.im").unwrap_err();
-        assert!(matches!(err, ConfigError::AlreadyExists(_)));
+        store.add_network("mainnet").unwrap();
+        let err = store.add_network("mainnet").unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkAlreadyExists(_)));
     }
 
     #[test]
-    fn add_ccn_invalid_name_errors() {
+    fn add_network_invalid_name_errors() {
         let (_dir, store) = temp_store();
-        let err = store
-            .add_ccn("bad name!", "https://api3.aleph.im")
-            .unwrap_err();
+        let err = store.add_network("bad name!").unwrap_err();
         assert!(matches!(err, ConfigError::InvalidName(_)));
     }
 
     #[test]
-    fn add_ccn_invalid_url_errors() {
+    fn get_nonexistent_network_errors() {
         let (_dir, store) = temp_store();
-        let err = store.add_ccn("api3", "not a url").unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidUrl(_, _)));
+        let err = store.get_network("nope").unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
     }
 
     #[test]
-    fn get_nonexistent_ccn_errors() {
+    fn set_default_network() {
         let (_dir, store) = temp_store();
-        let err = store.get_ccn("nope").unwrap_err();
-        assert!(matches!(err, ConfigError::NotFound(_)));
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        store.set_default_network("testnet").unwrap();
+        assert_eq!(
+            store.default_network_name().unwrap().as_deref(),
+            Some("testnet")
+        );
     }
 
     #[test]
-    fn set_default_ccn() {
+    fn set_default_network_unknown_errors() {
         let (_dir, store) = temp_store();
-        store.add_ccn("api3", "https://api3.aleph.im").unwrap();
-        store.add_ccn("local", "http://localhost:4024").unwrap();
-        store.set_default_ccn("local").unwrap();
-        assert_eq!(store.default_ccn_name().unwrap().as_deref(), Some("local"));
+        let err = store.set_default_network("nope").unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
     }
 
     #[test]
-    fn set_default_ccn_nonexistent_errors() {
+    fn remove_default_network_refused() {
         let (_dir, store) = temp_store();
-        let err = store.set_default_ccn("nope").unwrap_err();
-        assert!(matches!(err, ConfigError::NotFound(_)));
+        store.add_network("mainnet").unwrap();
+        let err = store.remove_network("mainnet").unwrap_err();
+        assert!(matches!(err, ConfigError::CannotRemoveDefaultNetwork(_)));
     }
 
     #[test]
-    fn remove_ccn() {
+    fn remove_non_default_network() {
         let (_dir, store) = temp_store();
-        store.add_ccn("api3", "https://api3.aleph.im").unwrap();
-        store.add_ccn("local", "http://localhost:4024").unwrap();
-        store.remove_ccn("local").unwrap();
-        assert!(store.get_ccn("local").is_err());
-        // api3 still there
-        assert!(store.get_ccn("api3").is_ok());
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        store.remove_network("testnet").unwrap();
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "mainnet");
     }
 
     #[test]
-    fn remove_default_ccn_clears_default() {
+    fn remove_unknown_network_errors() {
         let (_dir, store) = temp_store();
-        store.add_ccn("api3", "https://api3.aleph.im").unwrap();
-        store.add_ccn("local", "http://localhost:4024").unwrap();
-        // api3 is default (first added)
-        store.remove_ccn("api3").unwrap();
-        // default should be cleared to None, not reassigned
-        assert_eq!(store.default_ccn_name().unwrap(), None);
+        let err = store.remove_network("nope").unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
     }
 
     #[test]
-    fn remove_nonexistent_ccn_errors() {
+    fn add_ccn_to_network() {
         let (_dir, store) = temp_store();
-        let err = store.remove_ccn("nope").unwrap_err();
-        assert!(matches!(err, ConfigError::NotFound(_)));
+        store.add_network("mainnet").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
+        let entry = store.get_ccn("mainnet", "official").unwrap();
+        assert_eq!(entry.url, "https://api.aleph.im");
     }
 
     #[test]
-    fn save_and_load_manifest() {
+    fn first_ccn_becomes_network_default() {
         let (_dir, store) = temp_store();
-        let manifest = ConfigManifest {
-            default_ccn: Some("api3".to_string()),
-            ccns: vec![CcnEntry {
-                name: "api3".to_string(),
-                url: "https://api3.aleph.im".to_string(),
-            }],
-        };
-        store.save_manifest(&manifest).unwrap();
-        let loaded = store.load_manifest().unwrap();
-        assert_eq!(loaded.default_ccn.as_deref(), Some("api3"));
-        assert_eq!(loaded.ccns.len(), 1);
+        store.add_network("mainnet").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
+        let net = store.get_network("mainnet").unwrap();
+        assert_eq!(net.default_ccn.as_deref(), Some("official"));
+    }
+
+    #[test]
+    fn second_ccn_does_not_override_network_default() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
+        store
+            .add_ccn("mainnet", "api3", "https://api3.aleph.im")
+            .unwrap();
+        let net = store.get_network("mainnet").unwrap();
+        assert_eq!(net.default_ccn.as_deref(), Some("official"));
+    }
+
+    #[test]
+    fn add_ccn_unknown_network_errors() {
+        let (_dir, store) = temp_store();
+        let err = store
+            .add_ccn("nope", "official", "https://api.aleph.im")
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
+    }
+
+    #[test]
+    fn add_duplicate_ccn_same_network_errors() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
+        let err = store
+            .add_ccn("mainnet", "official", "https://other.aleph.im")
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::CcnAlreadyExists { .. }));
+    }
+
+    #[test]
+    fn same_ccn_name_in_different_networks_allowed() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        store
+            .add_ccn("mainnet", "local", "http://one:4024")
+            .unwrap();
+        store
+            .add_ccn("testnet", "local", "http://two:4024")
+            .unwrap();
+        assert_eq!(
+            store.get_ccn("mainnet", "local").unwrap().url,
+            "http://one:4024"
+        );
+        assert_eq!(
+            store.get_ccn("testnet", "local").unwrap().url,
+            "http://two:4024"
+        );
+    }
+
+    #[test]
+    fn get_ccn_not_in_network_errors() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        let err = store.get_ccn("mainnet", "nope").unwrap_err();
+        assert!(matches!(err, ConfigError::CcnNotFound { .. }));
+    }
+
+    #[test]
+    fn remove_ccn_from_network() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_ccn("mainnet", "a", "https://a.example").unwrap();
+        store.add_ccn("mainnet", "b", "https://b.example").unwrap();
+        store.remove_ccn("mainnet", "b").unwrap();
+        let ccns = store.get_network("mainnet").unwrap().ccns;
+        assert_eq!(ccns.len(), 1);
+        assert_eq!(ccns[0].name, "a");
+    }
+
+    #[test]
+    fn remove_default_ccn_clears_network_default() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_ccn("mainnet", "a", "https://a.example").unwrap();
+        store.remove_ccn("mainnet", "a").unwrap();
+        let net = store.get_network("mainnet").unwrap();
+        assert_eq!(net.default_ccn, None);
+    }
+
+    #[test]
+    fn remove_ccn_unknown_errors() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        let err = store.remove_ccn("mainnet", "nope").unwrap_err();
+        assert!(matches!(err, ConfigError::CcnNotFound { .. }));
+    }
+
+    #[test]
+    fn set_default_ccn_basic() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_ccn("mainnet", "a", "https://a.example").unwrap();
+        store.add_ccn("mainnet", "b", "https://b.example").unwrap();
+        store.set_default_ccn("mainnet", "b").unwrap();
+        let net = store.get_network("mainnet").unwrap();
+        assert_eq!(net.default_ccn.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn set_default_ccn_unknown_errors() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        let err = store.set_default_ccn("mainnet", "nope").unwrap_err();
+        assert!(matches!(err, ConfigError::CcnNotFound { .. }));
+    }
+
+    #[test]
+    fn list_all_ccns_across_networks() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        store
+            .add_ccn("mainnet", "official", "https://api.aleph.im")
+            .unwrap();
+        store
+            .add_ccn("testnet", "local", "http://localhost:4024")
+            .unwrap();
+        let all = store.list_all_ccns().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(
+            all.iter()
+                .any(|(n, c)| n == "mainnet" && c.name == "official")
+        );
+        assert!(all.iter().any(|(n, c)| n == "testnet" && c.name == "local"));
+    }
+
+    #[test]
+    fn remove_network_cascades_ccns() {
+        let (_dir, store) = temp_store();
+        store.add_network("mainnet").unwrap();
+        store.add_network("testnet").unwrap();
+        store
+            .add_ccn("testnet", "local", "http://localhost:4024")
+            .unwrap();
+        store.remove_network("testnet").unwrap();
+        assert!(store.get_network("testnet").is_err());
+        // no orphaned CCNs in list_all
+        let all = store.list_all_ccns().unwrap();
+        assert!(all.iter().all(|(n, _)| n != "testnet"));
+    }
+
+    #[test]
+    fn ensure_builtin_seeds_mainnet() {
+        let (_dir, store) = temp_store();
+        store.ensure_builtin().unwrap();
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "mainnet");
+        assert_eq!(nets[0].default_ccn.as_deref(), Some(BUILTIN_CCN_NAME));
+        assert_eq!(nets[0].ccns.len(), 1);
+        assert_eq!(nets[0].ccns[0].name, BUILTIN_CCN_NAME);
+        assert_eq!(nets[0].ccns[0].url, BUILTIN_CCN_URL);
+        assert_eq!(
+            store.default_network_name().unwrap().as_deref(),
+            Some("mainnet")
+        );
+    }
+
+    #[test]
+    fn ensure_builtin_is_idempotent() {
+        let (_dir, store) = temp_store();
+        store.ensure_builtin().unwrap();
+        store.ensure_builtin().unwrap();
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].ccns.len(), 1);
+    }
+
+    #[test]
+    fn ensure_builtin_noop_when_networks_exist() {
+        let (_dir, store) = temp_store();
+        store.add_network("testnet").unwrap();
+        store.ensure_builtin().unwrap();
+        // mainnet not added because networks is non-empty
+        let nets = store.list_networks().unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "testnet");
     }
 }
