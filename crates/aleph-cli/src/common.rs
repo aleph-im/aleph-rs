@@ -278,43 +278,67 @@ use crate::account::{CliAccount, load_account, load_account_by_name};
 use crate::cli::SigningArgs;
 use crate::config::store::ConfigStore;
 
-/// Resolve the CCN URL from CLI flags or config.
+/// Resolve the CCN URL using a provided `ConfigStore` (testable form).
 ///
 /// Resolution order:
-/// 1. --ccn-url flag (explicit URL)
-/// 2. --ccn flag (named CCN from config)
-/// 3. default_ccn from config.toml
-pub fn resolve_ccn_url(
+/// 1. `ccn_url` (explicit URL) — returned as-is, no network membership check.
+///    This is an escape hatch for advanced use / quick tests.
+/// 2. Select the network:
+///    - `network` if provided — error if unknown.
+///    - else `default_network` from config — error if unset.
+/// 3. Within the selected network:
+///    - `ccn` (named) → lookup within that network; `CcnNotFound` if absent.
+///    - else → the network's `default_ccn`; error if unset.
+pub fn resolve_ccn_url_with_store(
+    store: &ConfigStore,
     ccn_url: Option<&str>,
     ccn: Option<&str>,
+    network: Option<&str>,
 ) -> Result<Url, Box<dyn std::error::Error>> {
-    // 1. Explicit URL
     if let Some(raw) = ccn_url {
         return Ok(Url::parse(raw).map_err(|e| format!("invalid --ccn-url: {e}"))?);
     }
 
-    // open() seeds the built-in "official" entry, so there is always a default.
-    let store =
-        ConfigStore::open().map_err(|e| anyhow::anyhow!("failed to open config store: {e}"))?;
+    let network_name: String = match network {
+        Some(n) => {
+            store.get_network(n).map_err(|e| anyhow::anyhow!("{e}"))?;
+            n.to_string()
+        }
+        None => store
+            .default_network_name()
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!(
+                "no default network set; use: aleph config network use <NAME>"
+            ))?,
+    };
 
-    // 2. Named CCN from --ccn flag
-    if let Some(name) = ccn {
-        let entry = store.get_ccn(name).map_err(|e| anyhow::anyhow!("{e}"))?;
-        return Ok(
-            Url::parse(&entry.url).map_err(|e| format!("invalid URL for CCN '{name}': {e}"))?
-        );
-    }
-
-    // 3. Default from config (always set — open() ensures the built-in exists)
-    let default_name = store
-        .default_ccn_name()
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .expect("open() ensures a default CCN exists");
+    let ccn_name = match ccn {
+        Some(name) => name.to_string(),
+        None => store
+            .get_network(&network_name)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .default_ccn
+            .ok_or_else(|| anyhow::anyhow!(
+                "network '{network_name}' has no default CCN; use: aleph config ccn use <NAME>"
+            ))?,
+    };
 
     let entry = store
-        .get_ccn(&default_name)
+        .get_ccn(&network_name, &ccn_name)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(Url::parse(&entry.url).map_err(|e| format!("invalid URL for CCN '{default_name}': {e}"))?)
+    Ok(Url::parse(&entry.url)
+        .map_err(|e| format!("invalid URL for CCN '{ccn_name}' in network '{network_name}': {e}"))?)
+}
+
+/// Resolve the CCN URL using the user-global config store. Call site: `main.rs`.
+pub fn resolve_ccn_url(
+    ccn_url: Option<&str>,
+    ccn: Option<&str>,
+    network: Option<&str>,
+) -> Result<Url, Box<dyn std::error::Error>> {
+    let store =
+        ConfigStore::open().map_err(|e| anyhow::anyhow!("failed to open config store: {e}"))?;
+    resolve_ccn_url_with_store(&store, ccn_url, ccn, network)
 }
 
 /// Resolve a signing account from CLI args.
@@ -485,5 +509,89 @@ mod tests {
         let body = r#"{"error":"something broke"}"#;
         let formatted = format_api_error(422, body, None, true);
         assert_eq!(formatted, "API request failed (HTTP 422)");
+    }
+
+    use crate::config::store::ConfigStore;
+    use tempfile::TempDir;
+
+    fn store_with_fixture() -> (TempDir, ConfigStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::with_manifest_path(dir.path().join("config.toml"));
+        // Seed mainnet + official manually (ensure_builtin is a private helper).
+        store.add_network("mainnet").unwrap();
+        store.add_ccn("mainnet", "official", "https://api.aleph.im").unwrap();
+        store.add_network("testnet").unwrap();
+        store.add_ccn("testnet", "local", "http://localhost:4024").unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn ccn_url_escape_hatch_wins() {
+        let (_dir, store) = store_with_fixture();
+        let url = resolve_ccn_url_with_store(
+            &store,
+            Some("http://escape.example"),
+            Some("official"),
+            Some("mainnet"),
+        )
+        .unwrap();
+        assert_eq!(url.as_str(), "http://escape.example/");
+    }
+
+    #[test]
+    fn ccn_url_escape_hatch_skips_network_check() {
+        let (_dir, store) = store_with_fixture();
+        // Neither the ccn name nor a network is needed when --ccn-url is set.
+        let url = resolve_ccn_url_with_store(&store, Some("http://escape.example"), None, None)
+            .unwrap();
+        assert_eq!(url.as_str(), "http://escape.example/");
+    }
+
+    #[test]
+    fn network_plus_ccn_resolves_within_network() {
+        let (_dir, store) = store_with_fixture();
+        let url =
+            resolve_ccn_url_with_store(&store, None, Some("local"), Some("testnet")).unwrap();
+        assert_eq!(url.as_str(), "http://localhost:4024/");
+    }
+
+    #[test]
+    fn network_only_uses_network_default_ccn() {
+        let (_dir, store) = store_with_fixture();
+        let url = resolve_ccn_url_with_store(&store, None, None, Some("mainnet")).unwrap();
+        assert_eq!(url.as_str(), "https://api.aleph.im/");
+    }
+
+    #[test]
+    fn no_flags_uses_default_network_default_ccn() {
+        let (_dir, store) = store_with_fixture();
+        // mainnet is the default (first network added).
+        let url = resolve_ccn_url_with_store(&store, None, None, None).unwrap();
+        assert_eq!(url.as_str(), "https://api.aleph.im/");
+    }
+
+    #[test]
+    fn unknown_network_errors() {
+        let (_dir, store) = store_with_fixture();
+        let err =
+            resolve_ccn_url_with_store(&store, None, None, Some("nope")).unwrap_err();
+        assert!(err.to_string().contains("network 'nope' not found"));
+    }
+
+    #[test]
+    fn unknown_ccn_in_selected_network_errors() {
+        let (_dir, store) = store_with_fixture();
+        let err =
+            resolve_ccn_url_with_store(&store, None, Some("nope"), Some("mainnet")).unwrap_err();
+        assert!(err.to_string().contains("ccn 'nope' not found in network 'mainnet'"));
+    }
+
+    #[test]
+    fn ccn_lookup_does_not_fall_back_across_networks() {
+        let (_dir, store) = store_with_fixture();
+        // 'local' exists in testnet but not in mainnet.
+        let err = resolve_ccn_url_with_store(&store, None, Some("local"), Some("mainnet"))
+            .unwrap_err();
+        assert!(err.to_string().contains("ccn 'local' not found in network 'mainnet'"));
     }
 }
