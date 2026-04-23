@@ -46,16 +46,13 @@ impl std::str::FromStr for PriceSource {
 
     /// Parse the CLI-facing `<coingecko|fixed:N|none>` form.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let trimmed = s.trim();
-        match trimmed.to_ascii_lowercase().as_str() {
+        let lower = s.trim().to_ascii_lowercase();
+        match lower.as_str() {
             "coingecko" => return Ok(PriceSource::CoinGecko),
             "none" => return Ok(PriceSource::None),
             _ => {}
         }
-        if let Some(rest) = trimmed
-            .strip_prefix("fixed:")
-            .or_else(|| trimmed.strip_prefix("FIXED:"))
-        {
+        if let Some(rest) = lower.strip_prefix("fixed:") {
             let usd: f64 = rest.parse().map_err(|e| {
                 format!("invalid fixed price '{rest}': {e} (expected 'fixed:<number>')")
             })?;
@@ -563,6 +560,15 @@ mod tests {
         assert_eq!(
             PriceSource::from_str("fixed:1").unwrap(),
             PriceSource::Fixed { usd: 1.0 }
+        );
+        // Case-insensitive prefix (was previously broken for mixed case).
+        assert_eq!(
+            PriceSource::from_str("FIXED:0.5").unwrap(),
+            PriceSource::Fixed { usd: 0.5 }
+        );
+        assert_eq!(
+            PriceSource::from_str("Fixed:2.0").unwrap(),
+            PriceSource::Fixed { usd: 2.0 }
         );
     }
 
