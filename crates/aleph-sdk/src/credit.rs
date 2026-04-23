@@ -246,8 +246,11 @@ async fn resolve_aleph_price_usd(source: &PriceSource) -> Result<Option<f64>, St
 }
 
 async fn fetch_aleph_price_usd_from_coingecko() -> Result<f64, String> {
+    // Cloudflare (CoinGecko's CDN) 403s reqwest's default UA as a suspicious
+    // programmatic client. Any non-default UA string passes through.
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
+        .user_agent(concat!("aleph-sdk/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let resp = client
