@@ -1,5 +1,5 @@
 use aleph_sdk::credit::{EthereumConfig, PriceSource};
-use alloy::primitives::Address;
+use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

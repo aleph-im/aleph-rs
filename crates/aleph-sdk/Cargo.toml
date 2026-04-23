@@ -9,7 +9,11 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aleph-types = { workspace = true }
-alloy = { workspace = true }
+alloy-contract = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-provider = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-sol-types = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 bs58 = { workspace = true }

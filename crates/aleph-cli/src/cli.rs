@@ -1518,13 +1518,13 @@ pub struct NetworkEthereumArgs {
     pub rpc_url: Option<String>,
     /// Credit smart-contract address (receives ERC20 transfers).
     #[arg(long)]
-    pub credit_contract: Option<alloy::primitives::Address>,
+    pub credit_contract: Option<alloy_primitives::Address>,
     /// ALEPH ERC20 token address on this network.
     #[arg(long)]
-    pub aleph_token: Option<alloy::primitives::Address>,
+    pub aleph_token: Option<alloy_primitives::Address>,
     /// USDC ERC20 token address on this network.
     #[arg(long)]
-    pub usdc_token: Option<alloy::primitives::Address>,
+    pub usdc_token: Option<alloy_primitives::Address>,
     /// ALEPH/USD price source: `coingecko`, `fixed:<usd>`, or `none`.
     #[arg(long, value_parser = parse_price_source)]
     pub price_source: Option<aleph_sdk::credit::PriceSource>,

@@ -3,11 +3,11 @@ use crate::cli::{BuyCreditArgs, CreditCommand, CreditTokenCli, SigningArgs};
 use crate::common::{resolve_account, resolve_network};
 use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
 use aleph_types::account::EvmAccount;
-use alloy::network::EthereumWallet;
-use alloy::primitives::{Address, U256};
-use alloy::providers::{Provider, ProviderBuilder};
-use alloy::rpc::types::TransactionReceipt;
-use alloy::signers::local::PrivateKeySigner;
+use alloy_network::EthereumWallet;
+use alloy_primitives::{Address, U256};
+use alloy_provider::{Provider, ProviderBuilder};
+use alloy_rpc_types_eth::TransactionReceipt;
+use alloy_signer_local::PrivateKeySigner;
 
 impl From<CreditTokenCli> for CreditToken {
     fn from(v: CreditTokenCli) -> Self {

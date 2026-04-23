@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use alloy::primitives::{Address, U256, address};
-use alloy::providers::Provider;
-use alloy::sol;
+use alloy_primitives::{Address, U256, address};
+use alloy_provider::Provider;
+use alloy_sol_types::sol;
 use serde::{Deserialize, Serialize};
 
 /// ALEPH ERC20 token on Ethereum mainnet.
@@ -361,7 +361,7 @@ pub async fn buy_credits(
     token_address: Address,
     credit_contract: Address,
     amount_raw: U256,
-) -> Result<alloy::rpc::types::TransactionReceipt, String> {
+) -> Result<alloy_rpc_types_eth::TransactionReceipt, String> {
     let contract = IERC20::new(token_address, provider);
     let tx = contract.transfer(credit_contract, amount_raw);
     let pending = tx
