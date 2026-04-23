@@ -71,7 +71,7 @@ async fn handle_buy(
 
     if !json {
         print_human_estimate(&args.amount, &estimate, &ethereum);
-        if !confirm_submission()? {
+        if !args.yes && !confirm_submission()? {
             eprintln!("Cancelled.");
             return Ok(());
         }

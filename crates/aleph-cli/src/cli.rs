@@ -1596,6 +1596,10 @@ pub struct BuyCreditArgs {
     #[arg(long)]
     pub rpc_url: Option<String>,
 
+    /// Skip the confirmation prompt and submit the transaction immediately.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
