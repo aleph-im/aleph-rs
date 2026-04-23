@@ -33,6 +33,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PriceSource {
     /// Fetch live ALEPH/USD from CoinGecko.
+    #[serde(rename = "coingecko")]
     CoinGecko,
     /// Hard-coded USD price (useful for testnets with mock tokens).
     Fixed { usd: f64 },
@@ -512,7 +513,7 @@ mod tests {
     #[test]
     fn price_source_json_roundtrip_coingecko() {
         let s = serde_json::to_string(&PriceSource::CoinGecko).unwrap();
-        assert_eq!(s, r#"{"type":"coin_gecko"}"#);
+        assert_eq!(s, r#"{"type":"coingecko"}"#);
         let back: PriceSource = serde_json::from_str(&s).unwrap();
         assert_eq!(back, PriceSource::CoinGecko);
     }
