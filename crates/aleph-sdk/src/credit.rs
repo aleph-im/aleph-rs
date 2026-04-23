@@ -17,7 +17,7 @@ pub const MAINNET_USDC_TOKEN_ADDRESS: Address =
 pub const MAINNET_CREDIT_CONTRACT: Address = address!("6b55F32Ea969910838defd03746Ced5E2AE8cB8B");
 
 /// Default Ethereum RPC endpoint for mainnet.
-pub const MAINNET_RPC_URL: &str = "https://eth.llamarpc.com";
+pub const MAINNET_RPC_URL: &str = "https://ethereum.publicnode.com";
 
 /// Etherscan transaction URL prefix for mainnet.
 pub const MAINNET_EXPLORER_TX_BASE: &str = "https://etherscan.io/tx/";
