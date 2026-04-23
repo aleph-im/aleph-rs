@@ -20,6 +20,7 @@ alloy-provider = { version = "1.8" }
 alloy-network = { version = "1.8" }
 alloy-signer-local = { version = "1.8" }
 alloy-rpc-types-eth = { version = "1.8" }
+alloy-node-bindings = { version = "1.8" }
 memsizes = { version = "1.0.0", features = ["serde"] }
 async-trait = { version = "0.1" }
 anyhow = { version = "1.0.100" }

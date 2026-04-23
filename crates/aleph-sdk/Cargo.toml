@@ -43,6 +43,11 @@ hex = { workspace = true }
 p256 = { workspace = true }
 prost = { workspace = true }
 
+[dev-dependencies]
+alloy-network = { workspace = true }
+alloy-node-bindings = { workspace = true }
+alloy-signer-local = { workspace = true }
+
 [features]
 default = []
 account-evm = ["aleph-types/account-evm"]
