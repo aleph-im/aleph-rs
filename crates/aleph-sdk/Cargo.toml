@@ -9,11 +9,14 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aleph-types = { workspace = true }
-alloy-contract = { workspace = true }
-alloy-primitives = { workspace = true }
-alloy-provider = { workspace = true }
-alloy-rpc-types-eth = { workspace = true }
-alloy-sol-types = { workspace = true }
+# alloy crates are only needed for the `credits` feature (EVM credit
+# purchases). Gated so downstream SDK consumers who don't use that flow
+# avoid the whole alloy dependency tree.
+alloy-contract = { workspace = true, optional = true }
+alloy-primitives = { workspace = true, optional = true }
+alloy-provider = { workspace = true, optional = true }
+alloy-rpc-types-eth = { workspace = true, optional = true }
+alloy-sol-types = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 bs58 = { workspace = true }
@@ -52,3 +55,14 @@ alloy-signer-local = { workspace = true }
 default = []
 account-evm = ["aleph-types/account-evm"]
 account-sol = ["aleph-types/account-sol"]
+credits = [
+    "dep:alloy-contract",
+    "dep:alloy-primitives",
+    "dep:alloy-provider",
+    "dep:alloy-rpc-types-eth",
+    "dep:alloy-sol-types",
+]
+
+[[test]]
+name = "credit_integration"
+required-features = ["credits"]

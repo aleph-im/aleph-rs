@@ -8,7 +8,7 @@ repository = "https://github.com/aleph-im/aleph-rs"
 homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
-aleph-sdk = { workspace = true, features = ["account-evm", "account-sol"] }
+aleph-sdk = { workspace = true, features = ["account-evm", "account-sol", "credits"] }
 alloy-network = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-provider = { workspace = true }
