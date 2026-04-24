@@ -346,6 +346,38 @@ pub fn resolve_ccn_url(
     resolve_ccn_url_with_store(&store, ccn_url, ccn, network)
 }
 
+/// Resolve a network entry from an explicit name or the config's current default.
+///
+/// Resolution order: `network_override` (e.g. top-level `--network`) >
+/// current `default_network` from config. Errors if neither is set or the
+/// named network is unknown.
+pub fn resolve_network_with_store(
+    store: &ConfigStore,
+    network_override: Option<&str>,
+) -> Result<crate::config::store::NetworkEntry, Box<dyn std::error::Error>> {
+    let name = match network_override {
+        Some(n) => n.to_string(),
+        None => store
+            .default_network_name()
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
+            })?,
+    };
+    store
+        .get_network(&name)
+        .map_err(|e| anyhow::anyhow!("{e}").into())
+}
+
+/// Resolve a network entry using the user-global config store.
+pub fn resolve_network(
+    network_override: Option<&str>,
+) -> Result<crate::config::store::NetworkEntry, Box<dyn std::error::Error>> {
+    let store =
+        ConfigStore::open().map_err(|e| anyhow::anyhow!("failed to open config store: {e}"))?;
+    resolve_network_with_store(&store, network_override)
+}
+
 /// Resolve a signing account from CLI args.
 ///
 /// Resolution order:

@@ -40,6 +40,14 @@ impl EvmAccount {
             signing_key,
         })
     }
+
+    /// Returns a reference to the underlying secp256k1 signing key.
+    ///
+    /// Exposed for callers (e.g. signing raw EVM transactions via `alloy`)
+    /// that need the key material directly rather than through `sign_raw`.
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
 }
 
 impl Account for EvmAccount {

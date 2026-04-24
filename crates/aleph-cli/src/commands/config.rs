@@ -1,9 +1,25 @@
 use crate::cli::{
     CcnAddArgs, CcnCommand, CcnListArgs, CcnRemoveArgs, CcnShowArgs, CcnUseArgs, ConfigCommand,
-    NetworkAddArgs, NetworkCommand, NetworkRemoveArgs, NetworkShowArgs, NetworkUseArgs,
+    NetworkAddArgs, NetworkCommand, NetworkEthereumArgs, NetworkRemoveArgs, NetworkSetArgs,
+    NetworkShowArgs, NetworkUseArgs,
 };
-use crate::config::store::{ConfigStore, NetworkEntry};
+use crate::config::store::{ConfigStore, EthereumPatch, NetworkEntry};
+use aleph_sdk::credit::EthereumConfig;
 use anyhow::{Context, Result};
+
+impl NetworkEthereumArgs {
+    /// Lower to an `EthereumPatch` that the store can apply.
+    fn to_patch(&self) -> EthereumPatch {
+        EthereumPatch {
+            rpc_url: self.rpc_url.clone(),
+            credit_contract: self.credit_contract,
+            aleph_token: self.aleph_token,
+            usdc_token: self.usdc_token,
+            price_source: self.price_source.clone(),
+            explorer_tx_base: self.explorer_tx_base.clone(),
+        }
+    }
+}
 
 pub async fn handle_config_command(
     command: ConfigCommand,
@@ -30,20 +46,109 @@ async fn handle_network_command(
         NetworkCommand::Use(args) => handle_network_use(&store, args, json),
         NetworkCommand::Show(args) => handle_network_show(&store, args, json, cli_network),
         NetworkCommand::Remove(args) => handle_network_remove(&store, args, json),
+        NetworkCommand::Set(args) => handle_network_set(&store, args, json, cli_network),
     }
 }
 
 fn handle_network_add(store: &ConfigStore, args: NetworkAddArgs, json: bool) -> Result<()> {
     store.add_network(&args.name)?;
+    let patch = args.ethereum.to_patch();
+    if !patch.is_empty() {
+        // The patch fills on top of mainnet defaults, giving the new network
+        // a complete ethereum block even if the user only overrode one field.
+        store.update_network_ethereum(&args.name, &patch)?;
+    }
+    let ethereum = store.get_network(&args.name)?.ethereum;
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "name": args.name }))?
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": args.name,
+                "ethereum": ethereum,
+            }))?
         );
     } else {
         eprintln!("Network '{}' added.", args.name);
+        if let Some(eth) = &ethereum {
+            render_ethereum_block_human(eth);
+        }
     }
     Ok(())
+}
+
+fn handle_network_set(
+    store: &ConfigStore,
+    args: NetworkSetArgs,
+    json: bool,
+    cli_network: Option<&str>,
+) -> Result<()> {
+    let name = resolve_target_network(store, args.network.as_deref(), cli_network)?;
+    let patch = args.ethereum.to_patch();
+    if patch.is_empty() {
+        return Err(anyhow::anyhow!(
+            "nothing to update — pass at least one of --rpc-url, --credit-contract, --aleph-token, --usdc-token, --price-source, --explorer-tx-base"
+        ));
+    }
+    store.update_network_ethereum(&name, &patch)?;
+    let ethereum = store
+        .get_network(&name)?
+        .ethereum
+        .expect("update_network_ethereum always leaves Some");
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "network": name,
+                "ethereum": ethereum,
+            }))?
+        );
+    } else {
+        eprintln!("Network '{name}' updated.");
+        render_ethereum_block_human(&ethereum);
+    }
+    Ok(())
+}
+
+/// Resolve which network a `network set` call targets:
+/// explicit `--network` > top-level `--network` > current default.
+fn resolve_target_network(
+    store: &ConfigStore,
+    override_name: Option<&str>,
+    cli_network: Option<&str>,
+) -> Result<String> {
+    let name = match override_name.or(cli_network) {
+        Some(n) => n.to_string(),
+        None => store.default_network_name()?.ok_or_else(|| {
+            anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
+        })?,
+    };
+    // Validate existence early so errors are consistent with other commands.
+    store.get_network(&name)?;
+    Ok(name)
+}
+
+fn render_ethereum_block_human(eth: &EthereumConfig) {
+    eprintln!("Ethereum:");
+    eprintln!("  RPC URL:        {}", eth.rpc_url);
+    eprintln!("  Credit:         {}", eth.credit_contract);
+    eprintln!("  ALEPH token:    {}", eth.aleph_token);
+    eprintln!("  USDC token:     {}", eth.usdc_token);
+    eprintln!(
+        "  Price source:   {}",
+        format_price_source(&eth.price_source)
+    );
+    if let Some(base) = &eth.explorer_tx_base {
+        eprintln!("  Explorer base:  {base}");
+    }
+}
+
+fn format_price_source(p: &aleph_sdk::credit::PriceSource) -> String {
+    use aleph_sdk::credit::PriceSource::*;
+    match p {
+        CoinGecko => "coingecko".to_string(),
+        Fixed { usd } => format!("fixed:{usd}"),
+        None => "none".to_string(),
+    }
 }
 
 fn handle_network_list(store: &ConfigStore, json: bool) -> Result<()> {
@@ -120,6 +225,7 @@ fn handle_network_show(
             "default": is_default,
             "default_ccn": net.default_ccn,
             "ccns": net.ccns,
+            "ethereum": net.ethereum,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -138,6 +244,9 @@ fn handle_network_show(
                 };
                 eprintln!("  {} {:<16} {}", marker, c.name, c.url);
             }
+        }
+        if let Some(eth) = &net.ethereum {
+            render_ethereum_block_human(eth);
         }
     }
     Ok(())
