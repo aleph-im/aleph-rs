@@ -42,6 +42,7 @@ tokio-tungstenite = { workspace = true }
 tokio-stream = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }
+walkdir = { workspace = true }
 hex = { workspace = true }
 p256 = { workspace = true }
 prost = { workspace = true }
@@ -50,6 +51,8 @@ prost = { workspace = true }
 alloy-network = { workspace = true }
 alloy-node-bindings = { workspace = true }
 alloy-signer-local = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
 
 [features]
 default = []

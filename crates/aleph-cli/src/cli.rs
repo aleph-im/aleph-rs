@@ -3,6 +3,7 @@ use aleph_sdk::credit::PriceSource;
 use aleph_types::item_hash::ItemHash;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+use url::Url;
 
 /// Clap adapter for [`PriceSource::from_str`]. Exposed as a named function so
 /// it can be referenced from `value_parser = parse_price_source` attributes.
@@ -1082,6 +1083,14 @@ pub struct FileUploadArgs {
     /// Sign on behalf of another address (requires an authorization from that address).
     #[arg(long)]
     pub on_behalf_of: Option<String>,
+
+    /// IPFS gateway URL (kubo daemon host) to use for directory uploads. The
+    /// SDK appends `/api/v0/...` paths internally, so pass scheme + host (and
+    /// optionally port), e.g. `http://localhost:5001`. Defaults to
+    /// `https://ipfs.aleph.cloud`. Can also be set via the
+    /// `ALEPH_IPFS_GATEWAY` environment variable.
+    #[arg(long, env = "ALEPH_IPFS_GATEWAY")]
+    pub ipfs_gateway: Option<Url>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
