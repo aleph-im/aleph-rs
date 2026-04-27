@@ -1084,9 +1084,11 @@ pub struct FileUploadArgs {
     #[arg(long)]
     pub on_behalf_of: Option<String>,
 
-    /// IPFS gateway URL (kubo HTTP API root) to use for directory uploads.
-    /// Defaults to the public ipfs.aleph.cloud endpoint. Can also be set via
-    /// the ALEPH_IPFS_GATEWAY environment variable.
+    /// IPFS gateway URL (kubo daemon host) to use for directory uploads. The
+    /// SDK appends `/api/v0/...` paths internally, so pass scheme + host (and
+    /// optionally port), e.g. `http://localhost:5001`. Defaults to
+    /// `https://ipfs.aleph.cloud`. Can also be set via the
+    /// `ALEPH_IPFS_GATEWAY` environment variable.
     #[arg(long, env = "ALEPH_IPFS_GATEWAY")]
     pub ipfs_gateway: Option<Url>,
 

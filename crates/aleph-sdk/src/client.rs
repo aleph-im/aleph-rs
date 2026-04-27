@@ -2101,7 +2101,7 @@ impl AlephClient {
         let query = build_add_query(&opts);
         let url = self
             .ipfs_gateway
-            .join(&format!("add?{query}"))
+            .join(&format!("/api/v0/add?{query}"))
             .map_err(StorageError::InvalidUrl)?;
 
         let response = self
@@ -3011,16 +3011,14 @@ mod ipfs_gateway_tests {
     #[test]
     fn default_client_uses_default_ipfs_gateway() {
         let client = AlephClient::new(Url::parse("https://example.com").unwrap());
-        assert_eq!(
-            client.ipfs_gateway.as_str(),
-            "https://ipfs.aleph.cloud/api/v0"
-        );
+        // Url normalizes to include a trailing slash for the empty-path root.
+        assert_eq!(client.ipfs_gateway.as_str(), "https://ipfs.aleph.cloud/");
     }
 
     #[test]
     fn with_ipfs_gateway_overrides() {
         let client = AlephClient::new(Url::parse("https://example.com").unwrap())
-            .with_ipfs_gateway(Url::parse("http://localhost:5001/api/v0").unwrap());
-        assert_eq!(client.ipfs_gateway.as_str(), "http://localhost:5001/api/v0");
+            .with_ipfs_gateway(Url::parse("http://localhost:5001").unwrap());
+        assert_eq!(client.ipfs_gateway.as_str(), "http://localhost:5001/");
     }
 }

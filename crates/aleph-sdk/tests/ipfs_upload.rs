@@ -31,8 +31,9 @@ fn mock_body() -> String {
 }
 
 fn gateway_url(server_uri: &str) -> Url {
-    // trailing slash so Url::join("add?...") appends rather than replaces
-    Url::parse(&format!("{server_uri}/")).unwrap()
+    // The SDK uses an absolute-path join (`/api/v0/...`), so the base URL's
+    // trailing slash doesn't matter — but parsing as-is keeps it minimal.
+    Url::parse(server_uri).unwrap()
 }
 
 #[tokio::test]
@@ -41,7 +42,7 @@ async fn upload_folder_returns_root_cid_from_ndjson() {
     let tmp = make_temp_dir(&[("hello.txt", "hello")]);
 
     Mock::given(method("POST"))
-        .and(path("/add"))
+        .and(path("/api/v0/add"))
         .and(query_param("wrap-with-directory", "true"))
         .and(query_param("cid-version", "1"))
         .and(query_param("raw-leaves", "true"))
@@ -68,7 +69,7 @@ async fn upload_folder_v0_omits_raw_leaves() {
     let tmp = make_temp_dir(&[("a.txt", "a")]);
 
     Mock::given(method("POST"))
-        .and(path("/add"))
+        .and(path("/api/v0/add"))
         .and(query_param("cid-version", "0"))
         .respond_with(ResponseTemplate::new(200).set_body_string(mock_body()))
         .expect(1)
@@ -110,7 +111,7 @@ async fn upload_folder_surfaces_403_as_ipfs_disabled() {
     let tmp = make_temp_dir(&[("a.txt", "a")]);
 
     Mock::given(method("POST"))
-        .and(path("/add"))
+        .and(path("/api/v0/add"))
         .respond_with(ResponseTemplate::new(403))
         .mount(&server)
         .await;

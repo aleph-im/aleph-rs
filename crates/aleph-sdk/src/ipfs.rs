@@ -5,11 +5,13 @@
 //! is **temporary** until pyaleph exposes an authenticated directory-ingest
 //! endpoint; the gateway URL is overridable via `AlephClient::with_ipfs_gateway`.
 
-/// Default kubo HTTP API used by the SDK when no override is configured.
+/// Default kubo host used by the SDK when no override is configured. The SDK
+/// appends `/api/v0/...` paths internally; only the scheme + host (+ optional
+/// port) belong here.
 ///
 /// Temporary: public unauthenticated endpoint. Replace with pyaleph-side
 /// ingestion once that lands.
-pub const DEFAULT_IPFS_GATEWAY: &str = "https://ipfs.aleph.cloud/api/v0";
+pub const DEFAULT_IPFS_GATEWAY: &str = "https://ipfs.aleph.cloud";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CidVersion {
@@ -170,7 +172,7 @@ mod tests {
 
     #[test]
     fn default_gateway_is_aleph_cloud() {
-        assert_eq!(DEFAULT_IPFS_GATEWAY, "https://ipfs.aleph.cloud/api/v0");
+        assert_eq!(DEFAULT_IPFS_GATEWAY, "https://ipfs.aleph.cloud");
     }
 
     #[test]
