@@ -1,0 +1,17 @@
+{
+  "data": {
+    "websites": {
+      "my-site": {
+        "metadata": { "name": "my-site", "tags": ["demo"], "framework": "nextjs" },
+        "payment": { "chain": "ETH", "type": "hold" },
+        "version": 2,
+        "volume_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "history": { "1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+        "ens": [],
+        "created_at": 1714000000.0,
+        "updated_at": 1714001000.0
+      },
+      "deleted-site": null
+    }
+  }
+}

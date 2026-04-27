@@ -154,6 +154,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?
         }
+        cli::Commands::Domain {
+            command: domain_command,
+        } => {
+            commands::domain::handle_domain_command(&aleph_client, &ccn_url, json, domain_command)
+                .await?
+        }
+        cli::Commands::Website {
+            command: website_command,
+        } => {
+            commands::website::handle_website_command(
+                &aleph_client,
+                &ccn_url,
+                json,
+                website_command,
+            )
+            .await?
+        }
     }
 
     Ok(())
