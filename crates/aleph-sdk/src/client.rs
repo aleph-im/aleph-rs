@@ -1,5 +1,7 @@
 use crate::aggregate_models::corechannel::CoreChannelAggregate;
+use crate::aggregate_models::domains::{DOMAINS_AGGREGATE_KEY, DomainsAggregate};
 use crate::aggregate_models::pricing::{PRICING_ADDRESS, PricingAggregate};
+use crate::aggregate_models::websites::{WEBSITES_AGGREGATE_KEY, WebsitesAggregate};
 use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
 use crate::messages::StoreBuilder;
 use crate::verify::Hasher;
@@ -1289,6 +1291,13 @@ pub trait AlephStorageClient {
         message: Option<&PendingMessage>,
         sync: bool,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
+
+    /// Uploads a folder from disk to IPFS as a UnixFS directory. Returns
+    /// the root CID of the folder.
+    fn upload_folder_to_ipfs(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+    ) -> impl std::future::Future<Output = Result<ItemHash, StorageError>> + Send;
 }
 
 /// Methods used to query account properties, ex: their balance.
@@ -1348,6 +1357,34 @@ pub trait AlephAggregateClient {
     ) -> impl Future<Output = Result<PricingAggregate, MessageError>> + Send {
         self.get_aggregate(&PRICING_ADDRESS, "pricing")
     }
+
+    /// Returns the `websites` aggregate for the given address.
+    ///
+    /// "No aggregate stored for this address" is mapped to an empty aggregate
+    /// regardless of how the CCN signals it:
+    ///
+    /// * `200` with `data: null`, `data: {}`, or `data: {"websites": null}` -> empty.
+    /// * `404 Not Found` -> empty.
+    ///
+    /// Other transport errors (timeouts, 5xx, parse failures, etc.) are propagated.
+    fn get_websites_aggregate(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<WebsitesAggregate, MessageError>> + Send;
+
+    /// Returns the `domains` aggregate for the given address.
+    ///
+    /// "No aggregate stored for this address" is mapped to an empty aggregate
+    /// regardless of how the CCN signals it:
+    ///
+    /// * `200` with `data: null`, `data: {}`, or `data: {"domains": null}` -> empty.
+    /// * `404 Not Found` -> empty.
+    ///
+    /// Other transport errors (timeouts, 5xx, parse failures, etc.) are propagated.
+    fn get_domains_aggregate(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<DomainsAggregate, MessageError>> + Send;
 
     /// Returns the most recent version of multiple aggregates, keyed by their aggregate key.
     ///
@@ -2379,6 +2416,14 @@ impl AlephStorageClient for AlephClient {
 
         Ok(local_hash)
     }
+
+    async fn upload_folder_to_ipfs(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+    ) -> Result<ItemHash, StorageError> {
+        let _ = path;
+        todo!("upload_folder_to_ipfs: provided by IPFS folder upload feature (separate branch)")
+    }
 }
 
 impl AlephClient {
@@ -2746,6 +2791,67 @@ struct AggregatesResponse {
     data: HashMap<String, serde_json::Value>,
 }
 
+/// Maps a `404 Not Found` from `get_aggregate` to `Ok(None)` so callers that
+/// semantically treat "no aggregate stored" as empty don't need to discriminate
+/// between "200 with empty data" and "404 missing key".
+///
+/// The CCN's `/api/v0/aggregates/{address}.json?keys=...` endpoint is inconsistent:
+/// most deployments return `200 {"data": null}` for an unknown address+key pair, but
+/// some return `404`. Both should surface to callers as "no data". `get_aggregate`
+/// surfaces a 404 as `MessageError::HttpError` (the `error_for_status()` route),
+/// so we match on that variant and inspect its status code.
+///
+/// Only `404` is swallowed; other transport errors (timeouts, 5xx, decode failures)
+/// are propagated unchanged.
+fn map_aggregate_404_to_empty(
+    result: Result<Option<serde_json::Value>, MessageError>,
+) -> Result<Option<serde_json::Value>, MessageError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(MessageError::HttpError(ref e)) if e.status() == Some(StatusCode::NOT_FOUND) => {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Descends through the inner aggregate envelope returned by `get_aggregate::<Option<Value>>`.
+///
+/// The CCN responds with `{"data": <inner>}`. `get_aggregate` strips the outer `data`
+/// wrapper, so `inner` is what we receive here. The full mapping from CCN response to
+/// helper output is:
+///
+/// * `200` with `data: null` (`raw == None`) -> `T::default()` (empty).
+/// * `200` with `data` an object that does not contain `key` -> `T::default()`.
+/// * `200` with `data[key]` explicitly `null` -> `T::default()`.
+/// * `200` with `data[key]` parseable as `T` -> that value.
+/// * `200` with `data[key]` present but not deserializable as `T` ->
+///   `MessageError::ApiError { status: 200, body: "invalid <key> aggregate: ..." }`.
+/// * `200` with a malformed envelope, i.e. `data` is something other than an object
+///   (e.g. a string or number) -> `T::default()`. This is intentional graceful
+///   degradation: a transiently broken CCN should not nuke a user-facing list
+///   command. Logging or alerting on this case belongs at a higher layer; this
+///   helper deliberately swallows it.
+fn extract_aggregate_value<T>(raw: Option<serde_json::Value>, key: &str) -> Result<T, MessageError>
+where
+    T: DeserializeOwned + Default,
+{
+    let mut map = match raw {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => return Ok(T::default()),
+    };
+
+    let inner = match map.remove(key) {
+        None | Some(serde_json::Value::Null) => return Ok(T::default()),
+        Some(value) => value,
+    };
+
+    serde_json::from_value(inner).map_err(|e| MessageError::ApiError {
+        status: 200,
+        body: format!("invalid {key} aggregate: {e}"),
+    })
+}
+
 impl AlephAggregateClient for AlephClient {
     async fn get_aggregate<T: DeserializeOwned>(
         &self,
@@ -2776,6 +2882,28 @@ impl AlephAggregateClient for AlephClient {
             .map_err(reqwest_middleware::Error::from)?;
 
         Ok(aggregate_response.data)
+    }
+
+    async fn get_websites_aggregate(
+        &self,
+        address: &Address,
+    ) -> Result<WebsitesAggregate, MessageError> {
+        let raw = map_aggregate_404_to_empty(
+            self.get_aggregate::<Option<serde_json::Value>>(address, WEBSITES_AGGREGATE_KEY)
+                .await,
+        )?;
+        extract_aggregate_value(raw, WEBSITES_AGGREGATE_KEY)
+    }
+
+    async fn get_domains_aggregate(
+        &self,
+        address: &Address,
+    ) -> Result<DomainsAggregate, MessageError> {
+        let raw = map_aggregate_404_to_empty(
+            self.get_aggregate::<Option<serde_json::Value>>(address, DOMAINS_AGGREGATE_KEY)
+                .await,
+        )?;
+        extract_aggregate_value(raw, DOMAINS_AGGREGATE_KEY)
     }
 
     async fn get_aggregates(
@@ -3609,6 +3737,13 @@ mod tests {
             ) -> Result<ItemHash, StorageError> {
                 unimplemented!()
             }
+
+            async fn upload_folder_to_ipfs(
+                &self,
+                _path: impl AsRef<std::path::Path> + Send,
+            ) -> Result<ItemHash, StorageError> {
+                unimplemented!()
+            }
         }
 
         #[tokio::test]
@@ -3866,6 +4001,273 @@ mod tests {
             assert!(
                 classify_status_and_body(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "").is_none()
             );
+        }
+    }
+
+    mod aggregate_helper_tests {
+        use super::*;
+        use crate::aggregate_models::domains::{
+            DOMAINS_AGGREGATE_KEY, DomainTargetType, DomainsAggregate,
+        };
+        use crate::aggregate_models::websites::{WEBSITES_AGGREGATE_KEY, WebsitesAggregate};
+        use std::future::Future;
+
+        // --- extract_aggregate_value: pure JSON-descent logic ---
+
+        #[test]
+        fn extract_returns_empty_when_data_is_null() {
+            // CCN responded `{"data": null}` -> get_aggregate yields None.
+            let agg: WebsitesAggregate = extract_aggregate_value(None, WEBSITES_AGGREGATE_KEY)
+                .expect("null data should map to empty aggregate");
+            assert!(agg.is_empty());
+        }
+
+        #[test]
+        fn extract_returns_empty_when_inner_object_lacks_key() {
+            // CCN responded `{"data": {}}` (other keys but not ours).
+            let raw = serde_json::json!({"someOtherKey": {}});
+            let agg: WebsitesAggregate =
+                extract_aggregate_value(Some(raw), WEBSITES_AGGREGATE_KEY).unwrap();
+            assert!(agg.is_empty());
+        }
+
+        #[test]
+        fn extract_returns_empty_when_inner_key_is_null() {
+            // CCN responded `{"data": {"websites": null}}`.
+            let raw = serde_json::json!({ WEBSITES_AGGREGATE_KEY: serde_json::Value::Null });
+            let agg: WebsitesAggregate =
+                extract_aggregate_value(Some(raw), WEBSITES_AGGREGATE_KEY).unwrap();
+            assert!(agg.is_empty());
+        }
+
+        #[test]
+        fn extract_returns_empty_on_malformed_envelope() {
+            let bogus = Some(serde_json::Value::String("nope".into()));
+            let result: Result<WebsitesAggregate, _> =
+                extract_aggregate_value(bogus, WEBSITES_AGGREGATE_KEY);
+            assert!(result.unwrap().is_empty());
+        }
+
+        #[test]
+        fn extract_parses_real_websites_shape() {
+            let raw = serde_json::json!({
+                "websites": {
+                    "my-site": {
+                        "metadata": { "name": "my-site", "tags": [], "framework": "nextjs" },
+                        "payment": { "chain": "ETH", "type": "hold" },
+                        "version": 2,
+                        "volume_id": "vol_abc",
+                        "history": {},
+                        "ens": [],
+                        "created_at": 1.0,
+                        "updated_at": 2.0
+                    },
+                    "deleted-site": null
+                }
+            });
+            let agg: WebsitesAggregate =
+                extract_aggregate_value(Some(raw), WEBSITES_AGGREGATE_KEY).unwrap();
+            let entry = agg.get("my-site").unwrap().as_ref().unwrap();
+            assert_eq!(entry.version, 2);
+            assert_eq!(entry.volume_id, "vol_abc");
+            assert!(agg.get("deleted-site").unwrap().is_none());
+        }
+
+        #[test]
+        fn extract_parses_real_domains_shape() {
+            let raw = serde_json::json!({
+                "domains": {
+                    "site.example.com": {
+                        "type": "ipfs",
+                        "programType": "ipfs",
+                        "message_id": "vol1",
+                        "updated_at": 1.0
+                    }
+                }
+            });
+            let agg: DomainsAggregate =
+                extract_aggregate_value(Some(raw), DOMAINS_AGGREGATE_KEY).unwrap();
+            let entry = agg.get("site.example.com").unwrap().as_ref().unwrap();
+            assert_eq!(entry.kind, DomainTargetType::Ipfs);
+            assert_eq!(entry.message_id, "vol1");
+        }
+
+        #[test]
+        fn extract_propagates_invalid_aggregate_as_api_error() {
+            // Inner key is present but the shape can't be deserialized.
+            let raw = serde_json::json!({
+                "websites": "not-an-object"
+            });
+            let err =
+                extract_aggregate_value::<WebsitesAggregate>(Some(raw), WEBSITES_AGGREGATE_KEY)
+                    .expect_err("non-object inner should fail to deserialize");
+            match err {
+                MessageError::ApiError { status, body } => {
+                    assert_eq!(status, 200);
+                    assert!(
+                        body.contains("invalid websites aggregate"),
+                        "body was: {body}"
+                    );
+                }
+                other => panic!("expected ApiError, got: {other:?}"),
+            }
+        }
+
+        // --- AlephAggregateClient mock: returns Ok(empty) by default ---
+
+        struct MockAggregateClient;
+
+        impl AlephAggregateClient for MockAggregateClient {
+            #[allow(clippy::manual_async_fn)]
+            fn get_aggregate<T: DeserializeOwned>(
+                &self,
+                _address: &Address,
+                _key: &str,
+            ) -> impl Future<Output = Result<T, MessageError>> + Send {
+                // Not used by these tests; keeps the trait satisfied.
+                // Written as `fn -> impl Future` to mirror the trait declaration —
+                // `async fn` would silently drop the `+ Send` bound.
+                async { unimplemented!("MockAggregateClient::get_aggregate") }
+            }
+
+            async fn get_websites_aggregate(
+                &self,
+                _address: &Address,
+            ) -> Result<WebsitesAggregate, MessageError> {
+                Ok(WebsitesAggregate::new())
+            }
+
+            async fn get_domains_aggregate(
+                &self,
+                _address: &Address,
+            ) -> Result<DomainsAggregate, MessageError> {
+                Ok(DomainsAggregate::new())
+            }
+
+            async fn get_aggregates(
+                &self,
+                _address: &Address,
+                _keys: &[&str],
+            ) -> Result<HashMap<String, serde_json::Value>, MessageError> {
+                Ok(HashMap::new())
+            }
+
+            async fn get_all_aggregates(
+                &self,
+                _address: &Address,
+            ) -> Result<HashMap<String, serde_json::Value>, MessageError> {
+                Ok(HashMap::new())
+            }
+        }
+
+        #[tokio::test]
+        async fn mock_returns_empty_websites_aggregate_by_default() {
+            let client = MockAggregateClient;
+            let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+            let agg = client.get_websites_aggregate(&addr).await.unwrap();
+            assert!(agg.is_empty());
+        }
+
+        #[tokio::test]
+        async fn mock_returns_empty_domains_aggregate_by_default() {
+            let client = MockAggregateClient;
+            let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+            let agg = client.get_domains_aggregate(&addr).await.unwrap();
+            assert!(agg.is_empty());
+        }
+
+        // --- map_aggregate_404_to_empty: 404 -> empty, others propagated ---
+
+        /// Spin up a TCP listener that responds to every request with the given
+        /// hand-rolled HTTP/1.1 response. Each accepted connection serves one
+        /// response and closes.
+        async fn start_canned_response_server(response: &'static [u8]) -> Url {
+            use tokio::io::AsyncWriteExt;
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    // Don't bother reading the request — we always reply the same way.
+                    let _ = stream.write_all(response).await;
+                    let _ = stream.shutdown().await;
+                }
+            });
+            Url::parse(&format!("http://{addr}")).unwrap()
+        }
+
+        const HTTP_404_RESPONSE: &[u8] = b"HTTP/1.1 404 Not Found\r\n\
+            Content-Type: text/plain\r\n\
+            Content-Length: 9\r\n\
+            Connection: close\r\n\
+            \r\n\
+            not found";
+
+        #[tokio::test]
+        async fn get_websites_aggregate_returns_empty_on_404() {
+            let url = start_canned_response_server(HTTP_404_RESPONSE).await;
+            let client = AlephClient::builder(url)
+                .retry_config(RetryConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                })
+                .build();
+            let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+
+            let agg = client
+                .get_websites_aggregate(&addr)
+                .await
+                .expect("404 should map to an empty aggregate, not an error");
+            assert!(agg.is_empty());
+        }
+
+        #[tokio::test]
+        async fn get_domains_aggregate_returns_empty_on_404() {
+            let url = start_canned_response_server(HTTP_404_RESPONSE).await;
+            let client = AlephClient::builder(url)
+                .retry_config(RetryConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                })
+                .build();
+            let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+
+            let agg = client
+                .get_domains_aggregate(&addr)
+                .await
+                .expect("404 should map to an empty aggregate, not an error");
+            assert!(agg.is_empty());
+        }
+
+        #[tokio::test]
+        async fn map_aggregate_404_to_empty_propagates_non_404_errors() {
+            // A 500 should NOT be swallowed — only 404 is special-cased.
+            const HTTP_500_RESPONSE: &[u8] = b"HTTP/1.1 500 Internal Server Error\r\n\
+                Content-Type: text/plain\r\n\
+                Content-Length: 5\r\n\
+                Connection: close\r\n\
+                \r\n\
+                boom!";
+
+            let url = start_canned_response_server(HTTP_500_RESPONSE).await;
+            let client = AlephClient::builder(url)
+                .retry_config(RetryConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                })
+                .build();
+            let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+
+            let err = client
+                .get_websites_aggregate(&addr)
+                .await
+                .expect_err("5xx should propagate, not be swallowed as empty");
+            // The exact variant doesn't matter — what matters is that we did NOT
+            // get an Ok(empty) result for a non-404 transport failure.
+            assert!(matches!(err, MessageError::HttpError(_)), "got: {err:?}");
         }
     }
 }

@@ -1,11 +1,20 @@
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aleph_sdk::client::{AlephMessageClient, MessageError, MessageWithStatus};
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::pending::PendingMessage;
 use anyhow::{Result, anyhow, bail};
 use url::Url;
+
+/// Current Unix time as fractional seconds, matching the float `updated_at`
+/// field used across the dashboard's aggregates (`websites`, `domains`, ...).
+pub fn now_secs_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
 
 /// Returns true if the error is an HTTP 429 Too Many Requests.
 pub fn is_rate_limited(err: &MessageError) -> bool {
@@ -372,7 +381,7 @@ use aleph_types::chain::Address;
 use crate::account::store::AccountStore;
 use crate::account::{CliAccount, load_account, load_account_by_name};
 use crate::cli::IdentityArgs;
-use crate::config::store::ConfigStore;
+use crate::config::store::{BUILTIN_IPFS_GATEWAY_URL, ConfigStore};
 
 /// Resolve the CCN URL using a provided `ConfigStore` (testable form).
 ///
@@ -467,6 +476,38 @@ pub fn resolve_network(
     resolve_network_with_store(&store, network_override)
 }
 
+/// Resolve the IPFS gateway URL for folder uploads.
+///
+/// Resolution order:
+/// 1. `cli_override` (e.g. `--ipfs-gateway`) — parsed and returned as-is.
+/// 2. The named network (or the default network) and its `ipfs_gateway_url`
+///    field. Note that `NetworkEntry::ipfs_gateway_url()` already falls back
+///    to `BUILTIN_IPFS_GATEWAY_URL` when the field is unset.
+/// 3. `BUILTIN_IPFS_GATEWAY_URL` when no matching network can be found
+///    (no override, no named match, and no default network configured).
+pub fn resolve_ipfs_gateway_url(
+    store: &ConfigStore,
+    network_name: Option<&str>,
+    cli_override: Option<&str>,
+) -> Result<Url, Box<dyn std::error::Error>> {
+    if let Some(raw) = cli_override {
+        return Ok(Url::parse(raw).map_err(|e| format!("invalid --ipfs-gateway: {e}"))?);
+    }
+
+    let manifest = store.load_manifest().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let network = match network_name {
+        Some(n) => manifest.networks.iter().find(|e| e.name == n),
+        None => manifest
+            .default_network
+            .as_ref()
+            .and_then(|d| manifest.networks.iter().find(|e| &e.name == d)),
+    };
+    let url_str = network
+        .map(|n| n.ipfs_gateway_url())
+        .unwrap_or(BUILTIN_IPFS_GATEWAY_URL);
+    Ok(Url::parse(url_str).map_err(|e| format!("invalid IPFS gateway URL '{url_str}': {e}"))?)
+}
+
 /// Resolve a signing account from CLI args.
 ///
 /// Resolution order:
@@ -498,6 +539,34 @@ pub fn resolve_account(identity: &IdentityArgs) -> Result<CliAccount> {
     };
 
     load_account_by_name(&store, &name)
+}
+
+/// Resolve an address from an explicit `--address` value, falling back to the
+/// active (default) account when no value is supplied.
+///
+/// Used by read-only listing commands that operate on the signed-in user's
+/// data by default but accept `--address <NAME-OR-HEX>` to inspect another
+/// account. Returns a clear error when no override is given and no default
+/// account is configured, telling the caller exactly what to do.
+pub fn resolve_address_or_active(maybe_addr: Option<&str>) -> Result<Address> {
+    if let Some(value) = maybe_addr {
+        return resolve_address(value);
+    }
+    let store =
+        AccountStore::open().map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
+    let name = store
+        .default_account_name()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no --address given and no default account set; \
+                 use --address <ADDRESS> or: aleph account use <NAME>"
+            )
+        })?;
+    let entry = store
+        .get_account(&name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(Address::from(entry.address))
 }
 
 /// Resolve a user-supplied value to an address using a provided `AccountStore`
@@ -536,6 +605,33 @@ pub fn resolve_address(value: &str) -> Result<Address> {
     }
     let store = AccountStore::open().map_err(|e| anyhow!("failed to open account store: {e}"))?;
     resolve_address_with_store(&store, value)
+}
+
+/// Prompt the user for `y/N` confirmation on a TTY.
+///
+/// Returns `Ok(true)` if the user types `y` / `yes` (case-insensitive),
+/// `Ok(false)` for anything else (including an empty line - the default is
+/// "no"). Errors when stdin is not a terminal: callers should pass `--yes`
+/// to confirm non-interactively rather than silently proceed or skip.
+///
+/// The prompt is written to stderr so it doesn't pollute stdout (which may
+/// be captured by tooling expecting JSON output).
+pub fn confirm_tty(prompt: &str) -> Result<bool> {
+    use std::io::{self, IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "{} refusing to prompt without a TTY; pass --yes to confirm non-interactively",
+            prompt
+        ));
+    }
+    eprint!("{} [y/N] ", prompt);
+    io::stderr().flush()?;
+    let mut s = String::new();
+    io::stdin().read_line(&mut s)?;
+    Ok(matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// Format a user-supplied address value for display.
@@ -786,6 +882,31 @@ mod tests {
         (dir, store)
     }
 
+    /// Build a store with a single network whose `ipfs_gateway_url` is set
+    /// to the supplied value (or `None`). Writes TOML directly because the
+    /// `ConfigStore` API doesn't expose a setter for this field.
+    fn store_with_ipfs_gateway(gateway: Option<&str>) -> (TempDir, ConfigStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("config.toml");
+        let gateway_line = match gateway {
+            Some(g) => format!("ipfs_gateway_url = \"{g}\"\n"),
+            None => String::new(),
+        };
+        let toml_text = format!(
+            r#"default_network = "mainnet"
+[[networks]]
+name = "mainnet"
+default_ccn = "official"
+{gateway_line}[[networks.ccns]]
+name = "official"
+url = "https://api.aleph.im"
+"#
+        );
+        std::fs::write(&manifest_path, toml_text).unwrap();
+        let store = ConfigStore::with_manifest_path(manifest_path);
+        (dir, store)
+    }
+
     #[test]
     fn resolve_address_accepts_hex() {
         let (_dir, store) = temp_account_store();
@@ -837,5 +958,43 @@ mod tests {
                 .contains("'nobody' is not a valid address or known account/alias name"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn resolve_ipfs_gateway_url_uses_cli_override_first() {
+        // Even with a network configured with a gateway, the CLI override wins.
+        let (_dir, store) = store_with_ipfs_gateway(Some("https://network.example/"));
+        let url =
+            resolve_ipfs_gateway_url(&store, None, Some("https://override.example/")).unwrap();
+        assert_eq!(url.as_str(), "https://override.example/");
+    }
+
+    #[test]
+    fn resolve_ipfs_gateway_url_uses_network_field_when_no_override() {
+        let (_dir, store) = store_with_ipfs_gateway(Some("https://network.example/"));
+        let url = resolve_ipfs_gateway_url(&store, None, None).unwrap();
+        assert_eq!(url.as_str(), "https://network.example/");
+    }
+
+    #[test]
+    fn resolve_ipfs_gateway_url_falls_back_to_builtin_via_unset_field() {
+        // Network exists but `ipfs_gateway_url` field is unset; fall back to builtin.
+        let (_dir, store) = store_with_ipfs_gateway(None);
+        let url = resolve_ipfs_gateway_url(&store, None, None).unwrap();
+        assert_eq!(url.as_str(), format!("{BUILTIN_IPFS_GATEWAY_URL}/"));
+    }
+
+    #[test]
+    fn resolve_ipfs_gateway_url_falls_back_to_builtin_when_no_matching_network() {
+        // Manifest has no networks and no default_network: exercises the
+        // function's own `unwrap_or(BUILTIN_IPFS_GATEWAY_URL)`, not the
+        // accessor's internal fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("config.toml");
+        std::fs::write(&manifest_path, "").unwrap();
+        let store = ConfigStore::with_manifest_path(manifest_path);
+
+        let url = resolve_ipfs_gateway_url(&store, None, None).unwrap();
+        assert_eq!(url, Url::parse(BUILTIN_IPFS_GATEWAY_URL).unwrap());
     }
 }

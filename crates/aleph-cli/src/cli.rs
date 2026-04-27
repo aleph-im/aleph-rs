@@ -154,6 +154,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: ConfigCommand,
     },
+    /// Manage custom domains attached to websites, programs, or instances
+    Domain {
+        #[clap(subcommand)]
+        command: DomainCommand,
+    },
     /// Upload and download files
     File {
         #[clap(subcommand)]
@@ -194,6 +199,11 @@ pub enum Commands {
         /// Target shell.
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+    /// Deploy and manage static websites
+    Website {
+        #[clap(subcommand)]
+        command: WebsiteCommand,
     },
 }
 
@@ -375,6 +385,47 @@ impl From<SortOrderCli> for SortOrder {
             SortOrderCli::Asc => SortOrder::Asc,
             SortOrderCli::Desc => SortOrder::Desc,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum FrameworkCli {
+    None,
+    Nextjs,
+    React,
+    Vue,
+    Gatsby,
+    Svelte,
+    Nuxt,
+    Angular,
+    Other,
+}
+
+impl std::fmt::Display for FrameworkCli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            FrameworkCli::None => "none",
+            FrameworkCli::Nextjs => "nextjs",
+            FrameworkCli::React => "react",
+            FrameworkCli::Vue => "vue",
+            FrameworkCli::Gatsby => "gatsby",
+            FrameworkCli::Svelte => "svelte",
+            FrameworkCli::Nuxt => "nuxt",
+            FrameworkCli::Angular => "angular",
+            FrameworkCli::Other => "other",
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn framework_display_round_trip() {
+        assert_eq!(FrameworkCli::Nextjs.to_string(), "nextjs");
+        assert_eq!(FrameworkCli::Other.to_string(), "other");
     }
 }
 
@@ -2260,4 +2311,186 @@ mod credit_transfer_args_tests {
             _ => panic!("expected post list"),
         }
     }
+}
+
+#[derive(Subcommand)]
+pub enum DomainCommand {
+    /// List all domains for an account
+    List(DomainListArgs),
+    /// Add (or update) a domain entry pointing at a target
+    Add(DomainAddArgs),
+    /// Re-point an existing domain to a different target
+    Attach(DomainAttachArgs),
+    /// Clear a domain's target (entry kept, message_id emptied)
+    Detach(DomainDetachArgs),
+    /// Remove a domain entry (soft-delete: sets to null)
+    Remove(DomainRemoveArgs),
+}
+
+#[derive(Args)]
+pub struct DomainListArgs {
+    /// Inspect another address's domains.
+    #[arg(long)]
+    pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct DomainAddArgs {
+    /// Domain name (e.g. site.example.com).
+    pub domain: String,
+    /// Target: a website name (resolved against your `websites` aggregate)
+    /// or a raw message hash.
+    #[arg(long)]
+    pub target: String,
+    /// Target type.
+    #[arg(long, value_enum, default_value = "ipfs")]
+    pub kind: DomainKindCli,
+    /// Catch-all path for IPFS sites (default: /404.html).
+    #[arg(long)]
+    pub catch_all_path: Option<String>,
+    /// Overwrite existing entry without erroring.
+    #[arg(long)]
+    pub force: bool,
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct DomainAttachArgs {
+    pub domain: String,
+    /// Website name or message hash.
+    #[arg(long = "to")]
+    pub target: String,
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct DomainDetachArgs {
+    pub domain: String,
+    /// Skip TTY confirmation.
+    #[arg(long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct DomainRemoveArgs {
+    pub domain: String,
+    #[arg(long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum DomainKindCli {
+    Ipfs,
+    Program,
+    Instance,
+}
+
+#[derive(Subcommand)]
+pub enum WebsiteCommand {
+    /// List websites for an account
+    List(WebsiteListArgs),
+    /// Show details about one website
+    Show(WebsiteShowArgs),
+    /// Deploy a new website from a folder
+    Deploy(WebsiteDeployArgs),
+    /// Update an existing website with a new folder
+    Update(WebsiteUpdateArgs),
+    /// Soft-delete a website (sets aggregate entry to null)
+    Delete(WebsiteDeleteArgs),
+}
+
+#[derive(Args)]
+pub struct WebsiteListArgs {
+    #[arg(long)]
+    pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct WebsiteShowArgs {
+    pub name: String,
+    #[arg(long)]
+    pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct WebsiteDeployArgs {
+    /// Website name (used as the aggregate key; lowercase-with-dashes recommended).
+    pub name: String,
+    /// Path to the folder containing the static site.
+    pub path: std::path::PathBuf,
+    #[arg(long, value_enum, default_value = "none")]
+    pub framework: FrameworkCli,
+    #[arg(long)]
+    pub tag: Vec<String>,
+    /// Override payment chain (defaults to signing account's chain).
+    #[arg(long)]
+    pub payment_chain: Option<String>,
+    #[arg(long, default_value = "hold")]
+    pub payment_type: String,
+    /// Attach a domain (repeatable). Each domain creates/updates a `domains` entry.
+    #[arg(long)]
+    pub domain: Vec<String>,
+    /// Skip upload+STORE; reuse an existing volume by item_hash.
+    #[arg(long)]
+    pub volume_id: Option<String>,
+    #[arg(long)]
+    pub channel: Option<String>,
+    /// Override IPFS gateway URL (otherwise pulled from network config).
+    #[arg(long)]
+    pub ipfs_gateway: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct WebsiteUpdateArgs {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    #[arg(long, value_enum)]
+    pub framework: Option<FrameworkCli>,
+    #[arg(long)]
+    pub tag: Option<Vec<String>>,
+    #[arg(long)]
+    pub domain: Vec<String>,
+    /// Leave all attached domains pointing at the previous volume_id.
+    #[arg(long)]
+    pub skip_domain_update: bool,
+    #[arg(long)]
+    pub volume_id: Option<String>,
+    /// Skip aggregate write if folder content + version already match.
+    #[arg(long)]
+    pub idempotent: bool,
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[arg(long)]
+    pub ipfs_gateway: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct WebsiteDeleteArgs {
+    pub name: String,
+    #[arg(long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
