@@ -35,6 +35,24 @@ async fn handle_file_upload(
     json: bool,
     args: FileUploadArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !args.path.exists() {
+        return Err(format!("path not found: {}", args.path.display()).into());
+    }
+    if args.path.is_file() {
+        handle_single_file_upload(aleph_client, ccn_url, json, args).await
+    } else if args.path.is_dir() {
+        handle_folder_upload(aleph_client, ccn_url, json, args).await
+    } else {
+        Err(format!("not a regular file or directory: {}", args.path.display()).into())
+    }
+}
+
+async fn handle_single_file_upload(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: FileUploadArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing)?;
 
@@ -43,14 +61,6 @@ async fn handle_file_upload(
         StorageEngineCli::Ipfs => StorageEngine::Ipfs,
     };
 
-    if !args.path.exists() {
-        return Err(format!("file not found: {}", args.path.display()).into());
-    }
-    if !args.path.is_file() {
-        return Err(format!("not a file: {}", args.path.display()).into());
-    }
-
-    // Hash file locally
     if !json {
         eprintln!("Hashing {}...", args.path.display());
     }
@@ -62,7 +72,6 @@ async fn handle_file_upload(
         eprintln!("  File hash: {file_hash}");
     }
 
-    // Build STORE message
     let mut builder =
         StoreBuilder::new(&account, file_hash.clone(), storage_engine).payment(Payment::credits());
     if let Some(owner) = args.on_behalf_of {
@@ -76,7 +85,6 @@ async fn handle_file_upload(
     }
     let pending = builder.build()?;
 
-    // Dry run: print message preview without uploading
     if dry_run {
         if json {
             println!("{}", serde_json::to_string_pretty(&pending)?);
@@ -93,22 +101,110 @@ async fn handle_file_upload(
 
     match storage_engine {
         StorageEngine::Storage => {
-            // Authenticated upload: file + signed STORE message in one request.
-            // sync=true makes the server wait until the STORE message is
-            // processed before responding, so a 2xx guarantees "processed".
             aleph_client
                 .upload_file_to_storage(&args.path, Some(&pending), true)
                 .await?;
             print_submission_result(ccn_url, &pending, "success", "processed", json)?;
         }
         StorageEngine::Ipfs => {
-            // IPFS: fall back to old two-step flow (no authenticated upload support)
             aleph_client.upload_file_to_ipfs(&args.path).await?;
             submit_or_preview(aleph_client, ccn_url, &pending, false, json).await?;
         }
     }
 
     Ok(())
+}
+
+async fn handle_folder_upload(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: FileUploadArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use aleph_sdk::ipfs::{CidVersion, UploadFolderOptions};
+
+    if matches!(args.storage_engine, StorageEngineCli::Storage) {
+        return Err(
+            "native storage does not support directory uploads; use --storage-engine ipfs".into(),
+        );
+    }
+
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing)?;
+
+    let opts = UploadFolderOptions {
+        cid_version: CidVersion::V1,
+        ..Default::default()
+    };
+
+    if dry_run {
+        let entries = walk_folder_summary(&args.path)?;
+        let total_bytes: u64 = entries.iter().map(|(_, size)| size).sum();
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "dry_run": true,
+                    "files": entries.len(),
+                    "size_bytes": total_bytes,
+                }))?
+            );
+        } else {
+            eprintln!(
+                "Dry run — would upload {} file(s), {} bytes total. No HTTP calls made.",
+                entries.len(),
+                total_bytes
+            );
+        }
+        return Ok(());
+    }
+
+    let client = if let Some(gateway) = args.ipfs_gateway.clone() {
+        aleph_client.clone().with_ipfs_gateway(gateway)
+    } else {
+        aleph_client.clone()
+    };
+
+    if !json {
+        eprintln!("Uploading folder {}...", args.path.display());
+    }
+    let file_hash = client.upload_folder_to_ipfs(&args.path, opts).await?;
+    if !json {
+        eprintln!("  Directory CID: {file_hash}");
+    }
+
+    let mut builder = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Ipfs)
+        .payment(Payment::credits());
+    if let Some(owner) = args.on_behalf_of {
+        builder = builder.on_behalf_of(resolve_address(&owner)?);
+    }
+    if let Some(reference) = args.reference {
+        builder = builder.reference(reference);
+    }
+    if let Some(ch) = args.channel {
+        builder = builder.channel(Channel::from(ch));
+    }
+    let pending = builder.build()?;
+
+    submit_or_preview(aleph_client, ccn_url, &pending, false, json).await?;
+    Ok(())
+}
+
+fn walk_folder_summary(
+    root: &std::path::Path,
+) -> Result<Vec<(std::path::PathBuf, u64)>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(true).min_depth(1) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            let size = entry.metadata()?.len();
+            out.push((entry.path().to_path_buf(), size));
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("empty folder: {}", root.display()).into());
+    }
+    Ok(out)
 }
 
 async fn handle_file_pin(
@@ -195,4 +291,30 @@ async fn handle_file_download(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn walk_folder_summary_counts_files() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        fs::write(tmp.path().join("sub/b.txt"), "bb").unwrap();
+        let entries = walk_folder_summary(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        let total: u64 = entries.iter().map(|(_, s)| s).sum();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn walk_folder_summary_rejects_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        let err = walk_folder_summary(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("empty folder"));
+    }
 }

@@ -81,6 +81,7 @@ pub struct AlephClient {
     /// request body (multipart) is not cloneable and therefore cannot be retried.
     upload_client: reqwest::Client,
     ccn_url: Url,
+    ipfs_gateway: Url,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -105,6 +106,12 @@ pub enum StorageError {
     UploadFailed(reqwest_middleware::Error),
     #[error("Invalid response from node: {0}")]
     InvalidResponse(String),
+    #[error("invalid IPFS gateway response: {0}")]
+    InvalidIpfsResponse(String),
+    #[error("cannot upload empty folder: {0}")]
+    EmptyFolder(std::path::PathBuf),
+    #[error("non-UTF-8 path cannot be sent to IPFS gateway: {0}")]
+    NonUtf8Path(std::path::PathBuf),
     #[error("upload integrity mismatch: locally computed {expected}, server returned {actual}")]
     UploadIntegrityMismatch {
         expected: ItemHash,
@@ -1294,6 +1301,7 @@ pub struct AlephClientBuilder {
     retry_config: RetryConfig,
     timeout_config: TimeoutConfig,
     max_concurrent_requests: usize,
+    ipfs_gateway: Url,
 }
 
 impl AlephClientBuilder {
@@ -1315,6 +1323,12 @@ impl AlephClientBuilder {
     pub fn max_concurrent_requests(mut self, n: usize) -> Self {
         assert!(n > 0, "max_concurrent_requests must be > 0");
         self.max_concurrent_requests = n;
+        self
+    }
+
+    /// Overrides the default IPFS gateway URL.
+    pub fn ipfs_gateway(mut self, gateway: Url) -> Self {
+        self.ipfs_gateway = gateway;
         self
     }
 
@@ -1343,6 +1357,7 @@ impl AlephClientBuilder {
             http_client,
             upload_client: base_client,
             ccn_url: self.ccn_url,
+            ipfs_gateway: self.ipfs_gateway,
         }
     }
 
@@ -1367,7 +1382,15 @@ impl AlephClient {
             retry_config: RetryConfig::default(),
             timeout_config: TimeoutConfig::default(),
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
+            ipfs_gateway: Url::parse(crate::ipfs::DEFAULT_IPFS_GATEWAY)
+                .expect("DEFAULT_IPFS_GATEWAY is a valid URL"),
         }
+    }
+
+    /// Overrides the IPFS gateway URL on an existing client.
+    pub fn with_ipfs_gateway(mut self, gateway: Url) -> Self {
+        self.ipfs_gateway = gateway;
+        self
     }
 }
 
@@ -2042,6 +2065,73 @@ impl AlephStorageClient for AlephClient {
         }
 
         Ok(local_hash)
+    }
+}
+
+impl AlephClient {
+    /// Uploads a directory tree to the configured IPFS gateway and returns
+    /// the root directory CID.
+    ///
+    /// The caller is responsible for posting any STORE message that references
+    /// the returned hash.
+    pub async fn upload_folder_to_ipfs(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+        opts: crate::ipfs::UploadFolderOptions,
+    ) -> Result<ItemHash, StorageError> {
+        use crate::ipfs::{CollectError, build_add_query, collect_folder_files, parse_ndjson_root};
+
+        let path = path.as_ref();
+        let entries = collect_folder_files(path, opts.follow_symlinks).map_err(|e| match e {
+            CollectError::Empty(p) => StorageError::EmptyFolder(p),
+            CollectError::NonUtf8(p) => StorageError::NonUtf8Path(p),
+            CollectError::Walk { source, .. } => StorageError::Io(source.into()),
+        })?;
+
+        let mut form = reqwest::multipart::Form::new();
+        for entry in entries {
+            let part = reqwest::multipart::Part::file(&entry.absolute_path)
+                .await?
+                .file_name(entry.relative_path)
+                .mime_str("application/octet-stream")
+                .expect("valid mime type");
+            form = form.part("file", part);
+        }
+
+        let query = build_add_query(&opts);
+        let url = self
+            .ipfs_gateway
+            .join(&format!("add?{query}"))
+            .map_err(StorageError::InvalidUrl)?;
+
+        let response = self
+            .upload_client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+
+        match response.status() {
+            StatusCode::FORBIDDEN => return Err(StorageError::IpfsDisabled),
+            status if !status.is_success() => {
+                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
+                    response
+                        .error_for_status()
+                        .expect_err("already checked non-success"),
+                )));
+            }
+            _ => {}
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+
+        let cid = parse_ndjson_root(&body)
+            .map_err(|e| StorageError::InvalidIpfsResponse(format!("{e}")))?;
+        Ok(ItemHash::Ipfs(cid))
     }
 }
 
@@ -2911,5 +3001,26 @@ mod tests {
             }
             assert!(!client.post_called.load(Ordering::SeqCst));
         }
+    }
+}
+
+#[cfg(test)]
+mod ipfs_gateway_tests {
+    use super::*;
+
+    #[test]
+    fn default_client_uses_default_ipfs_gateway() {
+        let client = AlephClient::new(Url::parse("https://example.com").unwrap());
+        assert_eq!(
+            client.ipfs_gateway.as_str(),
+            "https://ipfs.aleph.cloud/api/v0"
+        );
+    }
+
+    #[test]
+    fn with_ipfs_gateway_overrides() {
+        let client = AlephClient::new(Url::parse("https://example.com").unwrap())
+            .with_ipfs_gateway(Url::parse("http://localhost:5001/api/v0").unwrap());
+        assert_eq!(client.ipfs_gateway.as_str(), "http://localhost:5001/api/v0");
     }
 }
