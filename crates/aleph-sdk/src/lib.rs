@@ -7,6 +7,7 @@ pub mod corechannel;
 pub mod credit;
 pub mod crn;
 pub mod crns_list;
+pub mod ipfs;
 pub mod messages;
 mod proto;
 pub mod verify;

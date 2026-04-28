@@ -29,7 +29,7 @@ bs58 = { version = "0.5" }
 bytes = { version = "1" }
 assert_matches = { version = "1.5.0" }
 chrono = { version = "0.4.42" }
-clap = { version = "4.5.51", features = ["derive"] }
+clap = { version = "4.5.51", features = ["derive", "env"] }
 futures-util = { version = "0.3" }
 http = { version = "1" }
 reqwest = { version = "0.13.2", features = ["json", "stream", "multipart"] }
@@ -56,6 +56,8 @@ rpassword = { version = "7" }
 rand = { version = "0.8" }
 toml = { version = "0.8" }
 tempfile = { version = "3" }
+walkdir = { version = "2" }
+wiremock = { version = "0.6" }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 base64 = { version = "0.22" }
