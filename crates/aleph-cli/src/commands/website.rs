@@ -273,13 +273,9 @@ struct DeployOut {
 /// are skipped entirely; the [`DeployOut`] envelope is the single document
 /// representing the dry-run state.
 ///
-/// **Note:** the upload-folder path currently calls
-/// [`AlephStorageClient::upload_folder_to_ipfs`], which is implemented as a
-/// `todo!()` panic on this branch — the real IPFS folder upload lives on a
-/// parallel branch. Until it lands, deploy short-circuits with a friendly
-/// error when `--volume-id` is absent (see the TEMPORARY guard below). The
-/// rest of the deploy flow (validation, aggregate write, dry-run JSON
-/// envelope) can be exercised end-to-end via `--volume-id`.
+/// Folder uploads target the IPFS gateway resolved by
+/// [`crate::common::resolve_ipfs_gateway_url`] (CLI override → default
+/// network's `ipfs_gateway_url` → builtin fallback).
 async fn handle_website_deploy(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -316,28 +312,24 @@ async fn handle_website_deploy(
         .unwrap_or_else(|| WEBSITE_CHANNEL.to_string());
 
     // 6. Either reuse the supplied volume or upload + STORE.
-    // TEMPORARY: remove when feat-ipfs-folder-upload merges
-    if args.volume_id.is_none() {
-        return Err(anyhow::anyhow!(
-            "folder upload is not yet implemented in this build (parallel branch pending merge); \
-             pass --volume-id <hash> to use a previously-uploaded volume in the meantime"
-        ));
-    }
     let (ipfs_cid, volume_id) = if let Some(vid) = args.volume_id.as_ref() {
         // Best-effort: surface the underlying IPFS CID for the user. If the
         // STORE message can't be fetched (not yet processed, network error,
         // not an IPFS-backed STORE...), fall back to an empty string and keep
-        // going — the aggregate write only needs the volume_id.
+        // going - the aggregate write only needs the volume_id.
         let cid = resolve_store_ipfs_cid(aleph_client, vid)
             .await
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        // upload_folder_to_ipfs is a todo!() panic on this branch — see the
-        // doc comment above. Unreachable: the guard above short-circuits when
-        // --volume-id is absent. Kept here so the branch is ready to wire up
-        // once the real upload lands.
-        let cid = aleph_client
+        // Resolve the IPFS gateway and upload the folder. The deploy handler
+        // doesn't have plumbing for `--network`, so we fall through to the
+        // default network's `ipfs_gateway_url` (with builtin fallback).
+        let store = crate::config::store::ConfigStore::open()?;
+        let gateway =
+            crate::common::resolve_ipfs_gateway_url(&store, None, args.ipfs_gateway.as_deref())?;
+        let client = aleph_client.clone().with_ipfs_gateway(gateway);
+        let cid = client
             .upload_folder_to_ipfs(&args.path, aleph_sdk::ipfs::UploadFolderOptions::default())
             .await?;
         let cid_str = cid.to_string();
@@ -511,11 +503,9 @@ struct UpdateOut {
 /// a failure logs a warning and clears `domains_repointed`, but does not
 /// fail the command (the website update itself already succeeded).
 ///
-/// **Note:** the upload-folder path currently calls
-/// [`AlephStorageClient::upload_folder_to_ipfs`], which is a `todo!()` panic
-/// on this branch (the real folder upload lives on a parallel branch). Until
-/// that lands, update short-circuits with a friendly error when
-/// `--volume-id` is absent (TEMPORARY guard below).
+/// Folder uploads target the IPFS gateway resolved by
+/// [`crate::common::resolve_ipfs_gateway_url`] (CLI override → default
+/// network's `ipfs_gateway_url` → builtin fallback).
 async fn handle_website_update(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -553,23 +543,21 @@ async fn handle_website_update(
         .unwrap_or_else(|| WEBSITE_CHANNEL.to_string());
 
     // 4. Either reuse the supplied volume or upload + STORE.
-    // TEMPORARY: remove when feat-ipfs-folder-upload merges
-    if args.volume_id.is_none() {
-        return Err(anyhow::anyhow!(
-            "folder upload is not yet implemented in this build (parallel branch pending merge); \
-             pass --volume-id <hash> to use a previously-uploaded volume in the meantime"
-        ));
-    }
     let (ipfs_cid, new_volume_id) = if let Some(vid) = args.volume_id.as_ref() {
-        // Best-effort CID resolution — same semantics as deploy.
+        // Best-effort CID resolution - same semantics as deploy.
         let cid = resolve_store_ipfs_cid(aleph_client, vid)
             .await
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        // Unreachable on this branch — guarded above. Wired so the branch
-        // is ready when upload_folder_to_ipfs lands.
-        let cid = aleph_client
+        // Resolve the IPFS gateway and upload the folder. The update handler
+        // doesn't have plumbing for `--network`, so we fall through to the
+        // default network's `ipfs_gateway_url` (with builtin fallback).
+        let store = crate::config::store::ConfigStore::open()?;
+        let gateway =
+            crate::common::resolve_ipfs_gateway_url(&store, None, args.ipfs_gateway.as_deref())?;
+        let client = aleph_client.clone().with_ipfs_gateway(gateway);
+        let cid = client
             .upload_folder_to_ipfs(&args.path, aleph_sdk::ipfs::UploadFolderOptions::default())
             .await?;
         let cid_str = cid.to_string();

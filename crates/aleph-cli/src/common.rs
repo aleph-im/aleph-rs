@@ -489,12 +489,12 @@ pub fn resolve_ipfs_gateway_url(
     store: &ConfigStore,
     network_name: Option<&str>,
     cli_override: Option<&str>,
-) -> Result<Url, Box<dyn std::error::Error>> {
+) -> Result<Url> {
     if let Some(raw) = cli_override {
-        return Ok(Url::parse(raw).map_err(|e| format!("invalid --ipfs-gateway: {e}"))?);
+        return Url::parse(raw).map_err(|e| anyhow!("invalid --ipfs-gateway: {e}"));
     }
 
-    let manifest = store.load_manifest().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let manifest = store.load_manifest().map_err(|e| anyhow!("{e}"))?;
     let network = match network_name {
         Some(n) => manifest.networks.iter().find(|e| e.name == n),
         None => manifest
@@ -505,7 +505,7 @@ pub fn resolve_ipfs_gateway_url(
     let url_str = network
         .map(|n| n.ipfs_gateway_url())
         .unwrap_or(BUILTIN_IPFS_GATEWAY_URL);
-    Ok(Url::parse(url_str).map_err(|e| format!("invalid IPFS gateway URL '{url_str}': {e}"))?)
+    Url::parse(url_str).map_err(|e| anyhow!("invalid IPFS gateway URL '{url_str}': {e}"))
 }
 
 /// Resolve a signing account from CLI args.

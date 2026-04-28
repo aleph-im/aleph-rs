@@ -1291,13 +1291,6 @@ pub trait AlephStorageClient {
         message: Option<&PendingMessage>,
         sync: bool,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
-
-    /// Uploads a folder from disk to IPFS as a UnixFS directory. Returns
-    /// the root CID of the folder.
-    fn upload_folder_to_ipfs(
-        &self,
-        path: impl AsRef<std::path::Path> + Send,
-    ) -> impl std::future::Future<Output = Result<ItemHash, StorageError>> + Send;
 }
 
 /// Methods used to query account properties, ex: their balance.
@@ -2415,14 +2408,6 @@ impl AlephStorageClient for AlephClient {
         }
 
         Ok(local_hash)
-    }
-
-    async fn upload_folder_to_ipfs(
-        &self,
-        path: impl AsRef<std::path::Path> + Send,
-    ) -> Result<ItemHash, StorageError> {
-        let _ = path;
-        todo!("upload_folder_to_ipfs: provided by IPFS folder upload feature (separate branch)")
     }
 }
 
@@ -3734,13 +3719,6 @@ mod tests {
                 _path: impl AsRef<std::path::Path> + Send,
                 _message: Option<&PendingMessage>,
                 _sync: bool,
-            ) -> Result<ItemHash, StorageError> {
-                unimplemented!()
-            }
-
-            async fn upload_folder_to_ipfs(
-                &self,
-                _path: impl AsRef<std::path::Path> + Send,
             ) -> Result<ItemHash, StorageError> {
                 unimplemented!()
             }
