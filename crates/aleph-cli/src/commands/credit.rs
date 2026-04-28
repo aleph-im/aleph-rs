@@ -1,6 +1,8 @@
 use crate::account::CliAccount;
 use crate::cli::{BuyCreditArgs, CreditCommand, CreditTokenCli, SigningArgs, TransferCreditArgs};
-use crate::common::{resolve_account, resolve_address, resolve_network, submit_or_preview};
+use crate::common::{
+    format_address, resolve_account, resolve_address, resolve_network, submit_or_preview,
+};
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::AlephClient;
 use aleph_sdk::credit::{
@@ -153,11 +155,7 @@ fn print_transfer_summary(
     expiration: Option<DateTime<Utc>>,
 ) {
     eprintln!("Transfer {amount} credits");
-    if input.starts_with("0x") || input.starts_with("0X") {
-        eprintln!("  To: {resolved}");
-    } else {
-        eprintln!("  To: {input} ({resolved})");
-    }
+    eprintln!("  To: {}", format_address(input, resolved));
     if let Some(exp) = expiration {
         eprintln!("  Expiration: {}", exp.to_rfc3339());
     }
