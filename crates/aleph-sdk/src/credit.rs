@@ -679,7 +679,6 @@ mod tests {
 
     #[test]
     fn credit_transfer_content_round_trips_with_expiration() {
-        use aleph_types::chain::Address as AlephAddress;
         use chrono::TimeZone;
 
         let dt = chrono::Utc
@@ -707,8 +706,6 @@ mod tests {
 
     #[test]
     fn credit_transfer_entry_omits_expiration_when_none() {
-        use aleph_types::chain::Address as AlephAddress;
-
         let entry = CreditTransferEntry {
             address: AlephAddress::from("0xrecipient".to_string()),
             amount: 1,
@@ -741,7 +738,6 @@ mod tests {
 
     #[test]
     fn validate_accepts_single_recipient_positive_amount() {
-        use aleph_types::chain::Address as AlephAddress;
         let content = CreditTransferContent {
             transfer: CreditTransferList {
                 credits: vec![CreditTransferEntry {
@@ -767,7 +763,6 @@ mod tests {
 
     #[test]
     fn validate_rejects_zero_amount() {
-        use aleph_types::chain::Address as AlephAddress;
         let content = CreditTransferContent {
             transfer: CreditTransferList {
                 credits: vec![CreditTransferEntry {
@@ -785,7 +780,6 @@ mod tests {
 
     #[test]
     fn validate_rejects_blank_address() {
-        use aleph_types::chain::Address as AlephAddress;
         let content = CreditTransferContent {
             transfer: CreditTransferList {
                 credits: vec![CreditTransferEntry {
@@ -803,7 +797,6 @@ mod tests {
 
     #[test]
     fn validate_rejects_duplicate_recipients() {
-        use aleph_types::chain::Address as AlephAddress;
         let dup = AlephAddress::from("0xrecipient".to_string());
         let content = CreditTransferContent {
             transfer: CreditTransferList {
@@ -829,7 +822,6 @@ mod tests {
 
     #[test]
     fn validate_rejects_pre_epoch_expiration() {
-        use aleph_types::chain::Address as AlephAddress;
         use chrono::TimeZone;
         let pre_epoch = chrono::Utc.with_ymd_and_hms(1969, 1, 1, 0, 0, 0).unwrap();
         let content = CreditTransferContent {
