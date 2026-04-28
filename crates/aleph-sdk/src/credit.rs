@@ -1,8 +1,10 @@
 use std::time::Duration;
 
+use aleph_types::chain::Address as AlephAddress;
 use alloy_primitives::{Address, U256, address};
 use alloy_provider::Provider;
 use alloy_sol_types::sol;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// ALEPH ERC20 token on Ethereum mainnet.
@@ -386,13 +388,6 @@ pub async fn buy_credits(
     Ok(receipt)
 }
 
-// ---------------------------------------------------------------------------
-// Credit transfer message schema
-// ---------------------------------------------------------------------------
-
-use aleph_types::chain::Address as AlephAddress;
-use chrono::{DateTime, Utc};
-
 pub const CREDIT_TRANSFER_POST_TYPE: &str = "aleph_credit_transfer";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -657,7 +652,6 @@ mod tests {
         let json = serde_json::to_value(&content).unwrap();
         assert_eq!(json["transfer"]["credits"][0]["address"], "0xrecipient");
         assert_eq!(json["transfer"]["credits"][0]["amount"], 1500);
-        // ts_seconds_option emits an integer unix-seconds value.
         assert_eq!(json["transfer"]["credits"][0]["expiration"], dt.timestamp(),);
 
         let back: CreditTransferContent = serde_json::from_value(json).unwrap();
