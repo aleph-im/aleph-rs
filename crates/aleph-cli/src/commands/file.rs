@@ -56,7 +56,7 @@ async fn handle_single_file_upload(
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing)?;
 
-    let storage_engine = match args.storage_engine {
+    let storage_engine = match args.storage_engine.unwrap_or(StorageEngineCli::Storage) {
         StorageEngineCli::Storage => StorageEngine::Storage,
         StorageEngineCli::Ipfs => StorageEngine::Ipfs,
     };
@@ -123,9 +123,11 @@ async fn handle_folder_upload(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use aleph_sdk::ipfs::{CidVersion, UploadFolderOptions};
 
-    if matches!(args.storage_engine, StorageEngineCli::Storage) {
+    // Directory uploads always use IPFS. Reject only when the user explicitly
+    // asked for native storage; an unset flag silently picks IPFS.
+    if matches!(args.storage_engine, Some(StorageEngineCli::Storage)) {
         return Err(
-            "native storage does not support directory uploads; use --storage-engine ipfs".into(),
+            "native storage does not support directory uploads; omit --storage-engine or pass --storage-engine ipfs".into(),
         );
     }
 

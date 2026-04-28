@@ -1068,9 +1068,10 @@ pub struct FileUploadArgs {
     /// Path of the file to upload.
     pub path: std::path::PathBuf,
 
-    /// Storage engine to use.
-    #[arg(long, value_enum, default_value = "storage")]
-    pub storage_engine: StorageEngineCli,
+    /// Storage engine to use. Defaults to `storage` for files and `ipfs` for
+    /// directories (native storage does not support directory uploads).
+    #[arg(long, value_enum)]
+    pub storage_engine: Option<StorageEngineCli>,
 
     /// Channel name.
     #[arg(long)]
