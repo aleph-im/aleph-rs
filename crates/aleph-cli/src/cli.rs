@@ -235,7 +235,7 @@ pub struct PostListArgs {
 use aleph_sdk::client::{MessageFilter, PostFilter, SortBy, SortOrder};
 use aleph_types::message::{MessageStatus, MessageType};
 use aleph_types::timestamp::Timestamp;
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Utc};
 use std::str::FromStr;
 
 fn parse_timestamp(s: &str) -> Result<Timestamp, String> {
@@ -1584,6 +1584,8 @@ pub struct NetworkSetArgs {
 pub enum CreditCommand {
     /// Buy Aleph credits by transferring ALEPH or USDC tokens
     Buy(BuyCreditArgs),
+    /// Transfer Aleph credits to another account
+    Transfer(TransferCreditArgs),
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -1612,4 +1614,60 @@ pub struct BuyCreditArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+pub fn parse_rfc3339_utc(s: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| format!("invalid RFC3339 timestamp '{s}': {e}"))
+}
+
+#[derive(Args)]
+pub struct TransferCreditArgs {
+    /// Recipient address, account name, or alias from the local store.
+    #[arg(long)]
+    pub to: String,
+
+    /// Number of credits to transfer (strictly positive integer).
+    #[arg(long)]
+    pub amount: u64,
+
+    /// Optional expiration as an RFC3339 timestamp
+    /// (e.g. `2026-12-31T23:59:59Z`). The recipient loses any unspent
+    /// portion of this transfer after that time.
+    #[arg(long, value_parser = parse_rfc3339_utc)]
+    pub expiration: Option<DateTime<Utc>>,
+
+    /// Optional channel for the underlying POST message.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// Skip the confirmation prompt and submit immediately.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[cfg(test)]
+mod credit_transfer_args_tests {
+    use super::*;
+
+    #[test]
+    fn parse_rfc3339_utc_accepts_z_suffix() {
+        let dt = parse_rfc3339_utc("2026-12-31T23:59:59Z").unwrap();
+        assert_eq!(dt.to_rfc3339(), "2026-12-31T23:59:59+00:00");
+    }
+
+    #[test]
+    fn parse_rfc3339_utc_accepts_offset_and_normalizes_to_utc() {
+        let dt = parse_rfc3339_utc("2026-12-31T23:59:59+01:00").unwrap();
+        assert_eq!(dt.to_rfc3339(), "2026-12-31T22:59:59+00:00");
+    }
+
+    #[test]
+    fn parse_rfc3339_utc_rejects_garbage() {
+        assert!(parse_rfc3339_utc("not a date").is_err());
+    }
 }

@@ -25,6 +25,7 @@ pub async fn handle_credit_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         CreditCommand::Buy(args) => handle_buy(json, args, cli_network).await,
+        CreditCommand::Transfer(_) => todo!("credit transfer handler (Task 4)"),
     }
 }
 
