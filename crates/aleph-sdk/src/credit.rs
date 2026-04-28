@@ -386,6 +386,37 @@ pub async fn buy_credits(
     Ok(receipt)
 }
 
+// ---------------------------------------------------------------------------
+// Credit transfer message schema
+// ---------------------------------------------------------------------------
+
+use aleph_types::chain::Address as AlephAddress;
+use chrono::{DateTime, Utc};
+
+pub const CREDIT_TRANSFER_POST_TYPE: &str = "aleph_credit_transfer";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditTransferEntry {
+    pub address: AlephAddress,
+    pub amount: u64,
+    #[serde(
+        default,
+        with = "chrono::serde::ts_seconds_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expiration: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditTransferList {
+    pub credits: Vec<CreditTransferEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditTransferContent {
+    pub transfer: CreditTransferList,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +634,51 @@ mod tests {
     fn u256_to_f64_one_wei() {
         // Smallest representable fraction at 18 decimals.
         assert!((u256_to_f64(U256::from(1u64), 18) - 1e-18).abs() < 1e-30);
+    }
+
+    #[test]
+    fn credit_transfer_content_round_trips_with_expiration() {
+        use aleph_types::chain::Address as AlephAddress;
+        use chrono::TimeZone;
+
+        let dt = chrono::Utc
+            .with_ymd_and_hms(2026, 12, 31, 23, 59, 59)
+            .unwrap();
+        let content = CreditTransferContent {
+            transfer: CreditTransferList {
+                credits: vec![CreditTransferEntry {
+                    address: AlephAddress::from("0xrecipient".to_string()),
+                    amount: 1500,
+                    expiration: Some(dt),
+                }],
+            },
+        };
+
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["transfer"]["credits"][0]["address"], "0xrecipient");
+        assert_eq!(json["transfer"]["credits"][0]["amount"], 1500);
+        // ts_seconds_option emits an integer unix-seconds value.
+        assert_eq!(json["transfer"]["credits"][0]["expiration"], dt.timestamp(),);
+
+        let back: CreditTransferContent = serde_json::from_value(json).unwrap();
+        assert_eq!(back.transfer.credits[0].amount, 1500);
+        assert_eq!(back.transfer.credits[0].expiration, Some(dt));
+    }
+
+    #[test]
+    fn credit_transfer_entry_omits_expiration_when_none() {
+        use aleph_types::chain::Address as AlephAddress;
+
+        let entry = CreditTransferEntry {
+            address: AlephAddress::from("0xrecipient".to_string()),
+            amount: 1,
+            expiration: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(
+            json.get("expiration").is_none(),
+            "expiration should be omitted when None, got: {json}"
+        );
     }
 
     #[test]
