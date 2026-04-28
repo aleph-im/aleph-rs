@@ -1,4 +1,6 @@
-use crate::cli::{FileCommand, FileDownloadArgs, FilePinArgs, FileUploadArgs, StorageEngineCli};
+use crate::cli::{
+    FileCommand, FileDownloadArgs, FilePinArgs, FileUploadArgs, PaymentTypeCli, StorageEngineCli,
+};
 use crate::common::{print_submission_result, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::{AlephClient, AlephStorageClient, hash_file};
 use aleph_sdk::messages::StoreBuilder;
@@ -8,6 +10,13 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
 use aleph_types::message::{FileRef, StorageEngine};
 use url::Url;
+
+fn resolve_payment(choice: Option<PaymentTypeCli>) -> Payment {
+    match choice.unwrap_or(PaymentTypeCli::Credit) {
+        PaymentTypeCli::Hold => Payment::hold(),
+        PaymentTypeCli::Credit => Payment::credits(),
+    }
+}
 
 pub async fn handle_file_command(
     aleph_client: &AlephClient,
@@ -72,8 +81,8 @@ async fn handle_single_file_upload(
         eprintln!("  File hash: {file_hash}");
     }
 
-    let mut builder =
-        StoreBuilder::new(&account, file_hash.clone(), storage_engine).payment(Payment::credits());
+    let mut builder = StoreBuilder::new(&account, file_hash.clone(), storage_engine)
+        .payment(resolve_payment(args.payment_type));
     if let Some(owner) = args.on_behalf_of {
         builder = builder.on_behalf_of(resolve_address(&owner)?);
     }
@@ -176,7 +185,7 @@ async fn handle_folder_upload(
     }
 
     let mut builder = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Ipfs)
-        .payment(Payment::credits());
+        .payment(resolve_payment(args.payment_type));
     if let Some(owner) = args.on_behalf_of {
         builder = builder.on_behalf_of(resolve_address(&owner)?);
     }

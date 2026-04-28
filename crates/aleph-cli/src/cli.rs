@@ -1063,6 +1063,14 @@ pub enum StorageEngineCli {
     Ipfs,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum PaymentTypeCli {
+    /// Locked-stake payment, no credit consumption (deprecated upstream).
+    Hold,
+    /// Credit-based payment.
+    Credit,
+}
+
 #[derive(Args)]
 pub struct FileUploadArgs {
     /// Path of the file to upload.
@@ -1072,6 +1080,11 @@ pub struct FileUploadArgs {
     /// directories (native storage does not support directory uploads).
     #[arg(long, value_enum)]
     pub storage_engine: Option<StorageEngineCli>,
+
+    /// Payment type for the STORE message. `credit` (default) consumes
+    /// credits; `hold` requires locked stake on the account.
+    #[arg(long, value_enum)]
+    pub payment_type: Option<PaymentTypeCli>,
 
     /// Channel name.
     #[arg(long)]
