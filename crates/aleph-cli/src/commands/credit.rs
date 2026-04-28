@@ -1,13 +1,24 @@
 use crate::account::CliAccount;
-use crate::cli::{BuyCreditArgs, CreditCommand, CreditTokenCli, SigningArgs};
-use crate::common::{resolve_account, resolve_network};
-use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
-use aleph_types::account::EvmAccount;
+use crate::cli::{BuyCreditArgs, CreditCommand, CreditTokenCli, SigningArgs, TransferCreditArgs};
+use crate::common::{resolve_account, resolve_address, resolve_network, submit_or_preview};
+use aleph_sdk::builder::MessageBuilder;
+use aleph_sdk::client::AlephClient;
+use aleph_sdk::credit::{
+    self, CREDIT_TRANSFER_POST_TYPE, CreditEstimate, CreditToken, CreditTransferContent,
+    CreditTransferEntry, CreditTransferError, CreditTransferList, EthereumConfig,
+    format_token_amount,
+};
+use aleph_types::account::{Account, EvmAccount};
+use aleph_types::chain::Address as AlephAddress;
+use aleph_types::channel::Channel;
+use aleph_types::message::MessageType;
 use alloy_network::EthereumWallet;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_signer_local::PrivateKeySigner;
+use chrono::{DateTime, Utc};
+use url::Url;
 
 impl From<CreditTokenCli> for CreditToken {
     fn from(v: CreditTokenCli) -> Self {
@@ -19,13 +30,15 @@ impl From<CreditTokenCli> for CreditToken {
 }
 
 pub async fn handle_credit_command(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
     json: bool,
     command: CreditCommand,
     cli_network: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         CreditCommand::Buy(args) => handle_buy(json, args, cli_network).await,
-        CreditCommand::Transfer(_) => todo!("credit transfer handler (Task 4)"),
+        CreditCommand::Transfer(args) => handle_transfer(aleph_client, ccn_url, json, args).await,
     }
 }
 
@@ -87,6 +100,67 @@ async fn handle_buy(
     .await?;
     print_submission_result(json, &args.amount, &estimate, &ethereum, &receipt)?;
     Ok(())
+}
+
+async fn handle_transfer(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: TransferCreditArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing)?;
+    let recipient = resolve_address(&args.to)?;
+
+    let content = CreditTransferContent {
+        transfer: CreditTransferList {
+            credits: vec![CreditTransferEntry {
+                address: recipient.clone(),
+                amount: args.amount,
+                expiration: args.expiration,
+            }],
+        },
+    };
+    content.validate()?;
+    if account.address() == &recipient {
+        return Err(CreditTransferError::SelfTransfer(recipient).into());
+    }
+
+    let envelope = serde_json::json!({
+        "type": CREDIT_TRANSFER_POST_TYPE,
+        "content": content,
+    });
+    let mut builder = MessageBuilder::new(&account, MessageType::Post, envelope);
+    if let Some(ch) = args.channel {
+        builder = builder.channel(Channel::from(ch));
+    }
+    let pending = builder.build()?;
+
+    if !json && !dry_run {
+        print_transfer_summary(&args.to, &recipient, args.amount, args.expiration);
+        if !args.yes && !confirm_submission()? {
+            eprintln!("Cancelled.");
+            return Ok(());
+        }
+    }
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
+fn print_transfer_summary(
+    input: &str,
+    resolved: &AlephAddress,
+    amount: u64,
+    expiration: Option<DateTime<Utc>>,
+) {
+    eprintln!("Transfer {amount} credits");
+    if input.starts_with("0x") || input.starts_with("0X") {
+        eprintln!("  To: {resolved}");
+    } else {
+        eprintln!("  To: {input} ({resolved})");
+    }
+    if let Some(exp) = expiration {
+        eprintln!("  Expiration: {}", exp.to_rfc3339());
+    }
 }
 
 fn resolve_evm_account(signing: &SigningArgs) -> Result<EvmAccount, Box<dyn std::error::Error>> {
@@ -288,5 +362,57 @@ mod tests {
         let v = summary_json("50", &estimate, &eth);
         assert_eq!(v["token"], "USDC");
         assert_eq!(v["bonus_ratio"], 0.0);
+    }
+
+    #[test]
+    fn transfer_envelope_shape() {
+        use aleph_sdk::credit::{
+            CREDIT_TRANSFER_POST_TYPE, CreditTransferContent, CreditTransferEntry,
+            CreditTransferList,
+        };
+        use aleph_types::chain::Address as AlephAddress;
+
+        let content = CreditTransferContent {
+            transfer: CreditTransferList {
+                credits: vec![CreditTransferEntry {
+                    address: AlephAddress::from("0xrecipient".to_string()),
+                    amount: 1500,
+                    expiration: None,
+                }],
+            },
+        };
+        let envelope = serde_json::json!({
+            "type": CREDIT_TRANSFER_POST_TYPE,
+            "content": content,
+        });
+
+        assert_eq!(envelope["type"], "aleph_credit_transfer");
+        assert_eq!(
+            envelope["content"]["transfer"]["credits"][0]["address"],
+            "0xrecipient"
+        );
+        assert_eq!(
+            envelope["content"]["transfer"]["credits"][0]["amount"],
+            1500
+        );
+        assert!(
+            envelope["content"]["transfer"]["credits"][0]
+                .get("expiration")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn transfer_self_transfer_error_kind() {
+        use aleph_sdk::credit::CreditTransferError;
+        use aleph_types::chain::Address as AlephAddress;
+        let addr = AlephAddress::from("0xrecipient".to_string());
+        let err = CreditTransferError::SelfTransfer(addr.clone());
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("sender and recipient must differ"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("0xrecipient"), "got: {msg}");
     }
 }

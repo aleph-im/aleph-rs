@@ -112,8 +112,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Credit {
             command: credit_command,
         } => {
-            commands::credit::handle_credit_command(json, credit_command, cli.network.as_deref())
-                .await?
+            commands::credit::handle_credit_command(
+                &aleph_client,
+                &ccn_url,
+                json,
+                credit_command,
+                cli.network.as_deref(),
+            )
+            .await?
         }
     }
 
