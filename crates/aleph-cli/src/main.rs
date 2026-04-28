@@ -1,6 +1,7 @@
 use crate::cli::Cli;
 use aleph_sdk::client::AlephClient;
 use clap::Parser;
+use std::sync::OnceLock;
 
 mod account;
 mod cli;
@@ -8,8 +9,40 @@ mod commands;
 mod common;
 mod config;
 
+#[cfg(unix)]
+static ORIGINAL_TERMIOS: OnceLock<libc::termios> = OnceLock::new();
+
+// dialoguer's Select puts the tty into raw mode and hides the cursor,
+// restoring both via Drop. Ctrl+C skips Drop, so without this handler an
+// interrupt during e.g. `aleph account import --ledger` leaves the user's
+// shell with raw mode on and the cursor hidden. We snapshot the tty state
+// at startup (before any prompt mutates it) and restore that exact mode on
+// SIGINT, rather than hardcoding ICANON|ECHO and clobbering custom stty.
+fn install_terminal_restore_handler() {
+    #[cfg(unix)]
+    unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
+            let _ = ORIGINAL_TERMIOS.set(t);
+        }
+    }
+
+    let _ = ctrlc::set_handler(|| {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(b"\x1b[?25h");
+        #[cfg(unix)]
+        if let Some(t) = ORIGINAL_TERMIOS.get() {
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, t);
+            }
+        }
+        std::process::exit(130);
+    });
+}
+
 #[tokio::main]
 async fn main() {
+    install_terminal_restore_handler();
     if let Err(e) = run().await {
         // Walk the source chain to find the root cause — avoids
         // redundant "Storage error: File not found: ..." nesting.

@@ -67,3 +67,5 @@ hex = { version = "0.4" }
 zeroize = { version = "1" }
 coins-ledger = { version = "0.13" }
 dialoguer = { version = "0.11" }
+ctrlc = { version = "3.4" }
+libc = { version = "0.2" }
