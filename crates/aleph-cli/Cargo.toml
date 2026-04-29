@@ -38,6 +38,10 @@ coins-ledger = { workspace = true }
 dialoguer = { workspace = true, features = ["fuzzy-select"] }
 bs58 = { workspace = true }
 walkdir = { workspace = true }
+ctrlc = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { workspace = true, features = ["apple-native"] }
