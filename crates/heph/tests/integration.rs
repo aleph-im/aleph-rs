@@ -912,3 +912,64 @@ async fn test_credit_transfer_succeeds() {
     assert_eq!(post_sender, 1_000_000_000 - 12_345);
     assert_eq!(post_recipient, 12_345);
 }
+
+/// Submitting a credit transfer larger than the sender's balance must be
+/// rejected with a 422 carrying `code: 6` (CreditInsufficient), and both
+/// sides' balances must be unchanged (transactional rollback).
+#[tokio::test]
+async fn test_credit_transfer_insufficient_balance_rejected() {
+    use aleph_sdk::client::{AlephAccountClient, AlephClient, AlephMessageClient, MessageError};
+    use aleph_sdk::credit_transfer::CREDIT_TRANSFER_POST_TYPE;
+    use aleph_sdk::messages::PostBuilder;
+    use aleph_types::chain::Address;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let sender_account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let sender_addr = sender_account.address().clone();
+    let recipient = Address::from("0x000000000000000000000000000000000000BEEF".to_string());
+
+    let pre_sender = client.get_balance(&sender_addr).await.unwrap().credits;
+    assert_eq!(pre_sender, 1_000_000_000);
+
+    // Attempt to transfer more than the sender holds.
+    let pending = PostBuilder::new(
+        &sender_account,
+        CREDIT_TRANSFER_POST_TYPE,
+        serde_json::json!({
+            "transfer": {
+                "credits": [
+                    { "address": recipient.as_str(), "amount": 2_000_000_000u64 }
+                ]
+            }
+        }),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let err = client.submit_message(&pending, true).await.unwrap_err();
+    match err {
+        MessageError::ApiError { status, ref body } => {
+            assert_eq!(status, 422, "expected 422, got {status}: {body}");
+            assert!(
+                body.contains("\"code\":6"),
+                "expected code 6 (CreditInsufficient) in body: {body}"
+            );
+            assert!(
+                body.contains("insufficient credit balance"),
+                "expected balance message in body: {body}"
+            );
+        }
+        other => panic!("expected MessageError::ApiError, got: {other:?}"),
+    }
+
+    // Balances unchanged: sender still 1B, recipient still absent.
+    let post_sender = client.get_balance(&sender_addr).await.unwrap().credits;
+    let post_recipient = client.get_balance(&recipient).await.unwrap().credits;
+    assert_eq!(post_sender, 1_000_000_000);
+    assert_eq!(post_recipient, 0);
+}
