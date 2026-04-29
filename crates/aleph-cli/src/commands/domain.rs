@@ -5,7 +5,8 @@ use crate::cli::{
     DomainListArgs, DomainRemoveArgs,
 };
 use crate::common::{
-    confirm_tty, now_secs_f64, resolve_account, resolve_address_or_active, submit_or_preview,
+    confirm_tty, format_epoch_for_tty, now_secs_f64, resolve_account, resolve_address_or_active,
+    submit_or_preview,
 };
 use aleph_sdk::aggregate_models::domains::{
     DOMAINS_AGGREGATE_KEY, DomainEntry, DomainOptions, DomainTargetType, DomainsAggregate,
@@ -87,7 +88,7 @@ async fn handle_domain_list(
                     .unwrap_or_default()
                     .trim_matches('"'),
                 row.message_id.as_deref().unwrap_or("-"),
-                row.updated_at
+                format_epoch_for_tty(row.updated_at)
             );
         }
     }
