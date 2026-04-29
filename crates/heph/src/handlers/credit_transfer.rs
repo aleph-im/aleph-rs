@@ -13,13 +13,12 @@ pub fn process_in_tx(
     tx: &Transaction<'_>,
     sender: &str,
     item_hash: &str,
-    raw_content: &serde_json::Value,
+    raw_content: serde_json::Value,
 ) -> ProcessingResult<()> {
     // 1. Deserialize.
-    let content: CreditTransferContent =
-        serde_json::from_value(raw_content.clone()).map_err(|e| {
-            ProcessingError::InvalidFormat(format!("invalid credit transfer content: {e}"))
-        })?;
+    let content: CreditTransferContent = serde_json::from_value(raw_content).map_err(|e| {
+        ProcessingError::InvalidFormat(format!("invalid credit transfer content: {e}"))
+    })?;
 
     // 2. Schema validate.
     if let Err(e) = content.validate() {
@@ -121,7 +120,7 @@ mod tests {
         let err = db
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction().unwrap();
-                let r = process_in_tx(&tx, "0xsender", "h0", &json!({"not": "valid"}));
+                let r = process_in_tx(&tx, "0xsender", "h0", json!({"not": "valid"}));
                 let _ = tx.rollback();
                 r
             })
@@ -144,7 +143,7 @@ mod tests {
         let err = db
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction().unwrap();
-                let r = process_in_tx(&tx, "0xsender", "h0", &content);
+                let r = process_in_tx(&tx, "0xsender", "h0", content);
                 let _ = tx.rollback();
                 r
             })
@@ -164,7 +163,7 @@ mod tests {
         let err = db
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction().unwrap();
-                let r = process_in_tx(&tx, "0xsender", "h0", &content);
+                let r = process_in_tx(&tx, "0xsender", "h0", content);
                 let _ = tx.rollback();
                 r
             })
@@ -189,7 +188,7 @@ mod tests {
         let err = db
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction().unwrap();
-                let r = process_in_tx(&tx, "0xsender", "h0", &content);
+                let r = process_in_tx(&tx, "0xsender", "h0", content);
                 let _ = tx.rollback();
                 r
             })
@@ -213,7 +212,7 @@ mod tests {
         let err = db
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction().unwrap();
-                let r = process_in_tx(&tx, "0xsender", "h0", &content);
+                let r = process_in_tx(&tx, "0xsender", "h0", content);
                 let _ = tx.rollback();
                 r
             })
@@ -237,7 +236,7 @@ mod tests {
         let err = db
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction().unwrap();
-                let r = process_in_tx(&tx, "0xsender", "h0", &content);
+                let r = process_in_tx(&tx, "0xsender", "h0", content);
                 let _ = tx.rollback();
                 r
             })
@@ -262,7 +261,7 @@ mod tests {
         let err = db
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction().unwrap();
-                let r = process_in_tx(&tx, "0xsender", "h0", &content);
+                let r = process_in_tx(&tx, "0xsender", "h0", content);
                 let _ = tx.rollback();
                 r
             })
@@ -286,7 +285,7 @@ mod tests {
 
         db.with_conn(|conn| {
             let tx = conn.unchecked_transaction().unwrap();
-            let r = process_in_tx(&tx, "0xsender", "itemhashabc", &content);
+            let r = process_in_tx(&tx, "0xsender", "itemhashabc", content);
             assert!(r.is_ok(), "process_in_tx failed: {:?}", r.err());
             tx.commit().unwrap();
         });

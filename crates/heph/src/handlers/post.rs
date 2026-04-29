@@ -123,12 +123,7 @@ pub fn process_post(
                 .unchecked_transaction()
                 .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
             insert_post(&tx, &record).map_err(|e| ProcessingError::InternalError(e.to_string()))?;
-            credit_transfer::process_in_tx(
-                &tx,
-                &sender,
-                &item_hash_for_apply,
-                &raw_credit_content,
-            )?;
+            credit_transfer::process_in_tx(&tx, &sender, &item_hash_for_apply, raw_credit_content)?;
             tx.commit()
                 .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
             Ok(())
