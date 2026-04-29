@@ -5,7 +5,8 @@ use crate::cli::{
     WebsiteUpdateArgs,
 };
 use crate::common::{
-    confirm_tty, now_secs_f64, resolve_account, resolve_address_or_active, submit_or_preview,
+    confirm_tty, format_epoch_for_tty, now_secs_f64, resolve_account, resolve_address_or_active,
+    submit_or_preview,
 };
 use aleph_sdk::aggregate_models::domains::DomainsAggregate;
 use aleph_sdk::aggregate_models::websites::{
@@ -196,8 +197,8 @@ async fn handle_website_show(
         if !out.domains.is_empty() {
             println!("Domains:    {}", out.domains.join(", "));
         }
-        println!("Created:    {}", out.created_at);
-        println!("Updated:    {}", out.updated_at);
+        println!("Created:    {}", format_epoch_for_tty(out.created_at));
+        println!("Updated:    {}", format_epoch_for_tty(out.updated_at));
         if !out.history.is_empty() {
             println!("History:");
             for (v, vol) in &out.history {

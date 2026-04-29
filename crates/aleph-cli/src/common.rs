@@ -16,6 +16,15 @@ pub fn now_secs_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Format a fractional Unix timestamp (as stored in dashboard aggregates) as
+/// `YYYY-MM-DD HH:MM:SS UTC` for TTY display. Falls back to the raw float
+/// formatting if the value is out of the chrono range.
+pub fn format_epoch_for_tty(secs: f64) -> String {
+    chrono::DateTime::from_timestamp(secs as i64, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| secs.to_string())
+}
+
 /// Returns true if the error is an HTTP 429 Too Many Requests.
 pub fn is_rate_limited(err: &MessageError) -> bool {
     matches!(err, MessageError::ApiError { status: 429, .. })
