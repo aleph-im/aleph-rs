@@ -334,4 +334,88 @@ mod tests {
         assert_eq!(cp, "0xrecipient");
         assert_eq!(exp, None);
     }
+
+    /// Multi-recipient transfer: the apply loop must decrement the sender row
+    /// once per entry (cumulative debit) while upserting each recipient
+    /// independently. Six history rows total — one debit + one credit per
+    /// entry — all sharing the same `message_hash`.
+    #[test]
+    fn applies_multi_recipient_transfer() {
+        let db = open_db_with_schema();
+        db.with_conn(|c| set_credit_balance(c, "0xsender", 1_000))
+            .unwrap();
+
+        let content = json!({
+            "transfer": { "credits": [
+                { "address": "0xalice",   "amount": 100 },
+                { "address": "0xbob",     "amount": 200 },
+                { "address": "0xcarol",   "amount": 300 }
+            ]}
+        });
+
+        db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction().unwrap();
+            let r = process_in_tx(&tx, "0xsender", "multi-hash", content);
+            assert!(r.is_ok(), "process_in_tx failed: {:?}", r.err());
+            tx.commit().unwrap();
+        });
+
+        // Sender debited cumulatively: 1_000 - (100+200+300) = 400.
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, "0xsender")).unwrap(),
+            Some(400)
+        );
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, "0xalice")).unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, "0xbob")).unwrap(),
+            Some(200)
+        );
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, "0xcarol")).unwrap(),
+            Some(300)
+        );
+
+        // Six history rows under the same message_hash: three credits, three
+        // debits, summing to zero.
+        let (count, sum): (i64, i64) = db
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(amount), 0) \
+                     FROM credit_history WHERE message_hash = ?1",
+                    ["multi-hash"],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(count, 6);
+        assert_eq!(sum, 0);
+
+        // Sender has three debit rows; all three counterparties present.
+        let mut sender_debits: Vec<(i64, String)> = db.with_conn(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT amount, counterparty FROM credit_history \
+                     WHERE address = ?1 ORDER BY counterparty",
+                )
+                .unwrap();
+            stmt.query_map(["0xsender"], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+        });
+        sender_debits.sort();
+        assert_eq!(
+            sender_debits,
+            vec![
+                (-300, "0xcarol".to_string()),
+                (-200, "0xbob".to_string()),
+                (-100, "0xalice".to_string()),
+            ]
+        );
+    }
 }
