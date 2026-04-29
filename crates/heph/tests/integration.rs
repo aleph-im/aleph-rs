@@ -862,3 +862,53 @@ async fn test_sdk_get_aggregates_empty_keys_error() {
 
     assert!(result.is_err());
 }
+
+/// End-to-end credit transfer through the SDK and HTTP API.
+/// The pre-seeded sender (`start_test_server` key `[1u8; 32]`) starts at
+/// 1_000_000_000 credits. Submit a transfer of 12_345 credits to a recipient
+/// and assert both balances move via `GET /addresses/{addr}/balance`.
+#[tokio::test]
+async fn test_credit_transfer_succeeds() {
+    use aleph_sdk::client::{AlephAccountClient, AlephClient, AlephMessageClient};
+    use aleph_sdk::credit_transfer::CREDIT_TRANSFER_POST_TYPE;
+    use aleph_sdk::messages::PostBuilder;
+    use aleph_types::chain::Address;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let sender_account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let sender_addr = sender_account.address().clone();
+    let recipient = Address::from("0x000000000000000000000000000000000000FACE".to_string());
+
+    // Pre-state.
+    let pre_sender = client.get_balance(&sender_addr).await.unwrap().credits;
+    let pre_recipient = client.get_balance(&recipient).await.unwrap().credits;
+    assert_eq!(pre_sender, 1_000_000_000);
+    assert_eq!(pre_recipient, 0);
+
+    // Build and submit a credit-transfer POST.
+    let pending = PostBuilder::new(
+        &sender_account,
+        CREDIT_TRANSFER_POST_TYPE,
+        serde_json::json!({
+            "transfer": {
+                "credits": [{ "address": recipient.as_str(), "amount": 12_345 }]
+            }
+        }),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let resp = client.submit_message(&pending, true).await.unwrap();
+    assert_eq!(resp.message_status, "processed");
+
+    // Post-state: sender debited, recipient credited.
+    let post_sender = client.get_balance(&sender_addr).await.unwrap().credits;
+    let post_recipient = client.get_balance(&recipient).await.unwrap().credits;
+    assert_eq!(post_sender, 1_000_000_000 - 12_345);
+    assert_eq!(post_recipient, 12_345);
+}
