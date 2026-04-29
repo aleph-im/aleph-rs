@@ -1,9 +1,13 @@
 use crate::db::Db;
 use crate::db::posts::{PostRecord, get_post, insert_post, update_latest_amend};
+use crate::handlers::credit_transfer;
 use crate::handlers::{IncomingMessage, ProcessingError, ProcessingResult};
+use aleph_sdk::credit_transfer::CREDIT_TRANSFER_POST_TYPE;
 use aleph_types::message::MessageContent;
 
 /// Process a POST message: insert into the posts table, handling amend logic.
+/// For `aleph_credit_transfer` posts, the post insert and the credit apply
+/// run in a single SQL transaction so partial state is impossible.
 pub fn process_post(
     db: &Db,
     msg: &IncomingMessage,
@@ -27,7 +31,6 @@ pub fn process_post(
             .and_then(|v| v.as_str().map(|s| s.to_string()))
     });
 
-    // Serialize post content body to JSON.
     let content_json = post_content
         .content
         .as_ref()
@@ -36,6 +39,7 @@ pub fn process_post(
         .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
 
     if post_content.is_amend() {
+        // Amend path — unchanged from the previous implementation.
         let ref_hash = post_content.reference.as_deref().unwrap_or("").to_string();
 
         if ref_hash.is_empty() {
@@ -44,7 +48,6 @@ pub fn process_post(
             ));
         }
 
-        // Look up the target post.
         let target = db
             .with_conn(|conn| get_post(conn, &ref_hash))
             .map_err(|e| ProcessingError::InternalError(e.to_string()))?
@@ -54,14 +57,12 @@ pub fn process_post(
                 ))
             })?;
 
-        // Target must not itself be an amend.
         if target.post_type == "amend" {
             return Err(ProcessingError::PostAmendAmend(format!(
                 "target post {ref_hash} is itself an amend"
             )));
         }
 
-        // Address must match.
         if target.address != address {
             return Err(ProcessingError::PermissionDenied(format!(
                 "amend address {address} does not match original post address {}",
@@ -69,7 +70,6 @@ pub fn process_post(
             )));
         }
 
-        // The original is the target itself (target.original_item_hash is None for non-amends).
         let original_hash = ref_hash.clone();
 
         let record = PostRecord {
@@ -87,24 +87,53 @@ pub fn process_post(
         db.with_conn(|conn| insert_post(conn, &record))
             .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
 
-        // Update latest_amend on the original if this amend is newer.
         db.with_conn(|conn| update_latest_amend(conn, &original_hash, &item_hash, time))
             .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
-    } else {
-        // Regular (non-amend) post.
-        let post_type = post_content.post_type_str().to_string();
-        let record = PostRecord {
-            item_hash,
-            address,
-            post_type,
-            ref_: None,
-            content: content_json,
-            channel,
-            time,
-            original_item_hash: None,
-            latest_amend: None,
-        };
 
+        return Ok(());
+    }
+
+    // Regular (non-amend) post.
+    let post_type = post_content.post_type_str().to_string();
+    let record = PostRecord {
+        item_hash: item_hash.clone(),
+        address: address.clone(),
+        post_type: post_type.clone(),
+        ref_: None,
+        content: content_json,
+        channel,
+        time,
+        original_item_hash: None,
+        latest_amend: None,
+    };
+
+    if post_type == CREDIT_TRANSFER_POST_TYPE {
+        // Credit-transfer post: insert the post row AND apply the transfer in
+        // a single transaction. Post insert first, so the recipient/sender
+        // history rows can reference an existing post item_hash if any future
+        // FK is added; the transaction keeps both halves atomic.
+        let raw_credit_content = post_content
+            .content
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+        let sender = address.clone();
+        let item_hash_for_apply = item_hash.clone();
+        db.with_conn(|conn| -> ProcessingResult<()> {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
+            insert_post(&tx, &record).map_err(|e| ProcessingError::InternalError(e.to_string()))?;
+            credit_transfer::process_in_tx(
+                &tx,
+                &sender,
+                &item_hash_for_apply,
+                &raw_credit_content,
+            )?;
+            tx.commit()
+                .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
+            Ok(())
+        })?;
+    } else {
         db.with_conn(|conn| insert_post(conn, &record))
             .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
     }
@@ -116,6 +145,7 @@ pub fn process_post(
 mod tests {
     use super::*;
     use crate::db::Db;
+    use crate::db::balances::{get_credit_balance, set_credit_balance};
     use crate::db::posts::get_post;
     use crate::handlers::process_message;
     use aleph_types::account::{Account, EvmAccount, sign_message};
@@ -355,6 +385,170 @@ mod tests {
             2,
             "expected PermissionDenied (2), got {:?}",
             err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Credit-transfer dispatch tests
+    // -----------------------------------------------------------------------
+
+    /// Sign a credit-transfer POST inline message. The content embeds the sender's
+    /// own address as `address` (per inline-message convention). The transfer entry
+    /// targets `recipient`.
+    fn sign_credit_transfer(
+        key: &[u8; 32],
+        time: f64,
+        recipient: &str,
+        amount: u64,
+        expiration_unix: Option<i64>,
+    ) -> IncomingMessage {
+        let account = EvmAccount::new(Chain::Ethereum, key).unwrap();
+        let sender = account.address().as_str().to_string();
+        let exp_field = match expiration_unix {
+            Some(e) => format!(r#","expiration":{e}"#),
+            None => String::new(),
+        };
+        let item_content = format!(
+            r#"{{"type":"aleph_credit_transfer","address":"{sender}","time":{time},"content":{{"transfer":{{"credits":[{{"address":"{recipient}","amount":{amount}{exp_field}}}]}}}}}}"#
+        );
+        let item_hash = ItemHash::Native(AlephItemHash::from_bytes(item_content.as_bytes()));
+        let unsigned = UnsignedMessage {
+            message_type: MessageType::Post,
+            item_type: ItemType::Inline,
+            item_content: item_content.clone(),
+            item_hash: item_hash.clone(),
+            time: Timestamp::from(time),
+            channel: None,
+        };
+        let pending = sign_message(&account, unsigned).unwrap();
+        IncomingMessage {
+            chain: pending.chain,
+            sender: pending.sender,
+            signature: pending.signature,
+            message_type: pending.message_type,
+            item_type: pending.item_type,
+            item_content: Some(pending.item_content),
+            item_hash: pending.item_hash,
+            time: pending.time,
+            channel: pending.channel,
+        }
+    }
+
+    #[test]
+    fn credit_transfer_succeeds_and_updates_balances_and_history() {
+        let db = Db::open_in_memory().unwrap();
+
+        let sender_key = [40u8; 32];
+        let sender_account = EvmAccount::new(Chain::Ethereum, &sender_key).unwrap();
+        let sender = sender_account.address().as_str().to_string();
+        db.with_conn(|c| set_credit_balance(c, &sender, 5_000))
+            .unwrap();
+
+        let recipient = "0x000000000000000000000000000000000000FACE";
+        let msg = sign_credit_transfer(
+            &sender_key,
+            1_700_000_100.0,
+            recipient,
+            1_500,
+            Some(1_798_761_599), // 2026-12-31T23:59:59Z
+        );
+        let item_hash = msg.item_hash.to_string();
+
+        process_message(&db, &msg).expect("transfer should process");
+
+        // Balances.
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, &sender)).unwrap(),
+            Some(3_500)
+        );
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, recipient)).unwrap(),
+            Some(1_500)
+        );
+
+        // History rows: same message_hash on both legs.
+        let count: i64 = db
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM credit_history WHERE message_hash = ?1",
+                    [&item_hash],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn credit_transfer_with_insufficient_balance_rejects_and_rolls_back() {
+        let db = Db::open_in_memory().unwrap();
+
+        let sender_key = [41u8; 32];
+        let sender_account = EvmAccount::new(Chain::Ethereum, &sender_key).unwrap();
+        let sender = sender_account.address().as_str().to_string();
+        db.with_conn(|c| set_credit_balance(c, &sender, 100))
+            .unwrap();
+
+        let recipient = "0x000000000000000000000000000000000000BEEF";
+        let msg = sign_credit_transfer(&sender_key, 1_700_000_200.0, recipient, 200, None);
+        let item_hash = msg.item_hash.to_string();
+
+        let err = process_message(&db, &msg).unwrap_err();
+        assert_eq!(err.error_code(), 6, "expected CreditInsufficient (6)");
+
+        // Balances unchanged: sender still 100, recipient absent.
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, &sender)).unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, recipient)).unwrap(),
+            None
+        );
+
+        // No post row, no history rows.
+        let post_count: i64 = db
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM posts WHERE item_hash = ?1",
+                    [&item_hash],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(post_count, 0);
+
+        let history_count: i64 = db
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM credit_history WHERE message_hash = ?1",
+                    [&item_hash],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(history_count, 0);
+    }
+
+    #[test]
+    fn credit_transfer_self_transfer_rejected() {
+        let db = Db::open_in_memory().unwrap();
+
+        let sender_key = [42u8; 32];
+        let sender_account = EvmAccount::new(Chain::Ethereum, &sender_key).unwrap();
+        let sender = sender_account.address().as_str().to_string();
+        db.with_conn(|c| set_credit_balance(c, &sender, 5_000))
+            .unwrap();
+
+        let msg = sign_credit_transfer(&sender_key, 1_700_000_300.0, &sender, 1, None);
+        let err = process_message(&db, &msg).unwrap_err();
+        assert_eq!(err.error_code(), 0);
+        assert!(err.message().contains("sender and recipient must differ"));
+
+        // Balance unchanged.
+        assert_eq!(
+            db.with_conn(|c| get_credit_balance(c, &sender)).unwrap(),
+            Some(5_000)
         );
     }
 }
