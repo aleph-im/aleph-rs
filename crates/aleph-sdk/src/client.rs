@@ -4160,7 +4160,7 @@ mod tests {
         /// hand-rolled HTTP/1.1 response. Each accepted connection serves one
         /// response and closes.
         async fn start_canned_response_server(response: &'static [u8]) -> Url {
-            use tokio::io::AsyncWriteExt;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
@@ -4169,9 +4169,27 @@ mod tests {
                     let Ok((mut stream, _)) = listener.accept().await else {
                         break;
                     };
-                    // Don't bother reading the request — we always reply the same way.
-                    let _ = stream.write_all(response).await;
-                    let _ = stream.shutdown().await;
+                    tokio::spawn(async move {
+                        // Drain request headers so close() is graceful on
+                        // Windows (otherwise the kernel sends RST instead of
+                        // FIN and the client never parses our response).
+                        let mut buf = [0u8; 1024];
+                        let mut req = Vec::with_capacity(1024);
+                        loop {
+                            match stream.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    req.extend_from_slice(&buf[..n]);
+                                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let _ = stream.write_all(response).await;
+                        let _ = stream.shutdown().await;
+                    });
                 }
             });
             Url::parse(&format!("http://{addr}")).unwrap()

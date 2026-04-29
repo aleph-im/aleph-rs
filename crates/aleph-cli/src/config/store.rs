@@ -26,7 +26,7 @@ pub struct NetworkEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ethereum: Option<EthereumConfig>,
     /// IPFS gateway URL for folder uploads (Kubo HTTP API).
-    /// Defaults to https://ipfs.aleph.cloud when None.
+    /// Defaults to <https://ipfs.aleph.cloud> when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipfs_gateway_url: Option<String>,
 }
