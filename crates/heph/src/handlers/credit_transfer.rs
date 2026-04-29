@@ -54,7 +54,11 @@ pub fn process_in_tx(
             ProcessingError::InvalidFormat(format!("entry amount {} overflows i64", entry.amount))
         })?;
         let recipient = entry.address.as_str();
-        let expiration_str = entry.expiration.map(|dt| dt.to_rfc3339());
+        // Emit RFC3339 with `Z` suffix (rather than `+00:00`) so stored
+        // timestamps match the form used elsewhere across heph and pyaleph.
+        let expiration_str = entry
+            .expiration
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
 
         // Recipient history row.
         insert_credit_history_full(
@@ -312,7 +316,7 @@ mod tests {
         assert_eq!(amount, 1500);
         assert_eq!(mh, "itemhashabc");
         assert_eq!(cp, "0xsender");
-        assert_eq!(exp.as_deref(), Some("2026-12-31T23:59:59+00:00"));
+        assert_eq!(exp.as_deref(), Some("2026-12-31T23:59:59Z"));
 
         // Sender history row.
         let (amount, mh, cp, exp): (i64, String, String, Option<String>) = db
