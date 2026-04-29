@@ -20,6 +20,7 @@ pub enum CidVersion {
     V1,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct UploadFolderOptions {
     pub cid_version: CidVersion,
@@ -91,15 +92,17 @@ pub enum ParseRootError {
 
 use std::path::{Path, PathBuf};
 
+#[non_exhaustive]
 #[derive(Debug)]
-pub(crate) struct FolderEntry {
+pub struct FolderEntry {
     /// Relative path from the upload root, forward-slash separated.
     pub relative_path: String,
     pub absolute_path: PathBuf,
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum CollectError {
+pub enum CollectError {
     #[error("empty folder: {0}")]
     Empty(PathBuf),
     #[error("non-UTF-8 path: {0}")]
@@ -117,7 +120,7 @@ pub(crate) enum CollectError {
 ///
 /// Symlinks are followed when `follow_symlinks` is true (matches kubo's
 /// `ipfs add -r` default). Walk errors abort the collection.
-pub(crate) fn collect_folder_files(
+pub fn collect_folder_files(
     root: &Path,
     follow_symlinks: bool,
 ) -> Result<Vec<FolderEntry>, CollectError> {
