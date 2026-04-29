@@ -326,9 +326,12 @@ async fn handle_website_deploy(
         validate_folder(&args.path, false)?;
     }
 
-    // 4. Resolve signing account.
+    // 4. Resolve signing account. Capture a single `now` shared by the
+    //    website entry and any domain attachments below, so both records
+    //    written by this deploy carry the same `updated_at`.
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing)?;
+    let now = now_secs_f64();
 
     // 5. Refuse if name already exists and is non-null.
     let existing = aleph_client
@@ -371,7 +374,6 @@ async fn handle_website_deploy(
     };
 
     // 7. Build the websites aggregate entry and submit the partial update.
-    let now = now_secs_f64();
     let payment = WebsitePayment {
         chain: args
             .payment_chain
@@ -429,7 +431,6 @@ async fn handle_website_deploy(
             DOMAINS_AGGREGATE_KEY, DomainEntry, DomainOptions, DomainTargetType,
         };
         let mut content = serde_json::Map::new();
-        let now = now_secs_f64();
         for d in &args.domain {
             let entry = DomainEntry {
                 kind: DomainTargetType::Ipfs,
