@@ -98,8 +98,49 @@ where
     client.submit_message(&message, true).await
 }
 
-/// Add a single authorization, preserving existing ones.
-/// Fetches existing authorizations, appends the new one, and submits.
+/// Build the AGGREGATE message that adds a single authorization, applying
+/// merge logic with existing entries.
+///
+/// Fetches the account's existing authorizations, scans for the first
+/// entry that can be safely merged with `authorization` via
+/// [`Authorization::try_merge`], replaces it if found, otherwise appends.
+/// Returns the prepared (signed) `PendingMessage` without submitting it.
+pub async fn build_add_authorization<A, C>(
+    client: &C,
+    account: &A,
+    authorization: Authorization,
+) -> Result<aleph_types::message::pending::PendingMessage, MessageError>
+where
+    A: Account,
+    C: AlephAuthorizationClient + Sync,
+{
+    let mut authorizations = client.get_authorizations(account.address()).await?;
+
+    let merge_target = authorizations
+        .iter()
+        .position(|existing| existing.try_merge(&authorization).is_some());
+
+    match merge_target {
+        Some(idx) => {
+            // Safe to unwrap: position() returned Some only because try_merge did.
+            authorizations[idx] = authorizations[idx]
+                .try_merge(&authorization)
+                .expect("try_merge succeeded above");
+        }
+        None => authorizations.push(authorization),
+    }
+
+    let content = SecurityAggregateContent { authorizations };
+    let content_map =
+        match serde_json::to_value(&content).map_err(crate::messages::MessageBuildError::from)? {
+            serde_json::Value::Object(map) => map,
+            _ => unreachable!("SecurityAggregateContent always serializes to an object"),
+        };
+    Ok(AggregateBuilder::new(account, "security", content_map).build()?)
+}
+
+/// Add a single authorization, merging into an existing compatible entry
+/// when possible. Submits the resulting AGGREGATE message.
 pub async fn add_authorization<A, C>(
     client: &C,
     account: &A,
@@ -109,9 +150,8 @@ where
     A: Account,
     C: AlephMessageClient + AlephAuthorizationClient + AlephStorageClient + Sync,
 {
-    let mut authorizations = client.get_authorizations(account.address()).await?;
-    authorizations.push(authorization);
-    update_all_authorizations(client, account, authorizations).await
+    let message = build_add_authorization(client, account, authorization).await?;
+    client.submit_message(&message, true).await
 }
 
 /// Remove all authorizations for a specific delegate address.
@@ -318,6 +358,113 @@ mod tests {
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].address, delegate2);
         assert_eq!(fetched[0].types, vec![MessageType::Program]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running heph instance"]
+    async fn test_add_authorization_merges_aggregate_keys() {
+        let client = heph_client();
+        let account = test_account(206);
+        let delegate = Address::from("0xdelegate_206".to_string());
+
+        let auth1 = Authorization {
+            address: delegate.clone(),
+            chain: None,
+            channels: vec![],
+            types: vec![],
+            post_types: vec![],
+            aggregate_keys: vec!["A".to_string(), "B".to_string()],
+        };
+        add_authorization(&client, &account, auth1).await.unwrap();
+
+        let auth2 = Authorization {
+            address: delegate.clone(),
+            chain: None,
+            channels: vec![],
+            types: vec![],
+            post_types: vec![],
+            aggregate_keys: vec!["C".to_string()],
+        };
+        add_authorization(&client, &account, auth2).await.unwrap();
+
+        let fetched = client.get_authorizations(account.address()).await.unwrap();
+        assert_eq!(fetched.len(), 1, "entries should have merged into one");
+        let mut keys = fetched[0].aggregate_keys.clone();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running heph instance"]
+    async fn test_add_authorization_no_merge_on_chain_mismatch() {
+        let client = heph_client();
+        let account = test_account(207);
+        let delegate = Address::from("0xdelegate_207".to_string());
+
+        let auth1 = Authorization {
+            address: delegate.clone(),
+            chain: Some(Chain::Ethereum),
+            channels: vec![],
+            types: vec![],
+            post_types: vec![],
+            aggregate_keys: vec!["A".to_string()],
+        };
+        add_authorization(&client, &account, auth1).await.unwrap();
+
+        let auth2 = Authorization {
+            address: delegate.clone(),
+            chain: Some(Chain::Sol),
+            channels: vec![],
+            types: vec![],
+            post_types: vec![],
+            aggregate_keys: vec!["B".to_string()],
+        };
+        add_authorization(&client, &account, auth2).await.unwrap();
+
+        let fetched = client.get_authorizations(account.address()).await.unwrap();
+        assert_eq!(
+            fetched.len(),
+            2,
+            "chain mismatch must keep entries separate"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running heph instance"]
+    async fn test_add_authorization_no_merge_on_two_field_diff() {
+        let client = heph_client();
+        let account = test_account(208);
+        let delegate = Address::from("0xdelegate_208".to_string());
+
+        let auth1 = Authorization {
+            address: delegate.clone(),
+            chain: None,
+            channels: vec!["c1".to_string()],
+            types: vec![MessageType::Post],
+            post_types: vec![],
+            aggregate_keys: vec![],
+        };
+        add_authorization(&client, &account, auth1).await.unwrap();
+
+        let auth2 = Authorization {
+            address: delegate.clone(),
+            chain: None,
+            channels: vec!["c2".to_string()],
+            types: vec![MessageType::Aggregate],
+            post_types: vec![],
+            aggregate_keys: vec![],
+        };
+        add_authorization(&client, &account, auth2).await.unwrap();
+
+        let fetched = client.get_authorizations(account.address()).await.unwrap();
+        assert_eq!(
+            fetched.len(),
+            2,
+            "two differing fields must keep entries separate"
+        );
     }
 
     /// Mirrors the `AuthorizationsBody` enum from `client.rs` so we can
