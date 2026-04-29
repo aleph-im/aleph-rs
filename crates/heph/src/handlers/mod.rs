@@ -516,6 +516,7 @@ pub fn check_balance_public(
 }
 
 pub mod aggregate;
+pub mod credit_transfer;
 pub mod forget;
 pub mod instance;
 pub mod post;
