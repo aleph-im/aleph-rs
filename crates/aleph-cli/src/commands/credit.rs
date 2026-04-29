@@ -5,10 +5,10 @@ use crate::common::{
 };
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::AlephClient;
-use aleph_sdk::credit::{
-    self, CREDIT_TRANSFER_POST_TYPE, CreditEstimate, CreditToken, CreditTransferContent,
-    CreditTransferEntry, CreditTransferError, CreditTransferList, EthereumConfig,
-    format_token_amount,
+use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
+use aleph_sdk::credit_transfer::{
+    CREDIT_TRANSFER_POST_TYPE, CreditTransferContent, CreditTransferEntry, CreditTransferError,
+    CreditTransferList,
 };
 use aleph_types::account::{Account, EvmAccount};
 use aleph_types::chain::Address as AlephAddress;
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn transfer_envelope_shape() {
-        use aleph_sdk::credit::{
+        use aleph_sdk::credit_transfer::{
             CREDIT_TRANSFER_POST_TYPE, CreditTransferContent, CreditTransferEntry,
             CreditTransferList,
         };
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn transfer_self_transfer_error_kind() {
-        use aleph_sdk::credit::CreditTransferError;
+        use aleph_sdk::credit_transfer::CreditTransferError;
         use aleph_types::chain::Address as AlephAddress;
         let addr = AlephAddress::from("0xrecipient".to_string());
         let err = CreditTransferError::SelfTransfer(addr.clone());
