@@ -973,3 +973,63 @@ async fn test_credit_transfer_insufficient_balance_rejected() {
     assert_eq!(post_sender, 1_000_000_000);
     assert_eq!(post_recipient, 0);
 }
+
+/// Regression test for the "stuck processed" bug: when a credit transfer fails
+/// in dispatch, the messages row must be marked `rejected` (not left as
+/// `processed`) so that step-1 duplicate-check on retry falls through and
+/// re-runs the message instead of silently skipping it.
+#[tokio::test]
+async fn test_credit_transfer_failure_marks_message_rejected_and_allows_retry() {
+    use aleph_sdk::client::{AlephAccountClient, AlephClient, AlephMessageClient, MessageError};
+    use aleph_sdk::credit_transfer::CREDIT_TRANSFER_POST_TYPE;
+    use aleph_sdk::messages::PostBuilder;
+    use aleph_types::chain::Address;
+    use aleph_types::message::MessageStatus;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let sender_account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let recipient = Address::from("0x000000000000000000000000000000000000DEAD".to_string());
+
+    let pending = PostBuilder::new(
+        &sender_account,
+        CREDIT_TRANSFER_POST_TYPE,
+        serde_json::json!({
+            "transfer": {
+                "credits": [
+                    { "address": recipient.as_str(), "amount": 2_000_000_000u64 }
+                ]
+            }
+        }),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    // First submission: rejected with 422.
+    let err = client.submit_message(&pending, true).await.unwrap_err();
+    assert!(
+        matches!(err, MessageError::ApiError { status: 422, .. }),
+        "first attempt should fail with 422, got: {err:?}"
+    );
+
+    // The messages row must be in `rejected` state, not stuck as `processed`.
+    let fetched = client.get_message(&pending.item_hash).await.unwrap();
+    assert_eq!(
+        fetched.status(),
+        MessageStatus::Rejected,
+        "first failure must mark the row rejected so retries can re-run"
+    );
+
+    // Resubmitting the same message must re-run the pipeline (proving step 1
+    // didn't silent-skip on `rejected`). Sender balance is still insufficient,
+    // so we expect another 422 — not a 200 silently saying "already processed".
+    let err = client.submit_message(&pending, true).await.unwrap_err();
+    assert!(
+        matches!(err, MessageError::ApiError { status: 422, .. }),
+        "retry should re-run and reject again, got: {err:?}"
+    );
+}
