@@ -119,6 +119,10 @@ pub fn process_post(
         let sender = address.clone();
         let item_hash_for_apply = item_hash.clone();
         db.with_conn(|conn| -> ProcessingResult<()> {
+            // `with_conn` hands us `&Connection`; `unchecked_transaction` is
+            // the rusqlite-sanctioned way to start a transaction from an
+            // immutable connection ref (vs. `transaction()` which needs
+            // `&mut Connection`).
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
