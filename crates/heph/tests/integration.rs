@@ -980,7 +980,7 @@ async fn test_credit_transfer_insufficient_balance_rejected() {
 /// re-runs the message instead of silently skipping it.
 #[tokio::test]
 async fn test_credit_transfer_failure_marks_message_rejected_and_allows_retry() {
-    use aleph_sdk::client::{AlephAccountClient, AlephClient, AlephMessageClient, MessageError};
+    use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageError};
     use aleph_sdk::credit_transfer::CREDIT_TRANSFER_POST_TYPE;
     use aleph_sdk::messages::PostBuilder;
     use aleph_types::chain::Address;
