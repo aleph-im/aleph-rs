@@ -955,13 +955,13 @@ async fn test_credit_transfer_insufficient_balance_rejected() {
     match err {
         MessageError::ApiError { status, ref body } => {
             assert_eq!(status, 422, "expected 422, got {status}: {body}");
-            assert!(
-                body.contains("\"code\":6"),
-                "expected code 6 (CreditInsufficient) in body: {body}"
-            );
-            assert!(
-                body.contains("insufficient credit balance"),
-                "expected balance message in body: {body}"
+            let parsed: serde_json::Value = serde_json::from_str(body)
+                .unwrap_or_else(|e| panic!("response body is not valid JSON ({e}): {body}"));
+            assert_eq!(parsed["message_status"], "rejected");
+            assert_eq!(parsed["error"]["code"], 6);
+            assert_eq!(
+                parsed["error"]["message"],
+                "insufficient credit balance: have 1000000000, need 2000000000"
             );
         }
         other => panic!("expected MessageError::ApiError, got: {other:?}"),
