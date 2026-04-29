@@ -91,4 +91,40 @@ mod tests {
         assert!(tables.contains(&"account_costs".to_string()));
         assert!(tables.contains(&"forgotten_messages".to_string()));
     }
+
+    #[test]
+    fn credit_history_has_extended_columns() {
+        let db = Db::open_in_memory().unwrap();
+        let cols: Vec<String> = db.with_conn(|c| {
+            let mut stmt = c.prepare("PRAGMA table_info(credit_history)").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        });
+        assert!(cols.contains(&"message_hash".to_string()), "cols: {cols:?}");
+        assert!(cols.contains(&"counterparty".to_string()), "cols: {cols:?}");
+        assert!(
+            cols.contains(&"expiration_at".to_string()),
+            "cols: {cols:?}"
+        );
+    }
+
+    #[test]
+    fn credit_history_has_message_hash_index() {
+        let db = Db::open_in_memory().unwrap();
+        let names: Vec<String> = db.with_conn(|c| {
+            let mut stmt = c
+                .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='credit_history'")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        });
+        assert!(
+            names.contains(&"idx_credit_history_message_hash".to_string()),
+            "indexes on credit_history: {names:?}"
+        );
+    }
 }
