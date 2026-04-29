@@ -260,6 +260,40 @@ struct DeployOut {
     domains_attached: Vec<String>,
 }
 
+/// Upload a folder to IPFS and submit the matching STORE message.
+///
+/// Resolves the IPFS gateway (CLI override → default network → builtin), uploads
+/// `path`, builds a STORE pending message and (unless `dry_run`) submits it.
+/// Returns `(ipfs_cid_string, store_item_hash_string)`.
+///
+/// The inner `submit_or_preview` call always passes `false` for `json` so the
+/// caller's `--json` envelope remains the sole stdout document.
+async fn upload_folder_and_store(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    account: &crate::account::CliAccount,
+    path: &std::path::Path,
+    ipfs_gateway_override: Option<&str>,
+    channel: &str,
+    dry_run: bool,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let store = crate::config::store::ConfigStore::open()?;
+    let gateway = crate::common::resolve_ipfs_gateway_url(&store, None, ipfs_gateway_override)?;
+    let client = aleph_client.clone().with_ipfs_gateway(gateway);
+    let cid = client
+        .upload_folder_to_ipfs(path, aleph_sdk::ipfs::UploadFolderOptions::default())
+        .await?;
+    let cid_str = cid.to_string();
+    let pending_store = StoreBuilder::new(account, cid, StorageEngine::Ipfs)
+        .channel(Channel::from(channel.to_string()))
+        .build()?;
+    let store_hash = pending_store.item_hash.to_string();
+    if !dry_run {
+        submit_or_preview(aleph_client, ccn_url, &pending_store, dry_run, false).await?;
+    }
+    Ok((cid_str, store_hash))
+}
+
 /// Deploy a static site as an Aleph "website" entry.
 ///
 /// Two paths:
@@ -324,34 +358,16 @@ async fn handle_website_deploy(
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        // Resolve the IPFS gateway and upload the folder. The deploy handler
-        // doesn't have plumbing for `--network`, so we fall through to the
-        // default network's `ipfs_gateway_url` (with builtin fallback).
-        let store = crate::config::store::ConfigStore::open()?;
-        let gateway =
-            crate::common::resolve_ipfs_gateway_url(&store, None, args.ipfs_gateway.as_deref())?;
-        let client = aleph_client.clone().with_ipfs_gateway(gateway);
-        let cid = client
-            .upload_folder_to_ipfs(&args.path, aleph_sdk::ipfs::UploadFolderOptions::default())
-            .await?;
-        let cid_str = cid.to_string();
-        let pending_store = StoreBuilder::new(&account, cid, StorageEngine::Ipfs)
-            .channel(Channel::from(channel.clone()))
-            .build()?;
-        // The STORE message item_hash is computed locally during build() and
-        // is the value we need to reference as `volume_id`. We grab it
-        // directly from the PendingMessage — no extra round-trip needed.
-        let store_hash = pending_store.item_hash.to_string();
-        // Inner submissions pass `false` for the `json` flag so they don't
-        // emit a JSON envelope to stdout — the final DeployOut is the only
-        // JSON document a `--json` consumer sees. Skip the dry-run preview
-        // entirely: the DeployOut envelope already represents the dry-run
-        // state, so previewing the inner pending message would put a second
-        // JSON document on stdout.
-        if !dry_run {
-            submit_or_preview(aleph_client, ccn_url, &pending_store, dry_run, false).await?;
-        }
-        (cid_str, store_hash)
+        upload_folder_and_store(
+            aleph_client,
+            ccn_url,
+            &account,
+            &args.path,
+            args.ipfs_gateway.as_deref(),
+            &channel,
+            dry_run,
+        )
+        .await?
     };
 
     // 7. Build the websites aggregate entry and submit the partial update.
@@ -552,27 +568,16 @@ async fn handle_website_update(
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        // Resolve the IPFS gateway and upload the folder. The update handler
-        // doesn't have plumbing for `--network`, so we fall through to the
-        // default network's `ipfs_gateway_url` (with builtin fallback).
-        let store = crate::config::store::ConfigStore::open()?;
-        let gateway =
-            crate::common::resolve_ipfs_gateway_url(&store, None, args.ipfs_gateway.as_deref())?;
-        let client = aleph_client.clone().with_ipfs_gateway(gateway);
-        let cid = client
-            .upload_folder_to_ipfs(&args.path, aleph_sdk::ipfs::UploadFolderOptions::default())
-            .await?;
-        let cid_str = cid.to_string();
-        let pending_store = StoreBuilder::new(&account, cid, StorageEngine::Ipfs)
-            .channel(Channel::from(channel.clone()))
-            .build()?;
-        let store_hash = pending_store.item_hash.to_string();
-        // Inner submission: pass `false` for `json` (single-document
-        // discipline), skip in dry-run.
-        if !dry_run {
-            submit_or_preview(aleph_client, ccn_url, &pending_store, dry_run, false).await?;
-        }
-        (cid_str, store_hash)
+        upload_folder_and_store(
+            aleph_client,
+            ccn_url,
+            &account,
+            &args.path,
+            args.ipfs_gateway.as_deref(),
+            &channel,
+            dry_run,
+        )
+        .await?
     };
 
     // 5. Idempotent short-circuit: nothing changed → no aggregate write.
