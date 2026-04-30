@@ -5,6 +5,7 @@ pub mod client;
 pub mod corechannel;
 #[cfg(feature = "credits")]
 pub mod credit;
+pub mod credit_transfer;
 pub mod crn;
 pub mod crns_list;
 pub mod ipfs;

@@ -153,14 +153,20 @@ CREATE TABLE IF NOT EXISTS credit_balances (
     balance         INTEGER NOT NULL DEFAULT 0
 );
 
--- Credit history (for pre-seeded accounts)
+-- Credit history (one row per credit movement: distribution, transfer leg, etc.)
 CREATE TABLE IF NOT EXISTS credit_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     address         TEXT NOT NULL,
-    amount          INTEGER NOT NULL,
-    tx_hash         TEXT,
+    amount          INTEGER NOT NULL,                      -- signed: + for credit, - for debit
+    tx_hash         TEXT,                                  -- on-chain tx hash (distribution); NULL for transfers
+    message_hash    TEXT,                                  -- post item_hash this row was emitted from (NULL for distribution)
+    counterparty    TEXT,                                  -- the other address (sender for +, recipient for -); NULL for distribution
+    expiration_at   TEXT,                                  -- requested expiration on recipient row (ISO-8601 UTC); NULL otherwise
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_credit_history_address ON credit_history (address);
+CREATE INDEX IF NOT EXISTS idx_credit_history_message_hash ON credit_history (message_hash);
 
 -- Forgotten messages
 CREATE TABLE IF NOT EXISTS forgotten_messages (

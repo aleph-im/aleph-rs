@@ -862,3 +862,174 @@ async fn test_sdk_get_aggregates_empty_keys_error() {
 
     assert!(result.is_err());
 }
+
+/// End-to-end credit transfer through the SDK and HTTP API.
+/// The pre-seeded sender (`start_test_server` key `[1u8; 32]`) starts at
+/// 1_000_000_000 credits. Submit a transfer of 12_345 credits to a recipient
+/// and assert both balances move via `GET /addresses/{addr}/balance`.
+#[tokio::test]
+async fn test_credit_transfer_succeeds() {
+    use aleph_sdk::client::{AlephAccountClient, AlephClient, AlephMessageClient};
+    use aleph_sdk::credit_transfer::CREDIT_TRANSFER_POST_TYPE;
+    use aleph_sdk::messages::PostBuilder;
+    use aleph_types::chain::Address;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let sender_account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let sender_addr = sender_account.address().clone();
+    let recipient = Address::from("0x000000000000000000000000000000000000FACE".to_string());
+
+    // Pre-state.
+    let pre_sender = client.get_balance(&sender_addr).await.unwrap().credits;
+    let pre_recipient = client.get_balance(&recipient).await.unwrap().credits;
+    assert_eq!(pre_sender, 1_000_000_000);
+    assert_eq!(pre_recipient, 0);
+
+    // Build and submit a credit-transfer POST.
+    let pending = PostBuilder::new(
+        &sender_account,
+        CREDIT_TRANSFER_POST_TYPE,
+        serde_json::json!({
+            "transfer": {
+                "credits": [{ "address": recipient.as_str(), "amount": 12_345 }]
+            }
+        }),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let resp = client.submit_message(&pending, true).await.unwrap();
+    assert_eq!(resp.message_status, "processed");
+
+    // Post-state: sender debited, recipient credited.
+    let post_sender = client.get_balance(&sender_addr).await.unwrap().credits;
+    let post_recipient = client.get_balance(&recipient).await.unwrap().credits;
+    assert_eq!(post_sender, 1_000_000_000 - 12_345);
+    assert_eq!(post_recipient, 12_345);
+}
+
+/// Submitting a credit transfer larger than the sender's balance must be
+/// rejected with a 422 carrying `code: 6` (CreditInsufficient), and both
+/// sides' balances must be unchanged (transactional rollback).
+#[tokio::test]
+async fn test_credit_transfer_insufficient_balance_rejected() {
+    use aleph_sdk::client::{AlephAccountClient, AlephClient, AlephMessageClient, MessageError};
+    use aleph_sdk::credit_transfer::CREDIT_TRANSFER_POST_TYPE;
+    use aleph_sdk::messages::PostBuilder;
+    use aleph_types::chain::Address;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let sender_account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let sender_addr = sender_account.address().clone();
+    let recipient = Address::from("0x000000000000000000000000000000000000BEEF".to_string());
+
+    let pre_sender = client.get_balance(&sender_addr).await.unwrap().credits;
+    assert_eq!(pre_sender, 1_000_000_000);
+
+    // Attempt to transfer more than the sender holds.
+    let pending = PostBuilder::new(
+        &sender_account,
+        CREDIT_TRANSFER_POST_TYPE,
+        serde_json::json!({
+            "transfer": {
+                "credits": [
+                    { "address": recipient.as_str(), "amount": 2_000_000_000u64 }
+                ]
+            }
+        }),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let err = client.submit_message(&pending, true).await.unwrap_err();
+    match err {
+        MessageError::ApiError { status, ref body } => {
+            assert_eq!(status, 422, "expected 422, got {status}: {body}");
+            let parsed: serde_json::Value = serde_json::from_str(body)
+                .unwrap_or_else(|e| panic!("response body is not valid JSON ({e}): {body}"));
+            assert_eq!(parsed["message_status"], "rejected");
+            assert_eq!(parsed["error"]["code"], 6);
+            assert_eq!(
+                parsed["error"]["message"],
+                "insufficient credit balance: have 1000000000, need 2000000000"
+            );
+        }
+        other => panic!("expected MessageError::ApiError, got: {other:?}"),
+    }
+
+    // Balances unchanged: sender still 1B, recipient still absent.
+    let post_sender = client.get_balance(&sender_addr).await.unwrap().credits;
+    let post_recipient = client.get_balance(&recipient).await.unwrap().credits;
+    assert_eq!(post_sender, 1_000_000_000);
+    assert_eq!(post_recipient, 0);
+}
+
+/// Regression test for the "stuck processed" bug: when a credit transfer fails
+/// in dispatch, the messages row must be marked `rejected` (not left as
+/// `processed`) so that step-1 duplicate-check on retry falls through and
+/// re-runs the message instead of silently skipping it.
+#[tokio::test]
+async fn test_credit_transfer_failure_marks_message_rejected_and_allows_retry() {
+    use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageError};
+    use aleph_sdk::credit_transfer::CREDIT_TRANSFER_POST_TYPE;
+    use aleph_sdk::messages::PostBuilder;
+    use aleph_types::chain::Address;
+    use aleph_types::message::MessageStatus;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [1u8; 32];
+    let sender_account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let recipient = Address::from("0x000000000000000000000000000000000000DEAD".to_string());
+
+    let pending = PostBuilder::new(
+        &sender_account,
+        CREDIT_TRANSFER_POST_TYPE,
+        serde_json::json!({
+            "transfer": {
+                "credits": [
+                    { "address": recipient.as_str(), "amount": 2_000_000_000u64 }
+                ]
+            }
+        }),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+
+    // First submission: rejected with 422.
+    let err = client.submit_message(&pending, true).await.unwrap_err();
+    assert!(
+        matches!(err, MessageError::ApiError { status: 422, .. }),
+        "first attempt should fail with 422, got: {err:?}"
+    );
+
+    // The messages row must be in `rejected` state, not stuck as `processed`.
+    let fetched = client.get_message(&pending.item_hash).await.unwrap();
+    assert_eq!(
+        fetched.status(),
+        MessageStatus::Rejected,
+        "first failure must mark the row rejected so retries can re-run"
+    );
+
+    // Resubmitting the same message must re-run the pipeline (proving step 1
+    // didn't silent-skip on `rejected`). Sender balance is still insufficient,
+    // so we expect another 422 — not a 200 silently saying "already processed".
+    let err = client.submit_message(&pending, true).await.unwrap_err();
+    assert!(
+        matches!(err, MessageError::ApiError { status: 422, .. }),
+        "retry should re-run and reject again, got: {err:?}"
+    );
+}

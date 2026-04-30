@@ -37,6 +37,39 @@ pub fn insert_credit_history(
     Ok(())
 }
 
+/// Full row for `credit_history`. Used when the caller has more context than
+/// the legacy `(address, amount, tx_hash)` triple — e.g. a credit transfer
+/// recipient row carrying the source post's `item_hash` and the counterparty.
+#[derive(Debug, Clone)]
+pub struct CreditHistoryRow {
+    pub address: String,
+    pub amount: i64,
+    pub tx_hash: Option<String>,
+    pub message_hash: Option<String>,
+    pub counterparty: Option<String>,
+    pub expiration_at: Option<String>,
+}
+
+pub fn insert_credit_history_full(
+    conn: &Connection,
+    row: &CreditHistoryRow,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO credit_history \
+            (address, amount, tx_hash, message_hash, counterparty, expiration_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            row.address,
+            row.amount,
+            row.tx_hash,
+            row.message_hash,
+            row.counterparty,
+            row.expiration_at,
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +129,67 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn insert_credit_history_full_persists_all_columns() {
+        let db = Db::open_in_memory().unwrap();
+        let row = CreditHistoryRow {
+            address: "0xrecipient".to_string(),
+            amount: 1500,
+            tx_hash: None,
+            message_hash: Some("itemhashabc".to_string()),
+            counterparty: Some("0xsender".to_string()),
+            expiration_at: Some("2026-12-31T23:59:59Z".to_string()),
+        };
+        db.with_conn(|c| insert_credit_history_full(c, &row))
+            .unwrap();
+
+        let (amount, tx_hash, message_hash, counterparty, expiration_at): (
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = db
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT amount, tx_hash, message_hash, counterparty, expiration_at \
+                     FROM credit_history WHERE address = ?1",
+                    ["0xrecipient"],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(amount, 1500);
+        assert_eq!(tx_hash, None);
+        assert_eq!(message_hash.as_deref(), Some("itemhashabc"));
+        assert_eq!(counterparty.as_deref(), Some("0xsender"));
+        assert_eq!(expiration_at.as_deref(), Some("2026-12-31T23:59:59Z"));
+    }
+
+    #[test]
+    fn insert_credit_history_full_supports_negative_amounts() {
+        let db = Db::open_in_memory().unwrap();
+        let row = CreditHistoryRow {
+            address: "0xsender".to_string(),
+            amount: -1500,
+            tx_hash: None,
+            message_hash: Some("itemhashabc".to_string()),
+            counterparty: Some("0xrecipient".to_string()),
+            expiration_at: None,
+        };
+        db.with_conn(|c| insert_credit_history_full(c, &row))
+            .unwrap();
+        let amount: i64 = db
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT amount FROM credit_history WHERE address = ?1",
+                    ["0xsender"],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(amount, -1500);
     }
 }

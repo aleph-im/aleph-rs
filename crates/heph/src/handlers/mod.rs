@@ -407,11 +407,26 @@ pub fn process_message_with_store(
     db.with_conn(|conn| insert_message(conn, &insert))
         .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
 
-    // Step 7 — type-specific processing.
-    dispatch_type_specific(db, msg, &content)?;
-
-    // Step 8 — insert cost records for paid message types.
-    insert_cost_records(db, msg, &content, &item_hash_str)?;
+    // Steps 7 & 8 — type-specific processing + cost records. If either fails,
+    // the message row inserted at step 6 would otherwise be stuck as
+    // `processed` — step 1 would then silent-skip every retry. Mark the row
+    // `rejected` so the existing rejected-retry path (delete + re-insert at
+    // step 6, re-dispatch at step 7) can re-run the message after the caller
+    // fixes the underlying issue (e.g. tops up credits for a failed credit
+    // transfer).
+    let dispatch_result = dispatch_type_specific(db, msg, &content)
+        .and_then(|()| insert_cost_records(db, msg, &content, &item_hash_str));
+    if let Err(e) = dispatch_result {
+        // Best-effort cleanup: if the UPDATE itself fails, the row stays
+        // `processed` and the original error is still surfaced to the caller.
+        let _ = db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE messages SET status = 'rejected' WHERE item_hash = ?1",
+                [&item_hash_str],
+            )
+        });
+        return Err(e);
+    }
 
     Ok(())
 }
@@ -516,6 +531,7 @@ pub fn check_balance_public(
 }
 
 pub mod aggregate;
+pub mod credit_transfer;
 pub mod forget;
 pub mod instance;
 pub mod post;
