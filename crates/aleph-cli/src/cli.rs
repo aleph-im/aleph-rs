@@ -433,7 +433,7 @@ pub struct MessageFilterCli {
 
     /// Filter by content hashes (content.item_hash). CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
-    pub content_hashes: Option<Vec<String>>,
+    pub content_hashes: Option<Vec<ItemHash>>,
 
     /// Only posts that reference these hashes. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
@@ -449,7 +449,7 @@ pub struct MessageFilterCli {
 
     /// Specific item hashes. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
-    pub hashes: Option<Vec<String>>,
+    pub hashes: Option<Vec<ItemHash>>,
 
     /// Channels. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
@@ -494,16 +494,12 @@ impl From<MessageFilterCli> for MessageFilter {
                 .map(|v| v.into_iter().map(Into::into).collect()),
             content_types: c.content_types,
             content_keys: c.content_keys,
-            content_hashes: c
-                .content_hashes
-                .map(|v| v.into_iter().map(|s| s.parse().unwrap()).collect()),
+            content_hashes: c.content_hashes,
             refs: c.refs,
             addresses: c.addresses.map(|v| v.into_iter().map(Into::into).collect()),
             owners: None,
             tags: c.tags,
-            hashes: c
-                .hashes
-                .map(|v| v.into_iter().map(|s| s.parse().unwrap()).collect()),
+            hashes: c.hashes,
             channels: c.channels,
             chains: c.chains,
             start_date: c.start_date,
@@ -526,7 +522,7 @@ pub struct PostFilterCli {
 
     /// Filter by item hash(es). CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
-    pub hashes: Option<Vec<String>>,
+    pub hashes: Option<Vec<ItemHash>>,
 
     /// Filter by reference hash(es). CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
@@ -570,9 +566,7 @@ impl From<PostFilterCli> for PostFilter {
     fn from(c: PostFilterCli) -> Self {
         PostFilter {
             addresses: c.addresses.map(|v| v.into_iter().map(Into::into).collect()),
-            hashes: c
-                .hashes
-                .map(|v| v.into_iter().map(|s| s.parse().unwrap()).collect()),
+            hashes: c.hashes,
             refs: c.refs,
             post_types: c.post_types,
             tags: c.tags,
@@ -1682,5 +1676,32 @@ mod credit_transfer_args_tests {
     #[test]
     fn parse_rfc3339_utc_rejects_garbage() {
         assert!(parse_rfc3339_utc("not a date").is_err());
+    }
+
+    fn assert_value_validation_err(args: &[&str]) {
+        match Cli::try_parse_from(args) {
+            Ok(_) => panic!("expected parse error for {args:?}"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation),
+        }
+    }
+
+    #[test]
+    fn message_list_rejects_malformed_hashes_cleanly() {
+        // Previously these arguments would panic via .unwrap() during the
+        // From<MessageFilterCli> conversion. They must now fail at parse
+        // time with a clap error.
+        assert_value_validation_err(&["aleph", "message", "list", "--hashes", "not-a-hash"]);
+        assert_value_validation_err(&[
+            "aleph",
+            "message",
+            "list",
+            "--content-hashes",
+            "definitely-not-hex",
+        ]);
+    }
+
+    #[test]
+    fn post_list_rejects_malformed_hashes_cleanly() {
+        assert_value_validation_err(&["aleph", "post", "list", "--hashes", "not-a-hash"]);
     }
 }
