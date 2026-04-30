@@ -175,6 +175,22 @@ impl AccountStore {
         Ok(())
     }
 
+    /// Verify a name is valid and not already taken by an account or alias.
+    ///
+    /// Useful as a fast pre-flight before slow operations (e.g. talking to a
+    /// Ledger device) so the user isn't asked to plug in their device just to
+    /// be told the name was invalid afterwards.
+    pub fn check_name_available(&self, name: &str) -> Result<(), StoreError> {
+        Self::validate_name(name)?;
+        let manifest = self.load_manifest()?;
+        if manifest.accounts.iter().any(|a| a.name == name)
+            || manifest.aliases.iter().any(|a| a.name == name)
+        {
+            return Err(StoreError::AlreadyExists(name.to_string()));
+        }
+        Ok(())
+    }
+
     /// Add a local account (private key stored in keyring).
     ///
     /// The manifest is written first, then the key is stored in the keyring.
