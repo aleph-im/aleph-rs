@@ -56,6 +56,7 @@ keyring = { workspace = true, features = ["windows-native"] }
 tempfile = { workspace = true }
 heph = { path = "../heph" }
 actix-web = "4"
+insta = { version = "1", features = ["json"] }
 
 [package.metadata.deb]
 maintainer = "Aleph.im <contact@aleph.im>"

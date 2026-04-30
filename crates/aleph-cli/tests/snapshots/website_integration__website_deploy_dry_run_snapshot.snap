@@ -1,0 +1,11 @@
+---
+source: crates/aleph-cli/tests/website_integration.rs
+expression: parsed
+---
+{
+  "domains_attached": [],
+  "ipfs_cid": "bafybeigfolderv2cidexampleexampleexampleexampleexa",
+  "name": "test-site",
+  "version": 1,
+  "volume_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
