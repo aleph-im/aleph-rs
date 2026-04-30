@@ -239,7 +239,6 @@ use chrono::{DateTime, FixedOffset, Utc};
 use std::str::FromStr;
 
 fn parse_timestamp(s: &str) -> Result<Timestamp, String> {
-    println!("Parsing datetime: {}", s);
     // Try unix seconds (int/float)
     if let Ok(timestamp) = s.parse::<f64>() {
         return Ok(Timestamp::from(timestamp));
