@@ -167,19 +167,12 @@ pub async fn handle_authorization_command(
 
             let authorization = builder.build()?;
 
-            // Fetch existing authorizations, append, and submit as aggregate
-            let mut existing = aleph_client.get_authorizations(account.address()).await?;
-            existing.push(authorization);
-            let content = aleph_types::message::SecurityAggregateContent {
-                authorizations: existing,
-            };
-            let content_map = match serde_json::to_value(&content)? {
-                serde_json::Value::Object(map) => map,
-                _ => unreachable!(),
-            };
-            let pending_msg =
-                aleph_sdk::messages::AggregateBuilder::new(&account, "security", content_map)
-                    .build()?;
+            let pending_msg = aleph_sdk::authorization::build_add_authorization(
+                aleph_client,
+                &account,
+                authorization,
+            )
+            .await?;
 
             submit_or_preview(aleph_client, ccn_url, &pending_msg, dry_run, json).await?;
 
