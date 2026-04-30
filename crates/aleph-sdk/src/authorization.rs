@@ -118,15 +118,15 @@ where
 
     let merge_target = authorizations
         .iter()
-        .position(|existing| existing.try_merge(&authorization).is_some());
+        .enumerate()
+        .find_map(|(idx, existing)| {
+            existing
+                .try_merge(&authorization)
+                .map(|merged| (idx, merged))
+        });
 
     match merge_target {
-        Some(idx) => {
-            // Safe to unwrap: position() returned Some only because try_merge did.
-            authorizations[idx] = authorizations[idx]
-                .try_merge(&authorization)
-                .expect("try_merge succeeded above");
-        }
+        Some((idx, merged)) => authorizations[idx] = merged,
         None => authorizations.push(authorization),
     }
 
