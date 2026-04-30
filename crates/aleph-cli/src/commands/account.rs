@@ -490,18 +490,20 @@ fn handle_delete(store: &AccountStore, args: AccountDeleteArgs) -> Result<()> {
     // Verify account exists before prompting
     store.get_account(&args.name)?;
 
-    eprintln!(
-        "Are you sure you want to delete account '{}'? This cannot be undone.",
-        args.name
-    );
-    eprintln!("Type the account name to confirm: ");
-    let mut confirmation = String::new();
-    std::io::stdin()
-        .read_line(&mut confirmation)
-        .context("failed to read confirmation")?;
-    if confirmation.trim() != args.name {
-        eprintln!("Aborted.");
-        return Ok(());
+    if !args.yes {
+        eprintln!(
+            "Are you sure you want to delete account '{}'? This cannot be undone.",
+            args.name
+        );
+        eprintln!("Type the account name to confirm: ");
+        let mut confirmation = String::new();
+        std::io::stdin()
+            .read_line(&mut confirmation)
+            .context("failed to read confirmation")?;
+        if confirmation.trim() != args.name {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
     }
 
     store.delete_account(&args.name)?;

@@ -1,5 +1,5 @@
 use crate::cli::{ForgetArgs, GetMessageArgs, MessageCommand};
-use crate::common::{resolve_account, resolve_address, submit_or_preview};
+use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephClient, AlephMessageClient};
 use aleph_types::channel::Channel;
@@ -45,6 +45,19 @@ async fn handle_forget(
     args: ForgetArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
+    let total = args.hashes.len() + args.aggregates.as_ref().map_or(0, Vec::len);
+    if total == 0 {
+        return Err("at least one hash or --aggregates entry is required".into());
+    }
+    if !dry_run {
+        let prompt = format!(
+            "Forget {total} message(s)? This is irreversible — content will be tombstoned on the network."
+        );
+        if !confirm_action(&prompt, args.yes)? {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
+    }
     let account = resolve_account(&args.signing.identity)?;
     let hashes: Vec<String> = args.hashes.iter().map(|h| h.to_string()).collect();
     let mut envelope = serde_json::json!({

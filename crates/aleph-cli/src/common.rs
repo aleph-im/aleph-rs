@@ -55,6 +55,26 @@ pub fn read_content(
     Ok(value)
 }
 
+/// Interactive yes/no confirmation for destructive commands.
+///
+/// Prints `prompt` to stderr and reads a line from stdin. Returns `Ok(true)`
+/// only on `y` or `yes` (case-insensitive). If `assume_yes` is true (i.e. the
+/// caller passed `--yes`), skips the prompt and returns `Ok(true)`.
+///
+/// Errors only on stdin read failure — not on a "no" answer.
+pub fn confirm_action(prompt: &str, assume_yes: bool) -> Result<bool, std::io::Error> {
+    if assume_yes {
+        return Ok(true);
+    }
+    eprint!("{prompt} [y/N]: ");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    let trimmed = answer.trim().to_ascii_lowercase();
+    Ok(trimmed == "y" || trimmed == "yes")
+}
+
 /// Submit a signed message, or print it if --dry-run.
 /// Handles --json vs human-readable output.
 pub async fn submit_or_preview(
@@ -452,6 +472,12 @@ mod tests {
     use super::*;
     use crate::config::store::ConfigStore;
     use tempfile::TempDir;
+
+    #[test]
+    fn confirm_action_short_circuits_when_assume_yes() {
+        // No stdin read happens — verifies the --yes path is purely synchronous.
+        assert!(confirm_action("Delete everything?", true).unwrap());
+    }
 
     #[test]
     fn read_content_from_flag() {
