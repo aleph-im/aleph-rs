@@ -747,9 +747,11 @@ pub struct CreateCcnArgs {
     #[arg(long)]
     pub multiaddress: String,
 
-    /// Network tag (e.g. mainnet, testnet).
-    #[arg(long, default_value = "mainnet")]
-    pub network: String,
+    /// Corechannel network tag (e.g. mainnet, testnet) embedded in the
+    /// node's aggregate. Distinct from the global --network flag, which
+    /// selects which CCN endpoint the CLI talks to.
+    #[arg(long = "node-tag", default_value = "mainnet")]
+    pub node_tag: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -765,9 +767,11 @@ pub struct CreateCrnArgs {
     #[arg(long)]
     pub address: String,
 
-    /// Network tag (e.g. mainnet, testnet).
-    #[arg(long, default_value = "mainnet")]
-    pub network: String,
+    /// Corechannel network tag (e.g. mainnet, testnet) embedded in the
+    /// node's aggregate. Distinct from the global --network flag, which
+    /// selects which CCN endpoint the CLI talks to.
+    #[arg(long = "node-tag", default_value = "mainnet")]
+    pub node_tag: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -779,9 +783,11 @@ pub struct LinkCrnArgs {
     #[arg(long)]
     pub crn: NodeHash,
 
-    /// Network tag (e.g. mainnet, testnet).
-    #[arg(long, default_value = "mainnet")]
-    pub network: String,
+    /// Corechannel network tag (e.g. mainnet, testnet) embedded in the
+    /// node's aggregate. Distinct from the global --network flag, which
+    /// selects which CCN endpoint the CLI talks to.
+    #[arg(long = "node-tag", default_value = "mainnet")]
+    pub node_tag: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -793,9 +799,11 @@ pub struct UnlinkCrnArgs {
     #[arg(long)]
     pub crn: NodeHash,
 
-    /// Network tag (e.g. mainnet, testnet).
-    #[arg(long, default_value = "mainnet")]
-    pub network: String,
+    /// Corechannel network tag (e.g. mainnet, testnet) embedded in the
+    /// node's aggregate. Distinct from the global --network flag, which
+    /// selects which CCN endpoint the CLI talks to.
+    #[arg(long = "node-tag", default_value = "mainnet")]
+    pub node_tag: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -807,9 +815,11 @@ pub struct StakeArgs {
     #[arg(long)]
     pub node: NodeHash,
 
-    /// Network tag (e.g. mainnet, testnet).
-    #[arg(long, default_value = "mainnet")]
-    pub network: String,
+    /// Corechannel network tag (e.g. mainnet, testnet) embedded in the
+    /// node's aggregate. Distinct from the global --network flag, which
+    /// selects which CCN endpoint the CLI talks to.
+    #[arg(long = "node-tag", default_value = "mainnet")]
+    pub node_tag: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -821,9 +831,11 @@ pub struct UnstakeArgs {
     #[arg(long)]
     pub node: NodeHash,
 
-    /// Network tag (e.g. mainnet, testnet).
-    #[arg(long, default_value = "mainnet")]
-    pub network: String,
+    /// Corechannel network tag (e.g. mainnet, testnet) embedded in the
+    /// node's aggregate. Distinct from the global --network flag, which
+    /// selects which CCN endpoint the CLI talks to.
+    #[arg(long = "node-tag", default_value = "mainnet")]
+    pub node_tag: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -835,9 +847,11 @@ pub struct DropNodeArgs {
     #[arg(long)]
     pub node: NodeHash,
 
-    /// Network tag (e.g. mainnet, testnet).
-    #[arg(long, default_value = "mainnet")]
-    pub network: String,
+    /// Corechannel network tag (e.g. mainnet, testnet) embedded in the
+    /// node's aggregate. Distinct from the global --network flag, which
+    /// selects which CCN endpoint the CLI talks to.
+    #[arg(long = "node-tag", default_value = "mainnet")]
+    pub node_tag: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -901,9 +915,11 @@ pub struct AmendNodeArgs {
     #[arg(long)]
     pub terms_and_conditions: Option<String>,
 
-    /// Network tag (e.g. mainnet, testnet).
-    #[arg(long, default_value = "mainnet")]
-    pub network: String,
+    /// Corechannel network tag (e.g. mainnet, testnet) embedded in the
+    /// node's aggregate. Distinct from the global --network flag, which
+    /// selects which CCN endpoint the CLI talks to.
+    #[arg(long = "node-tag", default_value = "mainnet")]
+    pub node_tag: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
