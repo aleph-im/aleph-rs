@@ -100,6 +100,10 @@ fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> R
 fn handle_import_ledger(store: &AccountStore, args: AccountImportArgs, json: bool) -> Result<()> {
     use crate::account::ledger::{self, DerivationPath};
 
+    // Fail fast on invalid / taken names before asking the user to plug in
+    // their Ledger and select an address.
+    store.check_name_available(&args.name)?;
+
     let chain: aleph_types::chain::Chain = args.chain.into();
 
     if !chain.is_evm() {
