@@ -121,12 +121,11 @@ async fn handle_instance_list(
         Some(value) => resolve_address(value)?,
         None => {
             // Fall back to the current default signing account's address.
-            // No flags are passed; resolve_account ignores chain on the
-            // named/default-account paths.
+            // No --private-key is passed so chain is unused.
             let identity = crate::cli::IdentityArgs {
                 account: None,
                 private_key: None,
-                chain: crate::cli::ChainCli::Eth,
+                chain: None,
             };
             let account = resolve_account(&identity)?;
             account.address().clone()
