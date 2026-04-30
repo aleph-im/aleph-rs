@@ -275,7 +275,7 @@ use aleph_types::chain::Address;
 
 use crate::account::store::AccountStore;
 use crate::account::{CliAccount, load_account, load_account_by_name};
-use crate::cli::SigningArgs;
+use crate::cli::IdentityArgs;
 use crate::config::store::ConfigStore;
 
 /// Resolve the CCN URL using a provided `ConfigStore` (testable form).
@@ -384,12 +384,12 @@ pub fn resolve_network(
 /// 1. --private-key flag or ALEPH_PRIVATE_KEY env var
 /// 2. --account flag (named account from store)
 /// 3. Default account from store
-pub fn resolve_account(signing: &SigningArgs) -> Result<CliAccount, Box<dyn std::error::Error>> {
+pub fn resolve_account(identity: &IdentityArgs) -> Result<CliAccount, Box<dyn std::error::Error>> {
     // 1. Explicit private key takes precedence
-    if signing.private_key.is_some() || std::env::var("ALEPH_PRIVATE_KEY").is_ok() {
+    if identity.private_key.is_some() || std::env::var("ALEPH_PRIVATE_KEY").is_ok() {
         return Ok(load_account(
-            signing.private_key.as_deref(),
-            signing.chain.into(),
+            identity.private_key.as_deref(),
+            identity.chain.into(),
         )?);
     }
 
@@ -397,7 +397,7 @@ pub fn resolve_account(signing: &SigningArgs) -> Result<CliAccount, Box<dyn std:
     let store =
         AccountStore::open().map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
 
-    let name = match &signing.account {
+    let name = match &identity.account {
         Some(name) => name.clone(),
         None => store
             .default_account_name()

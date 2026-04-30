@@ -391,8 +391,10 @@ impl From<ChainCli> for aleph_types::chain::Chain {
     }
 }
 
+/// Identity args: the bits needed to *find* a signing key. Used on its own
+/// for read-only commands that just need to know whose address to query.
 #[derive(Debug, Clone, Args)]
-pub struct SigningArgs {
+pub struct IdentityArgs {
     /// Named account from `aleph account list`.
     /// Defaults to the active account set by `aleph account use`.
     #[arg(long)]
@@ -406,6 +408,14 @@ pub struct SigningArgs {
     /// Signing chain. Only required with --private-key.
     #[arg(long, value_enum, default_value = "eth")]
     pub chain: ChainCli,
+}
+
+/// Signing args: identity plus a `--dry-run` switch. Used on commands that
+/// actually submit a message to the network.
+#[derive(Debug, Clone, Args)]
+pub struct SigningArgs {
+    #[command(flatten)]
+    pub identity: IdentityArgs,
 
     /// Build and sign the message but don't submit it.
     #[arg(long)]
@@ -725,7 +735,7 @@ pub struct NodeListArgs {
     pub corechannel_address: Option<String>,
 
     #[command(flatten)]
-    pub signing: SigningArgs,
+    pub identity: IdentityArgs,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -1350,7 +1360,7 @@ pub struct AuthorizationListArgs {
     pub delegate: Option<String>,
 
     #[command(flatten)]
-    pub signing: SigningArgs,
+    pub identity: IdentityArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1364,7 +1374,7 @@ pub struct AuthorizationReceivedArgs {
     pub granter: Option<String>,
 
     #[command(flatten)]
-    pub signing: SigningArgs,
+    pub identity: IdentityArgs,
 }
 
 #[derive(Debug, Clone, Args)]

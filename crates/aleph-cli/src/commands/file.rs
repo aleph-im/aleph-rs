@@ -63,7 +63,7 @@ async fn handle_single_file_upload(
     args: FileUploadArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
 
     let storage_engine = match args.storage_engine.unwrap_or(StorageEngineCli::Storage) {
         StorageEngineCli::Storage => StorageEngine::Storage,
@@ -141,7 +141,7 @@ async fn handle_folder_upload(
     }
 
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
 
     let opts = UploadFolderOptions {
         cid_version: CidVersion::V1,
@@ -225,7 +225,7 @@ async fn handle_file_pin(
     args: FilePinArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
 
     // Storage engine is implied by the item hash variant; StoreBuilder::build
     // enforces the pairing so a mismatch is structurally impossible.

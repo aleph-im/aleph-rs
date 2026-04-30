@@ -111,7 +111,7 @@ async fn handle_transfer(
     args: TransferCreditArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
     let recipient = resolve_address(&args.to)?;
 
     let content = CreditTransferContent {
@@ -162,7 +162,7 @@ fn print_transfer_summary(
 }
 
 fn resolve_evm_account(signing: &SigningArgs) -> Result<EvmAccount, Box<dyn std::error::Error>> {
-    match resolve_account(signing)? {
+    match resolve_account(&signing.identity)? {
         CliAccount::Evm(a) => Ok(a),
         CliAccount::LedgerEvm(_) => Err(
             "Ledger accounts are not supported for credit purchases. Use a local account.".into(),
