@@ -17,7 +17,7 @@ pub async fn handle_authorization_command(
             let address = match &args.address {
                 Some(addr) => resolve_address(addr)?,
                 None => {
-                    let account = resolve_account(&args.signing)?;
+                    let account = resolve_account(&args.identity)?;
                     account.address().clone()
                 }
             };
@@ -67,7 +67,7 @@ pub async fn handle_authorization_command(
             let address = match &args.address {
                 Some(addr) => resolve_address(addr)?,
                 None => {
-                    let account = resolve_account(&args.signing)?;
+                    let account = resolve_account(&args.identity)?;
                     account.address().clone()
                 }
             };
@@ -139,7 +139,7 @@ pub async fn handle_authorization_command(
         }
         AuthorizationCommand::Add(args) => {
             let dry_run = args.signing.dry_run;
-            let account = resolve_account(&args.signing)?;
+            let account = resolve_account(&args.signing.identity)?;
 
             let delegate_addr = resolve_address(&args.delegate_address)?;
             let delegate_display = format_address(&args.delegate_address, &delegate_addr);
@@ -185,7 +185,7 @@ pub async fn handle_authorization_command(
             // by clap's ArgGroup on AuthorizationRevokeArgs.
 
             let dry_run = args.signing.dry_run;
-            let account = resolve_account(&args.signing)?;
+            let account = resolve_account(&args.signing.identity)?;
 
             let delegate_input = args.delegate_address.as_deref();
             let authorizations = if args.all {

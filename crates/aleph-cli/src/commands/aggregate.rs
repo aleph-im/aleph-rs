@@ -27,7 +27,7 @@ async fn handle_aggregate_create(
     args: AggregateCreateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
     let content = read_content(args.content)?;
     let map = match content {
         serde_json::Value::Object(map) => map,

@@ -51,7 +51,7 @@ async fn handle_post_create(
     args: PostCreateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
     let content = read_content(args.content)?;
     let envelope = serde_json::json!({
         "type": args.post_type,
@@ -75,7 +75,7 @@ async fn handle_post_amend(
     args: PostAmendArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
     let content = read_content(args.content)?;
     let envelope = serde_json::json!({
         "type": "amend",

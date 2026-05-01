@@ -9,7 +9,7 @@ fn build_client(
     crn_url: &str,
     signing: &SigningArgs,
 ) -> Result<CrnClient, Box<dyn std::error::Error>> {
-    let account = resolve_account(signing)?;
+    let account = resolve_account(&signing.identity)?;
     let url = Url::parse(crn_url)?;
     Ok(CrnClient::new(&account, url)?)
 }

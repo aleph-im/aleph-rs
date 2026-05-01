@@ -121,15 +121,14 @@ async fn handle_instance_list(
         Some(value) => resolve_address(value)?,
         None => {
             // Fall back to the current default signing account's address.
-            // SigningArgs has no Default impl, so construct one with the same
-            // defaults clap would assign (no --account, no --private-key, eth chain).
-            let signing = crate::cli::SigningArgs {
+            // No flags are passed; resolve_account ignores chain on the
+            // named/default-account paths.
+            let identity = crate::cli::IdentityArgs {
                 account: None,
                 private_key: None,
                 chain: crate::cli::ChainCli::Eth,
-                dry_run: false,
             };
-            let account = resolve_account(&signing)?;
+            let account = resolve_account(&identity)?;
             account.address().clone()
         }
     };
@@ -413,7 +412,7 @@ async fn handle_instance_create(
     mut args: InstanceCreateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
 
     if args.interactive {
         crate::commands::instance_interactive::resolve_interactive(&mut args, aleph_client).await?;

@@ -45,7 +45,7 @@ async fn handle_forget(
     args: ForgetArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let account = resolve_account(&args.signing)?;
+    let account = resolve_account(&args.signing.identity)?;
     let hashes: Vec<String> = args.hashes.iter().map(|h| h.to_string()).collect();
     let mut envelope = serde_json::json!({
         "hashes": hashes,
