@@ -450,7 +450,7 @@ pub fn resolve_account(identity: &IdentityArgs) -> Result<CliAccount, Box<dyn st
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .ok_or_else(|| anyhow::anyhow!(
                 "no account specified and no default account set.\n\
-                 Use --private-key, --account, or create an account with: aleph account create --name <NAME>"
+                 Use --private-key, --account, or create an account with: aleph account create <NAME>"
             ))?
             .to_string(),
     };

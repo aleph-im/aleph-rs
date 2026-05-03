@@ -2,8 +2,9 @@
 //!
 //! Runs before the normal build/submit path and fills in any `InstanceCreateArgs`
 //! fields not already provided on the command line. Prompts, in order:
-//! image → size → CRN → name → SSH public key path. CRN selection always runs
-//! (the instance gets pinned to the chosen CRN via `node_hash`).
+//! image → size → CRN → SSH public key path. CRN selection always runs
+//! (the instance gets pinned to the chosen CRN via `node_hash`). The instance
+//! name is a required positional argument and is never prompted for.
 
 use crate::cli::{IMAGE_PRESETS, InstanceCreateArgs, parse_image};
 use crate::commands::instance::validate_ssh_pubkey;
@@ -62,9 +63,6 @@ pub async fn resolve_interactive(
         )
     })?);
 
-    if args.name.is_none() {
-        args.name = prompt_name_optional()?;
-    }
     if args.ssh_pubkey_file.is_empty() {
         args.ssh_pubkey_file = vec![prompt_ssh_pubkey_path()?];
     }
@@ -324,18 +322,6 @@ async fn accept_terms_and_conditions(
         return Err("Terms & Conditions rejected: instance creation aborted.".into());
     }
     Ok(())
-}
-
-fn prompt_name_optional() -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let raw: String = Input::new()
-        .with_prompt("Instance name (optional, press enter to skip)")
-        .allow_empty(true)
-        .interact_text()?;
-    Ok(if raw.trim().is_empty() {
-        None
-    } else {
-        Some(raw)
-    })
 }
 
 fn prompt_ssh_pubkey_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {

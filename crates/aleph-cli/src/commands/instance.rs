@@ -477,11 +477,9 @@ async fn handle_instance_create(
         builder = builder.on_behalf_of(resolve_address(&owner)?);
     }
 
-    if let Some(name) = args.name {
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert("name".to_string(), serde_json::json!(name));
-        builder = builder.metadata(metadata);
-    }
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert("name".to_string(), serde_json::json!(args.name));
+    builder = builder.metadata(metadata);
 
     // Confidential VM
     if args.confidential {
