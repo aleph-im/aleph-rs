@@ -983,12 +983,46 @@ pub enum AccountCommand {
     /// Show the balance of any address
     Balance(AccountBalanceArgs),
     /// Generate a new private key and store it in the OS keychain
+    #[command(long_about = "\
+Generate a fresh private key and store it in the OS keychain under the \
+given name. The key never touches disk. Use the resulting account by \
+passing `--account <NAME>` to signing commands, or set it as the default \
+with `aleph account use <NAME>`.
+
+To import an existing key (private-key, keystore file, or Ledger), use \
+`aleph account import` instead.
+
+Examples:
+  aleph account create alice                    # EVM (default chain: eth)
+  aleph account create alice --chain sol        # Solana
+  aleph account use alice                       # set as default for signing")]
     Create(AccountCreateArgs),
     /// Delete an account from the keychain
     Delete(AccountDeleteArgs),
     /// Export the private key of a local account
     Export(AccountExportArgs),
     /// Import an existing private key
+    #[command(long_about = "\
+Import an existing key into the OS keychain under the given name. Three \
+sources are supported, mutually exclusive:
+
+  --private-key <HEX>   Hex-encoded private key on the command line. If \
+omitted (and no other source given), the key is read from stdin so it does \
+not appear in shell history.
+
+  --from-file <PATH>    Read from a file containing a raw 32-byte binary \
+key or a hex-encoded text key.
+
+  --ledger              Use a Ledger hardware wallet. Combine with \
+`--derivation-path` to override the default BIP44 path, and \
+`--ledger-count` to fetch more than the default 5 candidate addresses.
+
+Examples:
+  aleph account import alice --private-key 0xabcd1234...
+  aleph account import alice --from-file ~/keys/alice.key
+  aleph account import alice --ledger
+  aleph account import alice --chain sol --ledger
+  echo \"0xabcd1234...\" | aleph account import alice    # via stdin")]
     Import(AccountImportArgs),
     /// List all stored accounts
     List,
@@ -1123,6 +1157,27 @@ pub enum FileCommand {
     /// Pin an existing file by creating a STORE message for a known item hash
     Pin(FilePinArgs),
     /// Upload a file and create a STORE message
+    #[command(long_about = "\
+Upload a file (or directory) and create a STORE message announcing it on \
+the network. The signed STORE message anchors a content-addressed pin: \
+its item hash is the file's hash, and the network keeps the content as \
+long as the pin is paid for.
+
+Storage engine defaults to `storage` (Aleph native, ≤ 100 MB) for files \
+and `ipfs` for directories. Pass `--storage-engine ipfs` to put a single \
+file on IPFS instead. Payment defaults to credits; pass \
+`--payment-type hold` to fall back to locked-stake.
+
+Use `--ref <NAME>` to give the file a stable user-defined identifier \
+(e.g. `report/latest`) — useful for in-place updates and for downloading \
+later via `aleph file download --ref ...`.
+
+Examples:
+  aleph file upload ./report.pdf
+  aleph file upload ./website/                          # directory → IPFS
+  aleph file upload ./big.bin --storage-engine ipfs
+  aleph file upload ./report.pdf --ref reports/q4
+  aleph file upload ./data.bin --channel my-channel")]
     Upload(FileUploadArgs),
 }
 
@@ -1234,6 +1289,41 @@ pub struct FileDownloadArgs {
 #[allow(clippy::large_enum_variant)]
 pub enum InstanceCommand {
     /// Create a new instance (VM)
+    #[command(long_about = "\
+Create a new VM instance. Sizing is specified one of three ways:
+
+  --size <SLUG>                       e.g. `1vcpu-2gb`, `2vcpu-4gb`, \
+`4vcpu-8gb`, `8vcpu-16gb`.
+  --vcpus N --memory <SIZE> --disk-size <SIZE>
+                                      Custom sizing. Sizes accept \
+human-readable forms like `4GB`, `512MiB`, `1TiB`.
+  --gpu <MODEL> [...]                 GPU instance. Use \
+`aleph instance price --list-gpus` to list models. Combine with `--size` \
+to request resources above the GPU's minimum.
+
+Required: NAME (positional), `--image`, and at least one \
+`--ssh-pubkey-file`. Image accepts a preset name (`ubuntu22`, `ubuntu24`, \
+`debian12`) or an item hash (hex or IPFS CID).
+
+Pin to a specific compute node with `--crn-hash <HASH>`. For an \
+interactive walkthrough that prompts for any missing fields and lets you \
+pick a CRN from a list, pass `-i` / `--interactive`.
+
+Volumes can be added with `--persistent-volume`, `--ephemeral-volume`, or \
+`--immutable-volume` (each can be repeated).
+
+Examples:
+  aleph instance create web --image ubuntu24 --size 1vcpu-2gb \\
+                            --ssh-pubkey-file ~/.ssh/id_ed25519.pub
+
+  aleph instance create gpu-job --image ubuntu24 --gpu h100 \\
+                                --ssh-pubkey-file ~/.ssh/id_ed25519.pub
+
+  aleph instance create db --image ubuntu24 --size 4vcpu-8gb \\
+      --persistent-volume name=data,mount=/data,size=100GB \\
+      --ssh-pubkey-file ~/.ssh/id_ed25519.pub
+
+  aleph instance create -i web   # interactive prompts for everything else")]
     Create(InstanceCreateArgs),
     /// Erase a VM instance's data on the CRN
     Erase(CrnArgs),
@@ -1680,8 +1770,36 @@ pub struct NetworkSetArgs {
 #[derive(Subcommand)]
 pub enum CreditCommand {
     /// Buy Aleph credits by transferring ALEPH or USDC tokens
+    #[command(long_about = "\
+Buy Aleph credits by transferring ALEPH or USDC tokens from your EVM \
+account. The transfer goes to the network's credit purchase address; the \
+protocol mints credits to your address once the transfer is confirmed.
+
+`--amount` is in human-readable token units (decimals OK), not credits. \
+1 USD purchases 1,000,000 credits. Use `aleph account balance` afterwards \
+to confirm the credits arrived.
+
+Examples:
+  aleph credit buy --token aleph --amount 100
+  aleph credit buy --token usdc  --amount 50.5
+  aleph credit buy --token usdc  --amount 25 --yes      # skip confirmation
+  aleph credit buy --token aleph --amount 10 --rpc-url https://my-node.example")]
     Buy(BuyCreditArgs),
     /// Transfer Aleph credits to another account
+    #[command(long_about = "\
+Transfer credits to another address. `--amount` is the number of credits \
+(integer, not tokens) — 1 USD ≈ 1,000,000 credits. The recipient can be a \
+hex address, a local account name, or an alias from `aleph account alias \
+list`.
+
+Optionally pass `--expiration <RFC3339>` to claw back any unspent portion \
+after that time.
+
+Examples:
+  aleph credit transfer --to bob --amount 1000000
+  aleph credit transfer --to 0xab12... --amount 500000
+  aleph credit transfer --to bob --amount 250000 \\
+                        --expiration 2026-12-31T23:59:59Z")]
     Transfer(TransferCreditArgs),
 }
 
