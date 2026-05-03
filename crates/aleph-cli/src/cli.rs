@@ -746,7 +746,7 @@ pub enum NodeTypeCli {
 #[derive(Args)]
 pub struct CreateCcnArgs {
     /// Human-readable node name.
-    #[arg(long)]
+    #[arg(value_name = "NAME")]
     pub name: String,
 
     /// libp2p multiaddress (e.g. /ip4/1.2.3.4/tcp/4025/p2p/Qm...).
@@ -766,7 +766,7 @@ pub struct CreateCcnArgs {
 #[derive(Args)]
 pub struct CreateCrnArgs {
     /// Human-readable node name.
-    #[arg(long)]
+    #[arg(value_name = "NAME")]
     pub name: String,
 
     /// HTTPS URL of the CRN API endpoint.
@@ -961,7 +961,7 @@ pub enum AccountCommand {
 #[derive(Args)]
 pub struct AccountCreateArgs {
     /// Name for the new account.
-    #[arg(long)]
+    #[arg(value_name = "NAME")]
     pub name: String,
 
     /// Chain for the new account.
@@ -972,7 +972,7 @@ pub struct AccountCreateArgs {
 #[derive(Args)]
 pub struct AccountImportArgs {
     /// Name for the imported account.
-    #[arg(long)]
+    #[arg(value_name = "NAME")]
     pub name: String,
 
     /// Chain for the imported account.
@@ -1271,6 +1271,10 @@ pub struct InstancePriceArgs {
 
 #[derive(Args)]
 pub struct InstanceCreateArgs {
+    /// Instance name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
     /// Root filesystem image: a preset name (ubuntu22, ubuntu24, debian12) or an item hash (hex or IPFS CID).
     #[arg(
         long,
@@ -1299,10 +1303,6 @@ pub struct InstanceCreateArgs {
     /// Path to an SSH public key file. Can be repeated for multiple keys.
     #[arg(long, required_unless_present = "interactive")]
     pub ssh_pubkey_file: Vec<PathBuf>,
-
-    /// Instance name.
-    #[arg(long)]
-    pub name: Option<String>,
 
     /// Channel name.
     #[arg(long)]

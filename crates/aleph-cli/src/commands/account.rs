@@ -301,7 +301,7 @@ async fn handle_list(client: &AlephClient, store: &AccountStore, json: bool) -> 
         if json {
             println!("[]");
         } else {
-            eprintln!("No accounts. Create one with: aleph account create --name <NAME>");
+            eprintln!("No accounts. Create one with: aleph account create <NAME>");
         }
         return Ok(());
     }
