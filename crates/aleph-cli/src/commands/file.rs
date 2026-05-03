@@ -114,13 +114,14 @@ async fn handle_single_file_upload(
             aleph_client
                 .upload_file_to_storage(&args.path, Some(&pending), true)
                 .await?;
-            print_submission_result(ccn_url, &pending, "success", "processed", json)?;
         }
         StorageEngine::Ipfs => {
-            aleph_client.upload_file_to_ipfs(&args.path).await?;
-            submit_or_preview(aleph_client, ccn_url, &pending, false, json).await?;
+            aleph_client
+                .upload_file_to_ipfs(&args.path, Some(&pending), true)
+                .await?;
         }
     }
+    print_submission_result(ccn_url, &pending, "success", "processed", json)?;
 
     Ok(())
 }

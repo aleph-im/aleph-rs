@@ -104,6 +104,10 @@ pub enum StorageError {
     InsufficientBalance,
     #[error("IPFS is disabled on this node")]
     IpfsDisabled,
+    #[error("Invalid signature on STORE message")]
+    InvalidSignature,
+    #[error("Invalid upload metadata: {0}")]
+    InvalidMetadata(String),
     #[error("File too large")]
     FileTooLarge,
     #[error("Upload failed: {0}")]
@@ -942,7 +946,9 @@ pub trait AlephMessageClient {
                     }
                 }
                 ItemType::Ipfs => {
-                    let uploaded = self.upload_to_ipfs(message.item_content.as_bytes()).await?;
+                    let uploaded = self
+                        .upload_to_ipfs(message.item_content.as_bytes(), None, false)
+                        .await?;
                     if uploaded != message.item_hash {
                         return Err(MessageError::HashMismatch {
                             expected: message.item_hash.clone(),
@@ -961,9 +967,8 @@ pub trait AlephMessageClient {
     /// `StoreBuilder`, and `post_message`. For more control (setting reference,
     /// metadata, or channel), use those components directly.
     ///
-    /// For the native storage engine, the file is hashed locally and uploaded
-    /// together with the signed STORE message in a single authenticated request.
-    /// For IPFS, the file is uploaded first and the message is posted separately.
+    /// The file is hashed locally and uploaded together with the signed STORE
+    /// message in a single authenticated request, regardless of storage engine.
     fn create_store(
         &self,
         account: &impl Account,
@@ -976,20 +981,21 @@ pub trait AlephMessageClient {
     {
         async move {
             let path = path.as_ref();
-            let file_hash = match storage_engine {
-                StorageEngine::Storage => hash_file(path, Hasher::for_storage()).await?,
-                StorageEngine::Ipfs => {
-                    // IPFS authenticated upload not yet supported — fall back to old flow
-                    let file_hash = self.upload_file_to_ipfs(path).await?;
-                    let message =
-                        StoreBuilder::new(account, file_hash.clone(), storage_engine).build()?;
-                    self.post_message(&message, sync).await?;
-                    return Ok(file_hash);
-                }
+            let hasher = match storage_engine {
+                StorageEngine::Storage => Hasher::for_storage(),
+                StorageEngine::Ipfs => Hasher::for_ipfs(),
             };
+            let file_hash = hash_file(path, hasher).await?;
             let message = StoreBuilder::new(account, file_hash.clone(), storage_engine).build()?;
-            self.upload_file_to_storage(path, Some(&message), sync)
-                .await?;
+            match storage_engine {
+                StorageEngine::Storage => {
+                    self.upload_file_to_storage(path, Some(&message), sync)
+                        .await?;
+                }
+                StorageEngine::Ipfs => {
+                    self.upload_file_to_ipfs(path, Some(&message), sync).await?;
+                }
+            }
             Ok(file_hash)
         }
     }
@@ -1138,10 +1144,21 @@ pub trait AlephStorageClient {
     /// Uploads raw bytes to the node's IPFS backend.
     ///
     /// Sends a `POST /api/v0/ipfs/add_file` multipart request and returns
-    /// the IPFS CID of the uploaded content.
+    /// the IPFS CID of the pinned content.
+    ///
+    /// When `message` is `Some`, the multipart form includes a signed
+    /// STORE message in the `metadata` field. The message must be a STORE
+    /// with `content.item_type=ipfs` and `content.item_hash` set to the
+    /// CID the server will compute (callers compute it locally with
+    /// `Hasher::for_ipfs()`). The server pins, recomputes the CID, rejects
+    /// with 422 on mismatch, and processes the message inline. `sync`
+    /// controls whether the server waits for STORE message processing
+    /// before responding; ignored when `message` is `None`.
     fn upload_to_ipfs(
         &self,
         data: &[u8],
+        message: Option<&PendingMessage>,
+        sync: bool,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
 
     /// Uploads a file from disk to native storage, streaming without
@@ -1161,9 +1178,13 @@ pub trait AlephStorageClient {
     /// Uploads a file from disk to IPFS, streaming without loading the
     /// full file into memory. Returns the locally-computed CID, verified
     /// against the server's response.
+    ///
+    /// `message` and `sync` behave as for [`Self::upload_to_ipfs`].
     fn upload_file_to_ipfs(
         &self,
         path: impl AsRef<std::path::Path> + Send,
+        message: Option<&PendingMessage>,
+        sync: bool,
     ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send;
 }
 
@@ -1798,6 +1819,71 @@ struct UploadResponse {
     hash: String,
 }
 
+/// Classifies an HTTP error response from the storage / IPFS upload
+/// endpoints into the right `StorageError` variant.
+///
+/// Returns `None` for success codes and for unmapped non-success codes
+/// (which the caller maps to `UploadFailed` to preserve retry semantics).
+fn classify_status_and_body(status: reqwest::StatusCode, body: &str) -> Option<StorageError> {
+    use reqwest::StatusCode;
+    match status {
+        StatusCode::PAYMENT_REQUIRED => Some(StorageError::InsufficientBalance),
+        StatusCode::FORBIDDEN if body.contains("IPFS is disabled on this node") => {
+            Some(StorageError::IpfsDisabled)
+        }
+        StatusCode::FORBIDDEN => Some(StorageError::InvalidSignature),
+        StatusCode::PAYLOAD_TOO_LARGE => Some(StorageError::FileTooLarge),
+        StatusCode::UNPROCESSABLE_ENTITY => Some(StorageError::InvalidMetadata(body.to_string())),
+        _ => None,
+    }
+}
+
+/// Inspects an upload response: returns the success response unchanged,
+/// or maps non-success status codes to a `StorageError`.
+///
+/// 403 and 422 require body inspection; other statuses do not. For
+/// unmapped non-success codes the helper falls back to `UploadFailed`
+/// to preserve the existing retryable-error semantics.
+async fn handle_storage_response(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, StorageError> {
+    use reqwest::StatusCode;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    if matches!(
+        status,
+        StatusCode::FORBIDDEN | StatusCode::UNPROCESSABLE_ENTITY
+    ) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(classify_status_and_body(status, &body).expect("403 / 422 always classify"));
+    }
+    if let Some(err) = classify_status_and_body(status, "") {
+        return Err(err);
+    }
+    Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
+        response
+            .error_for_status()
+            .expect_err("non-success status checked above"),
+    )))
+}
+
+/// Serializes the storage upload metadata field as JSON.
+///
+/// Both the storage and IPFS authenticated upload endpoints accept the
+/// same `metadata` multipart field: a JSON object with the signed STORE
+/// message and a `sync` flag.
+fn serialize_storage_metadata(message: &PendingMessage, sync: bool) -> String {
+    serde_json::json!({"message": message, "sync": sync}).to_string()
+}
+
+fn build_storage_metadata_part(message: &PendingMessage, sync: bool) -> reqwest::multipart::Part {
+    reqwest::multipart::Part::text(serialize_storage_metadata(message, sync))
+        .mime_str("application/json")
+        .expect("application/json is a valid mime type")
+}
+
 impl AlephStorageClient for AlephClient {
     async fn get_file_size(&self, file_hash: &ItemHash) -> Result<Bytes, MessageError> {
         let url = self
@@ -1919,11 +2005,7 @@ impl AlephStorageClient for AlephClient {
         let mut form = reqwest::multipart::Form::new().part("file", part);
 
         if let Some(msg) = message {
-            let metadata = serde_json::json!({"message": msg, "sync": sync});
-            let meta_part = reqwest::multipart::Part::text(metadata.to_string())
-                .mime_str("application/json")
-                .expect("valid mime type");
-            form = form.part("metadata", meta_part);
+            form = form.part("metadata", build_storage_metadata_part(msg, sync));
         }
 
         // Use the plain client — multipart bodies are not cloneable, so the
@@ -1936,18 +2018,7 @@ impl AlephStorageClient for AlephClient {
             .await
             .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
 
-        match response.status() {
-            StatusCode::PAYMENT_REQUIRED => return Err(StorageError::InsufficientBalance),
-            StatusCode::PAYLOAD_TOO_LARGE => return Err(StorageError::FileTooLarge),
-            status if !status.is_success() => {
-                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
-                    response
-                        .error_for_status()
-                        .expect_err("already checked non-success"),
-                )));
-            }
-            _ => {}
-        }
+        let response = handle_storage_response(response).await?;
 
         let upload: UploadResponse = response
             .json()
@@ -1963,7 +2034,12 @@ impl AlephStorageClient for AlephClient {
             })
     }
 
-    async fn upload_to_ipfs(&self, data: &[u8]) -> Result<ItemHash, StorageError> {
+    async fn upload_to_ipfs(
+        &self,
+        data: &[u8],
+        message: Option<&PendingMessage>,
+        sync: bool,
+    ) -> Result<ItemHash, StorageError> {
         let url = self
             .ccn_url
             .join("/api/v0/ipfs/add_file")
@@ -1973,7 +2049,11 @@ impl AlephStorageClient for AlephClient {
             .file_name("upload")
             .mime_str("application/octet-stream")
             .expect("valid mime type");
-        let form = reqwest::multipart::Form::new().part("file", part);
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+
+        if let Some(msg) = message {
+            form = form.part("metadata", build_storage_metadata_part(msg, sync));
+        }
 
         // Use the plain client — multipart bodies are not cloneable, so the
         // retry middleware would fail with "Request object is not cloneable".
@@ -1985,17 +2065,7 @@ impl AlephStorageClient for AlephClient {
             .await
             .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
 
-        match response.status() {
-            StatusCode::FORBIDDEN => return Err(StorageError::IpfsDisabled),
-            status if !status.is_success() => {
-                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
-                    response
-                        .error_for_status()
-                        .expect_err("already checked non-success"),
-                )));
-            }
-            _ => {}
-        }
+        let response = handle_storage_response(response).await?;
 
         let upload: UploadResponse = response
             .json()
@@ -2036,11 +2106,7 @@ impl AlephStorageClient for AlephClient {
         let mut form = reqwest::multipart::Form::new().part("file", part);
 
         if let Some(msg) = message {
-            let metadata = serde_json::json!({"message": msg, "sync": sync});
-            let meta_part = reqwest::multipart::Part::text(metadata.to_string())
-                .mime_str("application/json")
-                .expect("valid mime type");
-            form = form.part("metadata", meta_part);
+            form = form.part("metadata", build_storage_metadata_part(msg, sync));
         }
 
         let response = self
@@ -2051,18 +2117,7 @@ impl AlephStorageClient for AlephClient {
             .await
             .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
 
-        match response.status() {
-            StatusCode::PAYMENT_REQUIRED => return Err(StorageError::InsufficientBalance),
-            StatusCode::PAYLOAD_TOO_LARGE => return Err(StorageError::FileTooLarge),
-            status if !status.is_success() => {
-                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
-                    response
-                        .error_for_status()
-                        .expect_err("already checked non-success"),
-                )));
-            }
-            _ => {}
-        }
+        let response = handle_storage_response(response).await?;
 
         let upload: UploadResponse = response
             .json()
@@ -2089,6 +2144,8 @@ impl AlephStorageClient for AlephClient {
     async fn upload_file_to_ipfs(
         &self,
         path: impl AsRef<std::path::Path> + Send,
+        message: Option<&PendingMessage>,
+        sync: bool,
     ) -> Result<ItemHash, StorageError> {
         let path = path.as_ref();
 
@@ -2105,7 +2162,11 @@ impl AlephStorageClient for AlephClient {
             .await?
             .mime_str("application/octet-stream")
             .expect("valid mime type");
-        let form = reqwest::multipart::Form::new().part("file", part);
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+
+        if let Some(msg) = message {
+            form = form.part("metadata", build_storage_metadata_part(msg, sync));
+        }
 
         let response = self
             .upload_client
@@ -2115,17 +2176,7 @@ impl AlephStorageClient for AlephClient {
             .await
             .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
 
-        match response.status() {
-            StatusCode::FORBIDDEN => return Err(StorageError::IpfsDisabled),
-            status if !status.is_success() => {
-                return Err(StorageError::UploadFailed(reqwest_middleware::Error::from(
-                    response
-                        .error_for_status()
-                        .expect_err("already checked non-success"),
-                )));
-            }
-            _ => {}
-        }
+        let response = handle_storage_response(response).await?;
 
         let upload: UploadResponse = response
             .json()
@@ -3007,7 +3058,7 @@ mod tests {
         let data = b"hello aleph ipfs";
 
         let hash = client
-            .upload_to_ipfs(data)
+            .upload_to_ipfs(data, None, false)
             .await
             .expect("upload should succeed");
 
@@ -3171,6 +3222,8 @@ mod tests {
             fn upload_to_ipfs(
                 &self,
                 _data: &[u8],
+                _message: Option<&PendingMessage>,
+                _sync: bool,
             ) -> impl Future<Output = Result<ItemHash, StorageError>> + Send {
                 self.upload_ipfs_called.store(true, Ordering::SeqCst);
                 let hash = self.upload_hash.clone();
@@ -3189,6 +3242,8 @@ mod tests {
             async fn upload_file_to_ipfs(
                 &self,
                 _path: impl AsRef<std::path::Path> + Send,
+                _message: Option<&PendingMessage>,
+                _sync: bool,
             ) -> Result<ItemHash, StorageError> {
                 unimplemented!()
             }
@@ -3249,6 +3304,136 @@ mod tests {
                 other => panic!("expected HashMismatch, got: {other:?}"),
             }
             assert!(!client.post_called.load(Ordering::SeqCst));
+        }
+    }
+
+    mod serialize_storage_metadata_tests {
+        use super::*;
+        use crate::messages::StoreBuilder;
+        use aleph_types::account::{Account, SignError};
+        use aleph_types::chain::{Address, Chain, Signature};
+        use aleph_types::message::StorageEngine;
+
+        struct TestAccount {
+            address: Address,
+        }
+
+        impl TestAccount {
+            fn new() -> Self {
+                Self {
+                    address: Address::from(
+                        "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef".to_string(),
+                    ),
+                }
+            }
+        }
+
+        impl Account for TestAccount {
+            fn chain(&self) -> Chain {
+                Chain::Ethereum
+            }
+            fn address(&self) -> &Address {
+                &self.address
+            }
+            fn sign_raw(&self, _buffer: &[u8]) -> Result<Signature, SignError> {
+                Ok(Signature::from("0xDUMMY".to_string()))
+            }
+        }
+
+        #[test]
+        fn serialize_storage_metadata_emits_message_and_sync() {
+            let account = TestAccount::new();
+            let hash = aleph_types::item_hash!("QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8");
+            let msg = StoreBuilder::new(&account, hash, StorageEngine::Ipfs)
+                .build()
+                .unwrap();
+
+            let json_str = serialize_storage_metadata(&msg, true);
+            let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(v["sync"], serde_json::Value::Bool(true));
+            assert!(v["message"].is_object(), "message should be an object");
+            assert_eq!(v["message"]["type"], "STORE");
+        }
+
+        #[test]
+        fn serialize_storage_metadata_respects_sync_false() {
+            let account = TestAccount::new();
+            let hash = aleph_types::item_hash!("QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8");
+            let msg = StoreBuilder::new(&account, hash, StorageEngine::Ipfs)
+                .build()
+                .unwrap();
+            let json_str = serialize_storage_metadata(&msg, false);
+            let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(v["sync"], serde_json::Value::Bool(false));
+        }
+    }
+
+    mod classify_status_and_body_tests {
+        use super::*;
+
+        #[test]
+        fn classify_status_402_insufficient_balance() {
+            let err = classify_status_and_body(reqwest::StatusCode::PAYMENT_REQUIRED, "");
+            assert!(matches!(err, Some(StorageError::InsufficientBalance)));
+        }
+
+        #[test]
+        fn classify_status_403_ipfs_disabled() {
+            let err = classify_status_and_body(
+                reqwest::StatusCode::FORBIDDEN,
+                "403: IPFS is disabled on this node",
+            );
+            assert!(matches!(err, Some(StorageError::IpfsDisabled)));
+        }
+
+        #[test]
+        fn classify_status_403_invalid_signature_when_body_does_not_match() {
+            let err = classify_status_and_body(reqwest::StatusCode::FORBIDDEN, "");
+            assert!(matches!(err, Some(StorageError::InvalidSignature)));
+            let err = classify_status_and_body(reqwest::StatusCode::FORBIDDEN, "Invalid signature");
+            assert!(matches!(err, Some(StorageError::InvalidSignature)));
+        }
+
+        #[test]
+        fn classify_status_403_partial_substring_does_not_match_ipfs_disabled() {
+            // Adversarial / proxy-injected body that quotes the fragment but is not
+            // the canonical pyaleph "IPFS is disabled on this node" reason — must
+            // fall through to InvalidSignature, not IpfsDisabled.
+            let err = classify_status_and_body(
+                reqwest::StatusCode::FORBIDDEN,
+                "User said: 'IPFS is disabled' is wrong",
+            );
+            assert!(matches!(err, Some(StorageError::InvalidSignature)));
+        }
+
+        #[test]
+        fn classify_status_403_aiohttp_default_body_is_invalid_signature() {
+            let err = classify_status_and_body(reqwest::StatusCode::FORBIDDEN, "403: Forbidden");
+            assert!(matches!(err, Some(StorageError::InvalidSignature)));
+        }
+
+        #[test]
+        fn classify_status_413_file_too_large() {
+            let err = classify_status_and_body(reqwest::StatusCode::PAYLOAD_TOO_LARGE, "anything");
+            assert!(matches!(err, Some(StorageError::FileTooLarge)));
+        }
+
+        #[test]
+        fn classify_status_422_invalid_metadata_carries_body() {
+            let body = "File hash does not match (X != Y)";
+            let err = classify_status_and_body(reqwest::StatusCode::UNPROCESSABLE_ENTITY, body);
+            match err {
+                Some(StorageError::InvalidMetadata(s)) => assert_eq!(s, body),
+                other => panic!("expected InvalidMetadata, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classify_status_returns_none_for_success_and_unknown() {
+            assert!(classify_status_and_body(reqwest::StatusCode::OK, "").is_none());
+            assert!(
+                classify_status_and_body(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "").is_none()
+            );
         }
     }
 }
