@@ -80,7 +80,7 @@ fn run_pin(base_url: &str, item_hash: &str) -> std::process::Output {
     let private_key_hex = hex::encode(TEST_KEY);
     Command::new(env!("CARGO_BIN_EXE_aleph"))
         .args([
-            "--ccn-url",
+            "--ccn",
             base_url,
             "--json",
             "file",

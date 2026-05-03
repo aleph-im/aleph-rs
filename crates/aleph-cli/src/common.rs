@@ -324,23 +324,29 @@ use crate::config::store::ConfigStore;
 
 /// Resolve the CCN URL using a provided `ConfigStore` (testable form).
 ///
+/// The single `--ccn` flag accepts either a raw URL (anything containing
+/// `://`) or a config alias name (looked up within the selected network).
+///
 /// Resolution order:
-/// 1. `ccn_url` (explicit URL) — returned as-is, no network membership check.
-///    This is an escape hatch for advanced use / quick tests.
+/// 1. If `ccn` is `Some(s)` and `s` contains `://`: parse `s` as a URL and
+///    return — no network membership check. This is the escape hatch for
+///    advanced use / quick tests.
 /// 2. Select the network:
 ///    - `network` if provided — error if unknown.
 ///    - else `default_network` from config — error if unset.
 /// 3. Within the selected network:
-///    - `ccn` (named) → lookup within that network; `CcnNotFound` if absent.
+///    - `ccn` (named alias) → lookup within that network; `CcnNotFound` if absent.
 ///    - else → the network's `default_ccn`; error if unset.
 pub fn resolve_ccn_url_with_store(
     store: &ConfigStore,
-    ccn_url: Option<&str>,
     ccn: Option<&str>,
     network: Option<&str>,
 ) -> Result<Url, Box<dyn std::error::Error>> {
-    if let Some(raw) = ccn_url {
-        return Ok(Url::parse(raw).map_err(|e| format!("invalid --ccn-url: {e}"))?);
+    // URL form: anything containing "://" is treated as a raw URL.
+    if let Some(raw) = ccn
+        && raw.contains("://")
+    {
+        return Ok(Url::parse(raw).map_err(|e| format!("invalid --ccn URL '{raw}': {e}"))?);
     }
 
     let (network_name, network_entry) = match network {
@@ -371,9 +377,11 @@ pub fn resolve_ccn_url_with_store(
         })?,
     };
 
-    let entry = store
-        .get_ccn(&network_name, &ccn_name)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let entry = store.get_ccn(&network_name, &ccn_name).map_err(|e| {
+        anyhow::anyhow!(
+            "{e} (and '{ccn_name}' doesn't look like a URL — missing scheme like https://)"
+        )
+    })?;
     Ok(Url::parse(&entry.url).map_err(|e| {
         format!("invalid URL for CCN '{ccn_name}' in network '{network_name}': {e}")
     })?)
@@ -381,13 +389,12 @@ pub fn resolve_ccn_url_with_store(
 
 /// Resolve the CCN URL using the user-global config store. Call site: `main.rs`.
 pub fn resolve_ccn_url(
-    ccn_url: Option<&str>,
     ccn: Option<&str>,
     network: Option<&str>,
 ) -> Result<Url, Box<dyn std::error::Error>> {
     let store =
         ConfigStore::open().map_err(|e| anyhow::anyhow!("failed to open config store: {e}"))?;
-    resolve_ccn_url_with_store(&store, ccn_url, ccn, network)
+    resolve_ccn_url_with_store(&store, ccn, network)
 }
 
 /// Resolve a network entry from an explicit name or the config's current default.
@@ -623,38 +630,46 @@ mod tests {
     }
 
     #[test]
-    fn ccn_url_escape_hatch_wins() {
+    fn ccn_url_form_skips_network_check() {
         let (_dir, store) = store_with_fixture();
-        let url = resolve_ccn_url_with_store(
-            &store,
-            Some("http://escape.example"),
-            Some("official"),
-            Some("mainnet"),
-        )
-        .unwrap();
+        // A value containing "://" is treated as a raw URL; no network or
+        // alias lookup is performed.
+        let url = resolve_ccn_url_with_store(&store, Some("http://escape.example"), None).unwrap();
         assert_eq!(url.as_str(), "http://escape.example/");
     }
 
     #[test]
-    fn ccn_url_escape_hatch_skips_network_check() {
+    fn ccn_url_form_works_even_with_network_set() {
         let (_dir, store) = store_with_fixture();
-        // Neither the ccn name nor a network is needed when --ccn-url is set.
+        // Passing --network alongside a URL value still uses the URL.
         let url =
-            resolve_ccn_url_with_store(&store, Some("http://escape.example"), None, None).unwrap();
+            resolve_ccn_url_with_store(&store, Some("http://escape.example"), Some("mainnet"))
+                .unwrap();
         assert_eq!(url.as_str(), "http://escape.example/");
+    }
+
+    #[test]
+    fn ccn_url_form_rejects_unparseable_url() {
+        let (_dir, store) = store_with_fixture();
+        // Contains "://" → treated as URL → must parse cleanly.
+        let err = resolve_ccn_url_with_store(&store, Some("://broken"), None).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid --ccn URL"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn network_plus_ccn_resolves_within_network() {
         let (_dir, store) = store_with_fixture();
-        let url = resolve_ccn_url_with_store(&store, None, Some("local"), Some("testnet")).unwrap();
+        let url = resolve_ccn_url_with_store(&store, Some("local"), Some("testnet")).unwrap();
         assert_eq!(url.as_str(), "http://localhost:4024/");
     }
 
     #[test]
     fn network_only_uses_network_default_ccn() {
         let (_dir, store) = store_with_fixture();
-        let url = resolve_ccn_url_with_store(&store, None, None, Some("mainnet")).unwrap();
+        let url = resolve_ccn_url_with_store(&store, None, Some("mainnet")).unwrap();
         assert_eq!(url.as_str(), "https://api.aleph.im/");
     }
 
@@ -662,25 +677,31 @@ mod tests {
     fn no_flags_uses_default_network_default_ccn() {
         let (_dir, store) = store_with_fixture();
         // mainnet is the default (first network added).
-        let url = resolve_ccn_url_with_store(&store, None, None, None).unwrap();
+        let url = resolve_ccn_url_with_store(&store, None, None).unwrap();
         assert_eq!(url.as_str(), "https://api.aleph.im/");
     }
 
     #[test]
     fn unknown_network_errors() {
         let (_dir, store) = store_with_fixture();
-        let err = resolve_ccn_url_with_store(&store, None, None, Some("nope")).unwrap_err();
+        let err = resolve_ccn_url_with_store(&store, None, Some("nope")).unwrap_err();
         assert!(err.to_string().contains("network 'nope' not found"));
     }
 
     #[test]
     fn unknown_ccn_in_selected_network_errors() {
         let (_dir, store) = store_with_fixture();
-        let err =
-            resolve_ccn_url_with_store(&store, None, Some("nope"), Some("mainnet")).unwrap_err();
+        let err = resolve_ccn_url_with_store(&store, Some("nope"), Some("mainnet")).unwrap_err();
+        let msg = err.to_string();
         assert!(
-            err.to_string()
-                .contains("ccn 'nope' not found in network 'mainnet'")
+            msg.contains("ccn 'nope' not found in network 'mainnet'"),
+            "unexpected error: {msg}"
+        );
+        // The hint about a missing URL scheme should also be present so a user
+        // who mistyped a URL like "api.example.com" gets a useful nudge.
+        assert!(
+            msg.contains("missing scheme like https://"),
+            "expected URL-scheme hint in error: {msg}"
         );
     }
 
@@ -688,8 +709,7 @@ mod tests {
     fn ccn_lookup_does_not_fall_back_across_networks() {
         let (_dir, store) = store_with_fixture();
         // 'local' exists in testnet but not in mainnet.
-        let err =
-            resolve_ccn_url_with_store(&store, None, Some("local"), Some("mainnet")).unwrap_err();
+        let err = resolve_ccn_url_with_store(&store, Some("local"), Some("mainnet")).unwrap_err();
         assert!(
             err.to_string()
                 .contains("ccn 'local' not found in network 'mainnet'")
@@ -702,7 +722,7 @@ mod tests {
         let store = ConfigStore::with_manifest_path(dir.path().join("config.toml"));
         // Add a network but no CCN — so it has no default_ccn.
         store.add_network("barenet").unwrap();
-        let err = resolve_ccn_url_with_store(&store, None, None, Some("barenet")).unwrap_err();
+        let err = resolve_ccn_url_with_store(&store, None, Some("barenet")).unwrap_err();
         assert!(
             err.to_string()
                 .contains("network 'barenet' has no default CCN"),

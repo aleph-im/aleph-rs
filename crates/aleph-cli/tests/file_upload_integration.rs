@@ -88,7 +88,7 @@ fn file_upload_json_emits_submission_envelope() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aleph"))
         .args([
-            "--ccn-url",
+            "--ccn",
             &base_url,
             "--json",
             "file",
