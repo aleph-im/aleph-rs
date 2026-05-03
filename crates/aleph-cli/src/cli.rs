@@ -1341,7 +1341,7 @@ pub struct InstanceCreateArgs {
 
     /// CRN node hash. Pins the instance to a specific compute node.
     #[arg(long)]
-    pub crn_hash: Option<String>,
+    pub crn_hash: Option<NodeHash>,
 
     /// Sign on behalf of another address (requires an authorization from that address).
     #[arg(long)]

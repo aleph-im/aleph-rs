@@ -513,7 +513,7 @@ async fn handle_instance_create(
             node: args.crn_hash.map(|hash| NodeRequirements {
                 owner: None,
                 address_regex: None,
-                node_hash: Some(hash),
+                node_hash: Some(hash.to_string()),
                 terms_and_conditions: None,
             }),
             gpu: gpu_props,
