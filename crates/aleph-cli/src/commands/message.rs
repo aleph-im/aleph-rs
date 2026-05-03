@@ -47,9 +47,7 @@ async fn handle_forget(
     let dry_run = args.signing.dry_run;
     let total = args.hashes.len() + args.aggregates.as_ref().map_or(0, Vec::len);
     if total == 0 {
-        return Err(
-            anyhow::anyhow!("at least one hash or --aggregates entry is required").into(),
-        );
+        return Err(anyhow::anyhow!("at least one hash or --aggregates entry is required").into());
     }
     if !dry_run {
         let prompt = format!(
