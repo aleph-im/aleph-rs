@@ -1,5 +1,5 @@
 use crate::cli::{NodeCommand, NodeListArgs, NodeTypeCli};
-use crate::common::{resolve_account, resolve_address, submit_or_preview};
+use crate::common::{resolve_account, resolve_address, resolve_network, submit_or_preview};
 use aleph_sdk::aggregate_models::corechannel::{CORECHANNEL_ADDRESS, CcnInfo, CrnInfo, CrnStatus};
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::corechannel::{self, AmendDetails};
@@ -20,44 +20,50 @@ pub async fn handle_node_command(
     ccn_url: &Url,
     json: bool,
     command: NodeCommand,
+    cli_network: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         NodeCommand::List(args) => list_nodes(aleph_client, json, args).await,
         NodeCommand::CreateCcn(args) => {
+            let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending =
-                corechannel::create_ccn(&account, &args.name, &args.multiaddress, &args.network)?;
+            let pending = corechannel::create_ccn(&account, &args.name, &args.multiaddress, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::CreateCrn(args) => {
+            let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending =
-                corechannel::create_crn(&account, &args.name, &args.address, &args.network)?;
+            let pending = corechannel::create_crn(&account, &args.name, &args.address, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Link(args) => {
+            let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending = corechannel::link_crn(&account, args.crn, &args.network)?;
+            let pending = corechannel::link_crn(&account, args.crn, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Unlink(args) => {
+            let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending = corechannel::unlink_crn(&account, args.crn, &args.network)?;
+            let pending = corechannel::unlink_crn(&account, args.crn, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Stake(args) => {
+            let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending = corechannel::stake(&account, args.node, &args.network)?;
+            let pending = corechannel::stake(&account, args.node, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Unstake(args) => {
+            let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending = corechannel::unstake(&account, args.node, &args.network)?;
+            let pending = corechannel::unstake(&account, args.node, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Drop(args) => {
+            let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending = corechannel::drop_node(&account, args.node, &args.network)?;
+            let pending = corechannel::drop_node(&account, args.node, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Amend(args) => {
@@ -79,11 +85,35 @@ pub async fn handle_node_command(
             if details == AmendDetails::default() {
                 return Err("at least one field must be provided".into());
             }
+            let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending = corechannel::amend_node(&account, args.node, details, &args.network)?;
+            let pending = corechannel::amend_node(&account, args.node, details, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
     }
+}
+
+/// Pick the network tag to embed in the corechannel aggregate.
+///
+/// Precedence: explicit `--network-tag` > current network's name (from
+/// `--network` or the configured default). Errors only if neither is
+/// available — e.g. `aleph --ccn-url <RAW> node ...` with no network
+/// selected and no `--network-tag` given.
+fn resolve_effective_tag(
+    override_tag: Option<&str>,
+    cli_network: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(tag) = override_tag {
+        return Ok(tag.to_string());
+    }
+    let entry = resolve_network(cli_network).map_err(|e| -> Box<dyn std::error::Error> {
+        format!(
+            "no --network-tag given and could not resolve a default network ({e}). \
+             Pass --network-tag <TAG> or set a default with: aleph config network use <NAME>"
+        )
+        .into()
+    })?;
+    Ok(entry.name)
 }
 
 async fn list_nodes(

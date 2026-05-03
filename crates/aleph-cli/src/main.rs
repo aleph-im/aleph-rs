@@ -107,7 +107,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Node {
             command: node_command,
         } => {
-            commands::node::handle_node_command(&aleph_client, &ccn_url, json, node_command).await?
+            commands::node::handle_node_command(
+                &aleph_client,
+                &ccn_url,
+                json,
+                node_command,
+                cli.network.as_deref(),
+            )
+            .await?
         }
         cli::Commands::File {
             command: file_command,
