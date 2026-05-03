@@ -33,7 +33,7 @@ pub async fn handle_node_command(
         NodeCommand::CreateCrn(args) => {
             let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
-            let pending = corechannel::create_crn(&account, &args.name, &args.address, &tag)?;
+            let pending = corechannel::create_crn(&account, &args.name, &args.api_url, &tag)?;
             submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await
         }
         NodeCommand::Link(args) => {
@@ -70,7 +70,7 @@ pub async fn handle_node_command(
             let details = AmendDetails {
                 name: args.name,
                 multiaddress: args.multiaddress,
-                address: args.address,
+                address: args.api_url,
                 picture: args.picture,
                 banner: args.banner,
                 description: args.description,
