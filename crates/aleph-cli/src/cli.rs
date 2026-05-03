@@ -173,6 +173,22 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum MessageCommand {
     /// Forget messages by their item hashes
+    #[command(long_about = "\
+Forget one or more messages by their item hashes.
+
+Each hash is the item hash of a message on the network — a POST, AGGREGATE, \
+STORE, PROGRAM, or INSTANCE — that you want to tombstone. The network \
+cascades the appropriate cleanup based on the target's type: forgetting an \
+AGGREGATE element rebuilds the aggregate from the remaining elements, \
+forgetting a STORE releases the file pin, forgetting a POST also forgets \
+its amends, and forgetting a PROGRAM/INSTANCE tears down its VM.
+
+Examples:
+  aleph message forget abc123def456...
+  aleph message forget abc123... def456... --reason \"superseded\"
+
+Forget is irreversible. You can only forget messages your own address owns \
+(or that you have an authorization to forget on behalf of).")]
     Forget(ForgetArgs),
     /// Get a message by its item hash
     Get(GetMessageArgs),
@@ -664,12 +680,12 @@ pub struct AggregateCreateArgs {
 
 #[derive(Args)]
 pub struct ForgetArgs {
-    /// Item hashes to forget.
+    /// Item hashes of the messages to forget.
+    ///
+    /// Accepts one or more hashes (32-byte native hashes or IPFS CIDs).
+    /// All targets must be owned by the signing address (or by the address
+    /// passed via `--on-behalf-of`).
     pub hashes: Vec<ItemHash>,
-
-    /// Aggregate hashes to forget.
-    #[arg(long, value_delimiter = ',')]
-    pub aggregates: Option<Vec<ItemHash>>,
 
     /// Reason for forgetting.
     #[arg(long)]
