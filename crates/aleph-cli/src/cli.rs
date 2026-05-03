@@ -404,9 +404,11 @@ pub struct IdentityArgs {
     #[arg(long)]
     pub private_key: Option<String>,
 
-    /// Signing chain. Only required with --private-key.
-    #[arg(long, value_enum, default_value = "eth")]
-    pub chain: ChainCli,
+    /// Signing chain. Required with --private-key (or ALEPH_PRIVATE_KEY env);
+    /// ignored when --account or the default account is used (the chain comes
+    /// from the stored account).
+    #[arg(long, value_enum)]
+    pub chain: Option<ChainCli>,
 }
 
 /// Signing args: identity plus a `--dry-run` switch. Used on commands that

@@ -381,16 +381,18 @@ pub fn resolve_network(
 /// Resolve a signing account from CLI args.
 ///
 /// Resolution order:
-/// 1. --private-key flag or ALEPH_PRIVATE_KEY env var
+/// 1. --private-key flag or ALEPH_PRIVATE_KEY env var (requires --chain)
 /// 2. --account flag (named account from store)
 /// 3. Default account from store
 pub fn resolve_account(identity: &IdentityArgs) -> Result<CliAccount, Box<dyn std::error::Error>> {
     // 1. Explicit private key takes precedence
     if identity.private_key.is_some() || std::env::var("ALEPH_PRIVATE_KEY").is_ok() {
-        return Ok(load_account(
-            identity.private_key.as_deref(),
-            identity.chain.into(),
-        )?);
+        let chain = identity.chain.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--chain is required when signing with --private-key (or ALEPH_PRIVATE_KEY)"
+            )
+        })?;
+        return Ok(load_account(identity.private_key.as_deref(), chain.into())?);
     }
 
     // 2-3. Named account or default from store
