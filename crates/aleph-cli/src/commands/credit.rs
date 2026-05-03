@@ -19,6 +19,7 @@ use alloy_primitives::{Address, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_signer_local::PrivateKeySigner;
+use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use url::Url;
 
@@ -37,36 +38,35 @@ pub async fn handle_credit_command(
     json: bool,
     command: CreditCommand,
     cli_network: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     match command {
         CreditCommand::Buy(args) => handle_buy(json, args, cli_network).await,
         CreditCommand::Transfer(args) => handle_transfer(aleph_client, ccn_url, json, args).await,
     }
 }
 
-async fn handle_buy(
-    json: bool,
-    args: BuyCreditArgs,
-    cli_network: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_buy(json: bool, args: BuyCreditArgs, cli_network: Option<&str>) -> Result<()> {
     let evm_account = resolve_evm_account(&args.signing)?;
     let network = resolve_network(cli_network)?;
     let ethereum = network.ethereum.ok_or_else(|| {
-        format!(
+        anyhow!(
             "network '{}' has no ethereum settlement config; \
              run: aleph config network set --network {} --rpc-url <URL> --credit-contract <ADDR> \
                   --aleph-token <ADDR> --usdc-token <ADDR> --price-source <coingecko|fixed:N|none>",
-            network.name, network.name
+            network.name,
+            network.name
         )
     })?;
     let rpc_url = args.rpc_url.as_deref().unwrap_or(&ethereum.rpc_url);
 
     let token: CreditToken = args.token.into();
     let amount_raw = credit::parse_token_amount(&args.amount, token.decimals())
-        .map_err(|e| format!("invalid amount: {e}"))?;
+        .map_err(|e| anyhow!("invalid amount: {e}"))?;
 
     let (provider, alloy_address) = build_signer_provider(evm_account, rpc_url)?;
-    let estimate = credit::estimate_credits(token, amount_raw, &ethereum.price_source).await?;
+    let estimate = credit::estimate_credits(token, amount_raw, &ethereum.price_source)
+        .await
+        .map_err(anyhow::Error::msg)?;
 
     // Dry-run must succeed even for under-funded accounts, so we defer the
     // balance check until we know we're actually submitting.
@@ -99,7 +99,8 @@ async fn handle_buy(
         ethereum.credit_contract,
         amount_raw,
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow!("{e}"))?;
     print_submission_result(json, &args.amount, &estimate, &ethereum, &receipt)?;
     Ok(())
 }
@@ -109,7 +110,7 @@ async fn handle_transfer(
     ccn_url: &Url,
     json: bool,
     args: TransferCreditArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
     let recipient = resolve_address(&args.to)?;
@@ -161,25 +162,27 @@ fn print_transfer_summary(
     }
 }
 
-fn resolve_evm_account(signing: &SigningArgs) -> Result<EvmAccount, Box<dyn std::error::Error>> {
+fn resolve_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
     match resolve_account(&signing.identity)? {
         CliAccount::Evm(a) => Ok(a),
-        CliAccount::LedgerEvm(_) => Err(
-            "Ledger accounts are not supported for credit purchases. Use a local account.".into(),
-        ),
-        CliAccount::Sol(_) => Err("credit purchases require an EVM account (got Solana)".into()),
+        CliAccount::LedgerEvm(_) => Err(anyhow!(
+            "Ledger accounts are not supported for credit purchases. Use a local account."
+        )),
+        CliAccount::Sol(_) => Err(anyhow!(
+            "credit purchases require an EVM account (got Solana)"
+        )),
     }
 }
 
 fn build_signer_provider(
     evm_account: EvmAccount,
     rpc_url: &str,
-) -> Result<(impl Provider, Address), Box<dyn std::error::Error>> {
+) -> Result<(impl Provider, Address)> {
     let wallet = PrivateKeySigner::from_signing_key(evm_account.signing_key().clone());
     let address = wallet.address();
     let url = rpc_url
         .parse()
-        .map_err(|e| format!("invalid RPC URL: {e}"))?;
+        .map_err(|e| anyhow!("invalid RPC URL: {e}"))?;
     let provider = ProviderBuilder::new()
         .wallet(EthereumWallet::from(wallet))
         .connect_http(url);
@@ -193,26 +196,27 @@ async fn ensure_token_balance(
     token_address: Address,
     amount_raw: U256,
     amount_display: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let balance = credit::check_balance(provider, owner, token, token_address).await?;
+) -> Result<()> {
+    let balance = credit::check_balance(provider, owner, token, token_address)
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
     if balance < amount_raw {
         let have = format_token_amount(balance, token.decimals());
-        return Err(format!(
+        bail!(
             "insufficient {} balance: have {have}, need {amount_display}",
             token.symbol(),
-        )
-        .into());
+        );
     }
     Ok(())
 }
 
-fn confirm_submission() -> Result<bool, Box<dyn std::error::Error>> {
+fn confirm_submission() -> Result<bool> {
     eprintln!();
     dialoguer::Confirm::new()
         .with_prompt("Proceed?")
         .default(false)
         .interact()
-        .map_err(|e| format!("failed to read confirmation: {e}").into())
+        .map_err(|e| anyhow!("failed to read confirmation: {e}"))
 }
 
 /// JSON envelope shared by dry-run and post-submit output.
@@ -263,7 +267,7 @@ fn print_dry_run_summary(
     amount_display: &str,
     estimate: &CreditEstimate,
     ethereum: &EthereumConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if json {
         let mut output = summary_json(amount_display, estimate, ethereum);
         output["dry_run"] = serde_json::Value::Bool(true);
@@ -281,7 +285,7 @@ fn print_submission_result(
     estimate: &CreditEstimate,
     ethereum: &EthereumConfig,
     receipt: &TransactionReceipt,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let tx_hash = receipt.transaction_hash;
     if json {
         let mut output = summary_json(amount_display, estimate, ethereum);

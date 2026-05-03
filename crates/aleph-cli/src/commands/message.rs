@@ -4,6 +4,7 @@ use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephClient, AlephMessageClient};
 use aleph_types::channel::Channel;
 use aleph_types::message::MessageType;
+use anyhow::{Result, bail};
 use url::Url;
 
 pub async fn handle_message_command(
@@ -11,7 +12,7 @@ pub async fn handle_message_command(
     ccn_url: &Url,
     json: bool,
     command: MessageCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     match command {
         MessageCommand::Get(GetMessageArgs { item_hash }) => {
             let message = aleph_client.get_message(&item_hash).await?;
@@ -43,11 +44,11 @@ async fn handle_forget(
     ccn_url: &Url,
     json: bool,
     args: ForgetArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let total = args.hashes.len() + args.aggregates.as_ref().map_or(0, Vec::len);
     if total == 0 {
-        return Err(anyhow::anyhow!("at least one hash or --aggregates entry is required").into());
+        bail!("at least one hash or --aggregates entry is required");
     }
     if !dry_run {
         let prompt = format!(

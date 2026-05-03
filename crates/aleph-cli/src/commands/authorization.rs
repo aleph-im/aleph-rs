@@ -4,6 +4,7 @@ use aleph_sdk::authorization::AlephAuthorizationClient;
 use aleph_sdk::client::AlephClient;
 use aleph_sdk::messages::AuthorizationBuilder;
 use aleph_types::account::Account;
+use anyhow::Result;
 use url::Url;
 
 pub async fn handle_authorization_command(
@@ -11,7 +12,7 @@ pub async fn handle_authorization_command(
     ccn_url: &Url,
     json: bool,
     command: AuthorizationCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     match command {
         AuthorizationCommand::List(args) => {
             let address = match &args.address {

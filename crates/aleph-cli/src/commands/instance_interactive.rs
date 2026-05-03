@@ -13,6 +13,7 @@ use aleph_sdk::crns_list::{
     CrnFilter, CrnListEntry, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list,
 };
 use aleph_types::item_hash::ItemHash;
+use anyhow::{Result, anyhow, bail};
 use dialoguer::{Confirm, FuzzySelect, Input, Select};
 use std::cmp::Ordering;
 use tokio::task::JoinHandle;
@@ -20,7 +21,7 @@ use tokio::task::JoinHandle;
 pub async fn resolve_interactive(
     args: &mut InstanceCreateArgs,
     aleph_client: &AlephClient,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // Kick off the CRN list fetch in parallel with the early prompts.
     let crn_list_fut = spawn_crn_list_fetch();
 
@@ -33,7 +34,8 @@ pub async fn resolve_interactive(
 
     let crn_list = crn_list_fut
         .await
-        .map_err(|e| format!("background task error: {e}"))??;
+        .map_err(|e| anyhow!("background task error: {e}"))?
+        .map_err(anyhow::Error::msg)?;
     let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aleph_client).await?;
     // `ipv6: true` filters the CRN's own infrastructure. CRNs without working IPv6
     // can't route traffic to their VMs, so they can't host usable instances. This is
@@ -48,18 +50,23 @@ pub async fn resolve_interactive(
     };
     let filtered = crn_list.filter(&filter);
     if filtered.is_empty() {
-        return Err(format!(
+        bail!(
             "No CRN matches the requirements (vcpus={}, memory_mib={}, disk_mib={}, confidential={}, gpu={}). \
              Try a smaller size or wait for capacity.",
-            vcpus, memory_mib, disk_mib, filter.confidential, filter.gpu
-        ).into());
+            vcpus,
+            memory_mib,
+            disk_mib,
+            filter.confidential,
+            filter.gpu
+        );
     }
     let chosen = prompt_crn(&filtered)?;
     accept_terms_and_conditions(chosen).await?;
     args.crn_hash = Some(chosen.hash.parse().map_err(|e| {
-        format!(
+        anyhow!(
             "CRN list returned an invalid node hash '{}': {}",
-            chosen.hash, e
+            chosen.hash,
+            e
         )
     })?);
 
@@ -70,11 +77,11 @@ pub async fn resolve_interactive(
     Ok(())
 }
 
-async fn prompt_size(aleph_client: &AlephClient) -> Result<String, Box<dyn std::error::Error>> {
+async fn prompt_size(aleph_client: &AlephClient) -> Result<String> {
     let pricing = aleph_client
         .get_pricing_aggregate()
         .await
-        .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
+        .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
     let instance_pricing = &pricing.pricing.instance;
 
     let mut tiers: Vec<_> = instance_pricing
@@ -85,7 +92,7 @@ async fn prompt_size(aleph_client: &AlephClient) -> Result<String, Box<dyn std::
     tiers.sort_by_key(|t| t.compute_units);
 
     if tiers.is_empty() {
-        return Err("no instance tiers available in the pricing aggregate".into());
+        bail!("no instance tiers available in the pricing aggregate");
     }
 
     let cu = &instance_pricing.compute_unit;
@@ -112,7 +119,7 @@ async fn prompt_size(aleph_client: &AlephClient) -> Result<String, Box<dyn std::
     Ok(instance_pricing.tier_slug(tiers[idx]))
 }
 
-fn crn_list_url() -> Result<url::Url, Box<dyn std::error::Error>> {
+fn crn_list_url() -> Result<url::Url> {
     let raw =
         std::env::var("ALEPH_CRN_LIST_URL").unwrap_or_else(|_| DEFAULT_CRN_LIST_URL.to_string());
     Ok(url::Url::parse(&raw)?)
@@ -136,14 +143,14 @@ fn spawn_crn_list_fetch() -> JoinHandle<Result<CrnListResponse, String>> {
 async fn resolve_specs_for_filter(
     args: &InstanceCreateArgs,
     aleph_client: &AlephClient,
-) -> Result<(u32, u64, u64), Box<dyn std::error::Error>> {
+) -> Result<(u32, u64, u64)> {
     if let Some(slug) = &args.size {
         let pricing = aleph_client.get_pricing_aggregate().await?;
         let tier = pricing
             .pricing
             .instance
             .find_tier_by_slug(slug)
-            .ok_or_else(|| format!("unknown size '{slug}'"))?;
+            .ok_or_else(|| anyhow!("unknown size '{slug}'"))?;
         Ok((
             args.vcpus.unwrap_or(tier.vcpus),
             args.memory.unwrap_or(tier.memory_mib),
@@ -158,7 +165,7 @@ async fn resolve_specs_for_filter(
     }
 }
 
-fn prompt_image() -> Result<ItemHash, Box<dyn std::error::Error>> {
+fn prompt_image() -> Result<ItemHash> {
     let mut items: Vec<String> = IMAGE_PRESETS
         .iter()
         .map(|(name, _)| name.to_string())
@@ -172,13 +179,15 @@ fn prompt_image() -> Result<ItemHash, Box<dyn std::error::Error>> {
         .interact()?;
 
     if idx < IMAGE_PRESETS.len() {
-        Ok(IMAGE_PRESETS[idx].1.parse()?)
+        IMAGE_PRESETS[idx].1.parse().map_err(anyhow::Error::msg)
     } else {
         let raw: String = Input::new()
             .with_prompt("Image (item hash or IPFS CID)")
-            .validate_with(|s: &String| -> Result<(), String> { parse_image(s).map(|_| ()) })
+            .validate_with(|s: &String| -> std::result::Result<(), String> {
+                parse_image(s).map(|_| ())
+            })
             .interact_text()?;
-        parse_image(&raw).map_err(Into::into)
+        parse_image(&raw).map_err(anyhow::Error::msg)
     }
 }
 
@@ -235,9 +244,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn prompt_crn<'a>(
-    entries: &'a [&CrnListEntry],
-) -> Result<&'a CrnListEntry, Box<dyn std::error::Error>> {
+fn prompt_crn<'a>(entries: &'a [&CrnListEntry]) -> Result<&'a CrnListEntry> {
     // Pre-sort by score desc; None (and NaN) sort last.
     //
     // JSON doesn't encode NaN, so in practice `score` is always finite or None.
@@ -303,9 +310,7 @@ fn effective_tac_hash(chosen: &CrnListEntry) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-async fn accept_terms_and_conditions(
-    chosen: &CrnListEntry,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn accept_terms_and_conditions(chosen: &CrnListEntry) -> Result<()> {
     let Some(tac_hash) = effective_tac_hash(chosen) else {
         return Ok(());
     };
@@ -319,12 +324,12 @@ async fn accept_terms_and_conditions(
         .default(false)
         .interact()?
     {
-        return Err("Terms & Conditions rejected: instance creation aborted.".into());
+        bail!("Terms & Conditions rejected: instance creation aborted.");
     }
     Ok(())
 }
 
-fn prompt_ssh_pubkey_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+fn prompt_ssh_pubkey_path() -> Result<std::path::PathBuf> {
     let default = default_ssh_pubkey_path();
     loop {
         let raw: String = Input::new()

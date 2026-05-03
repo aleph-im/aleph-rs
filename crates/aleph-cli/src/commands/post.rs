@@ -4,6 +4,7 @@ use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephClient, AlephPostClient};
 use aleph_types::channel::Channel;
 use aleph_types::message::MessageType;
+use anyhow::{Result, bail};
 use url::Url;
 
 pub async fn handle_post_command(
@@ -11,7 +12,7 @@ pub async fn handle_post_command(
     ccn_url: &Url,
     json: bool,
     command: PostCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     match command {
         PostCommand::List(args) => {
             let pagination = aleph_sdk::client::PaginationParams {
@@ -29,7 +30,7 @@ pub async fn handle_post_command(
                     println!("{}", serde_json::to_string_pretty(&response.posts)?);
                 }
                 v => {
-                    return Err(format!("unsupported API version: {v} (expected 0 or 1)").into());
+                    bail!("unsupported API version: {v} (expected 0 or 1)");
                 }
             }
         }
@@ -49,7 +50,7 @@ async fn handle_post_create(
     ccn_url: &Url,
     json: bool,
     args: PostCreateArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
     let content = read_content(args.content)?;
@@ -73,7 +74,7 @@ async fn handle_post_amend(
     ccn_url: &Url,
     json: bool,
     args: PostAmendArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
     let content = read_content(args.content)?;

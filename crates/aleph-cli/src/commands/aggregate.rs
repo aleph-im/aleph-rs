@@ -4,6 +4,7 @@ use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::AlephClient;
 use aleph_types::channel::Channel;
 use aleph_types::message::MessageType;
+use anyhow::{Result, bail};
 use url::Url;
 
 pub async fn handle_aggregate_command(
@@ -11,7 +12,7 @@ pub async fn handle_aggregate_command(
     ccn_url: &Url,
     json: bool,
     command: AggregateCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     match command {
         AggregateCommand::Create(args) => {
             handle_aggregate_create(aleph_client, ccn_url, json, args).await?;
@@ -25,13 +26,13 @@ async fn handle_aggregate_create(
     ccn_url: &Url,
     json: bool,
     args: AggregateCreateArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
     let content = read_content(args.content)?;
     let map = match content {
         serde_json::Value::Object(map) => map,
-        _ => return Err("aggregate content must be a JSON object".into()),
+        _ => bail!("aggregate content must be a JSON object"),
     };
     let envelope = serde_json::json!({
         "key": args.key,

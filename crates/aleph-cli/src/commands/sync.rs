@@ -5,9 +5,10 @@ use crate::common::with_retry;
 use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageError};
 use aleph_types::message::MessageStatus;
 use aleph_types::message::pending::PendingMessage;
+use anyhow::{Result, bail};
 use url::Url;
 
-pub async fn handle_sync(args: SyncArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn handle_sync(args: SyncArgs) -> Result<()> {
     let source_url = Url::parse(&args.source)?;
     let target_url = Url::parse(&args.target)?;
 
@@ -138,7 +139,7 @@ pub async fn handle_sync(args: SyncArgs) -> Result<(), Box<dyn std::error::Error
 
     eprintln!("Done. {} synced, {} errors.", success, errors);
     if errors > 0 {
-        return Err(format!("{errors} messages failed to sync").into());
+        bail!("{errors} messages failed to sync");
     }
     Ok(())
 }
