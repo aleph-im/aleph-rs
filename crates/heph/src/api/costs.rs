@@ -4,6 +4,7 @@ use serde::Deserialize;
 use crate::api::AppState;
 use crate::db::costs;
 use crate::db::messages;
+use crate::handlers::{IncomingMessage, ProcessingError, compute_cost_records, validate};
 
 // ---------------------------------------------------------------------------
 // GET /api/v0/messages/{hash}/consumed_credits  (spec 9.24)
@@ -270,33 +271,86 @@ pub async fn get_price(state: web::Data<AppState>, path: web::Path<String>) -> i
 // POST /api/v0/price/estimate  (spec 9.27)
 // ---------------------------------------------------------------------------
 
+fn bad_request(msg: impl Into<String>) -> HttpResponse {
+    HttpResponse::BadRequest().json(serde_json::json!({ "error": msg.into() }))
+}
+
+/// Estimate the cost of a message before submission.
+///
+/// Mirrors the per-message cost calculation in
+/// `handlers::compute_cost_records` so the estimate matches what would be
+/// recorded on submission. STORE/PROGRAM/INSTANCE are billed (per-second
+/// credit cost, in `cost_credit`); POST/AGGREGATE/FORGET return zero with an
+/// empty detail array.
+///
+/// Inline messages are validated and parsed in-process. Non-inline (storage)
+/// messages fall back to the local `FileStore`, matching the
+/// `process_message_with_store` flow used at submission time.
 pub async fn estimate_price(
-    _state: web::Data<AppState>,
+    state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> impl Responder {
-    // Very basic estimation: return zeros for now.
-    // Full implementation would parse message type and run cost calculation.
-    let message = body
-        .get("message")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let msg_type = message
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    // For free messages (POST, AGGREGATE, FORGET), cost is 0.
-    let cost = match msg_type.to_uppercase().as_str() {
-        "POST" | "AGGREGATE" | "FORGET" => 0.0f64,
-        _ => 0.0, // Other types: simplified — actual cost would require size info
+    let msg_value = match body.get("message").cloned() {
+        Some(v) if !v.is_null() => v,
+        _ => return bad_request("missing 'message' field"),
     };
+
+    let msg: IncomingMessage = match serde_json::from_value(msg_value) {
+        Ok(m) => m,
+        Err(e) => return bad_request(format!("invalid message: {e}")),
+    };
+
+    let content = match validate::validate_format(&msg) {
+        Ok(c) => c,
+        Err(ProcessingError::ContentUnavailable(_)) => {
+            // Non-inline (storage/IPFS) — try to resolve via local FileStore,
+            // matching what `process_message_with_store` does at submission.
+            let item_hash_str = msg.item_hash.to_string();
+            match state.file_store.read(&item_hash_str) {
+                Ok(raw) => match validate::validate_fetched_content(&msg, &raw) {
+                    Ok(c) => c,
+                    Err(e) => return bad_request(e.message().to_string()),
+                },
+                Err(_) => {
+                    return bad_request(format!(
+                        "content for {item_hash_str} not available locally; \
+                         upload it first or send an inline message",
+                    ));
+                }
+            }
+        }
+        Err(e) => return bad_request(e.message().to_string()),
+    };
+
+    let item_hash = msg.item_hash.to_string();
+    let charged_address = content.address.as_str().to_string();
+    let records = compute_cost_records(&msg, &content, &item_hash);
+
+    let total_cost: f64 = records
+        .iter()
+        .filter_map(|r| r.cost_credit.parse::<f64>().ok())
+        .sum();
+    // `format!("{:.6}", -0.0)` yields "-0.000000"; collapse signed zero so
+    // free-message and zero-cost responses round-trip as "0.000000".
+    let total_cost = if total_cost == 0.0 { 0.0 } else { total_cost };
+
+    let detail: Vec<serde_json::Value> = records
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "cost_type": r.cost_type,
+                "cost_credit": r.cost_credit,
+            })
+        })
+        .collect();
 
     HttpResponse::Ok().json(serde_json::json!({
         "required_tokens": 0.0,
         "payment_type": "credit",
-        "cost": format!("{cost:.6}"),
-        "detail": [],
-        "charged_address": message.get("address").and_then(|v| v.as_str()).unwrap_or(""),
+        "cost": format!("{total_cost:.6}"),
+        "detail": detail,
+        "charged_address": charged_address,
     }))
 }
 
@@ -420,5 +474,159 @@ mod tests {
         assert_eq!(body["summary"]["resource_count"], 0);
         assert_eq!(body["summary"]["total_consumed_credits"], 0);
         assert_eq!(body["filters"]["payment_type"], "credit");
+    }
+
+    // -----------------------------------------------------------------------
+    // estimate_price tests
+    // -----------------------------------------------------------------------
+
+    use aleph_types::account::{Account, EvmAccount, sign_message};
+    use aleph_types::chain::Chain;
+    use aleph_types::item_hash::{AlephItemHash, ItemHash};
+    use aleph_types::message::MessageType;
+    use aleph_types::message::item_type::ItemType;
+    use aleph_types::message::unsigned::UnsignedMessage;
+    use aleph_types::timestamp::Timestamp;
+
+    fn sign_inline(
+        key: &[u8; 32],
+        msg_type: MessageType,
+        item_content: String,
+    ) -> serde_json::Value {
+        let account = EvmAccount::new(Chain::Ethereum, key).unwrap();
+        let item_hash = ItemHash::Native(AlephItemHash::from_bytes(item_content.as_bytes()));
+        let unsigned = UnsignedMessage {
+            message_type: msg_type,
+            item_type: ItemType::Inline,
+            item_content: item_content.clone(),
+            item_hash,
+            time: Timestamp::from(1_000.0),
+            channel: None,
+        };
+        let pending = sign_message(&account, unsigned).unwrap();
+        serde_json::to_value(&pending).unwrap()
+    }
+
+    fn addr_for_key(key: &[u8; 32]) -> String {
+        EvmAccount::new(Chain::Ethereum, key)
+            .unwrap()
+            .address()
+            .as_str()
+            .to_string()
+    }
+
+    async fn post_estimate(
+        state: &web::Data<AppState>,
+        message: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri("/api/v0/price/estimate")
+            .set_json(serde_json::json!({ "message": message }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        (status, body)
+    }
+
+    /// Regression: STORE on a fresh address must report a non-zero per-second
+    /// cost matching `calculate_store_cost`, with a populated `detail` array
+    /// (the previous stub returned `{cost:"0", detail:[]}` for everything).
+    #[actix_web::test]
+    async fn test_estimate_store_returns_storage_cost() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let key = [90u8; 32];
+        let addr = addr_for_key(&key);
+        let file_hash = "a".repeat(64);
+        let size: u64 = 100 * 1024 * 1024;
+        let item_content = format!(
+            r#"{{"address":"{}","time":1000.0,"item_type":"storage","item_hash":"{}","size":{}}}"#,
+            addr, file_hash, size
+        );
+        let msg = sign_inline(&key, MessageType::Store, item_content);
+
+        let (status, body) = post_estimate(&state, msg).await;
+        assert_eq!(status, 200);
+
+        let expected_per_second = crate::cost::calculate_store_cost(size);
+        let expected_cost_str = format!("{expected_per_second:.6}");
+        assert_eq!(body["cost"], expected_cost_str);
+        assert_eq!(body["payment_type"], "credit");
+        assert_eq!(body["charged_address"], addr);
+        let detail = body["detail"].as_array().expect("detail must be an array");
+        assert_eq!(detail.len(), 1, "STORE must produce one cost detail entry");
+        assert_eq!(detail[0]["cost_type"], "STORAGE");
+    }
+
+    /// STORE without an explicit `size` falls back to the 25-MiB minimum.
+    #[actix_web::test]
+    async fn test_estimate_store_no_size_uses_minimum() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let key = [91u8; 32];
+        let addr = addr_for_key(&key);
+        let file_hash = "b".repeat(64);
+        let item_content = format!(
+            r#"{{"address":"{}","time":1000.0,"item_type":"storage","item_hash":"{}"}}"#,
+            addr, file_hash
+        );
+        let msg = sign_inline(&key, MessageType::Store, item_content);
+
+        let (status, body) = post_estimate(&state, msg).await;
+        assert_eq!(status, 200);
+
+        let expected = crate::cost::calculate_store_cost(0);
+        assert_eq!(body["cost"], format!("{expected:.6}"));
+        assert!(body["detail"].as_array().unwrap().len() == 1);
+    }
+
+    /// POST is free — empty detail and zero cost.
+    #[actix_web::test]
+    async fn test_estimate_post_is_free() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let key = [92u8; 32];
+        let addr = addr_for_key(&key);
+        let item_content = format!(
+            r#"{{"type":"test","address":"{}","time":1000.0,"content":{{"body":"Hi"}}}}"#,
+            addr
+        );
+        let msg = sign_inline(&key, MessageType::Post, item_content);
+
+        let (status, body) = post_estimate(&state, msg).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["cost"], "0.000000");
+        assert_eq!(body["detail"].as_array().unwrap().len(), 0);
+        assert_eq!(body["charged_address"], addr);
+    }
+
+    /// Missing `message` field returns 400 instead of a default-zero estimate.
+    #[actix_web::test]
+    async fn test_estimate_missing_message_returns_400() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri("/api/v0/price/estimate")
+            .set_json(serde_json::json!({}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
     }
 }

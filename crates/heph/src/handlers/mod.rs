@@ -431,24 +431,29 @@ pub fn process_message_with_store(
     Ok(())
 }
 
-/// Insert cost records into `account_costs` for paid message types (STORE/PROGRAM/INSTANCE).
-fn insert_cost_records(
-    db: &Db,
+/// Compute the `account_costs` rows that paid message types (STORE/PROGRAM/INSTANCE)
+/// would generate. Returns an empty vec for free message types or content-shape
+/// mismatches.
+///
+/// Shared by the persist path (`insert_cost_records`) and the read-only price
+/// estimate (`api::costs::estimate_price`) so the estimate matches what gets
+/// recorded on submission.
+pub(crate) fn compute_cost_records(
     msg: &IncomingMessage,
     content: &MessageContent,
     item_hash: &str,
-) -> ProcessingResult<()> {
-    use crate::db::costs::{AccountCostRecord, insert_account_costs};
+) -> Vec<crate::db::costs::AccountCostRecord> {
+    use crate::db::costs::AccountCostRecord;
 
     let owner = content.address.as_str().to_string();
     let payment_type = "credit".to_string();
 
-    let costs: Vec<AccountCostRecord> = match msg.message_type {
-        MessageType::Post | MessageType::Aggregate | MessageType::Forget => return Ok(()),
+    match msg.message_type {
+        MessageType::Post | MessageType::Aggregate | MessageType::Forget => Vec::new(),
         MessageType::Store => {
             let store_content = match &content.content {
                 MessageContentEnum::Store(s) => s,
-                _ => return Ok(()),
+                _ => return Vec::new(),
             };
             let size_bytes = store_content.size.map(|s| s.count()).unwrap_or(0);
             let per_second = crate::cost::calculate_store_cost(size_bytes);
@@ -467,7 +472,7 @@ fn insert_cost_records(
         MessageType::Program => {
             let program = match &content.content {
                 MessageContentEnum::Program(p) => p,
-                _ => return Ok(()),
+                _ => return Vec::new(),
             };
             let vcpus = program.base.resources.vcpus;
             let memory_mib: u64 = program.base.resources.memory.count();
@@ -490,7 +495,7 @@ fn insert_cost_records(
         MessageType::Instance => {
             let instance = match &content.content {
                 MessageContentEnum::Instance(i) => i,
-                _ => return Ok(()),
+                _ => return Vec::new(),
             };
             let vcpus = instance.base.resources.vcpus;
             let memory_mib: u64 = instance.base.resources.memory.count();
@@ -510,13 +515,21 @@ fn insert_cost_records(
                 cost_credit: per_second.to_string(),
             }]
         }
-    };
+    }
+}
 
+/// Insert cost records into `account_costs` for paid message types (STORE/PROGRAM/INSTANCE).
+fn insert_cost_records(
+    db: &Db,
+    msg: &IncomingMessage,
+    content: &MessageContent,
+    item_hash: &str,
+) -> ProcessingResult<()> {
+    let costs = compute_cost_records(msg, content, item_hash);
     if !costs.is_empty() {
-        db.with_conn(|conn| insert_account_costs(conn, &costs))
+        db.with_conn(|conn| crate::db::costs::insert_account_costs(conn, &costs))
             .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
     }
-
     Ok(())
 }
 
