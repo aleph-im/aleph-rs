@@ -6,8 +6,6 @@
 //!
 //! The fixture-builder functions below mirror the bash fixtures in the regen
 //! script — keep them in sync.
-//!
-//! All tests are `#[ignore]`d until Task 9 fills in real goldens.
 
 use aleph_sdk::ipfs::{CidVersion, UploadFolderOptions, collect_folder_files};
 use std::fs;
