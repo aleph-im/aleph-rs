@@ -45,13 +45,15 @@ async fn handle_forget(
     args: ForgetArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dry_run = args.signing.dry_run;
-    let total = args.hashes.len();
+    let total = args.hashes.len() + args.aggregates.as_ref().map_or(0, Vec::len);
     if total == 0 {
-        return Err(anyhow::anyhow!("at least one hash is required").into());
+        return Err(
+            anyhow::anyhow!("at least one hash or --aggregates entry is required").into(),
+        );
     }
     if !dry_run {
         let prompt = format!(
-            "Forget {total} message(s)? This is irreversible — content will be tombstoned on the network."
+            "Forget {total} target(s)? This is irreversible — content will be tombstoned on the network."
         );
         if !confirm_action(&prompt, args.yes)? {
             eprintln!("Aborted.");
@@ -63,6 +65,10 @@ async fn handle_forget(
     let mut envelope = serde_json::json!({
         "hashes": hashes,
     });
+    if let Some(aggs) = args.aggregates {
+        let agg_strs: Vec<String> = aggs.iter().map(|h| h.to_string()).collect();
+        envelope["aggregates"] = serde_json::json!(agg_strs);
+    }
     if let Some(reason) = args.reason {
         envelope["reason"] = serde_json::json!(reason);
     }
@@ -81,15 +87,13 @@ async fn handle_forget(
 mod tests {
     #[test]
     fn forget_envelope_shape() {
-        let hashes = vec!["abc123".to_string(), "def456".to_string()];
+        let hashes = vec!["abc123".to_string()];
         let mut envelope = serde_json::json!({ "hashes": hashes });
+        envelope["aggregates"] = serde_json::json!(["def456"]);
         envelope["reason"] = serde_json::json!("cleanup");
 
         assert_eq!(envelope["hashes"][0], "abc123");
-        assert_eq!(envelope["hashes"][1], "def456");
+        assert_eq!(envelope["aggregates"][0], "def456");
         assert_eq!(envelope["reason"], "cleanup");
-        // No separate `aggregates` field: targets of any message type
-        // (POST, AGGREGATE, STORE, PROGRAM, INSTANCE) all go into `hashes`.
-        assert!(envelope.get("aggregates").is_none());
     }
 }
