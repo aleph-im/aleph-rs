@@ -97,7 +97,7 @@ pub async fn handle_node_command(
 ///
 /// Precedence: explicit `--network-tag` > current network's name (from
 /// `--network` or the configured default). Errors only if neither is
-/// available — e.g. `aleph --ccn-url <RAW> node ...` with no network
+/// available — e.g. `aleph --ccn <RAW_URL> node ...` with no network
 /// selected and no `--network-tag` given.
 fn resolve_effective_tag(
     override_tag: Option<&str>,

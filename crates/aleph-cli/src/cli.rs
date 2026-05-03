@@ -96,12 +96,8 @@ pub fn parse_image(s: &str) -> Result<ItemHash, String> {
 #[derive(Parser)]
 #[command(name = "aleph", version, about = "Aleph CLI")]
 pub struct Cli {
-    /// CCN endpoint URL (overrides --ccn and config default; bypasses --network lookup).
-    #[arg(long, conflicts_with = "ccn")]
-    pub ccn_url: Option<String>,
-
-    /// Named CCN from config (see: aleph config ccn list).
-    #[arg(long, conflicts_with = "ccn_url")]
+    /// CCN to talk to: either a config alias name (see `aleph config ccn list`) or a raw URL (anything containing `://`).
+    #[arg(long)]
     pub ccn: Option<String>,
 
     /// Output results as JSON (for scripting/tooling).
