@@ -178,7 +178,36 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum MessageCommand {
-    /// Forget messages by their item hashes
+    /// Forget messages or entire aggregates
+    #[command(long_about = "\
+Forget messages on the network. Two scopes are supported:
+
+  <HASHES>...        Forget specific messages, one per item hash. Each hash \
+identifies a single message (POST, AGGREGATE element, STORE, PROGRAM, or \
+INSTANCE). The network cascades the appropriate cleanup based on the \
+target's type: forgetting a STORE releases the file pin, forgetting a POST \
+also forgets its amends, forgetting a PROGRAM/INSTANCE tears down its VM, \
+and forgetting an AGGREGATE element rebuilds the aggregate from the \
+elements that remain.
+
+  --aggregates <HASH>...  Forget an entire aggregate, identified by the \
+item hash of any of its element messages. This forgets *every* AGGREGATE \
+message sent by the same address under the same key — not just the one \
+hash you passed. Use this when you want the whole aggregate gone, not just \
+one update to it.
+
+Examples:
+  # Forget two specific messages
+  aleph message forget abc123... def456...
+
+  # Forget the entire aggregate keyed at the (sender, key) of this element
+  aleph message forget --aggregates abc123...
+
+  # Combine: forget some specific messages AND wipe an aggregate
+  aleph message forget abc123... --aggregates def456... --reason \"superseded\"
+
+Forget is irreversible. You can only forget messages your own address owns \
+(or that you have an authorization to forget on behalf of).")]
     Forget(ForgetArgs),
     /// Get a message by its item hash
     Get(GetMessageArgs),
@@ -670,10 +699,21 @@ pub struct AggregateCreateArgs {
 
 #[derive(Args)]
 pub struct ForgetArgs {
-    /// Item hashes to forget.
+    /// Item hashes of the messages to forget (one-by-one).
+    ///
+    /// Each hash identifies a single message to tombstone. To forget an
+    /// entire aggregate (all elements with the same sender + key), use
+    /// `--aggregates` instead.
     pub hashes: Vec<ItemHash>,
 
-    /// Aggregate hashes to forget.
+    /// Item hashes identifying aggregates to forget *in their entirety*.
+    ///
+    /// Pass the item hash of any element message belonging to the
+    /// aggregate; the network resolves the (sender, key) pair from it and
+    /// forgets every AGGREGATE message under that key from that sender.
+    /// Use this when you want the whole aggregate gone — not just one
+    /// update to it. Compare with positional `<HASHES>` which forgets one
+    /// message per hash.
     #[arg(long, value_delimiter = ',')]
     pub aggregates: Option<Vec<ItemHash>>,
 

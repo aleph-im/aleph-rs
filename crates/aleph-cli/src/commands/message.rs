@@ -51,7 +51,7 @@ async fn handle_forget(
     }
     if !dry_run {
         let prompt = format!(
-            "Forget {total} message(s)? This is irreversible — content will be tombstoned on the network."
+            "Forget {total} target(s)? This is irreversible — content will be tombstoned on the network."
         );
         if !confirm_action(&prompt, args.yes)? {
             eprintln!("Aborted.");
