@@ -775,9 +775,9 @@ pub struct CreateCrnArgs {
     #[arg(long)]
     pub name: String,
 
-    /// HTTPS URL of the CRN API endpoint.
+    /// HTTPS URL of the CRN.
     #[arg(long)]
-    pub address: String,
+    pub url: String,
 
     /// Override the corechannel network tag embedded in the node's
     /// aggregate. Defaults to the current network's name (from --network
@@ -883,9 +883,9 @@ pub struct AmendNodeArgs {
     #[arg(long)]
     pub multiaddress: Option<String>,
 
-    /// HTTPS endpoint address (CRN only).
+    /// HTTPS URL of the CRN (CRN only).
     #[arg(long)]
-    pub address: Option<String>,
+    pub url: Option<String>,
 
     /// Profile picture URL.
     #[arg(long)]
