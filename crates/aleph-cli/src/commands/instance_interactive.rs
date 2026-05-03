@@ -55,7 +55,12 @@ pub async fn resolve_interactive(
     }
     let chosen = prompt_crn(&filtered)?;
     accept_terms_and_conditions(chosen).await?;
-    args.crn_hash = Some(chosen.hash.clone());
+    args.crn_hash = Some(chosen.hash.parse().map_err(|e| {
+        format!(
+            "CRN list returned an invalid node hash '{}': {}",
+            chosen.hash, e
+        )
+    })?);
 
     if args.name.is_none() {
         args.name = prompt_name_optional()?;
