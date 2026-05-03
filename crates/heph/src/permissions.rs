@@ -34,14 +34,7 @@ pub fn check_sender_authorization(
         && let MessageContentEnum::Post(post) = &content.content
         && post.is_amend()
     {
-        // Extract the ref hash via serialization.
-        let post_val = serde_json::to_value(&post.post_type)
-            .map_err(|e| ProcessingError::InternalError(e.to_string()))?;
-        let ref_hash = post_val
-            .get("ref")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let ref_hash = post.reference.as_deref().unwrap_or("").to_string();
 
         if ref_hash.is_empty() {
             return Err(ProcessingError::PermissionDenied(
@@ -443,6 +436,46 @@ mod tests {
         assert!(
             result.is_ok(),
             "empty filters should allow all: {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Delegated amend regression: original-owner check must read `ref` from
+    // PostContent.reference, not from the (string) post_type field.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_delegated_amend_uses_post_reference() {
+        let owner_key = [83u8; 32];
+        let delegate_key = [84u8; 32];
+        let owner_addr = addr_for_key(&owner_key);
+        let delegate_addr = addr_for_key(&delegate_key);
+        let db = Db::open_in_memory().unwrap();
+
+        // Owner publishes the original POST.
+        let orig_content = format!(
+            r#"{{"type":"test","address":"{}","time":1000.0,"content":{{"body":"Hi"}}}}"#,
+            owner_addr
+        );
+        let orig_msg = sign_inline(&owner_key, MessageType::Post, orig_content);
+        let orig_hash = orig_msg.item_hash.to_string();
+        process_message(&db, &orig_msg).expect("original post should process");
+
+        // Owner authorizes the delegate for POST/amend.
+        let auths = format!(r#"[{{"address":"{}"}}]"#, delegate_addr);
+        submit_security_aggregate(&db, &owner_key, &auths);
+
+        // Delegate sends an amend on the owner's post.
+        let amend_content = format!(
+            r#"{{"type":"amend","ref":"{}","address":"{}","time":1002.0,"content":{{"body":"Amended"}}}}"#,
+            orig_hash, owner_addr
+        );
+        let amend_msg = sign_inline(&delegate_key, MessageType::Post, amend_content);
+        let result = process_message(&db, &amend_msg);
+        assert!(
+            result.is_ok(),
+            "delegated amend with valid ref should pass authorization, got {:?}",
             result
         );
     }
