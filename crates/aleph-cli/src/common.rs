@@ -80,8 +80,8 @@ pub fn confirm_action(prompt: &str, assume_yes: bool) -> Result<bool, std::io::E
 /// (deleting a key, exposing one to the terminal). `warning` is printed
 /// before the read so the user sees *why* the prompt is asking.
 ///
-/// Returns `Ok(true)` on a verbatim match, `Ok(false)` on anything else
-/// (including `--yes` overrides, which short-circuit to `true`).
+/// Returns `Ok(true)` on a verbatim match or when `assume_yes` is true
+/// (i.e. the caller passed `--yes`); `Ok(false)` on anything else.
 pub fn confirm_typed_match(
     warning: &str,
     expected: &str,
