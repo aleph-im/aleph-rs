@@ -3,6 +3,7 @@ use crate::cli::{
     NetworkAddArgs, NetworkCommand, NetworkEthereumArgs, NetworkRemoveArgs, NetworkSetArgs,
     NetworkShowArgs, NetworkUseArgs,
 };
+use crate::common::confirm_action;
 use crate::config::store::{ConfigStore, EthereumPatch, NetworkEntry};
 use aleph_sdk::credit::EthereumConfig;
 use anyhow::{Context, Result};
@@ -253,6 +254,14 @@ fn handle_network_show(
 }
 
 fn handle_network_remove(store: &ConfigStore, args: NetworkRemoveArgs, json: bool) -> Result<()> {
+    let prompt = format!(
+        "Remove network '{}' and all of its CCN entries? This cannot be undone.",
+        args.name
+    );
+    if !confirm_action(&prompt, args.yes).context("failed to read confirmation")? {
+        eprintln!("Aborted.");
+        return Ok(());
+    }
     store.remove_network(&args.name)?;
     if json {
         println!(
@@ -454,6 +463,11 @@ fn handle_remove(
     cli_network: Option<&str>,
 ) -> Result<()> {
     let network = resolve_ccn_scope(store, args.network.as_deref().or(cli_network))?.name;
+    let prompt = format!("Remove CCN '{}' from network '{network}'?", args.name);
+    if !confirm_action(&prompt, args.yes).context("failed to read confirmation")? {
+        eprintln!("Aborted.");
+        return Ok(());
+    }
     store.remove_ccn(&network, &args.name)?;
     if json {
         println!(

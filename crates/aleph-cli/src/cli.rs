@@ -683,6 +683,10 @@ pub struct ForgetArgs {
     #[arg(long)]
     pub on_behalf_of: Option<String>,
 
+    /// Skip the confirmation prompt and submit immediately.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -1024,6 +1028,10 @@ pub struct AccountBalanceArgs {
 pub struct AccountDeleteArgs {
     /// Name of the account to delete.
     pub name: String,
+
+    /// Skip the type-the-name confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -1534,6 +1542,9 @@ pub struct CcnRemoveArgs {
     /// Target network (defaults to the current network).
     #[arg(long)]
     pub network: Option<String>,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -1602,6 +1613,10 @@ pub struct NetworkShowArgs {
 pub struct NetworkRemoveArgs {
     /// Name of the network to remove.
     pub name: String,
+
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]

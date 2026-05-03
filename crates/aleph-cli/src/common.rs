@@ -55,6 +55,50 @@ pub fn read_content(
     Ok(value)
 }
 
+/// Interactive yes/no confirmation for destructive commands.
+///
+/// Prints `prompt` to stderr and reads a line from stdin. Returns `Ok(true)`
+/// only on `y` or `yes` (case-insensitive). If `assume_yes` is true (i.e. the
+/// caller passed `--yes`), skips the prompt and returns `Ok(true)`.
+///
+/// Errors only on stdin read failure — not on a "no" answer.
+pub fn confirm_action(prompt: &str, assume_yes: bool) -> Result<bool, std::io::Error> {
+    if assume_yes {
+        return Ok(true);
+    }
+    eprint!("{prompt} [y/N]: ");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    let trimmed = answer.trim().to_ascii_lowercase();
+    Ok(trimmed == "y" || trimmed == "yes")
+}
+
+/// Stricter confirmation: the user must type `expected` verbatim. Used when
+/// the action is irreversible enough that a reflexive `y` would be a problem
+/// (deleting a key, exposing one to the terminal). `warning` is printed
+/// before the read so the user sees *why* the prompt is asking.
+///
+/// Returns `Ok(true)` on a verbatim match or when `assume_yes` is true
+/// (i.e. the caller passed `--yes`); `Ok(false)` on anything else.
+pub fn confirm_typed_match(
+    warning: &str,
+    expected: &str,
+    assume_yes: bool,
+) -> Result<bool, std::io::Error> {
+    if assume_yes {
+        return Ok(true);
+    }
+    eprintln!("{warning}");
+    eprint!("Type '{expected}' to confirm: ");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim() == expected)
+}
+
 /// Submit a signed message, or print it if --dry-run.
 /// Handles --json vs human-readable output.
 pub async fn submit_or_preview(
@@ -454,6 +498,17 @@ mod tests {
     use super::*;
     use crate::config::store::ConfigStore;
     use tempfile::TempDir;
+
+    #[test]
+    fn confirm_action_short_circuits_when_assume_yes() {
+        // No stdin read happens — verifies the --yes path is purely synchronous.
+        assert!(confirm_action("Delete everything?", true).unwrap());
+    }
+
+    #[test]
+    fn confirm_typed_match_short_circuits_when_assume_yes() {
+        assert!(confirm_typed_match("WARNING", "expected", true).unwrap());
+    }
 
     #[test]
     fn read_content_from_flag() {
