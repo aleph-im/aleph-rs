@@ -1,23 +1,18 @@
 use aleph_sdk::crn::CrnClient;
+use anyhow::Result;
 use futures_util::StreamExt;
 use url::Url;
 
 use crate::cli::{CrnArgs, CrnStartArgs, SigningArgs};
 use crate::common::resolve_account;
 
-fn build_client(
-    crn_url: &str,
-    signing: &SigningArgs,
-) -> Result<CrnClient, Box<dyn std::error::Error>> {
+fn build_client(crn_url: &str, signing: &SigningArgs) -> Result<CrnClient> {
     let account = resolve_account(&signing.identity)?;
     let url = Url::parse(crn_url)?;
     Ok(CrnClient::new(&account, url)?)
 }
 
-pub async fn handle_start(
-    json: bool,
-    args: CrnStartArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn handle_start(json: bool, args: CrnStartArgs) -> Result<()> {
     let client = build_client(&args.crn_url, &args.signing)?;
     let response = client.start_instance(&args.vm_id).await?;
 
@@ -46,11 +41,7 @@ pub async fn handle_start(
     Ok(())
 }
 
-pub async fn handle_operation(
-    json: bool,
-    args: CrnArgs,
-    operation: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn handle_operation(json: bool, args: CrnArgs, operation: &str) -> Result<()> {
     let client = build_client(&args.crn_url, &args.signing)?;
 
     match operation {
@@ -112,7 +103,7 @@ fn sanitize_log(s: &str) -> String {
     result
 }
 
-pub async fn handle_logs(json: bool, args: CrnArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn handle_logs(json: bool, args: CrnArgs) -> Result<()> {
     let client = build_client(&args.crn_url, &args.signing)?;
     let mut stream = std::pin::pin!(client.stream_logs(&args.vm_id).await?);
 

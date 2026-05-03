@@ -5,6 +5,7 @@ use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::corechannel::{self, AmendDetails};
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
+use anyhow::{Result, bail};
 use serde::Serialize;
 use url::Url;
 
@@ -21,7 +22,7 @@ pub async fn handle_node_command(
     json: bool,
     command: NodeCommand,
     cli_network: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     match command {
         NodeCommand::List(args) => list_nodes(aleph_client, json, args).await,
         NodeCommand::CreateCcn(args) => {
@@ -83,7 +84,7 @@ pub async fn handle_node_command(
                 terms_and_conditions: args.terms_and_conditions,
             };
             if details == AmendDetails::default() {
-                return Err("at least one field must be provided".into());
+                bail!("at least one field must be provided");
             }
             let tag = resolve_effective_tag(args.network_tag.as_deref(), cli_network)?;
             let account = resolve_account(&args.signing.identity)?;
@@ -99,28 +100,20 @@ pub async fn handle_node_command(
 /// `--network` or the configured default). Errors only if neither is
 /// available — e.g. `aleph --ccn <RAW_URL> node ...` with no network
 /// selected and no `--network-tag` given.
-fn resolve_effective_tag(
-    override_tag: Option<&str>,
-    cli_network: Option<&str>,
-) -> Result<String, Box<dyn std::error::Error>> {
+fn resolve_effective_tag(override_tag: Option<&str>, cli_network: Option<&str>) -> Result<String> {
     if let Some(tag) = override_tag {
         return Ok(tag.to_string());
     }
-    let entry = resolve_network(cli_network).map_err(|e| -> Box<dyn std::error::Error> {
-        format!(
+    let entry = resolve_network(cli_network).map_err(|e| {
+        anyhow::anyhow!(
             "no --network-tag given and could not resolve a default network ({e}). \
              Pass --network-tag <TAG> or set a default with: aleph config network use <NAME>"
         )
-        .into()
     })?;
     Ok(entry.name)
 }
 
-async fn list_nodes(
-    aleph_client: &AlephClient,
-    json: bool,
-    args: NodeListArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn list_nodes(aleph_client: &AlephClient, json: bool, args: NodeListArgs) -> Result<()> {
     let filter_address = if args.all {
         None
     } else if let Some(addr) = &args.address {
@@ -129,9 +122,10 @@ async fn list_nodes(
         match resolve_account(&args.identity) {
             Ok(account) => Some(account.address().clone()),
             Err(_) => {
-                return Err("No address provided. Use --address <ADDRESS> or --all, \
+                bail!(
+                    "No address provided. Use --address <ADDRESS> or --all, \
                      or configure a signing account."
-                    .into());
+                );
             }
         }
     };

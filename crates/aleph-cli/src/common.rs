@@ -4,6 +4,7 @@ use std::time::Duration;
 use aleph_sdk::client::{AlephMessageClient, MessageError, MessageWithStatus};
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::pending::PendingMessage;
+use anyhow::{Result, anyhow, bail};
 use url::Url;
 
 /// Returns true if the error is an HTTP 429 Too Many Requests.
@@ -40,9 +41,7 @@ where
 }
 
 /// Read JSON content from --content flag or stdin.
-pub fn read_content(
-    content_flag: Option<String>,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+pub fn read_content(content_flag: Option<String>) -> Result<serde_json::Value> {
     let raw = match content_flag {
         Some(c) => c,
         None => {
@@ -107,7 +106,7 @@ pub async fn submit_or_preview(
     pending: &PendingMessage,
     dry_run: bool,
     json: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if dry_run {
         if json {
             println!("{}", serde_json::to_string_pretty(pending)?);
@@ -126,7 +125,7 @@ pub async fn submit_or_preview(
             } else {
                 None
             };
-            return Err(format_api_error(status, &body, rejection_code, json).into());
+            bail!("{}", format_api_error(status, &body, rejection_code, json));
         }
         Err(e) => return Err(e.into()),
     };
@@ -151,7 +150,7 @@ pub fn print_submission_result(
     publication_status: &str,
     message_status: &str,
     json: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if json {
         print_json_result(ccn_url, pending, publication_status, message_status)
     } else {
@@ -165,7 +164,7 @@ fn print_json_result(
     pending: &PendingMessage,
     publication_status: &str,
     message_status: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let explorer_url = format!("{}api/v0/messages/{}", ccn_url.as_str(), pending.item_hash);
     let output = serde_json::json!({
         "item_hash": pending.item_hash.to_string(),
@@ -341,29 +340,27 @@ pub fn resolve_ccn_url_with_store(
     store: &ConfigStore,
     ccn: Option<&str>,
     network: Option<&str>,
-) -> Result<Url, Box<dyn std::error::Error>> {
+) -> Result<Url> {
     // URL form: anything containing "://" is treated as a raw URL.
     if let Some(raw) = ccn
         && raw.contains("://")
     {
-        return Ok(Url::parse(raw).map_err(|e| format!("invalid --ccn URL '{raw}': {e}"))?);
+        return Url::parse(raw).map_err(|e| anyhow!("invalid --ccn URL '{raw}': {e}"));
     }
 
     let (network_name, network_entry) = match network {
         Some(n) => {
-            let entry = store.get_network(n).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let entry = store.get_network(n).map_err(|e| anyhow!("{e}"))?;
             (n.to_string(), entry)
         }
         None => {
             let name = store
                 .default_network_name()
-                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .map_err(|e| anyhow!("{e}"))?
                 .ok_or_else(|| {
-                    anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
+                    anyhow!("no default network set; use: aleph config network use <NAME>")
                 })?;
-            let entry = store
-                .get_network(&name)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let entry = store.get_network(&name).map_err(|e| anyhow!("{e}"))?;
             (name, entry)
         }
     };
@@ -371,29 +368,20 @@ pub fn resolve_ccn_url_with_store(
     let ccn_name = match ccn {
         Some(name) => name.to_string(),
         None => network_entry.default_ccn.ok_or_else(|| {
-            anyhow::anyhow!(
-                "network '{network_name}' has no default CCN; use: aleph config ccn use <NAME>"
-            )
+            anyhow!("network '{network_name}' has no default CCN; use: aleph config ccn use <NAME>")
         })?,
     };
 
     let entry = store.get_ccn(&network_name, &ccn_name).map_err(|e| {
-        anyhow::anyhow!(
-            "{e} (and '{ccn_name}' doesn't look like a URL — missing scheme like https://)"
-        )
+        anyhow!("{e} (and '{ccn_name}' doesn't look like a URL — missing scheme like https://)")
     })?;
-    Ok(Url::parse(&entry.url).map_err(|e| {
-        format!("invalid URL for CCN '{ccn_name}' in network '{network_name}': {e}")
-    })?)
+    Url::parse(&entry.url)
+        .map_err(|e| anyhow!("invalid URL for CCN '{ccn_name}' in network '{network_name}': {e}"))
 }
 
 /// Resolve the CCN URL using the user-global config store. Call site: `main.rs`.
-pub fn resolve_ccn_url(
-    ccn: Option<&str>,
-    network: Option<&str>,
-) -> Result<Url, Box<dyn std::error::Error>> {
-    let store =
-        ConfigStore::open().map_err(|e| anyhow::anyhow!("failed to open config store: {e}"))?;
+pub fn resolve_ccn_url(ccn: Option<&str>, network: Option<&str>) -> Result<Url> {
+    let store = ConfigStore::open().map_err(|e| anyhow!("failed to open config store: {e}"))?;
     resolve_ccn_url_with_store(&store, ccn, network)
 }
 
@@ -405,27 +393,24 @@ pub fn resolve_ccn_url(
 pub fn resolve_network_with_store(
     store: &ConfigStore,
     network_override: Option<&str>,
-) -> Result<crate::config::store::NetworkEntry, Box<dyn std::error::Error>> {
+) -> Result<crate::config::store::NetworkEntry> {
     let name = match network_override {
         Some(n) => n.to_string(),
         None => store
             .default_network_name()
-            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .map_err(|e| anyhow!("{e}"))?
             .ok_or_else(|| {
-                anyhow::anyhow!("no default network set; use: aleph config network use <NAME>")
+                anyhow!("no default network set; use: aleph config network use <NAME>")
             })?,
     };
-    store
-        .get_network(&name)
-        .map_err(|e| anyhow::anyhow!("{e}").into())
+    store.get_network(&name).map_err(|e| anyhow!("{e}"))
 }
 
 /// Resolve a network entry using the user-global config store.
 pub fn resolve_network(
     network_override: Option<&str>,
-) -> Result<crate::config::store::NetworkEntry, Box<dyn std::error::Error>> {
-    let store =
-        ConfigStore::open().map_err(|e| anyhow::anyhow!("failed to open config store: {e}"))?;
+) -> Result<crate::config::store::NetworkEntry> {
+    let store = ConfigStore::open().map_err(|e| anyhow!("failed to open config store: {e}"))?;
     resolve_network_with_store(&store, network_override)
 }
 
@@ -435,47 +420,43 @@ pub fn resolve_network(
 /// 1. --private-key flag or ALEPH_PRIVATE_KEY env var (requires --chain)
 /// 2. --account flag (named account from store)
 /// 3. Default account from store
-pub fn resolve_account(identity: &IdentityArgs) -> Result<CliAccount, Box<dyn std::error::Error>> {
+pub fn resolve_account(identity: &IdentityArgs) -> Result<CliAccount> {
     // 1. Explicit private key takes precedence
     if identity.private_key.is_some() || std::env::var("ALEPH_PRIVATE_KEY").is_ok() {
         let chain = identity.chain.ok_or_else(|| {
-            anyhow::anyhow!(
-                "--chain is required when signing with --private-key (or ALEPH_PRIVATE_KEY)"
-            )
+            anyhow!("--chain is required when signing with --private-key (or ALEPH_PRIVATE_KEY)")
         })?;
-        return Ok(load_account(identity.private_key.as_deref(), chain.into())?);
+        return load_account(identity.private_key.as_deref(), chain.into());
     }
 
     // 2-3. Named account or default from store
-    let store =
-        AccountStore::open().map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
+    let store = AccountStore::open().map_err(|e| anyhow!("failed to open account store: {e}"))?;
 
     let name = match &identity.account {
         Some(name) => name.clone(),
         None => store
             .default_account_name()
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .ok_or_else(|| anyhow::anyhow!(
+            .map_err(|e| anyhow!("{e}"))?
+            .ok_or_else(|| anyhow!(
                 "no account specified and no default account set.\n\
                  Use --private-key, --account, or create an account with: aleph account create <NAME>"
             ))?
             .to_string(),
     };
 
-    Ok(load_account_by_name(&store, &name)?)
+    load_account_by_name(&store, &name)
 }
 
 /// Resolve a user-supplied value to an address.
 ///
 /// Accepts either a raw address (hex string starting with "0x"), an account
 /// name, or an alias name from the local account store.
-pub fn resolve_address(value: &str) -> Result<Address, Box<dyn std::error::Error>> {
+pub fn resolve_address(value: &str) -> Result<Address> {
     if value.starts_with("0x") || value.starts_with("0X") {
         return Ok(Address::from(value.to_string()));
     }
 
-    let store =
-        AccountStore::open().map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
+    let store = AccountStore::open().map_err(|e| anyhow!("failed to open account store: {e}"))?;
 
     // Try account first, then alias.
     if let Ok(entry) = store.get_account(value) {
@@ -485,7 +466,9 @@ pub fn resolve_address(value: &str) -> Result<Address, Box<dyn std::error::Error
         return Ok(Address::from(alias.address));
     }
 
-    Err(anyhow::anyhow!("'{value}' is not a valid address or known account/alias name").into())
+    Err(anyhow!(
+        "'{value}' is not a valid address or known account/alias name"
+    ))
 }
 
 /// Format a user-supplied address value for display.

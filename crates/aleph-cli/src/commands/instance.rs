@@ -19,6 +19,7 @@ use aleph_types::message::execution::volume::{
 };
 use aleph_types::message::{Message, MessageContentEnum, MessageType};
 use aleph_types::timestamp::Timestamp;
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use memsizes::MiB;
 use url::Url;
@@ -70,7 +71,7 @@ pub(crate) fn extract_instance_row(message: &Message) -> Option<InstanceRow> {
 async fn fetch_instance_rows(
     aleph_client: &AlephClient,
     address: &Address,
-) -> Result<Vec<InstanceRow>, Box<dyn std::error::Error>> {
+) -> Result<Vec<InstanceRow>> {
     use std::collections::HashMap;
 
     let mut by_hash: HashMap<ItemHash, InstanceRow> = HashMap::new();
@@ -116,7 +117,7 @@ async fn handle_instance_list(
     aleph_client: &AlephClient,
     json: bool,
     args: InstanceListArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let address = match args.address.as_deref() {
         Some(value) => resolve_address(value)?,
         None => {
@@ -211,7 +212,7 @@ fn format_rows_text(rows: &[InstanceRow]) -> String {
     out
 }
 
-fn render_rows(rows: &[InstanceRow], json: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn render_rows(rows: &[InstanceRow], json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&format_rows_json(rows))?);
     } else {
@@ -225,7 +226,7 @@ pub async fn handle_instance_command(
     ccn_url: &Url,
     json: bool,
     command: InstanceCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     use super::crn;
     match command {
         InstanceCommand::Create(args) => {
@@ -257,19 +258,15 @@ const SSH_PUBKEY_PREFIXES: &[&str] = &[
     "sk-ecdsa-sha2-nistp256@openssh.com",
 ];
 
-pub(crate) fn validate_ssh_pubkey(
-    key: &str,
-    path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn validate_ssh_pubkey(key: &str, path: &std::path::Path) -> Result<()> {
     let has_valid_prefix = SSH_PUBKEY_PREFIXES
         .iter()
         .any(|prefix| key.starts_with(prefix));
     if !has_valid_prefix {
-        return Err(format!(
+        bail!(
             "'{}' does not look like an SSH public key (expected a line starting with ssh-rsa, ssh-ed25519, etc.)",
             path.display()
-        )
-        .into());
+        );
     }
     Ok(())
 }
@@ -286,13 +283,11 @@ fn parse_kv_pairs(s: &str) -> Result<Vec<(&str, &str)>, String> {
         .collect()
 }
 
-fn parse_persistent_volumes(
-    specs: &[String],
-) -> Result<Vec<MachineVolume>, Box<dyn std::error::Error>> {
+fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
-            let pairs = parse_kv_pairs(spec)?;
+            let pairs = parse_kv_pairs(spec).map_err(anyhow::Error::msg)?;
             let mut name: Option<String> = None;
             let mut mount: Option<String> = None;
             let mut size_mib: Option<u64> = None;
@@ -301,19 +296,19 @@ fn parse_persistent_volumes(
                 match k {
                     "name" => name = Some(v.to_string()),
                     "mount" => mount = Some(v.to_string()),
-                    "size" => size_mib = Some(parse_size_to_mib(v)?),
+                    "size" => size_mib = Some(parse_size_to_mib(v).map_err(anyhow::Error::msg)?),
                     "persistence" => {
                         persistence = Some(match v {
                             "host" => VolumePersistence::Host,
                             "store" => VolumePersistence::Store,
-                            _ => return Err(format!("invalid persistence: '{v}'").into()),
+                            _ => bail!("invalid persistence: '{v}'"),
                         })
                     }
-                    _ => return Err(format!("unknown persistent volume key: '{k}'").into()),
+                    _ => bail!("unknown persistent volume key: '{k}'"),
                 }
             }
-            let size_mib = size_mib.ok_or("persistent volume requires size")?;
-            let mount = mount.ok_or("persistent volume requires mount")?;
+            let size_mib = size_mib.context("persistent volume requires size")?;
+            let mount = mount.context("persistent volume requires mount")?;
             Ok(MachineVolume::Persistent(PersistentVolume {
                 base: BaseVolume {
                     comment: None,
@@ -328,24 +323,22 @@ fn parse_persistent_volumes(
         .collect()
 }
 
-fn parse_ephemeral_volumes(
-    specs: &[String],
-) -> Result<Vec<MachineVolume>, Box<dyn std::error::Error>> {
+fn parse_ephemeral_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
-            let pairs = parse_kv_pairs(spec)?;
+            let pairs = parse_kv_pairs(spec).map_err(anyhow::Error::msg)?;
             let mut mount: Option<String> = None;
             let mut size_mib: Option<u64> = None;
             for (k, v) in pairs {
                 match k {
                     "mount" => mount = Some(v.to_string()),
-                    "size" => size_mib = Some(parse_size_to_mib(v)?),
-                    _ => return Err(format!("unknown ephemeral volume key: '{k}'").into()),
+                    "size" => size_mib = Some(parse_size_to_mib(v).map_err(anyhow::Error::msg)?),
+                    _ => bail!("unknown ephemeral volume key: '{k}'"),
                 }
             }
-            let size_mib = size_mib.ok_or("ephemeral volume requires size")?;
-            let mount = mount.ok_or("ephemeral volume requires mount")?;
+            let size_mib = size_mib.context("ephemeral volume requires size")?;
+            let mount = mount.context("ephemeral volume requires mount")?;
             Ok(MachineVolume::Ephemeral(EphemeralVolume::new(
                 size_mib, mount,
             )?))
@@ -353,13 +346,11 @@ fn parse_ephemeral_volumes(
         .collect()
 }
 
-fn parse_immutable_volumes(
-    specs: &[String],
-) -> Result<Vec<MachineVolume>, Box<dyn std::error::Error>> {
+fn parse_immutable_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
-            let pairs = parse_kv_pairs(spec)?;
+            let pairs = parse_kv_pairs(spec).map_err(anyhow::Error::msg)?;
             let mut reference: Option<String> = None;
             let mut mount: Option<String> = None;
             let mut use_latest = true;
@@ -370,14 +361,14 @@ fn parse_immutable_volumes(
                     "use_latest" => {
                         use_latest = v
                             .parse()
-                            .map_err(|_| format!("invalid use_latest: '{v}'"))?
+                            .map_err(|_| anyhow!("invalid use_latest: '{v}'"))?
                     }
-                    _ => return Err(format!("unknown immutable volume key: '{k}'").into()),
+                    _ => bail!("unknown immutable volume key: '{k}'"),
                 }
             }
-            let reference = reference.ok_or("immutable volume requires ref")?;
-            let mount = mount.ok_or("immutable volume requires mount")?;
-            let item_hash = reference.parse().map_err(|e| format!("invalid ref: {e}"))?;
+            let reference = reference.context("immutable volume requires ref")?;
+            let mount = mount.context("immutable volume requires mount")?;
+            let item_hash = reference.parse().map_err(|e| anyhow!("invalid ref: {e}"))?;
             Ok(MachineVolume::Immutable(ImmutableVolume {
                 base: BaseVolume {
                     comment: None,
@@ -396,8 +387,8 @@ pub(crate) fn resolve_instance_specs_from_flags(
     vcpus: Option<u32>,
     memory_mib: Option<u64>,
     disk_mib: Option<u64>,
-) -> Result<(u32, u64, u64), Box<dyn std::error::Error>> {
-    let disk_mib = disk_mib.ok_or(
+) -> Result<(u32, u64, u64)> {
+    let disk_mib = disk_mib.context(
         "--disk-size is required when --size is not used \
          (or use --size to specify a tier slug like 1vcpu-2gb)",
     )?;
@@ -409,7 +400,7 @@ async fn handle_instance_create(
     ccn_url: &Url,
     json: bool,
     mut args: InstanceCreateArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
@@ -421,7 +412,7 @@ async fn handle_instance_create(
     let mut ssh_keys = Vec::new();
     for path in &args.ssh_pubkey_file {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            format!(
+            anyhow!(
                 "failed to read SSH public key file '{}': {e}",
                 path.display()
             )
@@ -436,12 +427,12 @@ async fn handle_instance_create(
         let pricing = aleph_client
             .get_pricing_aggregate()
             .await
-            .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
+            .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
         let instance_pricing = &pricing.pricing.instance;
 
         let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
             let available = instance_pricing.available_slugs().join(", ");
-            format!("unknown size '{slug}'. Available sizes: {available}")
+            anyhow!("unknown size '{slug}'. Available sizes: {available}")
         })?;
 
         let vcpus = args.vcpus.unwrap_or(tier.vcpus);
@@ -459,9 +450,9 @@ async fn handle_instance_create(
     };
 
     let disk_size = PersistentVolumeSize::try_from(disk_size_mib)
-        .map_err(|e| format!("invalid disk size: {e}"))?;
+        .map_err(|e| anyhow!("invalid disk size: {e}"))?;
 
-    let image = args.image.ok_or("--image is required (or use -i)")?;
+    let image = args.image.context("--image is required (or use -i)")?;
     let mut builder = InstanceBuilder::new(&account, image, disk_size)
         .vcpus(vcpus)
         .memory(MiB::from(memory_mib))
@@ -486,7 +477,7 @@ async fn handle_instance_create(
         let firmware: ItemHash = args
             .confidential_firmware
             .parse()
-            .map_err(|e| format!("invalid confidential firmware hash: {e}"))?;
+            .map_err(|e| anyhow!("invalid confidential firmware hash: {e}"))?;
         builder = builder.trusted_execution(TrustedExecutionEnvironment {
             firmware: Some(firmware),
             policy: 0x1, // NoDebug
@@ -603,7 +594,7 @@ const GPU_PRESETS: &[(&str, &str, &str, &str, &str, &str)] = &[
     ),
 ];
 
-fn resolve_gpu(name: &str) -> Result<GpuProperties, Box<dyn std::error::Error>> {
+fn resolve_gpu(name: &str) -> Result<GpuProperties> {
     let lower = name.to_ascii_lowercase();
     for &(slug, _, vendor, device_name, class, device_id) in GPU_PRESETS {
         if lower == slug {
@@ -621,11 +612,10 @@ fn resolve_gpu(name: &str) -> Result<GpuProperties, Box<dyn std::error::Error>> 
         }
     }
     let available: Vec<&str> = GPU_PRESETS.iter().map(|(n, ..)| *n).collect();
-    Err(format!(
+    Err(anyhow!(
         "unknown GPU model '{name}'. Available models: {}",
         available.join(", ")
-    )
-    .into())
+    ))
 }
 
 fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingData) {
@@ -660,14 +650,14 @@ async fn handle_instance_price(
     aleph_client: &AlephClient,
     json: bool,
     args: InstancePriceArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let pricing = aleph_client
         .get_pricing_aggregate()
         .await
-        .map_err(|e| format!("failed to fetch pricing tiers: {e}"))?;
+        .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
 
     if args.confidential && args.gpu.is_some() {
-        return Err("--confidential and --gpu cannot be combined".into());
+        bail!("--confidential and --gpu cannot be combined");
     }
 
     if args.list_gpus || args.gpu.as_deref() == Some("") {
@@ -683,11 +673,10 @@ async fn handle_instance_price(
             Some(m) => Some(m.clone()),
             None => {
                 let names: Vec<String> = models.iter().map(|m| m.slug()).collect();
-                return Err(format!(
+                bail!(
                     "unknown GPU model '{slug}'. Available models: {}",
                     names.join(", ")
-                )
-                .into());
+                );
             }
         }
     } else {
@@ -701,12 +690,12 @@ async fn handle_instance_price(
     let cu_price = instance_pricing
         .price
         .get("compute_unit")
-        .ok_or("missing compute_unit price in pricing aggregate")?;
+        .context("missing compute_unit price in pricing aggregate")?;
 
     let credit_per_cu: f64 = cu_price
         .credit
         .parse()
-        .map_err(|_| format!("invalid credit price: '{}'", cu_price.credit))?;
+        .map_err(|_| anyhow!("invalid credit price: '{}'", cu_price.credit))?;
 
     // Resolve specs: GPU tier, --size tier, or fully manual
     let (size_slug, compute_units, vcpus, memory_mib, disk_mib) = if let Some(gpu) = &gpu_model {
@@ -715,7 +704,7 @@ async fn handle_instance_price(
             .tiers
             .iter()
             .find(|t| t.model.as_deref() == Some(&gpu.name))
-            .ok_or_else(|| format!("GPU tier not found for '{}'", gpu.name))?;
+            .ok_or_else(|| anyhow!("GPU tier not found for '{}'", gpu.name))?;
         let min_cu = tier.compute_units;
         let cu_spec = &instance_pricing.compute_unit;
         let min_slug = instance_pricing.slug_for_compute_units(min_cu);
@@ -729,18 +718,17 @@ async fn handle_instance_price(
                     .filter(|t| t.model.is_none() && t.compute_units >= min_cu)
                     .map(|t| instance_pricing.tier_slug(t))
                     .collect();
-                format!(
+                anyhow!(
                     "unknown size '{slug}' for GPU tier. Available sizes: {}",
                     available.join(", ")
                 )
             })?;
             if size_tier.compute_units < min_cu {
-                return Err(format!(
+                bail!(
                     "size '{slug}' ({} CU) is below the minimum for GPU '{}' (min: {min_slug}, {min_cu} CU)",
                     size_tier.compute_units,
                     gpu.slug(),
-                )
-                .into());
+                );
             }
             size_tier.compute_units
         } else if args.vcpus.is_some() || args.memory.is_some() {
@@ -752,11 +740,10 @@ async fn handle_instance_price(
                 .unwrap_or(0);
             let requested_cu = cu_from_vcpus.max(cu_from_mem);
             if requested_cu < min_cu {
-                return Err(format!(
+                bail!(
                     "requested resources are below the minimum for GPU '{}' (min: {min_slug}, {min_cu} CU)",
                     gpu.slug(),
-                )
-                .into());
+                );
             }
             requested_cu
         } else {
@@ -774,7 +761,7 @@ async fn handle_instance_price(
     } else if let Some(slug) = &args.size {
         let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
             let available = instance_pricing.available_slugs().join(", ");
-            format!("unknown size '{slug}'. Available sizes: {available}")
+            anyhow!("unknown size '{slug}'. Available sizes: {available}")
         })?;
         (
             Some(slug.clone()),
@@ -795,9 +782,9 @@ async fn handle_instance_price(
                 (None, compute_units, actual_vcpus, actual_memory, disk)
             }
             _ => {
-                return Err(
-                        "--size is required unless --vcpus, --memory, and --disk-size are all specified".into(),
-                    );
+                bail!(
+                    "--size is required unless --vcpus, --memory, and --disk-size are all specified"
+                );
             }
         }
     };

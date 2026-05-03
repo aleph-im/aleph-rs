@@ -9,6 +9,7 @@ use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
 use aleph_types::message::{FileRef, StorageEngine};
+use anyhow::{Context, Result, bail};
 use url::Url;
 
 fn resolve_payment(choice: Option<PaymentTypeCli>) -> Payment {
@@ -23,7 +24,7 @@ pub async fn handle_file_command(
     ccn_url: &Url,
     json: bool,
     command: FileCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     match command {
         FileCommand::Upload(args) => {
             handle_file_upload(aleph_client, ccn_url, json, args).await?;
@@ -43,16 +44,16 @@ async fn handle_file_upload(
     ccn_url: &Url,
     json: bool,
     args: FileUploadArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if !args.path.exists() {
-        return Err(format!("path not found: {}", args.path.display()).into());
+        bail!("path not found: {}", args.path.display());
     }
     if args.path.is_file() {
         handle_single_file_upload(aleph_client, ccn_url, json, args).await
     } else if args.path.is_dir() {
         handle_folder_upload(aleph_client, ccn_url, json, args).await
     } else {
-        Err(format!("not a regular file or directory: {}", args.path.display()).into())
+        bail!("not a regular file or directory: {}", args.path.display())
     }
 }
 
@@ -61,7 +62,7 @@ async fn handle_single_file_upload(
     ccn_url: &Url,
     json: bool,
     args: FileUploadArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
@@ -129,14 +130,14 @@ async fn handle_folder_upload(
     ccn_url: &Url,
     json: bool,
     args: FileUploadArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     use aleph_sdk::ipfs::{CidVersion, UploadFolderOptions};
 
     // Directory uploads always use IPFS. Reject only when the user explicitly
     // asked for native storage; an unset flag silently picks IPFS.
     if matches!(args.storage_engine, Some(StorageEngineCli::Storage)) {
-        return Err(
-            "native storage does not support directory uploads; omit --storage-engine or pass --storage-engine ipfs".into(),
+        bail!(
+            "native storage does not support directory uploads; omit --storage-engine or pass --storage-engine ipfs"
         );
     }
 
@@ -201,9 +202,7 @@ async fn handle_folder_upload(
     Ok(())
 }
 
-fn walk_folder_summary(
-    root: &std::path::Path,
-) -> Result<Vec<(std::path::PathBuf, u64)>, Box<dyn std::error::Error>> {
+fn walk_folder_summary(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, u64)>> {
     let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(root).follow_links(true).min_depth(1) {
         let entry = entry?;
@@ -213,7 +212,7 @@ fn walk_folder_summary(
         }
     }
     if out.is_empty() {
-        return Err(format!("empty folder: {}", root.display()).into());
+        bail!("empty folder: {}", root.display());
     }
     Ok(out)
 }
@@ -223,7 +222,7 @@ async fn handle_file_pin(
     ccn_url: &Url,
     json: bool,
     args: FilePinArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
@@ -254,7 +253,7 @@ async fn handle_file_download(
     aleph_client: &AlephClient,
     json: bool,
     args: FileDownloadArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // Resolve the file hash — for indirect lookups, fetch metadata first.
     let file_hash = if let Some(hash) = args.hash {
         hash
@@ -269,7 +268,7 @@ async fn handle_file_download(
     } else if let Some(reference) = args.reference {
         let owner = args
             .owner
-            .ok_or("--owner is required when downloading by --ref")?;
+            .context("--owner is required when downloading by --ref")?;
         let file_ref = FileRef::UserDefined {
             owner: resolve_address(&owner)?,
             reference,
