@@ -1,6 +1,6 @@
 use crate::cli::Cli;
 use aleph_sdk::client::AlephClient;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::sync::OnceLock;
 
 mod account;
@@ -58,6 +58,15 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let json = cli.json;
+
+    // Completions subcommand short-circuits: no network or config resolution
+    // is needed just to print a shell completion script.
+    if let cli::Commands::Completions { shell } = cli.command {
+        let mut cmd = Cli::command();
+        let bin_name = cmd.get_name().to_string();
+        clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+        return Ok(());
+    }
 
     // Config subcommand doesn't need a CCN URL
     if let cli::Commands::Config {
@@ -149,6 +158,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .await?
         }
         cli::Commands::Config { .. } => unreachable!(),
+        cli::Commands::Completions { .. } => unreachable!(),
         cli::Commands::Credit {
             command: credit_command,
         } => {

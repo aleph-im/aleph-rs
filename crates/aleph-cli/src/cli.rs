@@ -168,6 +168,12 @@ pub enum Commands {
         #[clap(subcommand)]
         command: CreditCommand,
     },
+    /// Generate shell completion script
+    Completions {
+        /// Target shell.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
