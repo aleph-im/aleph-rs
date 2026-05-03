@@ -75,6 +75,30 @@ pub fn confirm_action(prompt: &str, assume_yes: bool) -> Result<bool, std::io::E
     Ok(trimmed == "y" || trimmed == "yes")
 }
 
+/// Stricter confirmation: the user must type `expected` verbatim. Used when
+/// the action is irreversible enough that a reflexive `y` would be a problem
+/// (deleting a key, exposing one to the terminal). `warning` is printed
+/// before the read so the user sees *why* the prompt is asking.
+///
+/// Returns `Ok(true)` on a verbatim match, `Ok(false)` on anything else
+/// (including `--yes` overrides, which short-circuit to `true`).
+pub fn confirm_typed_match(
+    warning: &str,
+    expected: &str,
+    assume_yes: bool,
+) -> Result<bool, std::io::Error> {
+    if assume_yes {
+        return Ok(true);
+    }
+    eprintln!("{warning}");
+    eprint!("Type '{expected}' to confirm: ");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim() == expected)
+}
+
 /// Submit a signed message, or print it if --dry-run.
 /// Handles --json vs human-readable output.
 pub async fn submit_or_preview(
@@ -477,6 +501,11 @@ mod tests {
     fn confirm_action_short_circuits_when_assume_yes() {
         // No stdin read happens — verifies the --yes path is purely synchronous.
         assert!(confirm_action("Delete everything?", true).unwrap());
+    }
+
+    #[test]
+    fn confirm_typed_match_short_circuits_when_assume_yes() {
+        assert!(confirm_typed_match("WARNING", "expected", true).unwrap());
     }
 
     #[test]

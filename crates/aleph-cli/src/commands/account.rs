@@ -5,7 +5,7 @@ use crate::cli::{
     AccountImportArgs, AccountMigrateArgs, AccountShowArgs, AccountUseArgs, AliasAddArgs,
     AliasCommand, AliasRemoveArgs,
 };
-use crate::common::{format_address, resolve_address};
+use crate::common::{confirm_typed_match, format_address, resolve_address};
 use aleph_sdk::client::{AccountBalance, AlephAccountClient, AlephClient};
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
@@ -490,20 +490,15 @@ fn handle_delete(store: &AccountStore, args: AccountDeleteArgs) -> Result<()> {
     // Verify account exists before prompting
     store.get_account(&args.name)?;
 
-    if !args.yes {
-        eprintln!(
-            "Are you sure you want to delete account '{}'? This cannot be undone.",
-            args.name
-        );
-        eprintln!("Type the account name to confirm: ");
-        let mut confirmation = String::new();
-        std::io::stdin()
-            .read_line(&mut confirmation)
-            .context("failed to read confirmation")?;
-        if confirmation.trim() != args.name {
-            eprintln!("Aborted.");
-            return Ok(());
-        }
+    let warning = format!(
+        "Are you sure you want to delete account '{}'? This cannot be undone.",
+        args.name
+    );
+    if !confirm_typed_match(&warning, &args.name, args.yes)
+        .context("failed to read confirmation")?
+    {
+        eprintln!("Aborted.");
+        return Ok(());
     }
 
     store.delete_account(&args.name)?;
@@ -530,17 +525,15 @@ fn handle_export(store: &AccountStore, args: AccountExportArgs, json: bool) -> R
         anyhow::bail!("cannot export key for non-local account '{}'", args.name);
     }
 
-    if !args.yes {
-        eprintln!("WARNING: This will display your private key in the terminal.");
-        eprintln!("Type 'yes' to continue: ");
-        let mut confirmation = String::new();
-        std::io::stdin()
-            .read_line(&mut confirmation)
-            .context("failed to read confirmation")?;
-        if confirmation.trim() != "yes" {
-            eprintln!("Aborted.");
-            return Ok(());
-        }
+    if !confirm_typed_match(
+        "WARNING: This will display your private key in the terminal.",
+        "yes",
+        args.yes,
+    )
+    .context("failed to read confirmation")?
+    {
+        eprintln!("Aborted.");
+        return Ok(());
     }
 
     let key = Zeroizing::new(store.get_private_key(&args.name)?);
