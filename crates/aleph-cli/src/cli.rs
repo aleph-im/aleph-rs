@@ -1223,7 +1223,8 @@ Examples:
   aleph instance price --vcpus 2 --memory 4GB --disk-size 50GB
   aleph instance price --gpu h100
   aleph instance price --gpu h100 --size 32vcpu-192gb
-  aleph instance price --gpu            # list available GPU models
+  aleph instance price --list-gpus      # list available GPU models (recommended)
+  aleph instance price --gpu            # same, kept as a shortcut
   aleph instance price --size 1vcpu-2gb --confidential")]
     Price(InstancePriceArgs),
     /// Reboot a VM instance
@@ -1260,9 +1261,14 @@ pub struct InstancePriceArgs {
     #[arg(long, value_parser = parse_size_to_mib)]
     pub disk_size: Option<u64>,
 
-    /// GPU model name (e.g. h100, a100, rtx-4090). Pass --gpu without a value to list models.
+    /// GPU model name (e.g. h100, a100, rtx-4090). Pass --gpu without a value to list models
+    /// (or use --list-gpus).
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub gpu: Option<String>,
+
+    /// List available GPU models and exit.
+    #[arg(long, conflicts_with = "gpu")]
+    pub list_gpus: bool,
 
     /// Use confidential VM pricing (AMD SEV).
     #[arg(long)]

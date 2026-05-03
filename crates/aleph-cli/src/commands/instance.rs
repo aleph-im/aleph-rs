@@ -672,7 +672,7 @@ async fn handle_instance_price(
         return Err("--confidential and --gpu cannot be combined".into());
     }
 
-    if args.gpu.as_deref() == Some("") {
+    if args.list_gpus || args.gpu.as_deref() == Some("") {
         print_available_gpus(&pricing.pricing);
         return Ok(());
     }
