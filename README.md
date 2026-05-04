@@ -6,9 +6,9 @@ Rust tooling for the [Aleph Cloud](https://aleph.cloud) protocol: a CLI for end 
 
 ## Crates
 
-- **[aleph-cli](crates/aleph-cli)** — `aleph` command-line interface
-- **[aleph-sdk](crates/aleph-sdk)** — async Rust SDK
-- **[aleph-types](crates/aleph-types)** — protocol types and signature verification
+- **[aleph-cli](crates/aleph-cli)**: `aleph` command-line interface
+- **[aleph-sdk](crates/aleph-sdk)**: async Rust SDK
+- **[aleph-types](crates/aleph-types)**: protocol types and signature verification
 
 ---
 
@@ -45,7 +45,7 @@ aleph account use my-account
 # 2. Buy credits with ALEPH or USDC (requires a funded EVM account)
 aleph credit buy --token usdc --amount 10
 
-# 3. Upload a file — paid for in credits
+# 3. Upload a file (paid for in credits)
 aleph file upload ./report.pdf
 ```
 
