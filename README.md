@@ -9,6 +9,7 @@ Rust tooling for the [Aleph Cloud](https://aleph.cloud) protocol: a CLI for end 
 - **[aleph-cli](crates/aleph-cli)**: `aleph` command-line interface
 - **[aleph-sdk](crates/aleph-sdk)**: async Rust SDK
 - **[aleph-types](crates/aleph-types)**: protocol types and signature verification
+- **[heph](crates/heph)**: local single-binary CCN for testing (think Anvil for Aleph)
 
 ---
 
@@ -138,6 +139,19 @@ To trim dependencies (e.g. for a server that only verifies hashes):
 ```toml
 aleph-types = { version = "0.9", default-features = false }
 ```
+
+---
+
+## Heph (local CCN for testing)
+
+[Heph](crates/heph) is a single-binary local Core Channel Node, the Anvil-equivalent for Aleph: no P2P, no IPFS, no chain sync, just a fast deterministic test server backed by SQLite and a local file store. Useful for integration tests and local development against a real Aleph API surface.
+
+```sh
+cargo install heph
+heph                       # listens on http://127.0.0.1:4024
+```
+
+Pre-seeded accounts and credit balances are deterministic across runs. Point the CLI or SDK at it via `--ccn http://127.0.0.1:4024`. See [`crates/heph`](crates/heph) for flags (custom port, persistent data dir, pre-seeded addresses, etc.).
 
 ---
 
