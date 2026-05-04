@@ -116,7 +116,7 @@ use url::Url;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let client = AlephClient::new(Url::parse("https://api2.aleph.im")?);
+    let client = AlephClient::new(Url::parse("https://api.aleph.im")?);
     let hash = item_hash!("f3862cf9d3ad73a9e82b1c56fed12627ec51c6d2a1e3189ab3ef289642711b3e");
     let message = client.get_message(&hash).await?;
     println!("{message:?}");
