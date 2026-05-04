@@ -43,14 +43,14 @@ Run `aleph completions <bash|zsh|fish|powershell>` to generate shell completions
 aleph account create my-account
 aleph account use my-account
 
-# 2. Buy credits with ALEPH or USDC (requires a funded EVM account)
+# 2. Buy credits with ALEPH or USDC (requires funds on Ethereum mainnet)
 aleph credit buy --token usdc --amount 10
 
 # 3. Upload a file (paid for in credits)
 aleph file upload ./report.pdf
 ```
 
-`aleph account balance` shows your ALEPH and credit balances. Every command supports `--json` for scripting and `--help` for full documentation, including worked examples on the higher-traffic ones (`account import`, `credit buy`, `file upload`, `instance create`, …).
+`aleph account balance` shows your ALEPH and credit balances. Every command supports `--json` for scripting and `--help` for full documentation, including examples.
 
 ### Commands at a glance
 
