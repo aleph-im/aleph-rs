@@ -2,40 +2,111 @@
 
 [![CI](https://github.com/aleph-im/aleph-rs/workflows/CI/badge.svg)](https://github.com/aleph-im/aleph-rs/actions)
 
-Rust tools for the Aleph Cloud protocol.
-This repository is a mono-repo for everything related to Aleph Cloud written in Rust.
+Rust tooling for the [Aleph Cloud](https://aleph.cloud) protocol: a CLI for end users and a typed async SDK for developers.
 
 ## Crates
 
-- **[aleph-types](crates/aleph-types)** - Core type definitions (chains, messages, signature verification)
-- **[aleph-sdk](crates/aleph-sdk)** - SDK for interacting with Aleph Cloud nodes
-- **[aleph-cli](crates/aleph-cli)** - Command-line interface built on top of the SDK
+- **[aleph-cli](crates/aleph-cli)** — `aleph` command-line interface
+- **[aleph-sdk](crates/aleph-sdk)** — async Rust SDK
+- **[aleph-types](crates/aleph-types)** — protocol types and signature verification
 
-## Features
+---
 
-- **Type-safe** - Strongly typed Rust implementation of the Aleph Cloud protocol
-- **Async** - Built on Tokio for efficient async operations
-- **Signature verification** - Verify message signatures for EVM chains (Ethereum, Arbitrum, Base, ...) and SVM chains (Solana, Eclipse)
-- **Message integrity** - Verify item hashes and content integrity, with parallel verification and per-client concurrency control
-- **File storage** - Download files with optional integrity verification, stream to disk or memory
-- **Real-time** - Subscribe to messages via WebSocket with automatic reconnection
-- **Resilient** - HTTP retry with exponential backoff, configurable retry policy
-- **Cross-platform** - Tested on Linux, macOS, and Windows
-- **Modular** - Separate crates for types, SDK, and CLI
+## CLI
 
-## Quick Start
+### Install
 
-### Using the SDK
+```sh
+# 1. Pre-built binaries (Linux/macOS/Windows)
+#    https://github.com/aleph-im/aleph-rs/releases/latest
 
-Add the following to your `Cargo.toml`:
+# 2. Debian / Ubuntu (APT repo)
+echo "deb [trusted=yes] https://apt.aleph.im stable main" \
+  | sudo tee /etc/apt/sources.list.d/aleph.list
+sudo apt update && sudo apt install aleph-cli
+
+# 3. Cargo
+cargo install aleph-cli
+
+# 4. From source
+git clone https://github.com/aleph-im/aleph-rs && cd aleph-rs
+cargo install --path crates/aleph-cli
+```
+
+Run `aleph completions <bash|zsh|fish|powershell>` to generate shell completions.
+
+### Quick start
+
+```sh
+# 1. Create a local signing account (stored in your OS keychain)
+aleph account create my-account
+aleph account use my-account
+
+# 2. Buy credits with ALEPH or USDC (requires a funded EVM account)
+aleph credit buy --token usdc --amount 10
+
+# 3. Upload a file — paid for in credits
+aleph file upload ./report.pdf
+```
+
+`aleph account balance` shows your ALEPH and credit balances. Every command supports `--json` for scripting and `--help` for full documentation, including worked examples on the higher-traffic ones (`account import`, `credit buy`, `file upload`, `instance create`, …).
+
+### Commands at a glance
+
+| Group | Purpose |
+|---|---|
+| `aleph account` | Local signing keys (create, import, use, remove, balance, alias) |
+| `aleph credit` | Buy and transfer Aleph credits |
+| `aleph file` | Upload, download, and pin files |
+| `aleph instance` | Create and manage VM instances on CRNs |
+| `aleph post` | Create, amend, and list posts |
+| `aleph aggregate` | Create aggregate (key/value) entries |
+| `aleph message` | Get, list, sync, and forget raw protocol messages |
+| `aleph node` | Register, link, stake, and amend network nodes |
+| `aleph authorization` | Manage delegated signing authorizations |
+| `aleph config` | Networks and CCN endpoints |
+
+Run `aleph <group> --help` for the full subcommand list, and `aleph <group> <subcommand> --help` for flags and examples.
+
+### Configuration
+
+The CLI ships pre-configured for `mainnet` (CCN: `https://api.aleph.im`). Add more networks or CCN endpoints as needed:
+
+```sh
+aleph config network list                       # registered networks
+aleph config network add testnet …              # register a new network
+aleph config network use testnet                # change the default
+aleph config ccn list                           # CCN endpoints in current network
+aleph config ccn add my-ccn https://…           # register a CCN endpoint
+aleph config ccn use my-ccn                     # set as the default CCN
+```
+
+Per-command overrides also exist: `--network <name>` switches the active network for one call, `--ccn <name|url>` overrides the CCN endpoint, and `--account <name>` / `--private-key <hex>` override the signing identity.
+
+### Hardware wallets
+
+Ledger devices are supported for EVM accounts:
+
+```sh
+aleph account import my-ledger --ledger
+```
+
+Signing operations will prompt the device when required.
+
+---
+
+## SDK
+
+Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-aleph-sdk = { git = "https://github.com/aleph-im/aleph-rs" }
-aleph-types = { git = "https://github.com/aleph-im/aleph-rs" }
+aleph-sdk = "0.9"
+aleph-types = "0.9"
+tokio = { version = "1", features = ["full"] }
 ```
 
-Basic usage example:
+Fetch a message:
 
 ```rust
 use aleph_sdk::client::{AlephClient, AlephMessageClient};
@@ -45,42 +116,31 @@ use url::Url;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let client = AlephClient::new(Url::parse("https://api2.aleph.im")?);
-
-    // Fetch a message from the network.
-    let item_hash = item_hash!("f3862cf9d3ad73a9e82b1c56fed12627ec51c6d2a1e3189ab3ef289642711b3e");
-    let message = client.get_message(&item_hash).await?;
-
+    let hash = item_hash!("f3862cf9d3ad73a9e82b1c56fed12627ec51c6d2a1e3189ab3ef289642711b3e");
+    let message = client.get_message(&hash).await?;
+    println!("{message:?}");
     Ok(())
 }
 ```
 
-### Feature Flags
+The SDK also covers posting, aggregates, file storage, instance management, credit transfers, and WebSocket subscriptions. See [`crates/aleph-sdk`](crates/aleph-sdk) for examples.
 
-`aleph-types` provides optional signature verification behind feature flags:
+### Feature flags (`aleph-types`)
 
 | Feature | Description | Default |
-|---------|-------------|---------|
-| `signature` | Enables both `signature-evm` and `signature-sol` | Yes |
-| `signature-evm` | Ethereum/EVM signature verification (secp256k1, EIP-191) | Yes |
-| `signature-sol` | Solana/SVM signature verification (Ed25519) | Yes |
+|---|---|---|
+| `signature` | Enables both `signature-evm` and `signature-sol` | yes |
+| `signature-evm` | Ethereum/EVM signatures (secp256k1, EIP-191) | yes |
+| `signature-sol` | Solana/SVM signatures (Ed25519) | yes |
 
-To disable signature verification (e.g. to reduce dependencies):
+To trim dependencies (e.g. for a server that only verifies hashes):
 
 ```toml
-aleph-types = { git = "https://github.com/aleph-im/aleph-rs", default-features = false }
+aleph-types = { version = "0.9", default-features = false }
 ```
 
-### CLI
+---
 
-The `aleph` CLI supports fetching, listing, and syncing messages between nodes:
+## License
 
-```sh
-# Fetch a message by item hash
-aleph message get <item_hash>
-
-# List messages with filters
-aleph message list --message-types post --chains ETH
-
-# Sync messages between two nodes
-aleph message sync --source <url> --target <url>
-```
+MIT.
