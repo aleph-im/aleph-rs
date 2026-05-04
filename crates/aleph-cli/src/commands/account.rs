@@ -1,8 +1,8 @@
 use crate::account::generate::generate_key;
 use crate::account::store::{AccountKind, AccountStore};
 use crate::cli::{
-    AccountBalanceArgs, AccountCommand, AccountCreateArgs, AccountDeleteArgs, AccountExportArgs,
-    AccountImportArgs, AccountMigrateArgs, AccountShowArgs, AccountUseArgs, AliasAddArgs,
+    AccountBalanceArgs, AccountCommand, AccountCreateArgs, AccountExportArgs, AccountImportArgs,
+    AccountMigrateArgs, AccountRemoveArgs, AccountShowArgs, AccountUseArgs, AliasAddArgs,
     AliasCommand, AliasRemoveArgs,
 };
 use crate::common::{confirm_typed_match, format_address, resolve_address};
@@ -26,7 +26,7 @@ pub async fn handle_account_command(
         AccountCommand::Migrate(args) => handle_migrate(&store, args, json),
         AccountCommand::Show(args) => handle_show(client, &store, args, json).await,
         AccountCommand::Balance(args) => handle_balance(client, &store, args, json).await,
-        AccountCommand::Delete(args) => handle_delete(&store, args),
+        AccountCommand::Remove(args) => handle_remove(&store, args),
         AccountCommand::Use(args) => handle_use(&store, args, json),
         AccountCommand::Export(args) => handle_export(&store, args, json),
         AccountCommand::Alias { command } => handle_alias_command(&store, command, json),
@@ -486,12 +486,12 @@ async fn handle_balance(
     Ok(())
 }
 
-fn handle_delete(store: &AccountStore, args: AccountDeleteArgs) -> Result<()> {
+fn handle_remove(store: &AccountStore, args: AccountRemoveArgs) -> Result<()> {
     // Verify account exists before prompting
     store.get_account(&args.name)?;
 
     let warning = format!(
-        "Are you sure you want to delete account '{}'? This cannot be undone.",
+        "Are you sure you want to remove account '{}'? This cannot be undone.",
         args.name
     );
     if !confirm_typed_match(&warning, &args.name, args.yes)
@@ -502,7 +502,7 @@ fn handle_delete(store: &AccountStore, args: AccountDeleteArgs) -> Result<()> {
     }
 
     store.delete_account(&args.name)?;
-    eprintln!("Account '{}' deleted.", args.name);
+    eprintln!("Account '{}' removed.", args.name);
     Ok(())
 }
 

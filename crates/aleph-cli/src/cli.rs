@@ -984,8 +984,8 @@ pub enum AccountCommand {
     Balance(AccountBalanceArgs),
     /// Generate a new private key and store it in the OS keychain
     Create(AccountCreateArgs),
-    /// Delete an account from the keychain
-    Delete(AccountDeleteArgs),
+    /// Remove an account from the keychain
+    Remove(AccountRemoveArgs),
     /// Export the private key of a local account
     Export(AccountExportArgs),
     /// Import an existing private key
@@ -1067,8 +1067,8 @@ pub struct AccountBalanceArgs {
 }
 
 #[derive(Args)]
-pub struct AccountDeleteArgs {
-    /// Name of the account to delete.
+pub struct AccountRemoveArgs {
+    /// Name of the account to remove.
     pub name: String,
 
     /// Skip the type-the-name confirmation prompt.
