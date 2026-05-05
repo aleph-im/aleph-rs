@@ -4,6 +4,96 @@ use alloy_primitives::{Address, U256, address};
 use alloy_provider::Provider;
 use alloy_sol_types::sol;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Errors parsing a [`PriceSource`] from its CLI-facing string form.
+#[derive(Debug, Error)]
+pub enum ParsePriceSourceError {
+    /// `fixed:<n>` was given but `<n>` was not a valid float.
+    #[error("invalid fixed price '{rest}': {source} (expected 'fixed:<number>')")]
+    InvalidFixed {
+        rest: String,
+        #[source]
+        source: std::num::ParseFloatError,
+    },
+    /// `fixed:<n>` parsed but yielded a negative or non-finite number.
+    #[error("fixed price must be a non-negative number, got {0}")]
+    NegativeFixed(f64),
+    /// The input did not match any known form.
+    #[error("invalid price source '{0}': expected 'coingecko', 'fixed:<number>', or 'none'")]
+    Unknown(String),
+}
+
+/// Errors parsing a human-readable token amount via [`parse_token_amount`].
+#[derive(Debug, Error)]
+pub enum ParseAmountError {
+    /// Input was empty (after trimming).
+    #[error("amount cannot be empty")]
+    Empty,
+    /// Input started with a minus sign.
+    #[error("amount cannot be negative")]
+    Negative,
+    /// Input contained non-digit characters in either part.
+    #[error("invalid amount: '{0}'")]
+    NotNumeric(String),
+    /// Input had more decimal places than the token supports.
+    #[error("too many decimal places: '{amount}' has at most {max} decimals")]
+    TooManyDecimals { amount: String, max: u8 },
+    /// Input parsed to zero, which is not a meaningful transfer amount.
+    #[error("amount must be greater than zero")]
+    Zero,
+    /// Input was numerically valid but exceeds U256.
+    #[error("amount '{0}' is too large to fit in a U256")]
+    Overflow(String),
+}
+
+/// Errors fetching the ALEPH/USD price from a remote source.
+#[derive(Debug, Error)]
+pub enum PriceFetchError {
+    /// `reqwest::Client::builder()` failed to construct (e.g. TLS init).
+    #[error("failed to build HTTP client")]
+    HttpClientBuild(#[source] reqwest::Error),
+    /// The HTTP request itself failed (network, DNS, timeout).
+    #[error("failed to fetch ALEPH price from CoinGecko")]
+    Request(#[source] reqwest::Error),
+    /// CoinGecko replied with a non-2xx status.
+    #[error("CoinGecko API returned HTTP {0}")]
+    BadStatus(reqwest::StatusCode),
+    /// The response body did not deserialize as expected.
+    #[error("failed to parse CoinGecko response")]
+    Parse(#[source] reqwest::Error),
+}
+
+/// Errors from on-chain credit operations: balance reads, price fetches, and
+/// the `buy_credits` flow.
+#[derive(Debug, Error)]
+pub enum CreditError {
+    /// Failed to fetch the ALEPH/USD price for an estimate.
+    #[error(transparent)]
+    Price(#[from] PriceFetchError),
+    /// RPC error reading an ERC20 balance.
+    #[error("failed to check {token} balance")]
+    CheckBalance {
+        token: &'static str,
+        #[source]
+        source: alloy_contract::Error,
+    },
+    /// RPC error reading the native ETH balance.
+    #[error("failed to check ETH balance")]
+    CheckEthBalance(#[source] alloy_provider::transport::TransportError),
+    /// Failed to broadcast the credit-buy transaction.
+    #[error("failed to send transaction")]
+    SendTransaction(#[source] alloy_contract::Error),
+    /// The transaction was broadcast but no receipt arrived in time.
+    #[error("timed out after {timeout_secs}s waiting for transaction receipt")]
+    ReceiptTimeout { timeout_secs: u64 },
+    /// Polling for the transaction receipt errored.
+    #[error("failed to get transaction receipt")]
+    Receipt(#[source] alloy_provider::PendingTransactionError),
+    /// The transaction was mined but the contract reverted.
+    #[error("transaction reverted")]
+    Reverted,
+}
 
 /// ALEPH ERC20 token on Ethereum mainnet.
 pub const MAINNET_ALEPH_TOKEN_ADDRESS: Address =
@@ -42,7 +132,7 @@ pub enum PriceSource {
 }
 
 impl std::str::FromStr for PriceSource {
-    type Err = String;
+    type Err = ParsePriceSourceError;
 
     /// Parse the CLI-facing `<coingecko|fixed:N|none>` form.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -53,19 +143,18 @@ impl std::str::FromStr for PriceSource {
             _ => {}
         }
         if let Some(rest) = lower.strip_prefix("fixed:") {
-            let usd: f64 = rest.parse().map_err(|e| {
-                format!("invalid fixed price '{rest}': {e} (expected 'fixed:<number>')")
-            })?;
+            let usd: f64 = rest
+                .parse()
+                .map_err(|source| ParsePriceSourceError::InvalidFixed {
+                    rest: rest.to_string(),
+                    source,
+                })?;
             if !usd.is_finite() || usd < 0.0 {
-                return Err(format!(
-                    "fixed price must be a non-negative number, got {usd}"
-                ));
+                return Err(ParsePriceSourceError::NegativeFixed(usd));
             }
             return Ok(PriceSource::Fixed { usd });
         }
-        Err(format!(
-            "invalid price source '{s}': expected 'coingecko', 'fixed:<number>', or 'none'"
-        ))
+        Err(ParsePriceSourceError::Unknown(s.to_string()))
     }
 }
 
@@ -182,13 +271,13 @@ struct CoinGeckoPriceEntry {
 ///
 /// Rejects amounts with more decimal places than the token supports,
 /// negative values, zero, and non-numeric input.
-pub fn parse_token_amount(amount_str: &str, decimals: u8) -> Result<U256, String> {
+pub fn parse_token_amount(amount_str: &str, decimals: u8) -> Result<U256, ParseAmountError> {
     let amount_str = amount_str.trim();
     if amount_str.is_empty() {
-        return Err("amount cannot be empty".to_string());
+        return Err(ParseAmountError::Empty);
     }
     if amount_str.starts_with('-') {
-        return Err("amount cannot be negative".to_string());
+        return Err(ParseAmountError::Negative);
     }
 
     let (integer_part, decimal_part) = match amount_str.split_once('.') {
@@ -196,36 +285,35 @@ pub fn parse_token_amount(amount_str: &str, decimals: u8) -> Result<U256, String
         None => (amount_str, ""),
     };
 
-    // Validate parts are numeric
     if !integer_part.chars().all(|c| c.is_ascii_digit()) || integer_part.is_empty() {
-        return Err(format!("invalid amount: '{amount_str}'"));
+        return Err(ParseAmountError::NotNumeric(amount_str.to_string()));
     }
     if !decimal_part.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("invalid amount: '{amount_str}'"));
+        return Err(ParseAmountError::NotNumeric(amount_str.to_string()));
     }
 
-    // Check decimal places don't exceed token decimals
-    let decimal_len = decimal_part.len();
-    if decimal_len > decimals as usize {
-        return Err(format!(
-            "too many decimal places: {} has at most {} decimals",
-            amount_str, decimals
-        ));
+    if decimal_part.len() > decimals as usize {
+        return Err(ParseAmountError::TooManyDecimals {
+            amount: amount_str.to_string(),
+            max: decimals,
+        });
     }
 
     // Pad decimal part to full precision: "50.5" with 6 decimals => "50" + "500000"
     let padded_decimal = format!("{:0<width$}", decimal_part, width = decimals as usize);
 
-    // Combine: integer * 10^decimals + padded_decimal
-    let integer_value =
-        U256::from_str_radix(integer_part, 10).map_err(|e| format!("invalid integer part: {e}"))?;
+    // Both parts are pre-validated as ASCII digits; the only failure mode for
+    // `from_str_radix` here is U256 overflow on the integer part. The decimal
+    // part is bounded by `decimals` (≤ 77) so it can never overflow U256.
+    let integer_value = U256::from_str_radix(integer_part, 10)
+        .map_err(|_| ParseAmountError::Overflow(amount_str.to_string()))?;
     let decimal_value = U256::from_str_radix(&padded_decimal, 10)
-        .map_err(|e| format!("invalid decimal part: {e}"))?;
+        .expect("padded decimal is bounded by `decimals` and cannot overflow U256");
     let scale = U256::from(10u64).pow(U256::from(decimals));
 
     let result = integer_value * scale + decimal_value;
     if result.is_zero() {
-        return Err("amount must be greater than zero".to_string());
+        return Err(ParseAmountError::Zero);
     }
     Ok(result)
 }
@@ -234,7 +322,7 @@ pub fn parse_token_amount(amount_str: &str, decimals: u8) -> Result<U256, String
 ///
 /// Returns `Ok(None)` for `PriceSource::None` (caller will render an
 /// unknown-estimate state); `Ok(Some(_))` otherwise.
-async fn resolve_aleph_price_usd(source: &PriceSource) -> Result<Option<f64>, String> {
+async fn resolve_aleph_price_usd(source: &PriceSource) -> Result<Option<f64>, PriceFetchError> {
     match source {
         PriceSource::CoinGecko => fetch_aleph_price_usd_from_coingecko().await.map(Some),
         PriceSource::Fixed { usd } => Ok(Some(*usd)),
@@ -242,31 +330,25 @@ async fn resolve_aleph_price_usd(source: &PriceSource) -> Result<Option<f64>, St
     }
 }
 
-async fn fetch_aleph_price_usd_from_coingecko() -> Result<f64, String> {
+async fn fetch_aleph_price_usd_from_coingecko() -> Result<f64, PriceFetchError> {
     // Cloudflare (CoinGecko's CDN) 403s reqwest's default UA as a suspicious
     // programmatic client. Any non-default UA string passes through.
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .user_agent(concat!("aleph-sdk/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        .map_err(PriceFetchError::HttpClientBuild)?;
     let resp = client
         .get(COINGECKO_PRICE_URL)
         .send()
         .await
-        .map_err(|e| format!("failed to fetch ALEPH price: {e}"))?;
+        .map_err(PriceFetchError::Request)?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "CoinGecko API returned HTTP {}: try again later",
-            resp.status()
-        ));
+        return Err(PriceFetchError::BadStatus(resp.status()));
     }
 
-    let body: CoinGeckoPriceResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse CoinGecko response: {e}"))?;
+    let body: CoinGeckoPriceResponse = resp.json().await.map_err(PriceFetchError::Parse)?;
 
     Ok(body.aleph.usd)
 }
@@ -293,7 +375,7 @@ pub async fn estimate_credits(
     token: CreditToken,
     amount_raw: U256,
     price_source: &PriceSource,
-) -> Result<CreditEstimate, String> {
+) -> Result<CreditEstimate, PriceFetchError> {
     let price_usd = match token {
         CreditToken::Usdc => Some(1.0),
         CreditToken::Aleph => resolve_aleph_price_usd(price_source).await?,
@@ -320,22 +402,29 @@ pub async fn check_balance(
     owner: Address,
     token: CreditToken,
     token_address: Address,
-) -> Result<U256, String> {
+) -> Result<U256, CreditError> {
     let contract = IERC20::new(token_address, provider);
-    let result = contract
-        .balanceOf(owner)
-        .call()
-        .await
-        .map_err(|e| format!("failed to check {} balance: {e}", token.symbol()))?;
+    let result =
+        contract
+            .balanceOf(owner)
+            .call()
+            .await
+            .map_err(|source| CreditError::CheckBalance {
+                token: token.symbol(),
+                source,
+            })?;
     Ok(result)
 }
 
 /// Check the native ETH balance of an address.
-pub async fn check_eth_balance(provider: &impl Provider, owner: Address) -> Result<U256, String> {
+pub async fn check_eth_balance(
+    provider: &impl Provider,
+    owner: Address,
+) -> Result<U256, CreditError> {
     provider
         .get_balance(owner)
         .await
-        .map_err(|e| format!("failed to check ETH balance: {e}"))
+        .map_err(CreditError::CheckEthBalance)
 }
 
 /// Format a U256 token amount into a human-readable string with the given decimals.
@@ -361,26 +450,20 @@ pub async fn buy_credits(
     token_address: Address,
     credit_contract: Address,
     amount_raw: U256,
-) -> Result<alloy_rpc_types_eth::TransactionReceipt, String> {
+) -> Result<alloy_rpc_types_eth::TransactionReceipt, CreditError> {
     let contract = IERC20::new(token_address, provider);
     let tx = contract.transfer(credit_contract, amount_raw);
-    let pending = tx
-        .send()
-        .await
-        .map_err(|e| format!("failed to send transaction: {e}"))?;
+    let pending = tx.send().await.map_err(CreditError::SendTransaction)?;
 
     let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
         .await
-        .map_err(|_| {
-            format!(
-                "timed out after {}s waiting for transaction receipt",
-                RECEIPT_TIMEOUT.as_secs()
-            )
+        .map_err(|_| CreditError::ReceiptTimeout {
+            timeout_secs: RECEIPT_TIMEOUT.as_secs(),
         })?
-        .map_err(|e| format!("failed to get transaction receipt: {e}"))?;
+        .map_err(CreditError::Receipt)?;
 
     if !receipt.status() {
-        return Err("transaction reverted".to_string());
+        return Err(CreditError::Reverted);
     }
 
     Ok(receipt)
@@ -420,31 +503,34 @@ mod tests {
     #[test]
     fn reject_too_many_decimals() {
         let err = parse_token_amount("1.0000001", 6).unwrap_err();
-        assert!(err.contains("too many decimal places"));
+        assert!(matches!(
+            err,
+            ParseAmountError::TooManyDecimals { max: 6, .. }
+        ));
     }
 
     #[test]
     fn reject_negative() {
         let err = parse_token_amount("-1", 18).unwrap_err();
-        assert!(err.contains("negative"));
+        assert!(matches!(err, ParseAmountError::Negative));
     }
 
     #[test]
     fn reject_zero() {
         let err = parse_token_amount("0", 18).unwrap_err();
-        assert!(err.contains("greater than zero"));
+        assert!(matches!(err, ParseAmountError::Zero));
     }
 
     #[test]
     fn reject_empty() {
         let err = parse_token_amount("", 18).unwrap_err();
-        assert!(err.contains("empty"));
+        assert!(matches!(err, ParseAmountError::Empty));
     }
 
     #[test]
     fn reject_non_numeric() {
         let err = parse_token_amount("abc", 18).unwrap_err();
-        assert!(err.contains("invalid"));
+        assert!(matches!(err, ParseAmountError::NotNumeric(_)));
     }
 
     #[test]
