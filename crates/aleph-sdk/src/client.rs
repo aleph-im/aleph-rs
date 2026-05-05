@@ -90,8 +90,12 @@ pub enum StorageError {
     NotFound(ItemHash),
     #[error("File reference not found: {0}")]
     RefNotFound(FileRef),
-    #[error("Failed to read file size: {0}")]
-    InvalidSize(String),
+    #[error("failed to parse file size '{value}': {source}")]
+    InvalidSize {
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
     #[error("Integrity verification failed: {0}")]
     IntegrityError(#[from] crate::verify::VerifyError),
     #[error("Invalid URL: {0}")]
@@ -104,10 +108,19 @@ pub enum StorageError {
     FileTooLarge,
     #[error("Upload failed: {0}")]
     UploadFailed(reqwest_middleware::Error),
-    #[error("Invalid response from node: {0}")]
-    InvalidResponse(String),
-    #[error("invalid IPFS gateway response: {0}")]
-    InvalidIpfsResponse(String),
+    /// The node responded but the body could not be deserialized as JSON.
+    #[error("invalid response body from node")]
+    InvalidResponseBody(#[source] reqwest::Error),
+    /// The node responded with JSON but the embedded `hash` was not a valid item hash.
+    #[error("invalid item hash '{value}' in node response: {source}")]
+    InvalidResponseHash {
+        value: String,
+        #[source]
+        source: aleph_types::item_hash::ItemHashError,
+    },
+    /// IPFS gateway returned a body the SDK could not parse as a kubo add-response.
+    #[error("invalid IPFS gateway response")]
+    InvalidIpfsResponse(#[from] crate::ipfs::ParseRootError),
     #[error("cannot upload empty folder: {0}")]
     EmptyFolder(std::path::PathBuf),
     #[error("non-UTF-8 path cannot be sent to IPFS gateway: {0}")]
@@ -147,10 +160,21 @@ pub enum MessageError {
     HttpError(#[from] reqwest_middleware::Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("WebSocket connection error: {0}")]
-    WebsocketConnection(String),
-    #[error("WebSocket message error: {0}")]
-    WebsocketMessage(String),
+    /// The base URL had a scheme that has no websocket equivalent.
+    #[error("cannot derive a websocket scheme from the base URL")]
+    WebsocketBadScheme,
+    /// The message filter could not be serialized into a query string.
+    #[error("failed to serialize websocket query string")]
+    WebsocketSerializeFilter(#[source] serde_qs::Error),
+    /// The websocket handshake / TCP connect failed (initial or reconnect).
+    #[error("websocket connect failed")]
+    WebsocketConnect(#[source] Box<tokio_tungstenite::tungstenite::Error>),
+    /// An incoming websocket frame could not be deserialized as a [`Message`].
+    #[error("failed to parse websocket message")]
+    WebsocketParse(#[source] serde_json::Error),
+    /// An error was reported by the websocket stream after connect.
+    #[error("websocket stream error")]
+    WebsocketStream(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("upload hash mismatch: expected {expected}, got {actual}")]
     HashMismatch {
         expected: ItemHash,
@@ -171,8 +195,8 @@ pub enum IntegrityError {
     },
 
     /// The raw content passed hash verification but could not be deserialized as MessageContent.
-    #[error("Failed to deserialize verified content: {0}")]
-    ContentDeserializationFailed(String),
+    #[error("Failed to deserialize verified content")]
+    ContentDeserializationFailed(#[source] serde_json::Error),
 
     /// The cryptographic signature does not match the message sender.
     #[error("Signature verification failed: {0}")]
@@ -249,7 +273,7 @@ fn build_verified(
         }),
         Err(e) => Err(VerifyMessageError::Integrity(Box::new(InvalidMessage {
             header,
-            error: IntegrityError::ContentDeserializationFailed(e.to_string()),
+            error: IntegrityError::ContentDeserializationFailed(e),
         }))),
     }
 }
@@ -1753,7 +1777,10 @@ impl AlephStorageClient for AlephClient {
             .and_then(|s| {
                 s.parse::<u64>()
                     .map(Bytes::from)
-                    .map_err(|_| StorageError::InvalidSize(s.to_string()))
+                    .map_err(|source| StorageError::InvalidSize {
+                        value: s.to_string(),
+                        source,
+                    })
             })
             .map_err(MessageError::Storage)
     }
@@ -1880,12 +1907,15 @@ impl AlephStorageClient for AlephClient {
         let upload: UploadResponse = response
             .json()
             .await
-            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+            .map_err(StorageError::InvalidResponseBody)?;
 
         upload
             .hash
             .parse::<ItemHash>()
-            .map_err(|e| StorageError::InvalidResponse(e.to_string()))
+            .map_err(|source| StorageError::InvalidResponseHash {
+                value: upload.hash.clone(),
+                source,
+            })
     }
 
     async fn upload_to_ipfs(&self, data: &[u8]) -> Result<ItemHash, StorageError> {
@@ -1925,12 +1955,15 @@ impl AlephStorageClient for AlephClient {
         let upload: UploadResponse = response
             .json()
             .await
-            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+            .map_err(StorageError::InvalidResponseBody)?;
 
         upload
             .hash
             .parse::<ItemHash>()
-            .map_err(|e| StorageError::InvalidResponse(e.to_string()))
+            .map_err(|source| StorageError::InvalidResponseHash {
+                value: upload.hash.clone(),
+                source,
+            })
     }
 
     async fn upload_file_to_storage(
@@ -1989,12 +2022,14 @@ impl AlephStorageClient for AlephClient {
         let upload: UploadResponse = response
             .json()
             .await
-            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+            .map_err(StorageError::InvalidResponseBody)?;
 
-        let server_hash = upload
-            .hash
-            .parse::<ItemHash>()
-            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+        let server_hash = upload.hash.parse::<ItemHash>().map_err(|source| {
+            StorageError::InvalidResponseHash {
+                value: upload.hash.clone(),
+                source,
+            }
+        })?;
 
         if local_hash != server_hash {
             return Err(StorageError::UploadIntegrityMismatch {
@@ -2050,12 +2085,14 @@ impl AlephStorageClient for AlephClient {
         let upload: UploadResponse = response
             .json()
             .await
-            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+            .map_err(StorageError::InvalidResponseBody)?;
 
-        let server_hash = upload
-            .hash
-            .parse::<ItemHash>()
-            .map_err(|e| StorageError::InvalidResponse(e.to_string()))?;
+        let server_hash = upload.hash.parse::<ItemHash>().map_err(|source| {
+            StorageError::InvalidResponseHash {
+                value: upload.hash.clone(),
+                source,
+            }
+        })?;
 
         if local_hash != server_hash {
             return Err(StorageError::UploadIntegrityMismatch {
@@ -2129,8 +2166,7 @@ impl AlephClient {
             .await
             .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
 
-        let cid = parse_ndjson_root(&body)
-            .map_err(|e| StorageError::InvalidIpfsResponse(format!("{e}")))?;
+        let cid = parse_ndjson_root(&body)?;
         Ok(ItemHash::Ipfs(cid))
     }
 }
@@ -2484,10 +2520,6 @@ mod tests {
             "IPFS is disabled on this node"
         );
         assert_eq!(StorageError::FileTooLarge.to_string(), "File too large");
-        assert_eq!(
-            StorageError::InvalidResponse("bad json".into()).to_string(),
-            "Invalid response from node: bad json"
-        );
     }
 
     const FORGOTTEN_MESSAGE: &str = include_str!(concat!(

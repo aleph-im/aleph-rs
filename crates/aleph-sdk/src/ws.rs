@@ -25,13 +25,11 @@ fn build_ws_url(
     let mut ws_url = base_url.clone();
     ws_url
         .set_scheme(scheme)
-        .map_err(|_| MessageError::WebsocketConnection("Failed to set scheme".to_string()))?;
+        .map_err(|_| MessageError::WebsocketBadScheme)?;
 
     ws_url.set_path("/api/ws0/messages");
 
-    let mut query = serde_qs::to_string(filter).map_err(|e| {
-        MessageError::WebsocketConnection(format!("Failed to serialize filter: {e}"))
-    })?;
+    let mut query = serde_qs::to_string(filter).map_err(MessageError::WebsocketSerializeFilter)?;
 
     if let Some(history_value) = history {
         if !query.is_empty() {
@@ -56,9 +54,9 @@ pub async fn subscribe(
     let ws_url = build_ws_url(&base_url, filter, history)?;
 
     // Try initial connection to fail fast if URL is invalid
-    let (ws_stream, _) = connect_async(ws_url.as_str()).await.map_err(|e| {
-        MessageError::WebsocketConnection(format!("Initial connection failed: {e}"))
-    })?;
+    let (ws_stream, _) = connect_async(ws_url.as_str())
+        .await
+        .map_err(|e| MessageError::WebsocketConnect(Box::new(e)))?;
 
     let (tx, rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
 
@@ -87,13 +85,8 @@ async fn run_ws_loop(
                     // Reset backoff on successful message
                     backoff_ms = INITIAL_BACKOFF_MS;
 
-                    let parse_result: Result<Message, _> = serde_json::from_str(&text);
-                    let item = match parse_result {
-                        Ok(msg) => Ok(msg),
-                        Err(e) => Err(MessageError::WebsocketMessage(format!(
-                            "Failed to parse message: {e}"
-                        ))),
-                    };
+                    let item = serde_json::from_str::<Message>(&text)
+                        .map_err(MessageError::WebsocketParse);
 
                     if tx.send(item).await.is_err() {
                         // Receiver dropped, exit the loop
@@ -110,9 +103,7 @@ async fn run_ws_loop(
                 Err(e) => {
                     // Connection error, break to reconnect
                     let _ = tx
-                        .send(Err(MessageError::WebsocketMessage(format!(
-                            "Connection error: {e}"
-                        ))))
+                        .send(Err(MessageError::WebsocketStream(Box::new(e))))
                         .await;
                     break;
                 }
@@ -131,9 +122,7 @@ async fn run_ws_loop(
                 }
                 Err(e) => {
                     if tx
-                        .send(Err(MessageError::WebsocketConnection(format!(
-                            "Reconnection failed: {e}"
-                        ))))
+                        .send(Err(MessageError::WebsocketConnect(Box::new(e))))
                         .await
                         .is_err()
                     {
