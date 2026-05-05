@@ -56,23 +56,37 @@ pub(crate) fn parse_ndjson_root(body: &str) -> Result<Cid, ParseRootError> {
         .rfind(|l| !l.is_empty())
         .ok_or(ParseRootError::Empty)?;
 
-    let entry: AddEntry = serde_json::from_str(last).map_err(|e| {
+    let entry: AddEntry = serde_json::from_str(last).map_err(|source| {
         let preview: String = last.chars().take(120).collect();
-        ParseRootError::Malformed(format!("{e}: {preview}"))
+        ParseRootError::Malformed { preview, source }
     })?;
 
-    Cid::try_from(entry.hash.as_str())
-        .map_err(|e| ParseRootError::InvalidCid(format!("{}: {e}", entry.hash)))
+    Cid::try_from(entry.hash.as_str()).map_err(|source| ParseRootError::InvalidCid {
+        hash: entry.hash.clone(),
+        source,
+    })
 }
 
+/// Errors parsing a kubo `/api/v0/add` NDJSON response.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ParseRootError {
+pub enum ParseRootError {
+    /// The response body had no non-empty lines.
     #[error("empty NDJSON response")]
     Empty,
-    #[error("malformed NDJSON line: {0}")]
-    Malformed(String),
-    #[error("invalid CID in response: {0}")]
-    InvalidCid(String),
+    /// A line could not be deserialized as a kubo add-entry.
+    #[error("malformed NDJSON line: {source} (preview: {preview})")]
+    Malformed {
+        preview: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// The `Hash` field was not a valid CID.
+    #[error("invalid CID '{hash}' in response: {source}")]
+    InvalidCid {
+        hash: String,
+        #[source]
+        source: aleph_types::cid::CidError,
+    },
 }
 
 use std::path::{Path, PathBuf};
@@ -224,14 +238,14 @@ mod tests {
     #[test]
     fn parse_ndjson_root_malformed_errors() {
         let err = parse_ndjson_root("not json").unwrap_err();
-        assert!(matches!(err, ParseRootError::Malformed(_)));
+        assert!(matches!(err, ParseRootError::Malformed { .. }));
     }
 
     #[test]
     fn parse_ndjson_root_invalid_cid_errors() {
         let body = r#"{"Name":"x","Hash":"not-a-cid","Size":"0"}"#;
         let err = parse_ndjson_root(body).unwrap_err();
-        assert!(matches!(err, ParseRootError::InvalidCid(_)));
+        assert!(matches!(err, ParseRootError::InvalidCid { .. }));
     }
 
     use std::fs;
