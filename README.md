@@ -21,10 +21,8 @@ Rust tooling for the [Aleph Cloud](https://aleph.cloud) protocol: a CLI for end 
 # 1. Pre-built binaries (Linux/macOS/Windows)
 #    https://github.com/aleph-im/aleph-rs/releases/latest
 
-# 2. Debian / Ubuntu (APT repo)
-echo "deb [trusted=yes] https://apt.aleph.im stable main" \
-  | sudo tee /etc/apt/sources.list.d/aleph.list
-sudo apt update && sudo apt install aleph-cli
+# 2. Debian / Ubuntu (APT repo, signed)
+curl -fsSL https://apt.aleph.im/install.sh | sudo bash
 
 # 3. Cargo
 cargo install aleph-cli
