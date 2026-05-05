@@ -64,9 +64,7 @@ async fn handle_buy(json: bool, args: BuyCreditArgs, cli_network: Option<&str>) 
         .map_err(|e| anyhow!("invalid amount: {e}"))?;
 
     let (provider, alloy_address) = build_signer_provider(evm_account, rpc_url)?;
-    let estimate = credit::estimate_credits(token, amount_raw, &ethereum.price_source)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let estimate = credit::estimate_credits(token, amount_raw, &ethereum.price_source).await?;
 
     // Dry-run must succeed even for under-funded accounts, so we defer the
     // balance check until we know we're actually submitting.
@@ -99,8 +97,7 @@ async fn handle_buy(json: bool, args: BuyCreditArgs, cli_network: Option<&str>) 
         ethereum.credit_contract,
         amount_raw,
     )
-    .await
-    .map_err(|e| anyhow!("{e}"))?;
+    .await?;
     print_submission_result(json, &args.amount, &estimate, &ethereum, &receipt)?;
     Ok(())
 }
@@ -197,9 +194,7 @@ async fn ensure_token_balance(
     amount_raw: U256,
     amount_display: &str,
 ) -> Result<()> {
-    let balance = credit::check_balance(provider, owner, token, token_address)
-        .await
-        .map_err(|e| anyhow!("{e}"))?;
+    let balance = credit::check_balance(provider, owner, token, token_address).await?;
     if balance < amount_raw {
         let have = format_token_amount(balance, token.decimals());
         bail!(

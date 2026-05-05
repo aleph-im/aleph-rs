@@ -8,7 +8,7 @@ use url::Url;
 /// Clap adapter for [`PriceSource::from_str`]. Exposed as a named function so
 /// it can be referenced from `value_parser = parse_price_source` attributes.
 fn parse_price_source(s: &str) -> Result<PriceSource, String> {
-    s.parse()
+    s.parse::<PriceSource>().map_err(|e| e.to_string())
 }
 
 /// Parse a human-readable size string into MiB.
