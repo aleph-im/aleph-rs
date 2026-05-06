@@ -184,6 +184,20 @@ pub enum MessageError {
     Build(#[from] crate::messages::MessageBuildError),
 }
 
+impl MessageError {
+    /// Returns true if the error represents a 404 from the CCN, whether
+    /// surfaced as the typed `NotFound` variant, an `ApiError` with status
+    /// 404, or an `HttpError` wrapping a reqwest 404.
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            MessageError::NotFound(_) => true,
+            MessageError::ApiError { status, .. } => *status == 404,
+            MessageError::HttpError(e) => e.status() == Some(StatusCode::NOT_FOUND),
+            _ => false,
+        }
+    }
+}
+
 /// Error during message integrity verification.
 #[derive(Debug, thiserror::Error)]
 pub enum IntegrityError {
@@ -2356,11 +2370,16 @@ impl AlephAggregateClient for AlephClient {
             .join(&format!("/api/v0/aggregates/{}.json", address))
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let response = self
-            .http_client
-            .get(url)
-            .send()
-            .await?
+        let response = self.http_client.get(url).send().await?;
+
+        // pyaleph returns 404 when the address has no aggregates rather than
+        // an empty data map. Treat it as an empty result so callers don't
+        // have to special-case the status code.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(HashMap::new());
+        }
+
+        let response = response
             .error_for_status()
             .map_err(reqwest_middleware::Error::from)?;
 

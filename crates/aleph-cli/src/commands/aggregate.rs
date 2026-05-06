@@ -63,7 +63,14 @@ async fn handle_aggregate_get(
     args: AggregateGetArgs,
 ) -> Result<()> {
     let address = resolve_owner_address(args.address.as_deref())?;
-    let value: serde_json::Value = aleph_client.get_aggregate(&address, &args.key).await?;
+    let value: serde_json::Value = match aleph_client.get_aggregate(&address, &args.key).await {
+        Ok(v) => v,
+        Err(e) if e.is_not_found() => {
+            eprintln!("No aggregate at {}/{}", address, args.key);
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
     if json {
         println!("{}", serde_json::to_string(&value)?);
     } else {
