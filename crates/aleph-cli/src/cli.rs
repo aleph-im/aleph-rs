@@ -93,8 +93,19 @@ pub fn parse_image(s: &str) -> Result<ItemHash, String> {
     })
 }
 
+/// Long-form version string shown by `aleph --version`. Includes the git
+/// commit SHA and date captured at build time by `build.rs`.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("ALEPH_GIT_COMMIT"),
+    " ",
+    env!("ALEPH_COMMIT_DATE"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "aleph", version, about = "Aleph CLI")]
+#[command(name = "aleph", version, long_version = LONG_VERSION, about = "Aleph CLI")]
 pub struct Cli {
     /// CCN to talk to: either a config alias name (see `aleph config ccn list`) or a raw URL (anything containing `://`).
     #[arg(long)]
