@@ -684,6 +684,8 @@ pub enum AggregateCommand {
     Get(AggregateGetArgs),
     /// List every aggregate owned by an address
     List(AggregateListArgs),
+    /// Forget entire aggregates by element hash, with type validation
+    Forget(AggregateForgetArgs),
 }
 
 #[derive(Args)]
@@ -703,6 +705,34 @@ pub struct AggregateListArgs {
     /// alias name. Defaults to the current default account.
     #[arg(long)]
     pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct AggregateForgetArgs {
+    /// Item hashes of any AGGREGATE element message belonging to the
+    /// aggregates to forget. The network resolves the (sender, key) pair
+    /// from each hash and tombstones every AGGREGATE message under that
+    /// key from that sender.
+    pub hashes: Vec<ItemHash>,
+
+    /// Reason for forgetting.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    /// Skip the confirmation prompt and submit immediately.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
 
 #[derive(Args)]
