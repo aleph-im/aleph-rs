@@ -71,7 +71,7 @@ async fn handle_history(
     }
 
     eprintln!(
-        "Credit history for {} (page {} of ~{}, {} per page, {} total)",
+        "Credit history for {} (page {} of {}, {} per page, {} total)",
         history.address,
         history.pagination_page,
         total_pages(history.pagination_total, history.pagination_per_page),
@@ -134,10 +134,16 @@ fn display_optional(value: &Option<String>, width: usize) -> String {
 }
 
 fn truncate(s: &str, width: usize) -> String {
-    if width <= 1 || s.chars().count() <= width {
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    if s.chars().count() <= width {
         return s.to_string();
     }
-    let head: String = s.chars().take(width.saturating_sub(1)).collect();
+    let head: String = s.chars().take(width - 1).collect();
     format!("{head}…")
 }
 
@@ -166,6 +172,33 @@ mod history_tests {
         assert_eq!(total_pages(100, 100), 1);
         assert_eq!(total_pages(101, 100), 2);
         assert_eq!(total_pages(250, 100), 3);
+    }
+
+    #[test]
+    fn total_pages_handles_zero_per_page() {
+        // Server should always set this, but guard against a divide-by-zero
+        // if an empty/odd response slips through.
+        assert_eq!(total_pages(0, 0), 1);
+        assert_eq!(total_pages(123, 0), 1);
+    }
+
+    #[test]
+    fn truncate_zero_width_returns_empty() {
+        assert_eq!(truncate("hello", 0), "");
+    }
+
+    #[test]
+    fn truncate_one_width_returns_ellipsis() {
+        assert_eq!(truncate("hello", 1), "…");
+        // Even when the input is itself one char, the indicator wins so
+        // callers know the value was non-empty.
+        assert_eq!(truncate("a", 1), "…");
+    }
+
+    #[test]
+    fn truncate_keeps_short_strings_intact() {
+        assert_eq!(truncate("hi", 5), "hi");
+        assert_eq!(truncate("12345", 5), "12345");
     }
 }
 
