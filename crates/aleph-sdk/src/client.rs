@@ -2335,9 +2335,22 @@ impl AlephAccountClient for AlephClient {
             request = request.query(&[("pagination", per_page.to_string())]);
         }
 
-        let response = request
-            .send()
-            .await?
+        let response = request.send().await?;
+
+        // pyaleph returns 404 when the address has no credit history rather
+        // than an empty page. Surface that as an empty response so callers
+        // don't have to special-case the status code.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(CreditHistoryResponse {
+                address: address.to_string(),
+                credit_history: Vec::new(),
+                pagination_page: page,
+                pagination_total: 0,
+                pagination_per_page: page_size.unwrap_or(0),
+            });
+        }
+
+        let response = response
             .error_for_status()
             .map_err(reqwest_middleware::Error::from)?;
         let history: CreditHistoryResponse = response
