@@ -1199,6 +1199,16 @@ pub trait AlephAggregateClient {
         address: &Address,
         keys: &[&str],
     ) -> impl Future<Output = Result<HashMap<String, serde_json::Value>, MessageError>> + Send;
+
+    /// Returns every aggregate owned by `address`, keyed by their aggregate key.
+    ///
+    /// Use `get_aggregate` / `get_aggregates` when you already know the keys
+    /// you want; this method is for enumerating an address's aggregate
+    /// namespace (e.g. `aleph aggregate list`).
+    fn get_all_aggregates(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<HashMap<String, serde_json::Value>, MessageError>> + Send;
 }
 
 pub trait AlephPostClient {
@@ -2319,6 +2329,36 @@ impl AlephAggregateClient for AlephClient {
             .http_client
             .get(url)
             .query(&[("keys", &keys_csv)])
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let aggregates_response: AggregatesResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+
+        Ok(aggregates_response.data)
+    }
+
+    async fn get_all_aggregates(
+        &self,
+        address: &Address,
+    ) -> Result<HashMap<String, serde_json::Value>, MessageError> {
+        #[derive(Deserialize)]
+        struct AggregatesResponse {
+            data: HashMap<String, serde_json::Value>,
+        }
+
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/aggregates/{}.json", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .get(url)
             .send()
             .await?
             .error_for_status()

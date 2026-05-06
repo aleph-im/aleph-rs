@@ -669,6 +669,29 @@ pub struct PostAmendArgs {
 pub enum AggregateCommand {
     /// Create a new aggregate message
     Create(AggregateCreateArgs),
+    /// Fetch a single aggregate by key
+    Get(AggregateGetArgs),
+    /// List every aggregate owned by an address
+    List(AggregateListArgs),
+}
+
+#[derive(Args)]
+pub struct AggregateGetArgs {
+    /// Aggregate key to fetch.
+    pub key: String,
+
+    /// Owner address. Accepts a raw address (`0x...`) or a local account /
+    /// alias name. Defaults to the current default account.
+    #[arg(long)]
+    pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct AggregateListArgs {
+    /// Owner address. Accepts a raw address (`0x...`) or a local account /
+    /// alias name. Defaults to the current default account.
+    #[arg(long)]
+    pub address: Option<String>,
 }
 
 #[derive(Args)]
