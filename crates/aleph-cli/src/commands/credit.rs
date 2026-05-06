@@ -1,10 +1,14 @@
 use crate::account::CliAccount;
-use crate::cli::{BuyCreditArgs, CreditCommand, CreditTokenCli, SigningArgs, TransferCreditArgs};
+use crate::account::store::AccountStore;
+use crate::cli::{
+    BuyCreditArgs, CreditCommand, CreditHistoryArgs, CreditTokenCli, SigningArgs,
+    TransferCreditArgs,
+};
 use crate::common::{
     format_address, resolve_account, resolve_address, resolve_network, submit_or_preview,
 };
 use aleph_sdk::builder::MessageBuilder;
-use aleph_sdk::client::AlephClient;
+use aleph_sdk::client::{AlephAccountClient, AlephClient};
 use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
 use aleph_sdk::credit_transfer::{
     CREDIT_TRANSFER_POST_TYPE, CreditTransferContent, CreditTransferEntry, CreditTransferError,
@@ -42,6 +46,126 @@ pub async fn handle_credit_command(
     match command {
         CreditCommand::Buy(args) => handle_buy(json, args, cli_network).await,
         CreditCommand::Transfer(args) => handle_transfer(aleph_client, ccn_url, json, args).await,
+        CreditCommand::History(args) => handle_history(aleph_client, json, args).await,
+    }
+}
+
+async fn handle_history(
+    aleph_client: &AlephClient,
+    json: bool,
+    args: CreditHistoryArgs,
+) -> Result<()> {
+    let address = resolve_owner_address(args.address.as_deref())?;
+    let history = aleph_client
+        .get_credit_history(&address, args.page, Some(args.page_size))
+        .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&history)?);
+        return Ok(());
+    }
+
+    if history.credit_history.is_empty() {
+        eprintln!("No credit history for {address}");
+        return Ok(());
+    }
+
+    eprintln!(
+        "Credit history for {} (page {} of ~{}, {} per page, {} total)",
+        history.address,
+        history.pagination_page,
+        total_pages(history.pagination_total, history.pagination_per_page),
+        history.pagination_per_page,
+        history.pagination_total,
+    );
+    eprintln!(
+        "{:<19}  {:>15}  {:<15}  {:<20}  {:<20}  Expires",
+        "Timestamp", "Amount", "Method", "Origin", "Origin ref",
+    );
+    for item in &history.credit_history {
+        eprintln!(
+            "{:<19}  {:>15}  {:<15}  {:<20}  {:<20}  {}",
+            item.message_timestamp.format("%Y-%m-%d %H:%M:%S"),
+            item.amount,
+            display_optional(&item.payment_method, 15),
+            display_optional(&item.origin, 20),
+            display_optional(&item.origin_ref, 20),
+            item.expiration_date
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "Never".to_string()),
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the owner address for read-only credit queries.
+///
+/// Mirrors `aleph account balance` / `aleph aggregate list`: explicit
+/// `--address` (raw or local-name) wins, otherwise we use the default
+/// account from the local store.
+fn resolve_owner_address(args_address: Option<&str>) -> Result<AlephAddress> {
+    if let Some(value) = args_address {
+        return resolve_address(value);
+    }
+    let store = AccountStore::open().map_err(|e| anyhow!("failed to open account store: {e}"))?;
+    let name = store.default_account_name()?.ok_or_else(|| {
+        anyhow!(
+            "no --address provided and no default account set; \
+             pass --address or set a default with: aleph account use <NAME>"
+        )
+    })?;
+    let entry = store.get_account(&name)?;
+    Ok(AlephAddress::from(entry.address))
+}
+
+fn total_pages(total: u64, per_page: u32) -> u64 {
+    if per_page == 0 {
+        return 1;
+    }
+    let per = u64::from(per_page);
+    total.div_ceil(per).max(1)
+}
+
+fn display_optional(value: &Option<String>, width: usize) -> String {
+    match value {
+        Some(s) if !s.is_empty() => truncate(s, width),
+        _ => "-".to_string(),
+    }
+}
+
+fn truncate(s: &str, width: usize) -> String {
+    if width <= 1 || s.chars().count() <= width {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(width.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn display_optional_shows_dash_for_none() {
+        assert_eq!(display_optional(&None, 10), "-");
+        assert_eq!(display_optional(&Some(String::new()), 10), "-");
+    }
+
+    #[test]
+    fn display_optional_truncates_long_values() {
+        let v = Some("0123456789ABCDEF".to_string());
+        let rendered = display_optional(&v, 10);
+        assert_eq!(rendered.chars().count(), 10);
+        assert!(rendered.ends_with('…'));
+    }
+
+    #[test]
+    fn total_pages_rounds_up() {
+        assert_eq!(total_pages(0, 100), 1);
+        assert_eq!(total_pages(1, 100), 1);
+        assert_eq!(total_pages(100, 100), 1);
+        assert_eq!(total_pages(101, 100), 2);
+        assert_eq!(total_pages(250, 100), 3);
     }
 }
 

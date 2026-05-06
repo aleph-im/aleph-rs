@@ -1164,6 +1164,18 @@ pub trait AlephAccountClient {
         &self,
         item_hash: &ItemHash,
     ) -> impl Future<Output = Result<f64, MessageError>> + Send;
+
+    /// Returns a paginated history of credit-affecting events for the address
+    /// (purchases, transfers, expirations, etc.).
+    ///
+    /// Pages are 1-indexed to match the server. `page_size` is clamped by the
+    /// server side; pass `None` to use the server default.
+    fn get_credit_history(
+        &self,
+        address: &Address,
+        page: u32,
+        page_size: Option<u32>,
+    ) -> impl Future<Output = Result<CreditHistoryResponse, MessageError>> + Send;
 }
 
 pub trait AlephAggregateClient {
@@ -2181,6 +2193,51 @@ pub struct AccountBalance {
     pub credits: u64,
 }
 
+/// One row of `/api/v0/addresses/{address}/credit_history`.
+///
+/// Mirrors `aleph.schemas.api.accounts.CreditHistoryResponseItem` in pyaleph.
+/// Optional fields reflect that purchase / transfer / expiration entries
+/// populate different subsets.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreditHistoryItem {
+    pub amount: i64,
+    /// Per-credit price at the time of the entry, serialized as a decimal
+    /// string (e.g. `"0.000001"`). `None` for non-purchase rows.
+    #[serde(default)]
+    pub price: Option<String>,
+    #[serde(default)]
+    pub bonus_amount: Option<i64>,
+    #[serde(default)]
+    pub tx_hash: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub chain: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub origin_ref: Option<String>,
+    #[serde(default)]
+    pub payment_method: Option<String>,
+    pub credit_ref: String,
+    pub credit_index: i64,
+    #[serde(default)]
+    pub expiration_date: Option<DateTime<Utc>>,
+    pub message_timestamp: DateTime<Utc>,
+}
+
+/// Page-paginated response from `/api/v0/addresses/{address}/credit_history`.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreditHistoryResponse {
+    pub address: String,
+    pub credit_history: Vec<CreditHistoryItem>,
+    pub pagination_page: u32,
+    pub pagination_total: u64,
+    pub pagination_per_page: u32,
+}
+
 #[derive(Debug, Deserialize)]
 struct GetAccountFilesResponse {
     // We purposefully ignore the files themselves at the moment as the only feature of the client
@@ -2257,6 +2314,37 @@ impl AlephAccountClient for AlephClient {
             .map_err(reqwest_middleware::Error::from)?;
 
         Ok(get_price_response.required_tokens)
+    }
+
+    async fn get_credit_history(
+        &self,
+        address: &Address,
+        page: u32,
+        page_size: Option<u32>,
+    ) -> Result<CreditHistoryResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/addresses/{}/credit_history", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let mut request = self
+            .http_client
+            .get(url)
+            .query(&[("page", page.to_string())]);
+        if let Some(per_page) = page_size {
+            request = request.query(&[("pagination", per_page.to_string())]);
+        }
+
+        let response = request
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+        let history: CreditHistoryResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(history)
     }
 }
 
