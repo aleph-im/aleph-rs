@@ -184,6 +184,20 @@ pub enum MessageError {
     Build(#[from] crate::messages::MessageBuildError),
 }
 
+impl MessageError {
+    /// Returns true if the error represents a 404 from the CCN, whether
+    /// surfaced as the typed `NotFound` variant, an `ApiError` with status
+    /// 404, or an `HttpError` wrapping a reqwest 404.
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            MessageError::NotFound(_) => true,
+            MessageError::ApiError { status, .. } => *status == 404,
+            MessageError::HttpError(e) => e.status() == Some(StatusCode::NOT_FOUND),
+            _ => false,
+        }
+    }
+}
+
 /// Error during message integrity verification.
 #[derive(Debug, thiserror::Error)]
 pub enum IntegrityError {
@@ -1198,6 +1212,16 @@ pub trait AlephAggregateClient {
         &self,
         address: &Address,
         keys: &[&str],
+    ) -> impl Future<Output = Result<HashMap<String, serde_json::Value>, MessageError>> + Send;
+
+    /// Returns every aggregate owned by `address`, keyed by their aggregate key.
+    ///
+    /// Use `get_aggregate` / `get_aggregates` when you already know the keys
+    /// you want; this method is for enumerating an address's aggregate
+    /// namespace (e.g. `aleph aggregate list`).
+    fn get_all_aggregates(
+        &self,
+        address: &Address,
     ) -> impl Future<Output = Result<HashMap<String, serde_json::Value>, MessageError>> + Send;
 }
 
@@ -2260,6 +2284,14 @@ impl AlephAccountClient for AlephClient {
     }
 }
 
+/// Shape of `/api/v0/aggregates/{address}.json` when fetching multiple
+/// keys (or every key) at once. Shared by `get_aggregates` and
+/// `get_all_aggregates`.
+#[derive(Deserialize)]
+struct AggregatesResponse {
+    data: HashMap<String, serde_json::Value>,
+}
+
 impl AlephAggregateClient for AlephClient {
     async fn get_aggregate<T: DeserializeOwned>(
         &self,
@@ -2304,11 +2336,6 @@ impl AlephAggregateClient for AlephClient {
             });
         }
 
-        #[derive(Deserialize)]
-        struct AggregatesResponse {
-            data: HashMap<String, serde_json::Value>,
-        }
-
         let url = self
             .ccn_url
             .join(&format!("/api/v0/aggregates/{}.json", address))
@@ -2321,6 +2348,36 @@ impl AlephAggregateClient for AlephClient {
             .query(&[("keys", &keys_csv)])
             .send()
             .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let aggregates_response: AggregatesResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+
+        Ok(aggregates_response.data)
+    }
+
+    async fn get_all_aggregates(
+        &self,
+        address: &Address,
+    ) -> Result<HashMap<String, serde_json::Value>, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/aggregates/{}.json", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self.http_client.get(url).send().await?;
+
+        // pyaleph returns 404 when the address has no aggregates rather than
+        // an empty data map. Treat it as an empty result so callers don't
+        // have to special-case the status code.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(HashMap::new());
+        }
+
+        let response = response
             .error_for_status()
             .map_err(reqwest_middleware::Error::from)?;
 
