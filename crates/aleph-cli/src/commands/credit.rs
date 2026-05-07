@@ -79,20 +79,24 @@ async fn handle_history(
         history.pagination_total,
     );
     eprintln!(
-        "{:<19}  {:>15}  {:<15}  {:<20}  {:<20}  Expires",
-        "Timestamp", "Amount", "Method", "Origin", "Origin ref",
+        "{:<19}  {:>15}  {:<15}  {:<20}  {:<20}  {:<10}",
+        "Timestamp", "Amount", "Method", "Origin", "Origin ref", "Expires",
     );
     for item in &history.credit_history {
+        let expires = item
+            .expiration_date
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "Never".to_string());
         eprintln!(
-            "{:<19}  {:>15}  {:<15}  {:<20}  {:<20}  {}",
-            item.message_timestamp.format("%Y-%m-%d %H:%M:%S"),
+            "{:<19}  {:>15}  {:<15}  {:<20}  {:<20}  {:<10}",
+            item.message_timestamp
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
             item.amount,
             display_optional(&item.payment_method, 15),
             display_optional(&item.origin, 20),
             display_optional(&item.origin_ref, 20),
-            item.expiration_date
-                .map(|d| d.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "Never".to_string()),
+            expires,
         );
     }
     Ok(())

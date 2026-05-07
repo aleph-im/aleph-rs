@@ -3155,3 +3155,63 @@ mod ipfs_gateway_tests {
         assert_eq!(client.ipfs_gateway.as_str(), "http://localhost:5001/");
     }
 }
+
+#[cfg(test)]
+mod credit_history_serde_tests {
+    use super::*;
+
+    #[test]
+    fn item_handles_missing_and_null_optionals() {
+        // Source-of-truth row with every optional field populated.
+        let purchase = serde_json::json!({
+            "amount": 1_000_000,
+            "price": "0.000001",
+            "bonus_amount": 50_000,
+            "tx_hash": "0xdeadbeef",
+            "token": "USDC",
+            "chain": "ETH",
+            "provider": "stripe",
+            "origin": "web",
+            "origin_ref": "ord_42",
+            "payment_method": "card",
+            "credit_ref": "purchase:0xdeadbeef:0",
+            "credit_index": 0,
+            "expiration_date": "2027-01-01T00:00:00Z",
+            "message_timestamp": "2026-05-01T12:00:00Z",
+        });
+        let _: CreditHistoryItem = serde_json::from_value(purchase).unwrap();
+
+        // Optional fields explicitly null (the shape the reviewer flagged).
+        let null_optionals = serde_json::json!({
+            "amount": -500,
+            "price": null,
+            "bonus_amount": null,
+            "tx_hash": null,
+            "token": null,
+            "chain": null,
+            "provider": null,
+            "origin": null,
+            "origin_ref": null,
+            "payment_method": null,
+            "credit_ref": "transfer:abc:0",
+            "credit_index": 0,
+            "expiration_date": null,
+            "message_timestamp": "2026-05-01T12:00:00Z",
+        });
+        let item: CreditHistoryItem = serde_json::from_value(null_optionals).unwrap();
+        assert!(item.expiration_date.is_none());
+        assert!(item.payment_method.is_none());
+        assert!(item.price.is_none());
+
+        // Optional fields entirely missing from the payload.
+        let missing_optionals = serde_json::json!({
+            "amount": 1,
+            "credit_ref": "x:0",
+            "credit_index": 1,
+            "message_timestamp": "2026-05-01T12:00:00Z",
+        });
+        let item: CreditHistoryItem = serde_json::from_value(missing_optionals).unwrap();
+        assert!(item.expiration_date.is_none());
+        assert!(item.payment_method.is_none());
+    }
+}
