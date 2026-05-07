@@ -2284,6 +2284,14 @@ impl AlephAccountClient for AlephClient {
     }
 }
 
+/// Shape of `/api/v0/aggregates/{address}.json` when fetching multiple
+/// keys (or every key) at once. Shared by `get_aggregates` and
+/// `get_all_aggregates`.
+#[derive(Deserialize)]
+struct AggregatesResponse {
+    data: HashMap<String, serde_json::Value>,
+}
+
 impl AlephAggregateClient for AlephClient {
     async fn get_aggregate<T: DeserializeOwned>(
         &self,
@@ -2328,11 +2336,6 @@ impl AlephAggregateClient for AlephClient {
             });
         }
 
-        #[derive(Deserialize)]
-        struct AggregatesResponse {
-            data: HashMap<String, serde_json::Value>,
-        }
-
         let url = self
             .ccn_url
             .join(&format!("/api/v0/aggregates/{}.json", address))
@@ -2360,11 +2363,6 @@ impl AlephAggregateClient for AlephClient {
         &self,
         address: &Address,
     ) -> Result<HashMap<String, serde_json::Value>, MessageError> {
-        #[derive(Deserialize)]
-        struct AggregatesResponse {
-            data: HashMap<String, serde_json::Value>,
-        }
-
         let url = self
             .ccn_url
             .join(&format!("/api/v0/aggregates/{}.json", address))
