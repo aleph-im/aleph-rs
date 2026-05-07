@@ -1178,6 +1178,18 @@ pub trait AlephAccountClient {
         &self,
         item_hash: &ItemHash,
     ) -> impl Future<Output = Result<f64, MessageError>> + Send;
+
+    /// Returns a paginated history of credit-affecting events for the address
+    /// (purchases, transfers, expirations, etc.).
+    ///
+    /// Pages are 1-indexed to match the server. `page_size` is clamped by the
+    /// server side; pass `None` to use the server default.
+    fn get_credit_history(
+        &self,
+        address: &Address,
+        page: u32,
+        page_size: Option<u32>,
+    ) -> impl Future<Output = Result<CreditHistoryResponse, MessageError>> + Send;
 }
 
 pub trait AlephAggregateClient {
@@ -2205,6 +2217,51 @@ pub struct AccountBalance {
     pub credits: u64,
 }
 
+/// One row of `/api/v0/addresses/{address}/credit_history`.
+///
+/// Mirrors `aleph.schemas.api.accounts.CreditHistoryResponseItem` in pyaleph.
+/// Optional fields reflect that purchase / transfer / expiration entries
+/// populate different subsets.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreditHistoryItem {
+    pub amount: i64,
+    /// Per-credit price at the time of the entry, serialized as a decimal
+    /// string (e.g. `"0.000001"`). `None` for non-purchase rows.
+    #[serde(default)]
+    pub price: Option<String>,
+    #[serde(default)]
+    pub bonus_amount: Option<i64>,
+    #[serde(default)]
+    pub tx_hash: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub chain: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub origin_ref: Option<String>,
+    #[serde(default)]
+    pub payment_method: Option<String>,
+    pub credit_ref: String,
+    pub credit_index: i64,
+    #[serde(default)]
+    pub expiration_date: Option<DateTime<Utc>>,
+    pub message_timestamp: DateTime<Utc>,
+}
+
+/// Page-paginated response from `/api/v0/addresses/{address}/credit_history`.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreditHistoryResponse {
+    pub address: String,
+    pub credit_history: Vec<CreditHistoryItem>,
+    pub pagination_page: u32,
+    pub pagination_total: u64,
+    pub pagination_per_page: u32,
+}
+
 #[derive(Debug, Deserialize)]
 struct GetAccountFilesResponse {
     // We purposefully ignore the files themselves at the moment as the only feature of the client
@@ -2281,6 +2338,50 @@ impl AlephAccountClient for AlephClient {
             .map_err(reqwest_middleware::Error::from)?;
 
         Ok(get_price_response.required_tokens)
+    }
+
+    async fn get_credit_history(
+        &self,
+        address: &Address,
+        page: u32,
+        page_size: Option<u32>,
+    ) -> Result<CreditHistoryResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/addresses/{}/credit_history", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let mut request = self
+            .http_client
+            .get(url)
+            .query(&[("page", page.to_string())]);
+        if let Some(per_page) = page_size {
+            request = request.query(&[("pagination", per_page.to_string())]);
+        }
+
+        let response = request.send().await?;
+
+        // pyaleph returns 404 when the address has no credit history rather
+        // than an empty page. Surface that as an empty response so callers
+        // don't have to special-case the status code.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(CreditHistoryResponse {
+                address: address.to_string(),
+                credit_history: Vec::new(),
+                pagination_page: page,
+                pagination_total: 0,
+                pagination_per_page: page_size.unwrap_or(0),
+            });
+        }
+
+        let response = response
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+        let history: CreditHistoryResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(history)
     }
 }
 
@@ -3109,5 +3210,65 @@ mod ipfs_gateway_tests {
         let client = AlephClient::new(Url::parse("https://example.com").unwrap())
             .with_ipfs_gateway(Url::parse("http://localhost:5001").unwrap());
         assert_eq!(client.ipfs_gateway.as_str(), "http://localhost:5001/");
+    }
+}
+
+#[cfg(test)]
+mod credit_history_serde_tests {
+    use super::*;
+
+    #[test]
+    fn item_handles_missing_and_null_optionals() {
+        // Source-of-truth row with every optional field populated.
+        let purchase = serde_json::json!({
+            "amount": 1_000_000,
+            "price": "0.000001",
+            "bonus_amount": 50_000,
+            "tx_hash": "0xdeadbeef",
+            "token": "USDC",
+            "chain": "ETH",
+            "provider": "stripe",
+            "origin": "web",
+            "origin_ref": "ord_42",
+            "payment_method": "card",
+            "credit_ref": "purchase:0xdeadbeef:0",
+            "credit_index": 0,
+            "expiration_date": "2027-01-01T00:00:00Z",
+            "message_timestamp": "2026-05-01T12:00:00Z",
+        });
+        let _: CreditHistoryItem = serde_json::from_value(purchase).unwrap();
+
+        // Optional fields explicitly null (the shape the reviewer flagged).
+        let null_optionals = serde_json::json!({
+            "amount": -500,
+            "price": null,
+            "bonus_amount": null,
+            "tx_hash": null,
+            "token": null,
+            "chain": null,
+            "provider": null,
+            "origin": null,
+            "origin_ref": null,
+            "payment_method": null,
+            "credit_ref": "transfer:abc:0",
+            "credit_index": 0,
+            "expiration_date": null,
+            "message_timestamp": "2026-05-01T12:00:00Z",
+        });
+        let item: CreditHistoryItem = serde_json::from_value(null_optionals).unwrap();
+        assert!(item.expiration_date.is_none());
+        assert!(item.payment_method.is_none());
+        assert!(item.price.is_none());
+
+        // Optional fields entirely missing from the payload.
+        let missing_optionals = serde_json::json!({
+            "amount": 1,
+            "credit_ref": "x:0",
+            "credit_index": 1,
+            "message_timestamp": "2026-05-01T12:00:00Z",
+        });
+        let item: CreditHistoryItem = serde_json::from_value(missing_optionals).unwrap();
+        assert!(item.expiration_date.is_none());
+        assert!(item.payment_method.is_none());
     }
 }

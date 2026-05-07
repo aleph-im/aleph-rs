@@ -1865,6 +1865,24 @@ Examples:
   aleph credit transfer --to bob --amount 250000 \\
                         --expiration 2026-12-31T23:59:59Z")]
     Transfer(TransferCreditArgs),
+    /// Display the paginated credit history of an address
+    History(CreditHistoryArgs),
+}
+
+#[derive(Args)]
+pub struct CreditHistoryArgs {
+    /// Owner address. Accepts a raw address (`0x...`) or a local account /
+    /// alias name. Defaults to the current default account.
+    #[arg(long)]
+    pub address: Option<String>,
+
+    /// Page number (1-indexed).
+    #[arg(long, default_value_t = 1)]
+    pub page: u32,
+
+    /// Items per page (server-clamped).
+    #[arg(long, default_value_t = 100)]
+    pub page_size: u32,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
