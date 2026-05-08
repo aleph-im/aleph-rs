@@ -1,6 +1,6 @@
 use crate::cli::{
     PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs, ProgramListArgs,
-    ProgramUpdateArgs, StorageEngineCli,
+    ProgramPersistArgs, ProgramUpdateArgs, StorageEngineCli,
 };
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes,
@@ -41,8 +41,8 @@ pub async fn handle_program_command(
         ProgramCommand::List(args) => handle_list(aleph_client, json, args).await,
         ProgramCommand::Delete(args) => handle_delete(aleph_client, ccn_url, json, args).await,
         ProgramCommand::Update(args) => handle_update(aleph_client, ccn_url, json, args).await,
-        ProgramCommand::Persist(_) => {
-            bail!("`aleph program persist` lands in PR 2 of the program CLI work")
+        ProgramCommand::Persist(args) => {
+            handle_persist_or_unpersist(aleph_client, ccn_url, json, args, true).await
         }
         ProgramCommand::Unpersist(_) => {
             bail!("`aleph program unpersist` lands in PR 2 of the program CLI work")
@@ -598,6 +598,94 @@ fn check_update_encoding(program: &Message, new_encoding: Encoding) -> Result<()
     Ok(())
 }
 
+/// Pure helper: clone a PROGRAM message's `ProgramContent` with `on.persistent`
+/// flipped to `new_persistent`. Used by both `persist` and `unpersist` to build
+/// the replacement PROGRAM message.
+fn clone_program_for_repersist(
+    program: &Message,
+    new_persistent: bool,
+) -> Result<aleph_types::message::ProgramContent> {
+    let MessageContentEnum::Program(content) = program.content() else {
+        bail!("expected PROGRAM message");
+    };
+    let mut cloned = content.clone();
+    cloned.on.persistent = Some(new_persistent);
+    Ok(cloned)
+}
+
+/// Shared handler for `aleph program persist` (with `new_persistent = true`)
+/// and `aleph program unpersist` (with `new_persistent = false`). Publishes a
+/// new PROGRAM message with the updated `on.persistent` flag and, unless
+/// `--keep-prev`, forgets the previous PROGRAM (keeping its code STORE intact
+/// so the new program can reuse it).
+async fn handle_persist_or_unpersist(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: ProgramPersistArgs,
+    new_persistent: bool,
+) -> Result<()> {
+    use aleph_sdk::builder::MessageBuilder;
+
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+
+    let program = fetch_program_message(aleph_client, &args.item_hash).await?;
+    if &program.sender != account.address() {
+        bail!(
+            "you are not the owner of program {} (sender: {})",
+            args.item_hash,
+            program.sender
+        );
+    }
+    let MessageContentEnum::Program(program_content) = program.content() else {
+        bail!("expected PROGRAM message, got {:?}", program.message_type);
+    };
+    if !program_content.base.allow_amend {
+        bail!(
+            "program {} is not updatable; was it created without --updatable?",
+            args.item_hash
+        );
+    }
+
+    let new_content = clone_program_for_repersist(&program, new_persistent)?;
+    let value = serde_json::to_value(&new_content)?;
+    let new_pending = MessageBuilder::new(&account, MessageType::Program, value).build()?;
+
+    let action_label = if new_persistent {
+        "persistent"
+    } else {
+        "ephemeral"
+    };
+    let prompt = if args.keep_prev {
+        format!(
+            "Publish a new {action_label} program message? Previous program {} stays.",
+            args.item_hash
+        )
+    } else {
+        format!(
+            "Publish a new {action_label} program message and forget the previous one ({})?",
+            args.item_hash
+        )
+    };
+    if !confirm_action(&prompt, args.yes)? {
+        bail!("aborted");
+    }
+
+    submit_or_preview(aleph_client, ccn_url, &new_pending, dry_run, json).await?;
+
+    if !args.keep_prev {
+        // The code STORE is reused by the new program; do not forget it.
+        let forget = build_forget_for_program(&account, &program, "Re-persisted", None)?;
+        submit_or_preview(aleph_client, ccn_url, &forget, dry_run, json).await?;
+    }
+
+    if !json {
+        eprintln!("New {action_label} program: {}", new_pending.item_hash);
+    }
+    Ok(())
+}
+
 async fn handle_delete(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -965,6 +1053,49 @@ mod tests {
         let program: Message = serde_json::from_str(raw).unwrap();
         let err = check_update_encoding(&program, Encoding::Squashfs).unwrap_err();
         assert!(format!("{err:#}").contains("encoding"));
+    }
+
+    #[test]
+    fn clone_program_for_repersist_flips_only_the_flag() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        let original_content = match program.content() {
+            MessageContentEnum::Program(c) => c.clone(),
+            _ => unreachable!(),
+        };
+
+        let cloned = clone_program_for_repersist(&program, true).unwrap();
+        // The fixture has on.persistent = Some(false); make sure we flipped to true.
+        assert_eq!(cloned.on.persistent, Some(true));
+        // And nothing else moved.
+        assert_eq!(cloned.code.encoding, original_content.code.encoding);
+        assert_eq!(cloned.code.entrypoint, original_content.code.entrypoint);
+        assert_eq!(cloned.code.reference, original_content.code.reference);
+        assert_eq!(cloned.runtime.reference, original_content.runtime.reference);
+        assert_eq!(cloned.on.http, original_content.on.http);
+        assert_eq!(
+            cloned.environment.internet,
+            original_content.environment.internet
+        );
+        assert_eq!(
+            cloned.base.resources.vcpus,
+            original_content.base.resources.vcpus
+        );
+        assert_eq!(cloned.base.allow_amend, original_content.base.allow_amend);
+    }
+
+    #[test]
+    fn clone_program_for_repersist_to_false_works_too() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        let cloned = clone_program_for_repersist(&program, false).unwrap();
+        assert_eq!(cloned.on.persistent, Some(false));
     }
 
     #[test]
