@@ -283,7 +283,7 @@ fn parse_kv_pairs(s: &str) -> Result<Vec<(&str, &str)>, String> {
         .collect()
 }
 
-fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
+pub(crate) fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
@@ -323,7 +323,7 @@ fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
         .collect()
 }
 
-fn parse_ephemeral_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
+pub(crate) fn parse_ephemeral_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
@@ -346,7 +346,7 @@ fn parse_ephemeral_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
         .collect()
 }
 
-fn parse_immutable_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
+pub(crate) fn parse_immutable_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
