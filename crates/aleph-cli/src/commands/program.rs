@@ -1,6 +1,6 @@
 use crate::cli::{
-    PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs, ProgramListArgs,
-    ProgramPersistArgs, ProgramUpdateArgs, StorageEngineCli,
+    CrnArgs, PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs, ProgramListArgs,
+    ProgramLogsArgs, ProgramPersistArgs, ProgramUpdateArgs, StorageEngineCli,
 };
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes,
@@ -47,9 +47,7 @@ pub async fn handle_program_command(
         ProgramCommand::Unpersist(args) => {
             handle_persist_or_unpersist(aleph_client, ccn_url, json, args, false).await
         }
-        ProgramCommand::Logs(_) => {
-            bail!("`aleph program logs` lands in PR 2 of the program CLI work")
-        }
+        ProgramCommand::Logs(args) => handle_logs(json, args).await,
     }
 }
 
@@ -739,6 +737,21 @@ fn build_forget_for_program<A: Account>(
         builder = builder.channel(ch);
     }
     Ok(builder.build()?)
+}
+
+/// Stream logs from one CRN. The CRN's log endpoint is identical for instances
+/// and programs (it indexes by VM hash regardless of message type), so we
+/// route through the existing instance handler.
+async fn handle_logs(json: bool, args: ProgramLogsArgs) -> Result<()> {
+    crate::commands::crn::handle_logs(
+        json,
+        CrnArgs {
+            crn_url: args.crn.to_string(),
+            vm_id: args.item_hash,
+            signing: args.signing,
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
