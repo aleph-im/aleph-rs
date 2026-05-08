@@ -44,8 +44,8 @@ pub async fn handle_program_command(
         ProgramCommand::Persist(args) => {
             handle_persist_or_unpersist(aleph_client, ccn_url, json, args, true).await
         }
-        ProgramCommand::Unpersist(_) => {
-            bail!("`aleph program unpersist` lands in PR 2 of the program CLI work")
+        ProgramCommand::Unpersist(args) => {
+            handle_persist_or_unpersist(aleph_client, ccn_url, json, args, false).await
         }
         ProgramCommand::Logs(_) => {
             bail!("`aleph program logs` lands in PR 2 of the program CLI work")
