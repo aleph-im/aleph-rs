@@ -41,6 +41,7 @@ bs58 = { workspace = true }
 walkdir = { workspace = true }
 ctrlc = { workspace = true }
 zip = { workspace = true }
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
