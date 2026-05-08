@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod common;
 mod config;
+mod program;
 
 #[cfg(unix)]
 static ORIGINAL_TERMIOS: OnceLock<libc::termios> = OnceLock::new();
