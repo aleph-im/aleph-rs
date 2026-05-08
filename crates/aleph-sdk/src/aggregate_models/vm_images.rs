@@ -59,6 +59,32 @@ pub struct VmImageDefaults {
     pub runtime: Option<String>,
 }
 
+impl VmImagesData {
+    pub fn active_rootfs(&self) -> Vec<(&str, &RootfsEntry)> {
+        self.rootfs
+            .iter()
+            .filter(|(_, e)| !e.deprecated)
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+
+    pub fn active_runtimes(&self) -> Vec<(&str, &ImageEntry)> {
+        self.runtimes
+            .iter()
+            .filter(|(_, e)| !e.deprecated)
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+
+    pub fn active_firmwares(&self) -> Vec<(&str, &ImageEntry)> {
+        self.firmwares
+            .iter()
+            .filter(|(_, e)| !e.deprecated)
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +172,37 @@ mod tests {
         let json = r#"{"vm-images": {"rootfs": {"x": {"hash": "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e", "future_field": 42}}}}"#;
         let agg: VmImagesAggregate = serde_json::from_str(json).unwrap();
         assert!(agg.vm_images.rootfs.contains_key("x"));
+    }
+
+    #[test]
+    fn active_rootfs_excludes_deprecated_and_is_sorted() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let active: Vec<&str> = agg
+            .vm_images
+            .active_rootfs()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(active, vec!["ubuntu22", "ubuntu24"]);
+    }
+
+    #[test]
+    fn active_runtimes_and_firmwares() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let runtimes: Vec<&str> = agg
+            .vm_images
+            .active_runtimes()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(runtimes, vec!["py311"]);
+
+        let firmwares: Vec<&str> = agg
+            .vm_images
+            .active_firmwares()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(firmwares, vec!["ovmf-default"]);
     }
 }
