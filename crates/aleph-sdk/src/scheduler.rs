@@ -1,4 +1,4 @@
-//! Client for the Aleph VM scheduler API at https://scheduler.api.aleph.cloud.
+//! Client for the Aleph VM scheduler API at <https://scheduler.api.aleph.cloud>.
 //!
 //! Used by `aleph instance list` to enrich CCN-sourced rows with the actual
 //! VM placement and effective status. CCN remains authoritative for which
