@@ -10,4 +10,5 @@ pub mod instance_interactive;
 pub mod message;
 pub mod node;
 pub mod post;
+pub mod program;
 pub mod sync;
