@@ -1366,6 +1366,45 @@ mod tests {
         assert!(parse_image("abc").is_err());
     }
 
+    #[test]
+    fn parse_image_ref_hash() {
+        use crate::cli::{ImageRef, parse_image_ref};
+        let parsed =
+            parse_image_ref("5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e")
+                .unwrap();
+        match parsed {
+            ImageRef::Hash(h) => assert_eq!(
+                h.to_string(),
+                "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+            ),
+            ImageRef::Preset(p) => panic!("expected Hash, got Preset({p})"),
+        }
+    }
+
+    #[test]
+    fn parse_image_ref_cid() {
+        use crate::cli::{ImageRef, parse_image_ref};
+        let parsed = parse_image_ref("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG").unwrap();
+        assert!(matches!(parsed, ImageRef::Hash(_)));
+    }
+
+    #[test]
+    fn parse_image_ref_preset_name() {
+        use crate::cli::{ImageRef, parse_image_ref};
+        let parsed = parse_image_ref("ubuntu24").unwrap();
+        match parsed {
+            ImageRef::Preset(name) => assert_eq!(name, "ubuntu24"),
+            ImageRef::Hash(_) => panic!("expected Preset, got Hash"),
+        }
+    }
+
+    #[test]
+    fn parse_image_ref_rejects_empty() {
+        use crate::cli::parse_image_ref;
+        assert!(parse_image_ref("").is_err());
+        assert!(parse_image_ref("   ").is_err());
+    }
+
     use std::collections::HashMap;
 
     #[test]
