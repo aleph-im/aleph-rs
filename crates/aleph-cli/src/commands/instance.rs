@@ -3,6 +3,7 @@ use crate::cli::{
     parse_size_to_mib,
 };
 use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
+use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter, MessageWithStatus,
 };
@@ -601,6 +602,55 @@ pub(crate) fn resolve_instance_specs_from_flags(
          (or use --size to specify a tier slug like 1vcpu-2gb)",
     )?;
     Ok((vcpus.unwrap_or(1), memory_mib.unwrap_or(2048), disk_mib))
+}
+
+/// Output of `resolve_image_refs`. `confidential_firmware` is `Some` iff the
+/// caller requested a confidential VM.
+#[derive(Debug)]
+pub(crate) struct ResolvedImages {
+    pub rootfs: ItemHash,
+    pub confidential_firmware: Option<ItemHash>,
+}
+
+/// Resolve `--image` and `--confidential-firmware` against an in-memory
+/// `VmImagesData`. Pure: does no network I/O. The handler decides separately
+/// whether to fetch the aggregate.
+pub(crate) fn resolve_image_refs(
+    image: crate::cli::ImageRef,
+    confidential: bool,
+    confidential_firmware: Option<crate::cli::ImageRef>,
+    data: &VmImagesData,
+) -> anyhow::Result<ResolvedImages> {
+    use crate::cli::ImageRef;
+    use aleph_sdk::aggregate_models::vm_images::VmImagesError;
+
+    let rootfs = match image {
+        ImageRef::Hash(h) => h,
+        ImageRef::Preset(name) => data.rootfs(&name)?.hash.clone(),
+    };
+
+    let firmware = if confidential {
+        let resolved = match confidential_firmware {
+            Some(ImageRef::Hash(h)) => h,
+            Some(ImageRef::Preset(name)) => data.firmware(&name)?.hash.clone(),
+            None => {
+                let default_name = data
+                    .defaults
+                    .firmware
+                    .as_deref()
+                    .ok_or(VmImagesError::NoDefault { kind: "firmware" })?;
+                data.firmware(default_name)?.hash.clone()
+            }
+        };
+        Some(resolved)
+    } else {
+        None
+    };
+
+    Ok(ResolvedImages {
+        rootfs,
+        confidential_firmware: firmware,
+    })
 }
 
 async fn handle_instance_create(
@@ -1815,5 +1865,139 @@ mod tests {
     fn format_node_short_passthrough_when_short() {
         assert_eq!(format_node_short("abc"), "abc");
         assert_eq!(format_node_short("0123456789"), "0123456789");
+    }
+
+    mod resolve_image_refs_tests {
+        use super::super::resolve_image_refs;
+        use crate::cli::ImageRef;
+        use aleph_sdk::aggregate_models::vm_images::{
+            ImageEntry, RootfsEntry, VmImageDefaults, VmImagesData,
+        };
+        use aleph_types::item_hash::ItemHash;
+        use std::collections::BTreeMap;
+
+        fn h(hex: &str) -> ItemHash {
+            ItemHash::try_from(hex).unwrap()
+        }
+
+        fn fake_data() -> VmImagesData {
+            let mut rootfs = BTreeMap::new();
+            rootfs.insert(
+                "ubuntu24".to_string(),
+                RootfsEntry {
+                    hash: h("5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"),
+                    display_name: None,
+                    description: None,
+                    min_disk_mib: None,
+                    deprecated: false,
+                },
+            );
+            let mut firmwares = BTreeMap::new();
+            firmwares.insert(
+                "ovmf-default".to_string(),
+                ImageEntry {
+                    hash: h("ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff"),
+                    display_name: None,
+                    description: None,
+                    deprecated: false,
+                },
+            );
+            VmImagesData {
+                rootfs,
+                runtimes: BTreeMap::new(),
+                firmwares,
+                defaults: VmImageDefaults {
+                    rootfs: None,
+                    firmware: Some("ovmf-default".to_string()),
+                    runtime: None,
+                },
+            }
+        }
+
+        #[test]
+        fn resolves_preset_rootfs() {
+            let data = fake_data();
+            let r =
+                resolve_image_refs(ImageRef::Preset("ubuntu24".to_string()), false, None, &data)
+                    .unwrap();
+            assert_eq!(
+                r.rootfs.to_string(),
+                "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+            );
+            assert!(r.confidential_firmware.is_none());
+        }
+
+        #[test]
+        fn passes_through_hash_rootfs() {
+            let data = VmImagesData::default();
+            let raw = h("1111111111111111111111111111111111111111111111111111111111111111");
+            let r = resolve_image_refs(ImageRef::Hash(raw.clone()), false, None, &data).unwrap();
+            assert_eq!(r.rootfs.to_string(), raw.to_string());
+        }
+
+        #[test]
+        fn confidential_uses_default_firmware_when_omitted() {
+            let data = fake_data();
+            let r = resolve_image_refs(ImageRef::Preset("ubuntu24".to_string()), true, None, &data)
+                .unwrap();
+            let fw = r.confidential_firmware.expect("firmware should resolve");
+            assert_eq!(
+                fw.to_string(),
+                "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff"
+            );
+        }
+
+        #[test]
+        fn confidential_with_no_default_errors() {
+            let mut data = fake_data();
+            data.defaults.firmware = None;
+            let err =
+                resolve_image_refs(ImageRef::Preset("ubuntu24".to_string()), true, None, &data)
+                    .unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("no default firmware"), "msg={msg}");
+        }
+
+        #[test]
+        fn confidential_with_explicit_hash() {
+            let data = VmImagesData::default();
+            let rootfs = h("1111111111111111111111111111111111111111111111111111111111111111");
+            let firmware = h("2222222222222222222222222222222222222222222222222222222222222222");
+            let r = resolve_image_refs(
+                ImageRef::Hash(rootfs.clone()),
+                true,
+                Some(ImageRef::Hash(firmware.clone())),
+                &data,
+            )
+            .unwrap();
+            assert_eq!(
+                r.confidential_firmware.unwrap().to_string(),
+                firmware.to_string()
+            );
+        }
+
+        #[test]
+        fn unknown_preset_lists_available() {
+            let data = fake_data();
+            let err = resolve_image_refs(ImageRef::Preset("nope".to_string()), false, None, &data)
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("ubuntu24"), "msg={msg}");
+        }
+
+        #[test]
+        fn non_confidential_ignores_firmware_arg() {
+            let data = VmImagesData::default();
+            let rootfs = h("1111111111111111111111111111111111111111111111111111111111111111");
+            let firmware = h("2222222222222222222222222222222222222222222222222222222222222222");
+            let r = resolve_image_refs(
+                ImageRef::Hash(rootfs),
+                false,
+                Some(ImageRef::Hash(firmware)),
+                &data,
+            )
+            .unwrap();
+            assert!(r.confidential_firmware.is_none());
+        }
     }
 }
