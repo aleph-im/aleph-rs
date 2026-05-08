@@ -87,15 +87,6 @@ pub fn parse_image_ref(s: &str) -> Result<ImageRef, String> {
     if trimmed.is_empty() {
         return Err("image cannot be empty".to_string());
     }
-
-    // Only consider strings that are long enough to be hashes or CIDs as hashes.
-    // Native hashes are 64 hex chars, CIDv0 are 46 chars, CIDv1 are longer (typically 50+).
-    // Preset names are typically much shorter (e.g., ubuntu22, debian12).
-    // If it's too short, treat it as a preset name.
-    if trimmed.len() < 40 {
-        return Ok(ImageRef::Preset(trimmed.to_string()));
-    }
-
     match ItemHash::try_from(trimmed) {
         Ok(h) => Ok(ImageRef::Hash(h)),
         Err(_) => Ok(ImageRef::Preset(trimmed.to_string())),

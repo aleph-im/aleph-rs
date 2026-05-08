@@ -151,7 +151,8 @@ impl TryFrom<String> for Cid {
         // CIDv1: multibase-encoded, typically starts with 'b' (base32) or 'z' (base58btc)
         // Common prefixes: b (base32), B (base32upper), z (base58btc), f (base16), F (base16upper),
         // m (base64), M (base64url), u (base64url), U (base64urlpad)
-        if value.len() > 1 {
+        // Require a minimum length to avoid accepting short preset names (e.g., "ubuntu24")
+        if value.len() >= 40 {
             let first_char = value.chars().next().unwrap();
             // Check for common multibase prefixes
             if matches!(
