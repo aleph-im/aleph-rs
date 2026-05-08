@@ -71,8 +71,49 @@ fn validate_zip(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn zip_directory(_dir: &Path) -> Result<tempfile::NamedTempFile> {
-    bail!("directory zipping not yet implemented (PR1 T6)")
+fn zip_directory(dir: &Path) -> Result<tempfile::NamedTempFile> {
+    let tmp = tempfile::Builder::new()
+        .prefix("aleph-program-")
+        .suffix(".zip")
+        .tempfile()?;
+    let f = std::io::BufWriter::new(tmp.reopen()?);
+    let mut zip = zip::ZipWriter::new(f);
+    let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+        let entry = entry?;
+        let abs = entry.path();
+        let rel = abs.strip_prefix(dir)?;
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let name = rel.to_string_lossy().replace('\\', "/");
+
+        let metadata = entry.metadata()?;
+        let mut entry_opts = opts;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            entry_opts = entry_opts.unix_permissions(metadata.permissions().mode());
+        }
+        #[cfg(not(unix))]
+        let _ = metadata;
+
+        if entry.file_type().is_dir() {
+            zip.add_directory(name, entry_opts)?;
+        } else if entry.file_type().is_file() {
+            zip.start_file(name, entry_opts)?;
+            let mut src = fs::File::open(abs)?;
+            std::io::copy(&mut src, &mut zip)?;
+        } else if entry.file_type().is_symlink() {
+            let target = fs::read_link(abs)?;
+            zip.add_symlink(name, target.to_string_lossy(), entry_opts)?;
+        }
+    }
+
+    zip.finish()?;
+    Ok(tmp)
 }
 
 #[cfg(test)]
@@ -137,5 +178,64 @@ mod tests {
             format!("{err:#}").to_lowercase().contains("not found"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn directory_zip_includes_hidden_and_dotgit_with_no_filtering() {
+        let src = tempdir().unwrap();
+        fs::write(src.path().join("main.py"), b"print('hi')\n").unwrap();
+        fs::create_dir(src.path().join("sub")).unwrap();
+        fs::write(src.path().join("sub/util.py"), b"x = 1\n").unwrap();
+        fs::write(src.path().join(".env"), b"SECRET=1\n").unwrap();
+        fs::create_dir(src.path().join(".git")).unwrap();
+        fs::write(src.path().join(".git/config"), b"[core]\n").unwrap();
+
+        let (archive, enc) = prepare_archive(src.path()).unwrap();
+        assert_eq!(enc, Encoding::Zip);
+
+        let f = fs::File::open(archive.path()).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let mut names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        names.sort();
+
+        assert!(names.iter().any(|n| n == "main.py"));
+        assert!(names.iter().any(|n| n == "sub/util.py"));
+        assert!(names.iter().any(|n| n == ".env"));
+        assert!(names.iter().any(|n| n == ".git/config"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_zip_preserves_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempdir().unwrap();
+        let exe = src.path().join("run.sh");
+        fs::write(&exe, b"#!/bin/sh\necho hi\n").unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (archive, _) = prepare_archive(src.path()).unwrap();
+        let f = fs::File::open(archive.path()).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let entry = zip.by_name("run.sh").unwrap();
+        let mode = entry.unix_mode().unwrap_or(0);
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "executable bit lost; got mode {mode:o}"
+        );
+    }
+
+    #[test]
+    fn directory_zip_uses_deflated_compression() {
+        let src = tempdir().unwrap();
+        // Use a payload that compresses well so DEFLATE shows a clear win.
+        fs::write(src.path().join("payload.txt"), "x".repeat(4096).as_bytes()).unwrap();
+        let (archive, _) = prepare_archive(src.path()).unwrap();
+        let f = fs::File::open(archive.path()).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let entry = zip.by_name("payload.txt").unwrap();
+        assert_eq!(entry.compression(), zip::CompressionMethod::Deflated);
     }
 }
