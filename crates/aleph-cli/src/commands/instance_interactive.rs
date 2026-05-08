@@ -6,13 +6,13 @@
 //! (the instance gets pinned to the chosen CRN via `node_hash`). The instance
 //! name is a required positional argument and is never prompted for.
 
-use crate::cli::{IMAGE_PRESETS, InstanceCreateArgs, parse_image};
+use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
 use crate::commands::instance::validate_ssh_pubkey;
+use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::crns_list::{
     CrnFilter, CrnListEntry, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list,
 };
-use aleph_types::item_hash::ItemHash;
 use anyhow::{Result, anyhow, bail};
 use dialoguer::{Confirm, FuzzySelect, Input, Select};
 use std::cmp::Ordering;
@@ -26,7 +26,12 @@ pub async fn resolve_interactive(
     let crn_list_fut = spawn_crn_list_fetch();
 
     if args.image.is_none() {
-        args.image = Some(prompt_image()?);
+        let vm_images = aleph_client
+            .get_vm_images_aggregate()
+            .await
+            .map_err(|e| anyhow!("failed to fetch vm-images aggregate: {e}"))?
+            .vm_images;
+        args.image = Some(prompt_image(&vm_images)?);
     }
     if args.size.is_none() && args.disk_size.is_none() {
         args.size = Some(prompt_size(aleph_client).await?);
@@ -165,29 +170,40 @@ async fn resolve_specs_for_filter(
     }
 }
 
-fn prompt_image() -> Result<ItemHash> {
-    let mut items: Vec<String> = IMAGE_PRESETS
+fn prompt_image(vm_images: &VmImagesData) -> Result<ImageRef> {
+    let active = vm_images.active_rootfs();
+    let mut items: Vec<String> = active
         .iter()
-        .map(|(name, _)| name.to_string())
+        .map(|(slug, entry)| match &entry.display_name {
+            Some(d) => format!("{slug}  {d}"),
+            None => slug.to_string(),
+        })
         .collect();
-    items.push("custom hash or IPFS CID…".into());
+    items.push("custom hash or IPFS CID...".into());
+
+    let default_idx = vm_images
+        .defaults
+        .rootfs
+        .as_deref()
+        .and_then(|d| active.iter().position(|(slug, _)| *slug == d))
+        .unwrap_or(0);
 
     let idx = Select::new()
         .with_prompt("Image")
         .items(&items)
-        .default(0)
+        .default(default_idx)
         .interact()?;
 
-    if idx < IMAGE_PRESETS.len() {
-        IMAGE_PRESETS[idx].1.parse().map_err(anyhow::Error::msg)
+    if idx < active.len() {
+        Ok(ImageRef::Hash(active[idx].1.hash.clone()))
     } else {
         let raw: String = Input::new()
             .with_prompt("Image (item hash or IPFS CID)")
             .validate_with(|s: &String| -> std::result::Result<(), String> {
-                parse_image(s).map(|_| ())
+                parse_image_ref(s).map(|_| ())
             })
             .interact_text()?;
-        parse_image(&raw).map_err(anyhow::Error::msg)
+        parse_image_ref(&raw).map_err(anyhow::Error::msg)
     }
 }
 
