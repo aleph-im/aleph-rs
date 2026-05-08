@@ -59,6 +59,18 @@ pub struct VmImageDefaults {
     pub runtime: Option<String>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum VmImagesError {
+    #[error("unknown {kind} preset '{name}' (available: {available})")]
+    UnknownPreset {
+        kind: &'static str,
+        name: String,
+        available: String,
+    },
+    #[error("vm-images aggregate has no default {kind} configured")]
+    NoDefault { kind: &'static str },
+}
+
 impl VmImagesData {
     pub fn active_rootfs(&self) -> Vec<(&str, &RootfsEntry)> {
         self.rootfs
@@ -83,6 +95,42 @@ impl VmImagesData {
             .map(|(k, v)| (k.as_str(), v))
             .collect()
     }
+
+    pub fn rootfs(&self, name: &str) -> Result<&RootfsEntry, VmImagesError> {
+        self.rootfs
+            .get(name)
+            .ok_or_else(|| VmImagesError::UnknownPreset {
+                kind: "rootfs",
+                name: name.to_string(),
+                available: join_active_names(self.active_rootfs().iter().map(|(n, _)| *n)),
+            })
+    }
+
+    pub fn firmware(&self, name: &str) -> Result<&ImageEntry, VmImagesError> {
+        self.firmwares
+            .get(name)
+            .ok_or_else(|| VmImagesError::UnknownPreset {
+                kind: "firmware",
+                name: name.to_string(),
+                available: join_active_names(self.active_firmwares().iter().map(|(n, _)| *n)),
+            })
+    }
+
+    pub fn runtime(&self, name: &str) -> Result<&ImageEntry, VmImagesError> {
+        self.runtimes
+            .get(name)
+            .ok_or_else(|| VmImagesError::UnknownPreset {
+                kind: "runtime",
+                name: name.to_string(),
+                available: join_active_names(self.active_runtimes().iter().map(|(n, _)| *n)),
+            })
+    }
+}
+
+fn join_active_names<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let mut v: Vec<&str> = names.into_iter().collect();
+    v.sort_unstable();
+    v.join(", ")
 }
 
 #[cfg(test)]
@@ -204,5 +252,58 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         assert_eq!(firmwares, vec!["ovmf-default"]);
+    }
+
+    #[test]
+    fn lookup_returns_active_entry() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let entry = agg.vm_images.rootfs("ubuntu24").unwrap();
+        assert_eq!(
+            entry.hash.to_string(),
+            "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+        );
+    }
+
+    #[test]
+    fn lookup_returns_deprecated_entry() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let entry = agg.vm_images.rootfs("old-image").unwrap();
+        assert!(entry.deprecated);
+    }
+
+    #[test]
+    fn lookup_unknown_lists_active_names() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let err = agg.vm_images.rootfs("nope").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("rootfs"), "msg={msg}");
+        assert!(msg.contains("nope"), "msg={msg}");
+        assert!(msg.contains("ubuntu22"), "msg={msg}");
+        assert!(msg.contains("ubuntu24"), "msg={msg}");
+        assert!(
+            !msg.contains("old-image"),
+            "msg should hide deprecated: {msg}"
+        );
+    }
+
+    #[test]
+    fn lookup_firmware_and_runtime() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        assert_eq!(
+            agg.vm_images
+                .firmware("ovmf-default")
+                .unwrap()
+                .hash
+                .to_string(),
+            "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff"
+        );
+        assert_eq!(
+            agg.vm_images
+                .runtime("py311")
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Python 3.11")
+        );
     }
 }
