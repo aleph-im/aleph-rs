@@ -1,6 +1,6 @@
 use crate::cli::{
-    InstanceCommand, InstanceCreateArgs, InstanceDeleteArgs, InstanceListArgs, InstancePriceArgs,
-    parse_size_to_mib,
+    ImageRef, InstanceCommand, InstanceCreateArgs, InstanceDeleteArgs, InstanceListArgs,
+    InstancePriceArgs, parse_size_to_mib,
 };
 use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
@@ -710,7 +710,33 @@ async fn handle_instance_create(
     let disk_size = PersistentVolumeSize::try_from(disk_size_mib)
         .map_err(|e| anyhow!("invalid disk size: {e}"))?;
 
-    let image = args.image.context("--image is required (or use -i)")?;
+    let image_ref = args
+        .image
+        .clone()
+        .context("--image is required (or use -i)")?;
+
+    let needs_aggregate = matches!(image_ref, ImageRef::Preset(_))
+        || (args.confidential && !matches!(args.confidential_firmware, Some(ImageRef::Hash(_))));
+
+    let vm_images = if needs_aggregate {
+        aleph_client
+            .get_vm_images_aggregate()
+            .await
+            .map_err(|e| anyhow!("failed to fetch vm-images aggregate: {e}"))?
+            .vm_images
+    } else {
+        VmImagesData::default()
+    };
+
+    let resolved = resolve_image_refs(
+        image_ref,
+        args.confidential,
+        args.confidential_firmware.clone(),
+        &vm_images,
+    )?;
+
+    let image = resolved.rootfs;
+
     let mut builder = InstanceBuilder::new(&account, image, disk_size)
         .vcpus(vcpus)
         .memory(MiB::from(memory_mib))
@@ -732,10 +758,10 @@ async fn handle_instance_create(
 
     // Confidential VM
     if args.confidential {
-        let firmware: ItemHash = args
+        let firmware = resolved
             .confidential_firmware
-            .parse()
-            .map_err(|e| anyhow!("invalid confidential firmware hash: {e}"))?;
+            .clone()
+            .expect("resolver guarantees Some when confidential is true");
         builder = builder.trusted_execution(TrustedExecutionEnvironment {
             firmware: Some(firmware),
             policy: 0x1, // NoDebug
@@ -1199,7 +1225,7 @@ async fn handle_instance_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{parse_image, parse_size_to_mib};
+    use crate::cli::parse_size_to_mib;
 
     #[test]
     fn parse_kv_pairs_basic() {
@@ -1377,43 +1403,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_image_preset_ubuntu24() {
-        let hash = parse_image("ubuntu24").unwrap();
-        assert_eq!(
-            hash.to_string(),
-            "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
-        );
-    }
-
-    #[test]
-    fn parse_image_preset_case_insensitive() {
-        let hash = parse_image("Ubuntu22").unwrap();
-        assert_eq!(
-            hash.to_string(),
-            "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
-        );
-    }
-
-    #[test]
-    fn parse_image_raw_hash() {
-        let hash = parse_image("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c")
-            .unwrap();
-        assert_eq!(
-            hash.to_string(),
-            "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c"
-        );
-    }
-
-    #[test]
-    fn parse_image_ipfs_cid() {
-        let hash = parse_image("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG").unwrap();
-        assert!(matches!(hash, aleph_types::item_hash::ItemHash::Ipfs(_)));
-    }
-
-    #[test]
-    fn parse_image_invalid() {
-        assert!(parse_image("windows11").is_err());
-        assert!(parse_image("abc").is_err());
+    fn parse_image_ref_handles_preset_strings() {
+        use crate::cli::{ImageRef, parse_image_ref};
+        // Preset names resolve to Preset variant; the aggregate is the source
+        // of truth for which preset names are valid at runtime.
+        for name in [
+            "ubuntu22",
+            "ubuntu24",
+            "Ubuntu22",
+            "debian12",
+            "anything-else",
+        ] {
+            match parse_image_ref(name).unwrap() {
+                ImageRef::Preset(p) => assert_eq!(p, name),
+                ImageRef::Hash(_) => panic!("expected Preset for {name}"),
+            }
+        }
     }
 
     #[test]
