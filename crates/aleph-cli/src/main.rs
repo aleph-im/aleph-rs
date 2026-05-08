@@ -156,8 +156,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         cli::Commands::Config { .. } => unreachable!(),
         cli::Commands::Completions { .. } => unreachable!(),
-        cli::Commands::Program { .. } => {
-            return Err("aleph program handlers land in PR1 T8".into());
+        cli::Commands::Program {
+            command: program_command,
+        } => {
+            commands::program::handle_program_command(
+                &aleph_client,
+                &ccn_url,
+                json,
+                program_command,
+            )
+            .await?
         }
         cli::Commands::Credit {
             command: credit_command,
