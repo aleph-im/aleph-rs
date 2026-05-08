@@ -1,5 +1,6 @@
 use crate::aggregate_models::corechannel::CoreChannelAggregate;
 use crate::aggregate_models::pricing::{PRICING_ADDRESS, PricingAggregate};
+use crate::aggregate_models::vm_images::{VM_IMAGES_KEY, VmImagesAggregate};
 use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
 use crate::messages::StoreBuilder;
 use crate::verify::Hasher;
@@ -1214,6 +1215,15 @@ pub trait AlephAggregateClient {
         &self,
     ) -> impl Future<Output = Result<PricingAggregate, MessageError>> + Send {
         self.get_aggregate(&PRICING_ADDRESS, "pricing")
+    }
+
+    /// Returns the most recent version of the vm-images aggregate that lists
+    /// rootfs presets, runtimes, and confidential UEFI firmware curated on the
+    /// network.
+    fn get_vm_images_aggregate(
+        &self,
+    ) -> impl Future<Output = Result<VmImagesAggregate, MessageError>> + Send {
+        self.get_aggregate(&PRICING_ADDRESS, VM_IMAGES_KEY)
     }
 
     /// Returns the most recent version of multiple aggregates, keyed by their aggregate key.
