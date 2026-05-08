@@ -7,14 +7,22 @@ use crate::commands::instance::{
 };
 use crate::common::{print_submission_result, resolve_account, resolve_address, submit_or_preview};
 use crate::program::archive::prepare_archive;
-use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephStorageClient, hash_file};
+use aleph_sdk::client::{
+    AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageFilter,
+    hash_file,
+};
 use aleph_sdk::messages::{ProgramBuilder, StoreBuilder};
 use aleph_sdk::verify::Hasher;
+use aleph_types::account::Account;
+use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
-use aleph_types::message::StorageEngine;
+use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
 use aleph_types::message::execution::volume::MachineVolume;
+use aleph_types::message::{Message, MessageContentEnum, MessageType, StorageEngine};
+use aleph_types::timestamp::Timestamp;
 use anyhow::{Context, Result, bail};
+use futures_util::StreamExt;
 use memsizes::MiB;
 use std::collections::HashMap;
 use url::Url;
@@ -230,12 +238,191 @@ fn parse_env_vars(s: &str) -> Result<HashMap<String, String>> {
     Ok(out)
 }
 
-async fn handle_list(
-    _aleph_client: &AlephClient,
-    _json: bool,
-    _args: ProgramListArgs,
-) -> Result<()> {
-    bail!("`aleph program list` not yet implemented (PR1 T10)")
+/// One row of `aleph program list` output, extracted from a PROGRAM message.
+#[derive(Debug, Clone)]
+struct ProgramRow {
+    item_hash: ItemHash,
+    name: Option<String>,
+    sender: Address,
+    persistent: bool,
+    internet: bool,
+    updatable: bool,
+    vcpus: u32,
+    memory_mib: u64,
+    runtime: ItemHash,
+    created_at: Timestamp,
+}
+
+/// Convert a PROGRAM message into a row. Returns `None` for non-program
+/// messages (defensive - callers already filter by `MessageType::Program`,
+/// but the CCN can occasionally return a mis-typed payload).
+fn extract_program_row(message: &Message) -> Option<ProgramRow> {
+    let MessageContentEnum::Program(program) = message.content() else {
+        return None;
+    };
+    let name = program
+        .base
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Some(ProgramRow {
+        item_hash: message.item_hash.clone(),
+        name,
+        sender: message.sender.clone(),
+        persistent: program.on.persistent.unwrap_or(false),
+        internet: program.environment.internet,
+        updatable: program.base.allow_amend,
+        vcpus: program.base.resources.vcpus,
+        memory_mib: u64::from(program.base.resources.memory),
+        runtime: program.runtime.reference.clone(),
+        created_at: message.content.time.clone(),
+    })
+}
+
+/// Fetch all PROGRAM rows for `address`. Programs do not have an `owner`
+/// distinct from `sender` (instances do, because they may be paid for by
+/// another account), so a single sender filter is sufficient.
+async fn fetch_program_rows(
+    aleph_client: &AlephClient,
+    address: &Address,
+) -> Result<Vec<ProgramRow>> {
+    let filter = MessageFilter {
+        message_type: Some(MessageType::Program),
+        addresses: Some(vec![address.clone()]),
+        ..Default::default()
+    };
+    let mut rows = Vec::new();
+    let mut stream = Box::pin(aleph_client.get_messages_iterator(filter, None));
+    while let Some(message) = stream.next().await {
+        let message = message?;
+        if let Some(row) = extract_program_row(&message) {
+            rows.push(row);
+        } else {
+            eprintln!(
+                "warning: skipping message {} with non-program content",
+                message.item_hash
+            );
+        }
+    }
+    // Newest first: sort by content.time descending.
+    rows.sort_by(|a, b| {
+        b.created_at
+            .as_f64()
+            .partial_cmp(&a.created_at.as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(rows)
+}
+
+const MISSING_VALUE: &str = "-";
+
+fn format_program_rows_json(rows: &[ProgramRow]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "item_hash": r.item_hash.to_string(),
+                "name": r.name,
+                "sender": r.sender.to_string(),
+                "persistent": r.persistent,
+                "internet": r.internet,
+                "updatable": r.updatable,
+                "vcpus": r.vcpus,
+                "memory_mib": r.memory_mib,
+                "runtime": r.runtime.to_string(),
+                "created_at": r.created_at
+                    .to_datetime()
+                    .ok()
+                    .map(|dt| dt.to_rfc3339()),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items)
+}
+
+fn format_program_rows_text(rows: &[ProgramRow]) -> String {
+    use std::fmt::Write;
+
+    let hash_w = rows
+        .iter()
+        .map(|r| r.item_hash.to_string().len())
+        .chain(std::iter::once("ITEM HASH".len()))
+        .max()
+        .unwrap_or("ITEM HASH".len());
+    let name_w = rows
+        .iter()
+        .map(|r| r.name.as_deref().unwrap_or(MISSING_VALUE).len())
+        .chain(std::iter::once("NAME".len()))
+        .max()
+        .unwrap_or("NAME".len());
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{:<hash_w$}  {:<name_w$}  {:>5}  {:>9}  {:>10}  {:>8}  {:>9}",
+        "ITEM HASH",
+        "NAME",
+        "VCPUS",
+        "MEMORY",
+        "PERSISTENT",
+        "INTERNET",
+        "UPDATABLE",
+        hash_w = hash_w,
+        name_w = name_w,
+    )
+    .expect("writing to String cannot fail");
+
+    for row in rows {
+        let name = row.name.as_deref().unwrap_or(MISSING_VALUE);
+        writeln!(
+            out,
+            "{:<hash_w$}  {:<name_w$}  {:>5}  {:>9}  {:>10}  {:>8}  {:>9}",
+            row.item_hash,
+            name,
+            row.vcpus,
+            format!("{} MiB", row.memory_mib),
+            row.persistent,
+            row.internet,
+            row.updatable,
+            hash_w = hash_w,
+            name_w = name_w,
+        )
+        .expect("writing to String cannot fail");
+    }
+    out
+}
+
+fn render_program_rows(rows: &[ProgramRow], json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&format_program_rows_json(rows))?
+        );
+    } else {
+        print!("{}", format_program_rows_text(rows));
+    }
+    Ok(())
+}
+
+async fn handle_list(aleph_client: &AlephClient, json: bool, args: ProgramListArgs) -> Result<()> {
+    let address = match args.address.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => {
+            // Fall back to the current default signing account's address.
+            // No --private-key is passed so chain is unused.
+            let identity = crate::cli::IdentityArgs {
+                account: None,
+                private_key: None,
+                chain: None,
+            };
+            let account = resolve_account(&identity)?;
+            account.address().clone()
+        }
+    };
+    let rows = fetch_program_rows(aleph_client, &address).await?;
+    render_program_rows(&rows, json)
 }
 
 async fn handle_delete(
@@ -269,5 +456,42 @@ mod tests {
     fn parse_env_vars_missing_equals_errors() {
         let err = parse_env_vars("FOO").unwrap_err();
         assert!(format!("{err:#}").contains("expected KEY=value"));
+    }
+
+    #[test]
+    fn extract_program_row_from_fixture() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let message: Message = serde_json::from_str(raw).expect("fixture is valid program message");
+        let row = extract_program_row(&message).expect("fixture downcasts to program");
+        assert_eq!(
+            row.item_hash.to_string(),
+            "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"
+        );
+        assert_eq!(row.name.as_deref(), Some("Hoymiles"));
+        assert_eq!(row.vcpus, 2);
+        assert_eq!(row.memory_mib, 4096);
+        assert!(row.internet);
+        assert!(!row.persistent);
+        assert!(!row.updatable);
+    }
+
+    #[test]
+    fn format_program_rows_text_includes_columns_and_data() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let message: Message = serde_json::from_str(raw).unwrap();
+        let row = extract_program_row(&message).unwrap();
+        let out = format_program_rows_text(&[row]);
+        assert!(out.contains("ITEM HASH"));
+        assert!(out.contains("NAME"));
+        assert!(out.contains("VCPUS"));
+        assert!(out.contains("PERSISTENT"));
+        assert!(out.contains("Hoymiles"));
+        assert!(out.contains("acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"));
     }
 }
