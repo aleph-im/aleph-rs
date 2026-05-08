@@ -61,6 +61,38 @@ pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
     Ok(mib_rounded)
 }
 
+/// A user-supplied image reference: either a preset name to be resolved against
+/// the `vm-images` aggregate, or a raw item hash / IPFS CID.
+#[derive(Clone, Debug)]
+pub enum ImageRef {
+    Preset(String),
+    Hash(ItemHash),
+}
+
+/// Parse an image-or-preset argument. Accepts a raw item hash or IPFS CID
+/// (returns `Hash`), or any non-empty non-hash string (returns `Preset`).
+/// Empty / whitespace-only input is rejected. Preset name validity is checked
+/// later, against the network-published `vm-images` aggregate.
+pub fn parse_image_ref(s: &str) -> Result<ImageRef, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("image cannot be empty".to_string());
+    }
+
+    // Only consider strings that are long enough to be hashes or CIDs as hashes.
+    // Native hashes are 64 hex chars, CIDv0 are 46 chars, CIDv1 are longer (typically 50+).
+    // Preset names are typically much shorter (e.g., ubuntu22, debian12).
+    // If it's too short, treat it as a preset name.
+    if trimmed.len() < 40 {
+        return Ok(ImageRef::Preset(trimmed.to_string()));
+    }
+
+    match ItemHash::try_from(trimmed) {
+        Ok(h) => Ok(ImageRef::Hash(h)),
+        Err(_) => Ok(ImageRef::Preset(trimmed.to_string())),
+    }
+}
+
 /// Well-known rootfs image presets.
 pub(crate) const IMAGE_PRESETS: &[(&str, &str)] = &[
     (
