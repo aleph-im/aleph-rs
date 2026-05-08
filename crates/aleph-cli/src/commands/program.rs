@@ -1,6 +1,6 @@
 use crate::cli::{
-    PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs, ProgramListArgs,
-    StorageEngineCli,
+    CrnArgs, PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs, ProgramListArgs,
+    ProgramLogsArgs, ProgramPersistArgs, ProgramUpdateArgs, StorageEngineCli,
 };
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes,
@@ -19,7 +19,7 @@ use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::message::execution::base::Payment;
+use aleph_types::message::execution::base::{Encoding, Payment};
 use aleph_types::message::execution::volume::MachineVolume;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{Message, MessageContentEnum, MessageType, StorageEngine};
@@ -40,18 +40,14 @@ pub async fn handle_program_command(
         ProgramCommand::Create(args) => handle_create(aleph_client, ccn_url, json, args).await,
         ProgramCommand::List(args) => handle_list(aleph_client, json, args).await,
         ProgramCommand::Delete(args) => handle_delete(aleph_client, ccn_url, json, args).await,
-        ProgramCommand::Update(_) => {
-            bail!("`aleph program update` lands in PR 2 of the program CLI work")
+        ProgramCommand::Update(args) => handle_update(aleph_client, ccn_url, json, args).await,
+        ProgramCommand::Persist(args) => {
+            handle_persist_or_unpersist(aleph_client, ccn_url, json, args, true).await
         }
-        ProgramCommand::Persist(_) => {
-            bail!("`aleph program persist` lands in PR 2 of the program CLI work")
+        ProgramCommand::Unpersist(args) => {
+            handle_persist_or_unpersist(aleph_client, ccn_url, json, args, false).await
         }
-        ProgramCommand::Unpersist(_) => {
-            bail!("`aleph program unpersist` lands in PR 2 of the program CLI work")
-        }
-        ProgramCommand::Logs(_) => {
-            bail!("`aleph program logs` lands in PR 2 of the program CLI work")
-        }
+        ProgramCommand::Logs(args) => handle_logs(json, args).await,
     }
 }
 
@@ -428,6 +424,217 @@ async fn handle_list(aleph_client: &AlephClient, json: bool, args: ProgramListAr
     render_program_rows(&rows, json)
 }
 
+async fn handle_update(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: ProgramUpdateArgs,
+) -> Result<()> {
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+
+    // 1. Fetch the existing program message and verify ownership / amend flag.
+    let program = fetch_program_message(aleph_client, &args.item_hash).await?;
+    if &program.sender != account.address() {
+        bail!(
+            "you are not the owner of program {} (sender: {})",
+            args.item_hash,
+            program.sender
+        );
+    }
+    let MessageContentEnum::Program(program_content) = program.content() else {
+        bail!("expected PROGRAM message, got {:?}", program.message_type);
+    };
+    if !program_content.base.allow_amend {
+        bail!(
+            "program {} is not updatable; was it created without --updatable?",
+            args.item_hash
+        );
+    }
+    let original_code_ref = program_content.code.reference.clone();
+
+    // 2. Prepare the new archive and ensure its encoding matches the existing program.
+    let (archive, encoding) = prepare_archive(&args.path)?;
+    check_update_encoding(&program, encoding.clone())?;
+
+    // 3. Storage engine is derived from the original code's hash variant: an
+    //    IPFS-hosted code STORE must be amended with another IPFS STORE, and
+    //    likewise for native (storage) backed codes.
+    let storage_engine = match &original_code_ref {
+        ItemHash::Ipfs(_) => StorageEngine::Ipfs,
+        ItemHash::Native(_) => StorageEngine::Storage,
+    };
+
+    if !json {
+        eprintln!("Hashing {}...", archive.path().display());
+    }
+    let file_hash = match storage_engine {
+        StorageEngine::Storage => hash_file(archive.path(), Hasher::for_storage()).await?,
+        StorageEngine::Ipfs => hash_file(archive.path(), Hasher::for_ipfs()).await?,
+    };
+    if !json {
+        eprintln!("  Code hash: {file_hash}");
+    }
+
+    // 4. Build the amending STORE. `reference_hash` records the previous code
+    //    STORE so the network can chain amendments back to the original.
+    let mut store_builder = StoreBuilder::new(&account, file_hash.clone(), storage_engine)
+        .reference_hash(original_code_ref)
+        .payment(Payment::credits());
+    if let Some(ch) = &args.channel {
+        store_builder = store_builder.channel(Channel::from(ch.clone()));
+    }
+    let store_pending = store_builder.build()?;
+
+    // 5. Dry run: print the STORE envelope and stop. No PROGRAM is emitted on
+    //    update because the program item hash is unchanged - only the code
+    //    STORE changes.
+    if dry_run {
+        if !json {
+            eprintln!("Dry run - message not submitted.\n");
+        }
+        println!("{}", serde_json::to_string_pretty(&store_pending)?);
+        return Ok(());
+    }
+
+    // 6. Upload the new archive (mirrors handle_create).
+    if !json {
+        eprintln!("Uploading new code archive...");
+    }
+    match storage_engine {
+        StorageEngine::Storage => {
+            aleph_client
+                .upload_file_to_storage(archive.path(), Some(&store_pending), true)
+                .await?;
+            print_submission_result(ccn_url, &store_pending, "success", "processed", json)?;
+        }
+        StorageEngine::Ipfs => {
+            aleph_client.upload_file_to_ipfs(archive.path()).await?;
+            submit_or_preview(aleph_client, ccn_url, &store_pending, false, json).await?;
+        }
+    }
+
+    if !json {
+        eprintln!(
+            "Program {} updated. Code amended to {}.",
+            args.item_hash, file_hash
+        );
+    }
+    Ok(())
+}
+
+/// Pure helper: verify that a candidate new archive's encoding matches the
+/// existing program's `code.encoding`. The PROGRAM message records the
+/// encoding once at creation, and the network expects subsequent code
+/// amendments to keep it stable.
+fn check_update_encoding(program: &Message, new_encoding: Encoding) -> Result<()> {
+    let MessageContentEnum::Program(content) = program.content() else {
+        bail!("expected PROGRAM message");
+    };
+    if content.code.encoding != new_encoding {
+        bail!(
+            "new code encoding `{:?}` does not match existing program encoding `{:?}`",
+            new_encoding,
+            content.code.encoding
+        );
+    }
+    Ok(())
+}
+
+/// Pure helper: clone a PROGRAM message's `ProgramContent` with `on.persistent`
+/// flipped to `new_persistent`. Used by both `persist` and `unpersist` to build
+/// the replacement PROGRAM message.
+fn clone_program_for_repersist(
+    program: &Message,
+    new_persistent: bool,
+) -> Result<aleph_types::message::ProgramContent> {
+    let MessageContentEnum::Program(content) = program.content() else {
+        bail!("expected PROGRAM message");
+    };
+    let mut cloned = content.clone();
+    cloned.on.persistent = Some(new_persistent);
+    Ok(cloned)
+}
+
+/// Shared handler for `aleph program persist` (with `new_persistent = true`)
+/// and `aleph program unpersist` (with `new_persistent = false`). Publishes a
+/// new PROGRAM message with the updated `on.persistent` flag and, unless
+/// `--keep-prev`, forgets the previous PROGRAM (keeping its code STORE intact
+/// so the new program can reuse it).
+async fn handle_persist_or_unpersist(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: ProgramPersistArgs,
+    new_persistent: bool,
+) -> Result<()> {
+    use aleph_sdk::builder::MessageBuilder;
+
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+
+    let program = fetch_program_message(aleph_client, &args.item_hash).await?;
+    if &program.sender != account.address() {
+        bail!(
+            "you are not the owner of program {} (sender: {})",
+            args.item_hash,
+            program.sender
+        );
+    }
+    let MessageContentEnum::Program(program_content) = program.content() else {
+        bail!("expected PROGRAM message, got {:?}", program.message_type);
+    };
+    if !program_content.base.allow_amend {
+        bail!(
+            "program {} is not updatable; was it created without --updatable?",
+            args.item_hash
+        );
+    }
+
+    let new_content = clone_program_for_repersist(&program, new_persistent)?;
+    let value = serde_json::to_value(&new_content)?;
+    let new_pending = MessageBuilder::new(&account, MessageType::Program, value).build()?;
+
+    let action_label = if new_persistent {
+        "persistent"
+    } else {
+        "ephemeral"
+    };
+    let prompt = if args.keep_prev {
+        format!(
+            "Publish a new {action_label} program message? Previous program {} stays.",
+            args.item_hash
+        )
+    } else {
+        format!(
+            "Publish a new {action_label} program message and forget the previous one ({})?",
+            args.item_hash
+        )
+    };
+    if !confirm_action(&prompt, args.yes)? {
+        bail!("aborted");
+    }
+
+    submit_or_preview(aleph_client, ccn_url, &new_pending, dry_run, json).await?;
+
+    if !args.keep_prev {
+        // The code STORE is reused by the new program; do not forget it.
+        let forget = build_forget_for_program(
+            &account,
+            &program,
+            true, // keep_code
+            "Re-persisted",
+            None,
+        )?;
+        submit_or_preview(aleph_client, ccn_url, &forget, dry_run, json).await?;
+    }
+
+    if !json {
+        eprintln!("New {action_label} program: {}", new_pending.item_hash);
+    }
+    Ok(())
+}
+
 async fn handle_delete(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -530,6 +737,21 @@ fn build_forget_for_program<A: Account>(
         builder = builder.channel(ch);
     }
     Ok(builder.build()?)
+}
+
+/// Stream logs from one CRN. The CRN's log endpoint is identical for instances
+/// and programs (it indexes by VM hash regardless of message type), so we
+/// route through the existing instance handler.
+async fn handle_logs(json: bool, args: ProgramLogsArgs) -> Result<()> {
+    crate::commands::crn::handle_logs(
+        json,
+        CrnArgs {
+            crn_url: args.crn.to_string(),
+            vm_id: args.item_hash,
+            signing: args.signing,
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -654,6 +876,71 @@ mod tests {
                 .any(|h| h == &content.code.reference.to_string())
         );
         assert_eq!(value["reason"], "User deletion");
+    }
+
+    #[test]
+    fn check_update_encoding_accepts_matching() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        // Fixture's code.encoding is Encoding::Zip
+        check_update_encoding(&program, Encoding::Zip).unwrap();
+    }
+
+    #[test]
+    fn check_update_encoding_rejects_mismatch() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        let err = check_update_encoding(&program, Encoding::Squashfs).unwrap_err();
+        assert!(format!("{err:#}").contains("encoding"));
+    }
+
+    #[test]
+    fn clone_program_for_repersist_flips_only_the_flag() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        let original_content = match program.content() {
+            MessageContentEnum::Program(c) => c.clone(),
+            _ => unreachable!(),
+        };
+
+        let cloned = clone_program_for_repersist(&program, true).unwrap();
+        // The fixture has on.persistent = Some(false); make sure we flipped to true.
+        assert_eq!(cloned.on.persistent, Some(true));
+        // And nothing else moved.
+        assert_eq!(cloned.code.encoding, original_content.code.encoding);
+        assert_eq!(cloned.code.entrypoint, original_content.code.entrypoint);
+        assert_eq!(cloned.code.reference, original_content.code.reference);
+        assert_eq!(cloned.runtime.reference, original_content.runtime.reference);
+        assert_eq!(cloned.on.http, original_content.on.http);
+        assert_eq!(
+            cloned.environment.internet,
+            original_content.environment.internet
+        );
+        assert_eq!(
+            cloned.base.resources.vcpus,
+            original_content.base.resources.vcpus
+        );
+        assert_eq!(cloned.base.allow_amend, original_content.base.allow_amend);
+    }
+
+    #[test]
+    fn clone_program_for_repersist_to_false_works_too() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        let cloned = clone_program_for_repersist(&program, false).unwrap();
+        assert_eq!(cloned.on.persistent, Some(false));
     }
 
     #[test]
