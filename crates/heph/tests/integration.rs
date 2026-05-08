@@ -1033,3 +1033,77 @@ async fn test_credit_transfer_failure_marks_message_rejected_and_allows_retry() 
         "retry should re-run and reject again, got: {err:?}"
     );
 }
+
+/// Test that get_aggregate deserializes a vm-images aggregate via SDK against heph.
+#[tokio::test]
+async fn test_sdk_get_vm_images_aggregate() {
+    use aleph_sdk::aggregate_models::vm_images::{VM_IMAGES_KEY, VmImagesAggregate};
+    use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+    use aleph_types::chain::Address;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let http_client = reqwest::Client::new();
+    let sdk_client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [9u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let addr = account.address().as_str().to_string();
+
+    let body = r#"{
+        "rootfs": {
+            "ubuntu24": {
+                "hash": "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e",
+                "display_name": "Ubuntu 24.04 LTS"
+            }
+        },
+        "firmwares": {
+            "ovmf-default": {
+                "hash": "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff"
+            }
+        },
+        "defaults": {
+            "rootfs": "ubuntu24",
+            "firmware": "ovmf-default"
+        }
+    }"#;
+
+    let (msg, _) = build_aggregate_msg(&key, VM_IMAGES_KEY, body, 1_700_000_001.0);
+
+    let resp = http_client
+        .post(format!("{base_url}/api/v0/messages"))
+        .json(&serde_json::json!({ "sync": true, "message": msg }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let agg: VmImagesAggregate = sdk_client
+        .get_aggregate(&Address::from(addr), VM_IMAGES_KEY)
+        .await
+        .unwrap();
+
+    assert_eq!(agg.vm_images.rootfs.len(), 1);
+    let entry = agg.vm_images.rootfs.get("ubuntu24").unwrap();
+    assert_eq!(
+        entry.hash.to_string(),
+        "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+    );
+    assert_eq!(entry.display_name.as_deref(), Some("Ubuntu 24.04 LTS"));
+    assert_eq!(agg.vm_images.firmwares.len(), 1);
+    assert_eq!(
+        agg.vm_images
+            .firmwares
+            .get("ovmf-default")
+            .unwrap()
+            .hash
+            .to_string(),
+        "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff"
+    );
+    assert_eq!(agg.vm_images.defaults.rootfs.as_deref(), Some("ubuntu24"));
+    assert_eq!(
+        agg.vm_images.defaults.firmware.as_deref(),
+        Some("ovmf-default")
+    );
+    assert_eq!(agg.vm_images.defaults.runtime, None);
+}
