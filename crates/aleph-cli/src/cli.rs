@@ -170,6 +170,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: PostCommand,
     },
+    /// Manage Aleph Cloud programs (serverless functions / micro-VMs)
+    Program {
+        #[clap(subcommand)]
+        command: ProgramCommand,
+    },
     /// Buy and manage Aleph credits
     Credit {
         #[clap(subcommand)]
@@ -1952,6 +1957,182 @@ pub struct TransferCreditArgs {
     /// Skip the confirmation prompt and submit immediately.
     #[arg(short = 'y', long)]
     pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum ProgramCommand {
+    /// Deploy a new serverless program. Auto-uploads PATH as a STORE message,
+    /// then publishes the PROGRAM message referencing it.
+    Create(ProgramCreateArgs),
+    /// Update the code of an existing program. Item hash is unchanged.
+    Update(ProgramUpdateArgs),
+    /// Forget a program (and its code STORE unless --keep-code).
+    Delete(ProgramDeleteArgs),
+    /// List programs owned by an address.
+    List(ProgramListArgs),
+    /// Recreate a program with persistent=true. New item hash.
+    Persist(ProgramPersistArgs),
+    /// Recreate a program with persistent=false. New item hash.
+    Unpersist(ProgramPersistArgs),
+    /// Fetch logs from one CRN running this program.
+    Logs(ProgramLogsArgs),
+}
+
+#[derive(Args)]
+pub struct ProgramCreateArgs {
+    /// Source code path: directory, .zip, or .squashfs.
+    pub path: PathBuf,
+    /// Program entrypoint (e.g. `main:app` or `run.sh`).
+    pub entrypoint: String,
+
+    /// Friendly name (stored in metadata.name).
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Runtime item hash. Defaults to the standard Aleph Python 3.12 runtime.
+    #[arg(
+        long,
+        default_value = "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696"
+    )]
+    pub runtime: ItemHash,
+
+    /// Resource preset slug (e.g. `1vcpu-2gb`). Mutually exclusive with --vcpus / --memory.
+    #[arg(long, conflicts_with_all = ["vcpus", "memory"])]
+    pub size: Option<String>,
+
+    /// Number of virtual CPUs.
+    #[arg(long)]
+    pub vcpus: Option<u32>,
+
+    /// Memory size (e.g. 2GB, 512MiB).
+    #[arg(long, value_parser = parse_size_to_mib)]
+    pub memory: Option<u64>,
+
+    /// Idle timeout before shutdown (seconds). Default: 30.
+    #[arg(long, default_value_t = 30)]
+    pub timeout_seconds: u32,
+
+    /// Allow internet access from the program.
+    #[arg(long)]
+    pub internet: bool,
+
+    /// Make the program persistent (always running) instead of ephemeral.
+    #[arg(long)]
+    pub persistent: bool,
+
+    /// Allow future updates with `aleph program update`. Sets allow_amend.
+    #[arg(long)]
+    pub updatable: bool,
+
+    /// Environment variables (comma-separated KEY=value pairs).
+    #[arg(long)]
+    pub env_vars: Option<String>,
+
+    /// Persistent volume: `name=N,mount=PATH,size=SIZE[,persistence=host|store]`.
+    /// Can be repeated.
+    #[arg(long)]
+    pub persistent_volume: Option<Vec<String>>,
+
+    /// Ephemeral volume: `mount=PATH,size=SIZE`. Can be repeated.
+    #[arg(long)]
+    pub ephemeral_volume: Option<Vec<String>>,
+
+    /// Immutable volume: `ref=HASH,mount=PATH[,use_latest=BOOL]`. Can be repeated.
+    #[arg(long)]
+    pub immutable_volume: Option<Vec<String>>,
+
+    /// Storage engine for the code STORE message.
+    #[arg(long, value_enum, default_value_t = StorageEngineCli::Storage)]
+    pub storage_engine: StorageEngineCli,
+
+    /// Payment type for both the STORE and the PROGRAM messages.
+    #[arg(long, value_enum, default_value_t = PaymentTypeCli::Credit)]
+    pub payment_type: PaymentTypeCli,
+
+    /// Channel name (default: ALEPH-CLOUDSOLUTIONS).
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// Sign on behalf of another address (requires authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct ProgramUpdateArgs {
+    /// Item hash of the program to update.
+    pub item_hash: ItemHash,
+    /// New source code path: directory, .zip, or .squashfs.
+    pub path: PathBuf,
+
+    /// Channel for the new code STORE (default: original code's channel).
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct ProgramDeleteArgs {
+    /// Item hash of the program to forget.
+    pub item_hash: ItemHash,
+
+    /// Reason for deletion (recorded on the FORGET message).
+    #[arg(long, default_value = "User deletion")]
+    pub reason: String,
+
+    /// Keep the code STORE intact (do not also forget it).
+    #[arg(long)]
+    pub keep_code: bool,
+
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct ProgramListArgs {
+    /// Address whose programs to list. Hex, local account name, or alias.
+    /// Defaults to the current default account.
+    #[arg(long)]
+    pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ProgramPersistArgs {
+    /// Item hash of the program to convert.
+    pub item_hash: ItemHash,
+
+    /// Keep the previous program message instead of forgetting it.
+    #[arg(long)]
+    pub keep_prev: bool,
+
+    /// Skip the confirmation prompt for the forget step.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct ProgramLogsArgs {
+    /// Item hash of the program.
+    pub item_hash: ItemHash,
+
+    /// CRN URL (e.g. `https://crn.example.com`).
+    #[arg(long)]
+    pub crn: Url,
 
     #[command(flatten)]
     pub signing: SigningArgs,
