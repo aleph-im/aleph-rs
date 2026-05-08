@@ -5,13 +5,15 @@ use crate::cli::{
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes,
 };
-use crate::common::{print_submission_result, resolve_account, resolve_address, submit_or_preview};
+use crate::common::{
+    confirm_action, print_submission_result, resolve_account, resolve_address, submit_or_preview,
+};
 use crate::program::archive::prepare_archive;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageFilter,
-    hash_file,
+    MessageWithStatus, hash_file,
 };
-use aleph_sdk::messages::{ProgramBuilder, StoreBuilder};
+use aleph_sdk::messages::{ForgetBuilder, ProgramBuilder, StoreBuilder};
 use aleph_sdk::verify::Hasher;
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
@@ -19,6 +21,7 @@ use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
 use aleph_types::message::execution::volume::MachineVolume;
+use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{Message, MessageContentEnum, MessageType, StorageEngine};
 use aleph_types::timestamp::Timestamp;
 use anyhow::{Context, Result, bail};
@@ -426,12 +429,107 @@ async fn handle_list(aleph_client: &AlephClient, json: bool, args: ProgramListAr
 }
 
 async fn handle_delete(
-    _aleph_client: &AlephClient,
-    _ccn_url: &Url,
-    _json: bool,
-    _args: ProgramDeleteArgs,
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: ProgramDeleteArgs,
 ) -> Result<()> {
-    bail!("`aleph program delete` not yet implemented (PR1 T11)")
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+
+    let program = fetch_program_message(aleph_client, &args.item_hash).await?;
+    if &program.sender != account.address() {
+        bail!(
+            "you are not the owner of program {} (sender: {})",
+            args.item_hash,
+            program.sender
+        );
+    }
+
+    let forget = build_forget_for_program(
+        &account,
+        &program,
+        args.keep_code,
+        &args.reason,
+        None, // no --channel flag on delete; pending messages inherit the default
+    )?;
+
+    let action_summary = if args.keep_code {
+        format!("Forget program {} (keep code)?", args.item_hash)
+    } else {
+        format!("Forget program {} and its code STORE?", args.item_hash)
+    };
+    if !confirm_action(&action_summary, args.yes)? {
+        bail!("aborted");
+    }
+
+    submit_or_preview(aleph_client, ccn_url, &forget, dry_run, json).await?;
+    Ok(())
+}
+
+/// Fetch a PROGRAM message by item hash and assert it is currently usable
+/// (processed or in the process of being removed). Returns a clean error for
+/// pending / forgotten / rejected statuses.
+async fn fetch_program_message(
+    aleph_client: &AlephClient,
+    item_hash: &ItemHash,
+) -> Result<Message> {
+    let with_status = aleph_client
+        .get_message(item_hash)
+        .await
+        .with_context(|| format!("failed to fetch program {item_hash}"))?;
+    let message = match with_status {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Removed { .. } => {
+            bail!("program {item_hash} has been removed")
+        }
+        MessageWithStatus::Pending { .. } => {
+            bail!(
+                "program {item_hash} is still pending; wait for it to be processed before deleting"
+            )
+        }
+        MessageWithStatus::Forgotten { .. } => {
+            bail!("program {item_hash} has already been forgotten")
+        }
+        MessageWithStatus::Rejected { .. } => {
+            bail!("program {item_hash} was rejected by the network")
+        }
+    };
+    if message.message_type != MessageType::Program {
+        bail!(
+            "item {item_hash} is not a PROGRAM message (got {:?})",
+            message.message_type
+        );
+    }
+    Ok(message)
+}
+
+/// Build the FORGET that targets a program (and optionally its code STORE).
+///
+/// Pure helper, easy to unit-test against a fixture: takes the already-fetched
+/// PROGRAM message and produces a signed `PendingMessage` whose `hashes`
+/// payload contains the program hash plus, unless `keep_code` is set, the
+/// program's `code.ref` STORE hash.
+fn build_forget_for_program<A: Account>(
+    account: &A,
+    program: &Message,
+    keep_code: bool,
+    reason: &str,
+    channel: Option<Channel>,
+) -> Result<PendingMessage> {
+    let MessageContentEnum::Program(program_content) = program.content() else {
+        bail!("expected PROGRAM message, got {:?}", program.message_type);
+    };
+    let mut hashes = vec![program.item_hash.clone()];
+    if !keep_code {
+        hashes.push(program_content.code.reference.clone());
+    }
+    let mut builder = ForgetBuilder::new(account, hashes).reason(reason);
+    if let Some(ch) = channel {
+        builder = builder.channel(ch);
+    }
+    Ok(builder.build()?)
 }
 
 #[cfg(test)]
@@ -493,5 +591,84 @@ mod tests {
         assert!(out.contains("PERSISTENT"));
         assert!(out.contains("Hoymiles"));
         assert!(out.contains("acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"));
+    }
+
+    /// Minimal test account that produces a dummy signature. Mirrors the
+    /// `TestAccount` used in `aleph-sdk/src/builder.rs` tests; the actual
+    /// signing key does not matter for forget-builder unit tests.
+    struct TestAccount {
+        address: Address,
+    }
+
+    impl TestAccount {
+        fn new() -> Self {
+            Self {
+                address: Address::from("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef".to_string()),
+            }
+        }
+    }
+
+    impl Account for TestAccount {
+        fn chain(&self) -> aleph_types::chain::Chain {
+            aleph_types::chain::Chain::Ethereum
+        }
+        fn address(&self) -> &Address {
+            &self.address
+        }
+        fn sign_raw(
+            &self,
+            _buffer: &[u8],
+        ) -> Result<aleph_types::chain::Signature, aleph_types::account::SignError> {
+            Ok(aleph_types::chain::Signature::from("0xDUMMY".to_string()))
+        }
+    }
+
+    #[test]
+    fn build_forget_includes_code_by_default() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        let account = TestAccount::new();
+        let pending =
+            build_forget_for_program(&account, &program, false, "User deletion", None).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        let hashes = value["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 2);
+        let hashes_str: Vec<String> = hashes
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            hashes_str
+                .iter()
+                .any(|h| h == &program.item_hash.to_string())
+        );
+        let MessageContentEnum::Program(content) = program.content() else {
+            unreachable!()
+        };
+        assert!(
+            hashes_str
+                .iter()
+                .any(|h| h == &content.code.reference.to_string())
+        );
+        assert_eq!(value["reason"], "User deletion");
+    }
+
+    #[test]
+    fn build_forget_keeps_code_when_flag_set() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        let account = TestAccount::new();
+        let pending =
+            build_forget_for_program(&account, &program, true, "User deletion", None).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        let hashes = value["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].as_str().unwrap(), program.item_hash.to_string());
     }
 }
