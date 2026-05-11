@@ -362,15 +362,20 @@ pub enum RemovalReason {
 /// A pending message as returned by the CCN API (message status endpoint).
 /// Not to be confused with `aleph_types::message::pending::PendingMessage`
 /// which is the outgoing message type used for submission.
+///
+/// Time is typed as `DateTime<Utc>` (rather than `Timestamp`) because the CCN
+/// emits ISO-8601 datetime strings for pending messages, like `ForgottenMessage`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RawPendingMessage {
     pub sender: Address,
     pub chain: Chain,
     pub signature: Option<Signature>,
+    #[serde(flatten)]
     pub content_source: ContentSource,
+    #[serde(rename = "type")]
     pub message_type: MessageType,
     pub item_hash: ItemHash,
-    pub time: Timestamp,
+    pub time: DateTime<Utc>,
     pub channel: Option<Channel>,
     pub content: Option<HashMap<String, serde_json::Value>>,
 }
@@ -2684,6 +2689,37 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/api-responses/forgotten-message.json"
     ));
+    const PENDING_MESSAGE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/api-responses/pending-message.json"
+    ));
+
+    #[test]
+    fn test_deserialize_pending_message() {
+        let message: MessageWithStatus<Message> = serde_json::from_str(PENDING_MESSAGE).unwrap();
+
+        match message {
+            MessageWithStatus::Pending { messages } => {
+                assert_eq!(messages.len(), 1);
+                let pending = &messages[0];
+                assert_eq!(pending.chain, Chain::Ethereum);
+                assert_eq!(
+                    pending.item_hash,
+                    item_hash!("cab98cd9e1f957bd99259acff3eb35d960436121c7f567a2c9cb941c24e0c01b")
+                );
+                assert_eq!(
+                    pending.sender,
+                    address!("0x4D52380D3191274a04846c89c069E6C3F2Ed94e4")
+                );
+                assert_eq!(pending.message_type, MessageType::Post);
+                assert_eq!(pending.content_source, ContentSource::Storage);
+                assert_eq!(pending.channel, Some(channel!("aleph-scoring")));
+                assert!(pending.content.is_none());
+            }
+            _ => panic!("Expected Pending variant"),
+        }
+    }
+
     #[test]
     fn test_deserialize_forgotten_message() {
         let message: MessageWithStatus<Message> = serde_json::from_str(FORGOTTEN_MESSAGE).unwrap();
