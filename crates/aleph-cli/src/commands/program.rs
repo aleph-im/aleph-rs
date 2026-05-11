@@ -1,6 +1,6 @@
 use crate::cli::{
     PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs, ProgramListArgs,
-    StorageEngineCli,
+    ProgramShowArgs, StorageEngineCli,
 };
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes,
@@ -52,6 +52,7 @@ pub async fn handle_program_command(
         ProgramCommand::Logs(_) => {
             bail!("`aleph program logs` lands in PR 2 of the program CLI work")
         }
+        ProgramCommand::Show(args) => handle_show(aleph_client, json, args).await,
     }
 }
 
@@ -678,6 +679,14 @@ fn build_forget_for_code_store<A: Account>(
         builder = builder.channel(ch);
     }
     Ok(builder.build()?)
+}
+
+async fn handle_show(
+    _aleph_client: &AlephClient,
+    _json: bool,
+    _args: ProgramShowArgs,
+) -> Result<()> {
+    anyhow::bail!("aleph program show: not implemented yet")
 }
 
 #[cfg(test)]
