@@ -172,6 +172,11 @@ async fn resolve_specs_for_filter(
 
 fn prompt_image(vm_images: &VmImagesData) -> Result<ImageRef> {
     let active = vm_images.active_rootfs();
+    if active.is_empty() {
+        eprintln!("No rootfs presets available; enter a raw item hash or IPFS CID.");
+        return prompt_custom_image();
+    }
+
     let mut items: Vec<String> = active
         .iter()
         .map(|(slug, entry)| match &entry.display_name {
@@ -197,14 +202,18 @@ fn prompt_image(vm_images: &VmImagesData) -> Result<ImageRef> {
     if idx < active.len() {
         Ok(ImageRef::Hash(active[idx].1.hash.clone()))
     } else {
-        let raw: String = Input::new()
-            .with_prompt("Image (item hash or IPFS CID)")
-            .validate_with(|s: &String| -> std::result::Result<(), String> {
-                parse_image_ref(s).map(|_| ())
-            })
-            .interact_text()?;
-        parse_image_ref(&raw).map_err(anyhow::Error::msg)
+        prompt_custom_image()
     }
+}
+
+fn prompt_custom_image() -> Result<ImageRef> {
+    let raw: String = Input::new()
+        .with_prompt("Image (item hash or IPFS CID)")
+        .validate_with(|s: &String| -> std::result::Result<(), String> {
+            parse_image_ref(s).map(|_| ())
+        })
+        .interact_text()?;
+    parse_image_ref(&raw).map_err(anyhow::Error::msg)
 }
 
 /// Score suitable for sorting: `None` (or NaN) becomes `None` so those entries
