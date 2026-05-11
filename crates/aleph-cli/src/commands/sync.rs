@@ -6,6 +6,7 @@ use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageError};
 use aleph_types::message::MessageStatus;
 use aleph_types::message::pending::PendingMessage;
 use anyhow::{Result, bail};
+use futures_util::{StreamExt, TryStreamExt};
 use url::Url;
 
 pub async fn handle_sync(args: SyncArgs) -> Result<()> {
@@ -16,19 +17,22 @@ pub async fn handle_sync(args: SyncArgs) -> Result<()> {
     let target_client = AlephClient::new(target_url);
 
     let filter: aleph_sdk::client::MessageFilter = args.filter.into();
-    let pagination = aleph_sdk::client::PaginationParams {
-        pagination: Some(args.count),
-        page: Some(1),
-    };
+    let count = args.count as usize;
 
-    // Fetch from both nodes concurrently
+    // Fetch from both nodes concurrently, walking the cursor up to `count` messages.
     eprintln!(
         "Fetching up to {} messages from source and target...",
         args.count
     );
     let (source_messages, target_messages) = tokio::try_join!(
-        source_client.get_messages(&filter, pagination.clone()),
-        target_client.get_messages(&filter, pagination),
+        source_client
+            .get_messages_iterator(filter.clone(), None)
+            .take(count)
+            .try_collect::<Vec<_>>(),
+        target_client
+            .get_messages_iterator(filter.clone(), None)
+            .take(count)
+            .try_collect::<Vec<_>>(),
     )?;
     eprintln!(
         "  Found {} messages on source, {} on target.",
