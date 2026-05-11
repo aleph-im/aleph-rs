@@ -549,6 +549,50 @@ pub(crate) struct RefInfo {
     pub latest: LatestStatus,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RefSpec {
+    pub label: RefLabel,
+    pub hash: ItemHash,
+    pub use_latest: bool,
+}
+
+pub(crate) fn collect_refs(program: &aleph_types::message::ProgramContent) -> Vec<RefSpec> {
+    let mut out = Vec::new();
+    out.push(RefSpec {
+        label: RefLabel::Code,
+        hash: program.code.reference.clone(),
+        use_latest: program.code.use_latest,
+    });
+    out.push(RefSpec {
+        label: RefLabel::Runtime,
+        hash: program.runtime.reference.clone(),
+        use_latest: program.runtime.use_latest,
+    });
+    if let Some(data) = program.data.as_ref() {
+        out.push(RefSpec {
+            label: RefLabel::Data,
+            hash: data.reference.clone(),
+            use_latest: data.use_latest.unwrap_or(false),
+        });
+    }
+    for v in &program.base.volumes {
+        if let MachineVolume::Immutable(iv) = v {
+            let mount = iv
+                .base
+                .mount
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.push(RefSpec {
+                label: RefLabel::Immutable { mount },
+                hash: iv.reference.clone(),
+                use_latest: iv.use_latest,
+            });
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum NonRefVolume {
@@ -1165,5 +1209,42 @@ mod tests {
         assert_eq!(v["mount"], "/data");
         assert_eq!(v["latest"]["kind"], "updated");
         assert!(v["latest"]["updated_at"].is_string());
+    }
+
+    #[test]
+    fn collect_refs_from_fixture() {
+        let message: Message = serde_json::from_str(PROGRAM_FIXTURE).unwrap();
+        let MessageContentEnum::Program(program) = message.content() else {
+            panic!("fixture must be a PROGRAM");
+        };
+        let refs = collect_refs(program);
+
+        // Fixture: code (use_latest=true), runtime (use_latest=true),
+        // 1 immutable volume /opt/packages (use_latest=true), no data.
+        assert_eq!(refs.len(), 3);
+
+        assert!(matches!(refs[0].label, RefLabel::Code));
+        assert_eq!(
+            refs[0].hash.to_string(),
+            "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e"
+        );
+        assert!(refs[0].use_latest);
+
+        assert!(matches!(refs[1].label, RefLabel::Runtime));
+        assert_eq!(
+            refs[1].hash.to_string(),
+            "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696"
+        );
+        assert!(refs[1].use_latest);
+
+        match &refs[2].label {
+            RefLabel::Immutable { mount } => assert_eq!(mount, "/opt/packages"),
+            other => panic!("expected Immutable, got {:?}", other),
+        }
+        assert_eq!(
+            refs[2].hash.to_string(),
+            "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6"
+        );
+        assert!(refs[2].use_latest);
     }
 }
