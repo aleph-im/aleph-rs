@@ -467,6 +467,17 @@ fn render_program_rows(rows: &[ProgramRow], json: bool) -> Result<()> {
 // `aleph program show` data model
 // =============================================================================
 
+/// Serialize a `Timestamp` as an RFC3339 string (e.g. `"2025-10-04T12:34:56Z"`).
+fn serialize_ts_as_rfc3339<S>(ts: &Timestamp, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let dt = ts
+        .to_datetime()
+        .map_err(serde::ser::Error::custom)?;
+    serializer.serialize_str(&dt.to_rfc3339())
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProgramInterface {
@@ -478,6 +489,7 @@ pub(crate) enum ProgramInterface {
 pub(crate) struct ProgramShowInfo {
     pub item_hash: ItemHash,
     pub name: Option<String>,
+    #[serde(serialize_with = "serialize_ts_as_rfc3339")]
     pub created_at: Timestamp,
     pub sender: Address,
     pub owner: Address,
@@ -509,6 +521,7 @@ pub(crate) enum RefLabel {
 pub(crate) struct StoreSummary {
     pub sender: Address,
     pub owner: Address,
+    #[serde(serialize_with = "serialize_ts_as_rfc3339")]
     pub created_at: Timestamp,
 }
 
@@ -517,7 +530,11 @@ pub(crate) struct StoreSummary {
 pub(crate) enum LatestStatus {
     Pinned,
     UpToDate,
-    Updated { hash: ItemHash, updated_at: Timestamp },
+    Updated {
+        hash: ItemHash,
+        #[serde(serialize_with = "serialize_ts_as_rfc3339")]
+        updated_at: Timestamp,
+    },
     Unresolved { reason: String },
 }
 
@@ -525,6 +542,7 @@ pub(crate) enum LatestStatus {
 pub(crate) struct RefInfo {
     #[serde(flatten)]
     pub label: RefLabel,
+    #[serde(rename = "ref")]
     pub ref_hash: ItemHash,
     pub use_latest: bool,
     pub original: Option<StoreSummary>,
@@ -975,5 +993,54 @@ mod tests {
             "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"
         );
         assert_eq!(json["interface"], "asgi");
+        // Timestamp must serialize as an RFC3339 string, not a float.
+        assert!(json["created_at"].is_string(), "created_at must serialize as RFC3339 string");
+    }
+
+    #[test]
+    fn ref_info_serializes_with_ref_key_and_flattened_label() {
+        let store = StoreSummary {
+            sender: Address::from("0xABC".to_string()),
+            owner: Address::from("0xABC".to_string()),
+            created_at: Timestamp::from(1_700_000_000.0),
+        };
+        let code_ref = RefInfo {
+            label: RefLabel::Code,
+            ref_hash: ItemHash::try_from(
+                "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e",
+            )
+            .unwrap(),
+            use_latest: false,
+            original: Some(store.clone()),
+            latest: LatestStatus::Pinned,
+        };
+        let v = serde_json::to_value(&code_ref).unwrap();
+        assert_eq!(v["kind"], "code");
+        assert_eq!(v["ref"], "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e");
+        assert_eq!(v["latest"]["kind"], "pinned");
+        // Confirm timestamps render as RFC3339 strings, not floats.
+        assert!(v["original"]["created_at"].is_string(), "created_at must serialize as RFC3339 string");
+
+        let imm = RefInfo {
+            label: RefLabel::Immutable { mount: "/data".into() },
+            ref_hash: ItemHash::try_from(
+                "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6",
+            )
+            .unwrap(),
+            use_latest: true,
+            original: None,
+            latest: LatestStatus::Updated {
+                hash: ItemHash::try_from(
+                    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                )
+                .unwrap(),
+                updated_at: Timestamp::from(1_720_000_000.0),
+            },
+        };
+        let v = serde_json::to_value(&imm).unwrap();
+        assert_eq!(v["kind"], "immutable");
+        assert_eq!(v["mount"], "/data");
+        assert_eq!(v["latest"]["kind"], "updated");
+        assert!(v["latest"]["updated_at"].is_string());
     }
 }
