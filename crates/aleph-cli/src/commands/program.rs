@@ -11,7 +11,7 @@ use crate::common::{
 use crate::program::archive::prepare_archive;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageFilter,
-    MessageWithStatus, hash_file,
+    MessageWithStatus, PaginationParams, SortBy, SortOrder, hash_file,
 };
 use aleph_sdk::messages::{ForgetBuilder, ProgramBuilder, StoreBuilder};
 use aleph_sdk::verify::Hasher;
@@ -1055,6 +1055,92 @@ async fn handle_logs(json: bool, args: ProgramLogsArgs) -> Result<()> {
         },
     )
     .await
+}
+
+async fn resolve_ref(aleph_client: &AlephClient, spec: RefSpec) -> RefInfo {
+    let label = spec.label.clone();
+    let ref_hash = spec.hash.clone();
+    let use_latest = spec.use_latest;
+
+    // 1. Original STORE.
+    let original_res = aleph_client.get_message(&ref_hash).await;
+    let (original, unresolved_reason) = match original_res {
+        Ok(status) => match store_summary_from(status) {
+            Ok(s) => (Some(s), None),
+            Err(reason) => {
+                eprintln!(
+                    "warning: cannot resolve STORE {} for {}: {}",
+                    ref_hash,
+                    label_display(&label),
+                    reason
+                );
+                (None, Some(reason))
+            }
+        },
+        Err(e) => {
+            let reason = format!("fetch error: {e}");
+            eprintln!(
+                "warning: cannot resolve STORE {} for {}: {}",
+                ref_hash,
+                label_display(&label),
+                reason
+            );
+            (None, Some(reason))
+        }
+    };
+
+    // 2. Latest status.
+    let latest = if !use_latest {
+        LatestStatus::Pinned
+    } else if let Some(reason) = unresolved_reason.clone() {
+        // If the original STORE didn't resolve, we still ran no amend query.
+        LatestStatus::Unresolved { reason }
+    } else {
+        let filter = MessageFilter {
+            message_type: Some(MessageType::Store),
+            refs: Some(vec![ref_hash.to_string()]),
+            sort_by: Some(SortBy::Time),
+            sort_order: Some(SortOrder::Desc),
+            ..Default::default()
+        };
+        let pagination = PaginationParams {
+            pagination: Some(1),
+            page: Some(1),
+        };
+        match aleph_client.get_messages(&filter, pagination).await {
+            Ok(messages) => {
+                let headers: Vec<aleph_types::message::MessageHeader> =
+                    messages.into_iter().map(aleph_types::message::MessageHeader::from).collect();
+                latest_status_from(&headers)
+            }
+            Err(e) => {
+                let reason = format!("amend query failed: {e}");
+                eprintln!(
+                    "warning: cannot check latest for {}: {}",
+                    label_display(&label),
+                    reason
+                );
+                LatestStatus::Unresolved { reason }
+            }
+        }
+    };
+
+    RefInfo {
+        label,
+        ref_hash,
+        use_latest,
+        original,
+        latest,
+    }
+}
+
+fn label_display(label: &RefLabel) -> String {
+    match label {
+        RefLabel::Code => "code".into(),
+        RefLabel::Runtime => "runtime".into(),
+        RefLabel::Data => "data".into(),
+        RefLabel::Immutable { mount } => format!("immutable {mount}"),
+    }
 }
 
 async fn handle_show(
