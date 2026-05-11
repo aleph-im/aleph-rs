@@ -22,7 +22,7 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::{Encoding, Payment, PaymentType};
 use aleph_types::message::execution::volume::MachineVolume;
 use aleph_types::message::pending::PendingMessage;
-use aleph_types::message::{Message, MessageContentEnum, MessageType, StorageEngine};
+use aleph_types::message::{Message, MessageContentEnum, MessageHeader, MessageType, StorageEngine};
 use aleph_types::timestamp::Timestamp;
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
@@ -626,6 +626,48 @@ pub(crate) fn collect_non_ref_volumes(volumes: &[MachineVolume]) -> Vec<NonRefVo
             }),
         })
         .collect()
+}
+
+/// Map a `MessageWithStatus<Message>` (from an SDK `get_message` call) into
+/// a `StoreSummary`, or return a short reason string if the message is not a
+/// live STORE.
+///
+/// Pure helper with no I/O - takes ownership of the SDK response.
+pub(crate) fn store_summary_from(
+    status: MessageWithStatus<Message>,
+) -> std::result::Result<StoreSummary, String> {
+    let message = match status {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Removed { .. } => return Err("removed".into()),
+        MessageWithStatus::Forgotten { .. } => return Err("forgotten".into()),
+        MessageWithStatus::Pending { .. } => return Err("pending".into()),
+        MessageWithStatus::Rejected { .. } => return Err("rejected".into()),
+    };
+    if message.message_type != MessageType::Store {
+        return Err(format!("not a STORE (got {:?})", message.message_type));
+    }
+    Ok(StoreSummary {
+        sender: message.sender.clone(),
+        owner: message.owner().clone(),
+        created_at: message.content.time.clone(),
+    })
+}
+
+/// Map an amend-lookup response (headers sorted newest-first) into a
+/// `LatestStatus`. An empty slice means no amendments exist, so the original
+/// is current (`UpToDate`). The first (newest) header otherwise describes the
+/// latest amendment.
+///
+/// Pure helper with no I/O.
+pub(crate) fn latest_status_from(headers: &[MessageHeader]) -> LatestStatus {
+    match headers.first() {
+        None => LatestStatus::UpToDate,
+        Some(h) => LatestStatus::Updated {
+            hash: h.item_hash.clone(),
+            updated_at: h.time.clone(),
+        },
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1332,5 +1374,26 @@ mod tests {
             }
             other => panic!("expected Persistent, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn store_summary_from_wrong_type_returns_not_a_store() {
+        let message: Message = serde_json::from_str(PROGRAM_FIXTURE).unwrap();
+        let status = MessageWithStatus::Processed { message };
+        let err = store_summary_from(status).unwrap_err();
+        assert!(err.contains("not a STORE"), "expected wrong-type error, got: {err}");
+    }
+
+    #[test]
+    fn store_summary_from_pending_returns_pending_reason() {
+        let status: MessageWithStatus<Message> = MessageWithStatus::Pending { messages: vec![] };
+        let err = store_summary_from(status).unwrap_err();
+        assert_eq!(err, "pending");
+    }
+
+    #[test]
+    fn latest_status_from_empty_means_up_to_date() {
+        let headers: Vec<MessageHeader> = vec![];
+        assert!(matches!(latest_status_from(&headers), LatestStatus::UpToDate));
     }
 }
