@@ -522,6 +522,14 @@ fn payment_kind_str(payment: &Payment) -> &'static str {
     }
 }
 
+fn encoding_str(encoding: &Encoding) -> &'static str {
+    match encoding {
+        Encoding::Plain => "plain",
+        Encoding::Zip => "zip",
+        Encoding::Squashfs => "squashfs",
+    }
+}
+
 pub(crate) fn build_program_show_info(message: &Message) -> ProgramShowInfo {
     let MessageContentEnum::Program(program) = message.content() else {
         panic!(
@@ -566,7 +574,7 @@ pub(crate) fn build_program_show_info(message: &Message) -> ProgramShowInfo {
         channel: message.channel.clone(),
         entrypoint: program.code.entrypoint.clone(),
         interface: program_interface_from(program.code.interface.as_ref()),
-        encoding: format!("{:?}", program.code.encoding).to_lowercase(),
+        encoding: encoding_str(&program.code.encoding).to_string(),
         vcpus: program.base.resources.vcpus,
         memory_mib: u64::from(program.base.resources.memory),
         timeout_seconds: program.base.resources.seconds,
@@ -959,7 +967,7 @@ mod tests {
         assert_eq!(&info.owner, message.owner());
         assert_eq!(info.entrypoint, "main:app");
         assert_eq!(info.encoding, "zip");
-        matches!(info.interface, ProgramInterface::Asgi | ProgramInterface::Binary);
+        assert!(matches!(info.interface, ProgramInterface::Asgi));
         assert_eq!(info.vcpus, 2);
         assert_eq!(info.memory_mib, 4096);
         assert_eq!(info.timeout_seconds, 30);
