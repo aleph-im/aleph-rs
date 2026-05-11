@@ -1,6 +1,6 @@
 use crate::cli::{
     CrnArgs, PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs, ProgramListArgs,
-    ProgramLogsArgs, ProgramPersistArgs, ProgramUpdateArgs, StorageEngineCli,
+    ProgramLogsArgs, ProgramPersistArgs, ProgramShowArgs, ProgramUpdateArgs, StorageEngineCli,
 };
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes,
@@ -48,6 +48,7 @@ pub async fn handle_program_command(
             handle_persist_or_unpersist(aleph_client, ccn_url, json, args, false).await
         }
         ProgramCommand::Logs(args) => handle_logs(json, args).await,
+        ProgramCommand::Show(args) => handle_show(aleph_client, json, args).await,
     }
 }
 
@@ -752,6 +753,14 @@ async fn handle_logs(json: bool, args: ProgramLogsArgs) -> Result<()> {
         },
     )
     .await
+}
+
+async fn handle_show(
+    _aleph_client: &AlephClient,
+    _json: bool,
+    _args: ProgramShowArgs,
+) -> Result<()> {
+    anyhow::bail!("aleph program show: not implemented yet")
 }
 
 #[cfg(test)]
