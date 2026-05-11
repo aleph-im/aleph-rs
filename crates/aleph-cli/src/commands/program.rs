@@ -19,7 +19,7 @@ use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::message::execution::base::{Encoding, Payment};
+use aleph_types::message::execution::base::{Encoding, Payment, PaymentType};
 use aleph_types::message::execution::volume::MachineVolume;
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{Message, MessageContentEnum, MessageType, StorageEngine};
@@ -504,6 +504,81 @@ pub(crate) enum NonRefVolume {
     },
 }
 
+fn program_interface_from(
+    interface: Option<&aleph_types::message::execution::base::Interface>,
+) -> ProgramInterface {
+    use aleph_types::message::execution::base::Interface;
+    match interface {
+        Some(Interface::Asgi) | None => ProgramInterface::Asgi,
+        Some(Interface::Binary) => ProgramInterface::Binary,
+    }
+}
+
+fn payment_kind_str(payment: &Payment) -> &'static str {
+    match payment.payment_type {
+        PaymentType::Hold => "hold",
+        PaymentType::Superfluid => "superfluid",
+        PaymentType::Credit => "credit",
+    }
+}
+
+pub(crate) fn build_program_show_info(message: &Message) -> ProgramShowInfo {
+    let MessageContentEnum::Program(program) = message.content() else {
+        panic!(
+            "build_program_show_info called on non-PROGRAM message {}",
+            message.item_hash
+        );
+    };
+
+    let name = program
+        .base
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let env_vars = program
+        .base
+        .variables
+        .as_ref()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let (payment_kind, payment_chain) = match program.base.payment.as_ref() {
+        Some(p) => (
+            Some(payment_kind_str(p).to_string()),
+            p.chain.as_ref().map(|c| c.to_string()),
+        ),
+        None => (None, None),
+    };
+
+    ProgramShowInfo {
+        item_hash: message.item_hash.clone(),
+        name,
+        created_at: message.content.time.clone(),
+        sender: message.sender.clone(),
+        owner: message.owner().clone(),
+        channel: message.channel.clone(),
+        entrypoint: program.code.entrypoint.clone(),
+        interface: program_interface_from(program.code.interface.as_ref()),
+        encoding: format!("{:?}", program.code.encoding).to_lowercase(),
+        vcpus: program.base.resources.vcpus,
+        memory_mib: u64::from(program.base.resources.memory),
+        timeout_seconds: program.base.resources.seconds,
+        internet: program.environment.internet,
+        persistent: program.on.persistent.unwrap_or(false),
+        updatable: program.base.allow_amend,
+        env_vars,
+        payment_kind,
+        payment_chain,
+    }
+}
+
 async fn handle_list(aleph_client: &AlephClient, json: bool, args: ProgramListArgs) -> Result<()> {
     let address = match args.address.as_deref() {
         Some(value) => resolve_address(value)?,
@@ -864,6 +939,46 @@ async fn handle_show(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PROGRAM_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/messages/program/program.json"
+    ));
+
+    #[test]
+    fn build_program_show_info_matches_fixture() {
+        let message: Message = serde_json::from_str(PROGRAM_FIXTURE).unwrap();
+        let info = build_program_show_info(&message);
+
+        assert_eq!(
+            info.item_hash.to_string(),
+            "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"
+        );
+        assert_eq!(info.name.as_deref(), Some("Hoymiles"));
+        assert_eq!(info.sender, message.sender);
+        assert_eq!(&info.owner, message.owner());
+        assert_eq!(info.entrypoint, "main:app");
+        assert_eq!(info.encoding, "zip");
+        matches!(info.interface, ProgramInterface::Asgi | ProgramInterface::Binary);
+        assert_eq!(info.vcpus, 2);
+        assert_eq!(info.memory_mib, 4096);
+        assert_eq!(info.timeout_seconds, 30);
+        assert!(info.internet);
+        assert!(!info.persistent);
+        assert!(!info.updatable);
+        assert!(info.env_vars.is_empty());
+        assert_eq!(info.payment_kind.as_deref(), Some("hold"));
+        assert_eq!(info.payment_chain.as_deref(), Some("ETH"));
+        // Channel has no Display impl; serialize to extract the inner string.
+        let channel_str = info.channel.as_ref().and_then(|c| {
+            if let Ok(serde_json::Value::String(s)) = serde_json::to_value(c) {
+                Some(s)
+            } else {
+                None
+            }
+        });
+        assert_eq!(channel_str.as_deref(), Some("ALEPH-CLOUDSOLUTIONS"));
+    }
 
     #[test]
     fn parse_env_vars_basic() {
