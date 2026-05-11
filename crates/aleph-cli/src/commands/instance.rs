@@ -515,7 +515,12 @@ async fn handle_instance_create(
         aleph_client
             .get_vm_images_aggregate()
             .await
-            .map_err(|e| anyhow!("failed to fetch vm-images aggregate: {e}"))?
+            .map_err(|e| {
+                anyhow!(
+                    "failed to fetch vm-images aggregate: {e}. \
+                     As a fallback, pass --image with a raw item hash or IPFS CID."
+                )
+            })?
             .vm_images
     } else {
         VmImagesData::default()
