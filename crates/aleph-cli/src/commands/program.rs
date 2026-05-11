@@ -1082,6 +1082,127 @@ pub(crate) fn render_show_json(
     })
 }
 
+pub(crate) fn render_show_text(
+    info: &ProgramShowInfo,
+    refs: &[RefInfo],
+    volumes: &[NonRefVolume],
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    writeln!(out, "PROGRAM {}", info.item_hash).unwrap();
+    if let Some(name) = info.name.as_deref() {
+        writeln!(out, "  Name           {name}").unwrap();
+    }
+    writeln!(out, "  Created        {}", format_ts(&info.created_at)).unwrap();
+    if info.sender != info.owner {
+        writeln!(out, "  Sender         {}", info.sender).unwrap();
+    }
+    writeln!(out, "  Owner          {}", info.owner).unwrap();
+    if let Some(c) = info.channel.as_ref() {
+        let channel_str = serde_json::to_value(c)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        writeln!(out, "  Channel        {channel_str}").unwrap();
+    }
+    match (&info.payment_kind, &info.payment_chain) {
+        (Some(k), Some(c)) => writeln!(out, "  Payment        {k} ({c})").unwrap(),
+        _ => {}
+    }
+    writeln!(out, "  Entrypoint     {}", info.entrypoint).unwrap();
+    writeln!(
+        out,
+        "  Interface      {}",
+        match info.interface {
+            ProgramInterface::Asgi => "ASGI",
+            ProgramInterface::Binary => "binary",
+        }
+    )
+    .unwrap();
+    writeln!(out, "  Resources      {} vCPUs, {} MiB", info.vcpus, info.memory_mib).unwrap();
+    writeln!(out, "  Timeout        {}s", info.timeout_seconds).unwrap();
+    writeln!(
+        out,
+        "  Flags          internet={} persistent={} updatable={}",
+        info.internet, info.persistent, info.updatable
+    )
+    .unwrap();
+    if !info.env_vars.is_empty() {
+        let joined: Vec<String> = info
+            .env_vars
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        writeln!(out, "  Env vars       {}", joined.join(" ")).unwrap();
+    }
+
+    writeln!(out).unwrap();
+    writeln!(out, "REFS").unwrap();
+    for r in refs {
+        let header_label = match &r.label {
+            RefLabel::Code => "code".to_string(),
+            RefLabel::Runtime => "runtime".to_string(),
+            RefLabel::Data => "data".to_string(),
+            RefLabel::Immutable { mount } => format!("immutable {mount}"),
+        };
+        writeln!(out, "  {header_label:<14} {}", r.ref_hash).unwrap();
+        match &r.original {
+            Some(s) => {
+                writeln!(out, "    Owner        {}", s.owner).unwrap();
+                writeln!(out, "    Created      {}", format_ts(&s.created_at)).unwrap();
+            }
+            None => {
+                writeln!(out, "    Owner        ?").unwrap();
+            }
+        }
+        match &r.latest {
+            LatestStatus::Pinned => {
+                writeln!(out, "    Pinned (use_latest=false)").unwrap();
+            }
+            LatestStatus::UpToDate => {
+                writeln!(out, "    Up to date (use_latest=true, no amends found)").unwrap();
+            }
+            LatestStatus::Updated { hash, updated_at } => {
+                writeln!(out, "    Latest         {hash} (updated {})", format_ts(updated_at))
+                    .unwrap();
+            }
+            LatestStatus::Unresolved { reason } => {
+                writeln!(out, "    Status         {reason}").unwrap();
+            }
+        }
+        writeln!(out).unwrap();
+    }
+
+    if !volumes.is_empty() {
+        writeln!(out, "VOLUMES (no STORE)").unwrap();
+        for v in volumes {
+            match v {
+                NonRefVolume::Ephemeral { mount, size_mib } => {
+                    writeln!(out, "  ephemeral {mount:<20} size={size_mib} MiB").unwrap();
+                }
+                NonRefVolume::Persistent { mount, size_mib, persistence, name } => {
+                    let n = name.as_deref().unwrap_or("-");
+                    writeln!(
+                        out,
+                        "  persistent {n} {mount:<20} size={size_mib} MiB, persistence={persistence}"
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn format_ts(t: &Timestamp) -> String {
+    t.to_datetime()
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|_| format!("{}", t.as_f64()))
+}
+
 async fn handle_show(
     _aleph_client: &AlephClient,
     _json: bool,
@@ -1494,6 +1615,99 @@ mod tests {
     fn latest_status_from_empty_means_up_to_date() {
         let headers: Vec<MessageHeader> = vec![];
         assert!(matches!(latest_status_from(&headers), LatestStatus::UpToDate));
+    }
+
+    fn fixture_show_input() -> (ProgramShowInfo, Vec<RefInfo>, Vec<NonRefVolume>) {
+        let info = ProgramShowInfo {
+            item_hash: ItemHash::try_from(
+                "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c",
+            )
+            .unwrap(),
+            name: Some("Hoymiles".into()),
+            created_at: Timestamp::from(1_757_026_128.0),
+            sender: Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string()),
+            owner: Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string()),
+            channel: Some(aleph_types::channel::Channel::from(
+                "ALEPH-CLOUDSOLUTIONS".to_string(),
+            )),
+            entrypoint: "main:app".into(),
+            interface: ProgramInterface::Asgi,
+            encoding: "zip".into(),
+            vcpus: 2,
+            memory_mib: 4096,
+            timeout_seconds: 30,
+            internet: true,
+            persistent: false,
+            updatable: false,
+            env_vars: Default::default(),
+            payment_kind: Some("hold".into()),
+            payment_chain: Some("ETH".into()),
+        };
+        let store = StoreSummary {
+            sender: Address::from("0xDEADBEEF".to_string()),
+            owner: Address::from("0xDEADBEEF".to_string()),
+            created_at: Timestamp::from(1_700_000_000.0),
+        };
+        let refs = vec![
+            RefInfo {
+                label: RefLabel::Code,
+                ref_hash: ItemHash::try_from(
+                    "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e",
+                ).unwrap(),
+                use_latest: false,
+                original: Some(store.clone()),
+                latest: LatestStatus::Pinned,
+            },
+            RefInfo {
+                label: RefLabel::Runtime,
+                ref_hash: ItemHash::try_from(
+                    "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696",
+                ).unwrap(),
+                use_latest: true,
+                original: Some(store.clone()),
+                latest: LatestStatus::Updated {
+                    hash: ItemHash::try_from(
+                        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                    ).unwrap(),
+                    updated_at: Timestamp::from(1_720_000_000.0),
+                },
+            },
+            RefInfo {
+                label: RefLabel::Immutable { mount: "/data".into() },
+                ref_hash: ItemHash::try_from(
+                    "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6",
+                ).unwrap(),
+                use_latest: true,
+                original: None,
+                latest: LatestStatus::Unresolved { reason: "forgotten".into() },
+            },
+        ];
+        (info, refs, vec![])
+    }
+
+    #[test]
+    fn render_show_text_snapshot() {
+        let (info, refs, volumes) = fixture_show_input();
+        let out = render_show_text(&info, &refs, &volumes);
+        assert!(out.contains("PROGRAM acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"));
+        assert!(out.contains("Name           Hoymiles"));
+        assert!(out.contains("Owner          0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885"));
+        assert!(!out.contains("Sender         0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885"),
+            "sender line should be suppressed when equal to owner");
+        assert!(out.contains("Resources      2 vCPUs, 4096 MiB"));
+        assert!(out.contains("Pinned (use_latest=false)"));
+        assert!(out.contains("Latest         ffff"));
+        assert!(out.contains("Status         forgotten"));
+        assert!(!out.contains("Env vars"));
+        assert!(!out.contains("VOLUMES (no STORE)"));
+    }
+
+    #[test]
+    fn render_show_text_includes_sender_when_different_from_owner() {
+        let (mut info, refs, volumes) = fixture_show_input();
+        info.sender = Address::from("0xDIFFERENT".to_string());
+        let out = render_show_text(&info, &refs, &volumes);
+        assert!(out.contains("Sender         0xDIFFERENT"));
     }
 
     #[test]
