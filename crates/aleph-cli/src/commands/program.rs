@@ -593,6 +593,41 @@ pub(crate) fn collect_refs(program: &aleph_types::message::ProgramContent) -> Ve
     out
 }
 
+pub(crate) fn collect_non_ref_volumes(volumes: &[MachineVolume]) -> Vec<NonRefVolume> {
+    use aleph_types::message::execution::volume::VolumePersistence;
+
+    volumes
+        .iter()
+        .filter_map(|v| match v {
+            MachineVolume::Immutable(_) => None,
+            MachineVolume::Ephemeral(e) => Some(NonRefVolume::Ephemeral {
+                mount: e
+                    .base
+                    .mount
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                size_mib: u64::from(e.size_mib),
+            }),
+            MachineVolume::Persistent(p) => Some(NonRefVolume::Persistent {
+                mount: p
+                    .base
+                    .mount
+                    .as_ref()
+                    .map(|x| x.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                size_mib: u64::from(p.size_mib),
+                persistence: match p.persistence {
+                    Some(VolumePersistence::Host) => "host".into(),
+                    Some(VolumePersistence::Store) => "store".into(),
+                    None => "host".into(), // CCN default
+                },
+                name: p.name.clone(),
+            }),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum NonRefVolume {
@@ -1246,5 +1281,56 @@ mod tests {
             "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6"
         );
         assert!(refs[2].use_latest);
+    }
+
+    #[test]
+    fn collect_non_ref_volumes_filters_immutable() {
+        use aleph_types::message::execution::volume::{
+            BaseVolume, EphemeralVolume, ImmutableVolume, MachineVolume, PersistentVolume,
+            PersistentVolumeSize, VolumePersistence,
+        };
+        use std::path::PathBuf;
+
+        let imm = MachineVolume::Immutable(ImmutableVolume {
+            base: BaseVolume {
+                comment: None,
+                mount: Some(PathBuf::from("/opt/packages")),
+            },
+            reference: ItemHash::try_from(
+                "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6",
+            )
+            .unwrap(),
+            use_latest: true,
+        });
+        let eph = MachineVolume::Ephemeral(EphemeralVolume::new(512, "/tmp").unwrap());
+        let per = MachineVolume::Persistent(PersistentVolume {
+            base: BaseVolume {
+                comment: None,
+                mount: Some(PathBuf::from("/cache")),
+            },
+            parent: None,
+            name: Some("cache".into()),
+            persistence: Some(VolumePersistence::Host),
+            size_mib: PersistentVolumeSize::try_from(10_240u64).unwrap(),
+        });
+
+        let out = collect_non_ref_volumes(&[imm, eph, per]);
+        assert_eq!(out.len(), 2);
+        match &out[0] {
+            NonRefVolume::Ephemeral { mount, size_mib } => {
+                assert_eq!(mount, "/tmp");
+                assert_eq!(size_mib, &512u64);
+            }
+            other => panic!("expected Ephemeral, got {:?}", other),
+        }
+        match &out[1] {
+            NonRefVolume::Persistent { mount, size_mib, persistence, name } => {
+                assert_eq!(mount, "/cache");
+                assert_eq!(size_mib, &10_240u64);
+                assert_eq!(persistence, "host");
+                assert_eq!(name.as_deref(), Some("cache"));
+            }
+            other => panic!("expected Persistent, got {:?}", other),
+        }
     }
 }
