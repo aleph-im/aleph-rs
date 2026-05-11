@@ -1144,6 +1144,18 @@ fn label_display(label: &RefLabel) -> String {
     }
 }
 
+pub(crate) fn render_show_json(
+    info: &ProgramShowInfo,
+    refs: &[RefInfo],
+    volumes: &[NonRefVolume],
+) -> serde_json::Value {
+    serde_json::json!({
+        "program": info,
+        "refs": refs,
+        "volumes": volumes,
+    })
+}
+
 async fn handle_show(
     _aleph_client: &AlephClient,
     _json: bool,
@@ -1583,5 +1595,53 @@ mod tests {
         let hashes = value["hashes"].as_array().unwrap();
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].as_str().unwrap(), program.item_hash.to_string());
+    }
+
+    #[test]
+    fn render_show_json_contains_all_sections() {
+        let info = ProgramShowInfo {
+            item_hash: ItemHash::try_from(
+                "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c",
+            )
+            .unwrap(),
+            name: Some("Hoymiles".into()),
+            created_at: Timestamp::from(1_757_026_128.773),
+            sender: Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string()),
+            owner: Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string()),
+            channel: Some(aleph_types::channel::Channel::from("ALEPH-CLOUDSOLUTIONS".to_string())),
+            entrypoint: "main:app".into(),
+            interface: ProgramInterface::Asgi,
+            encoding: "zip".into(),
+            vcpus: 2,
+            memory_mib: 4096,
+            timeout_seconds: 30,
+            internet: true,
+            persistent: false,
+            updatable: false,
+            env_vars: Default::default(),
+            payment_kind: Some("hold".into()),
+            payment_chain: Some("ETH".into()),
+        };
+        let refs = vec![
+            RefInfo {
+                label: RefLabel::Code,
+                ref_hash: ItemHash::try_from("9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e").unwrap(),
+                use_latest: true,
+                original: Some(StoreSummary {
+                    sender: Address::from("0xABC".to_string()),
+                    owner: Address::from("0xABC".to_string()),
+                    created_at: Timestamp::from(1_700_000_000.0),
+                }),
+                latest: LatestStatus::UpToDate,
+            },
+        ];
+        let volumes: Vec<NonRefVolume> = vec![];
+
+        let value = render_show_json(&info, &refs, &volumes);
+        assert_eq!(value["program"]["name"], "Hoymiles");
+        assert_eq!(value["program"]["interface"], "asgi");
+        assert_eq!(value["refs"][0]["kind"], "code");
+        assert_eq!(value["refs"][0]["latest"]["kind"], "up_to_date");
+        assert!(value["volumes"].as_array().unwrap().is_empty());
     }
 }
