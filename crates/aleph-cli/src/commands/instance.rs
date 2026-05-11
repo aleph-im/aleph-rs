@@ -3,7 +3,7 @@ use crate::cli::{
     parse_size_to_mib,
 };
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
-use aleph_sdk::aggregate_models::vm_images::VmImagesData;
+use aleph_sdk::aggregate_models::vm_images::{VmImagesData, VmImagesError};
 use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter};
 use aleph_sdk::messages::InstanceBuilder;
 use aleph_types::account::Account;
@@ -409,14 +409,11 @@ pub(crate) struct ResolvedImages {
 /// `VmImagesData`. Pure: does no network I/O. The handler decides separately
 /// whether to fetch the aggregate.
 pub(crate) fn resolve_image_refs(
-    image: crate::cli::ImageRef,
+    image: ImageRef,
     confidential: bool,
-    confidential_firmware: Option<crate::cli::ImageRef>,
+    confidential_firmware: Option<ImageRef>,
     data: &VmImagesData,
 ) -> anyhow::Result<ResolvedImages> {
-    use crate::cli::ImageRef;
-    use aleph_sdk::aggregate_models::vm_images::VmImagesError;
-
     let rootfs = match image {
         ImageRef::Hash(h) => h,
         ImageRef::Preset(name) => data.rootfs(&name)?.hash.clone(),
