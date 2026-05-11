@@ -22,7 +22,9 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::{Encoding, Payment, PaymentType};
 use aleph_types::message::execution::volume::MachineVolume;
 use aleph_types::message::pending::PendingMessage;
-use aleph_types::message::{Message, MessageContentEnum, MessageHeader, MessageType, StorageEngine};
+use aleph_types::message::{
+    Message, MessageContentEnum, MessageHeader, MessageType, StorageEngine,
+};
 use aleph_types::timestamp::Timestamp;
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
@@ -415,9 +417,7 @@ fn serialize_ts_as_rfc3339<S>(ts: &Timestamp, serializer: S) -> Result<S::Ok, S:
 where
     S: serde::Serializer,
 {
-    let dt = ts
-        .to_datetime()
-        .map_err(serde::ser::Error::custom)?;
+    let dt = ts.to_datetime().map_err(serde::ser::Error::custom)?;
     serializer.serialize_str(&dt.to_rfc3339())
 }
 
@@ -478,7 +478,9 @@ pub(crate) enum LatestStatus {
         #[serde(serialize_with = "serialize_ts_as_rfc3339")]
         updated_at: Timestamp,
     },
-    Unresolved { reason: String },
+    Unresolved {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -616,7 +618,10 @@ pub(crate) fn latest_status_from(headers: &[MessageHeader]) -> LatestStatus {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum NonRefVolume {
-    Ephemeral { mount: String, size_mib: u64 },
+    Ephemeral {
+        mount: String,
+        size_mib: u64,
+    },
     Persistent {
         mount: String,
         size_mib: u64,
@@ -1109,8 +1114,10 @@ async fn resolve_ref(aleph_client: &AlephClient, spec: RefSpec) -> RefInfo {
         };
         match aleph_client.get_messages(&filter, pagination).await {
             Ok(messages) => {
-                let headers: Vec<aleph_types::message::MessageHeader> =
-                    messages.into_iter().map(aleph_types::message::MessageHeader::from).collect();
+                let headers: Vec<aleph_types::message::MessageHeader> = messages
+                    .into_iter()
+                    .map(aleph_types::message::MessageHeader::from)
+                    .collect();
                 latest_status_from(&headers)
             }
             Err(e) => {
@@ -1181,9 +1188,8 @@ pub(crate) fn render_show_text(
             .unwrap_or_default();
         writeln!(out, "  Channel        {channel_str}").unwrap();
     }
-    match (&info.payment_kind, &info.payment_chain) {
-        (Some(k), Some(c)) => writeln!(out, "  Payment        {k} ({c})").unwrap(),
-        _ => {}
+    if let (Some(k), Some(c)) = (&info.payment_kind, &info.payment_chain) {
+        writeln!(out, "  Payment        {k} ({c})").unwrap();
     }
     writeln!(out, "  Entrypoint     {}", info.entrypoint).unwrap();
     writeln!(
@@ -1195,7 +1201,12 @@ pub(crate) fn render_show_text(
         }
     )
     .unwrap();
-    writeln!(out, "  Resources      {} vCPUs, {} MiB", info.vcpus, info.memory_mib).unwrap();
+    writeln!(
+        out,
+        "  Resources      {} vCPUs, {} MiB",
+        info.vcpus, info.memory_mib
+    )
+    .unwrap();
     writeln!(out, "  Timeout        {}s", info.timeout_seconds).unwrap();
     writeln!(
         out,
@@ -1239,8 +1250,12 @@ pub(crate) fn render_show_text(
                 writeln!(out, "    Up to date (use_latest=true, no amends found)").unwrap();
             }
             LatestStatus::Updated { hash, updated_at } => {
-                writeln!(out, "    Latest         {hash} (updated {})", format_ts(updated_at))
-                    .unwrap();
+                writeln!(
+                    out,
+                    "    Latest         {hash} (updated {})",
+                    format_ts(updated_at)
+                )
+                .unwrap();
             }
             LatestStatus::Unresolved { reason } => {
                 writeln!(out, "    Status         {reason}").unwrap();
@@ -1256,7 +1271,12 @@ pub(crate) fn render_show_text(
                 NonRefVolume::Ephemeral { mount, size_mib } => {
                     writeln!(out, "  ephemeral {mount:<20} size={size_mib} MiB").unwrap();
                 }
-                NonRefVolume::Persistent { mount, size_mib, persistence, name } => {
+                NonRefVolume::Persistent {
+                    mount,
+                    size_mib,
+                    persistence,
+                    name,
+                } => {
                     let n = name.as_deref().unwrap_or("-");
                     writeln!(
                         out,
@@ -1277,12 +1297,39 @@ fn format_ts(t: &Timestamp) -> String {
         .unwrap_or_else(|_| format!("{}", t.as_f64()))
 }
 
-async fn handle_show(
-    _aleph_client: &AlephClient,
-    _json: bool,
-    _args: ProgramShowArgs,
-) -> Result<()> {
-    anyhow::bail!("aleph program show: not implemented yet")
+async fn handle_show(aleph_client: &AlephClient, json: bool, args: ProgramShowArgs) -> Result<()> {
+    // 1. Fetch the PROGRAM message (reuses existing helper; bails on
+    //    pending/forgotten/removed/wrong-type).
+    let message = fetch_program_message(aleph_client, &args.item_hash).await?;
+
+    // 2. Build the program-level info (pure).
+    let info = build_program_show_info(&message);
+
+    // 3. Extract refs and non-ref volumes from the content.
+    let MessageContentEnum::Program(program) = message.content() else {
+        // fetch_program_message already enforces this, but the borrow
+        // checker likes us to handle it explicitly.
+        anyhow::bail!("expected PROGRAM message");
+    };
+    let specs = collect_refs(program);
+    let volumes = collect_non_ref_volumes(&program.base.volumes);
+
+    // 4. Resolve all refs in parallel.
+    let futs = specs
+        .into_iter()
+        .map(|spec| resolve_ref(aleph_client, spec));
+    let refs: Vec<RefInfo> = futures_util::future::join_all(futs).await;
+
+    // 5. Render.
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&render_show_json(&info, &refs, &volumes))?
+        );
+    } else {
+        print!("{}", render_show_text(&info, &refs, &volumes));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1529,10 +1576,16 @@ mod tests {
             payment_chain: Some("ETH".into()),
         };
         let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["item_hash"], "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c");
+        assert_eq!(
+            json["item_hash"],
+            "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"
+        );
         assert_eq!(json["interface"], "asgi");
         // Timestamp must serialize as an RFC3339 string, not a float.
-        assert!(json["created_at"].is_string(), "created_at must serialize as RFC3339 string");
+        assert!(
+            json["created_at"].is_string(),
+            "created_at must serialize as RFC3339 string"
+        );
     }
 
     #[test]
@@ -1554,13 +1607,21 @@ mod tests {
         };
         let v = serde_json::to_value(&code_ref).unwrap();
         assert_eq!(v["kind"], "code");
-        assert_eq!(v["ref"], "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e");
+        assert_eq!(
+            v["ref"],
+            "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e"
+        );
         assert_eq!(v["latest"]["kind"], "pinned");
         // Confirm timestamps render as RFC3339 strings, not floats.
-        assert!(v["original"]["created_at"].is_string(), "created_at must serialize as RFC3339 string");
+        assert!(
+            v["original"]["created_at"].is_string(),
+            "created_at must serialize as RFC3339 string"
+        );
 
         let imm = RefInfo {
-            label: RefLabel::Immutable { mount: "/data".into() },
+            label: RefLabel::Immutable {
+                mount: "/data".into(),
+            },
             ref_hash: ItemHash::try_from(
                 "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6",
             )
@@ -1660,7 +1721,12 @@ mod tests {
             other => panic!("expected Ephemeral, got {:?}", other),
         }
         match &out[1] {
-            NonRefVolume::Persistent { mount, size_mib, persistence, name } => {
+            NonRefVolume::Persistent {
+                mount,
+                size_mib,
+                persistence,
+                name,
+            } => {
                 assert_eq!(mount, "/cache");
                 assert_eq!(size_mib, &10_240u64);
                 assert_eq!(persistence, "host");
@@ -1675,7 +1741,10 @@ mod tests {
         let message: Message = serde_json::from_str(PROGRAM_FIXTURE).unwrap();
         let status = MessageWithStatus::Processed { message };
         let err = store_summary_from(status).unwrap_err();
-        assert!(err.contains("not a STORE"), "expected wrong-type error, got: {err}");
+        assert!(
+            err.contains("not a STORE"),
+            "expected wrong-type error, got: {err}"
+        );
     }
 
     #[test]
@@ -1688,7 +1757,10 @@ mod tests {
     #[test]
     fn latest_status_from_empty_means_up_to_date() {
         let headers: Vec<MessageHeader> = vec![];
-        assert!(matches!(latest_status_from(&headers), LatestStatus::UpToDate));
+        assert!(matches!(
+            latest_status_from(&headers),
+            LatestStatus::UpToDate
+        ));
     }
 
     #[test]
@@ -1754,7 +1826,8 @@ mod tests {
                 label: RefLabel::Code,
                 ref_hash: ItemHash::try_from(
                     "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e",
-                ).unwrap(),
+                )
+                .unwrap(),
                 use_latest: false,
                 original: Some(store.clone()),
                 latest: LatestStatus::Pinned,
@@ -1763,24 +1836,31 @@ mod tests {
                 label: RefLabel::Runtime,
                 ref_hash: ItemHash::try_from(
                     "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696",
-                ).unwrap(),
+                )
+                .unwrap(),
                 use_latest: true,
                 original: Some(store.clone()),
                 latest: LatestStatus::Updated {
                     hash: ItemHash::try_from(
                         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                    ).unwrap(),
+                    )
+                    .unwrap(),
                     updated_at: Timestamp::from(1_720_000_000.0),
                 },
             },
             RefInfo {
-                label: RefLabel::Immutable { mount: "/data".into() },
+                label: RefLabel::Immutable {
+                    mount: "/data".into(),
+                },
                 ref_hash: ItemHash::try_from(
                     "8df728d560ed6e9103b040a6b5fc5417e0a52e890c12977464ebadf9becf1bf6",
-                ).unwrap(),
+                )
+                .unwrap(),
                 use_latest: true,
                 original: None,
-                latest: LatestStatus::Unresolved { reason: "forgotten".into() },
+                latest: LatestStatus::Unresolved {
+                    reason: "forgotten".into(),
+                },
             },
         ];
         (info, refs, vec![])
@@ -1790,11 +1870,17 @@ mod tests {
     fn render_show_text_snapshot() {
         let (info, refs, volumes) = fixture_show_input();
         let out = render_show_text(&info, &refs, &volumes);
-        assert!(out.contains("PROGRAM acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"));
+        assert!(
+            out.contains(
+                "PROGRAM acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c"
+            )
+        );
         assert!(out.contains("Name           Hoymiles"));
         assert!(out.contains("Owner          0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885"));
-        assert!(!out.contains("Sender         0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885"),
-            "sender line should be suppressed when equal to owner");
+        assert!(
+            !out.contains("Sender         0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885"),
+            "sender line should be suppressed when equal to owner"
+        );
         assert!(out.contains("Resources      2 vCPUs, 4096 MiB"));
         assert!(out.contains("Pinned (use_latest=false)"));
         assert!(out.contains("Latest         ffff"));
@@ -1822,7 +1908,9 @@ mod tests {
             created_at: Timestamp::from(1_757_026_128.773),
             sender: Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string()),
             owner: Address::from("0x9C2FD74F9CA2B7C4941690316B0Ebc35ce55c885".to_string()),
-            channel: Some(aleph_types::channel::Channel::from("ALEPH-CLOUDSOLUTIONS".to_string())),
+            channel: Some(aleph_types::channel::Channel::from(
+                "ALEPH-CLOUDSOLUTIONS".to_string(),
+            )),
             entrypoint: "main:app".into(),
             interface: ProgramInterface::Asgi,
             encoding: "zip".into(),
@@ -1836,19 +1924,20 @@ mod tests {
             payment_kind: Some("hold".into()),
             payment_chain: Some("ETH".into()),
         };
-        let refs = vec![
-            RefInfo {
-                label: RefLabel::Code,
-                ref_hash: ItemHash::try_from("9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e").unwrap(),
-                use_latest: true,
-                original: Some(StoreSummary {
-                    sender: Address::from("0xABC".to_string()),
-                    owner: Address::from("0xABC".to_string()),
-                    created_at: Timestamp::from(1_700_000_000.0),
-                }),
-                latest: LatestStatus::UpToDate,
-            },
-        ];
+        let refs = vec![RefInfo {
+            label: RefLabel::Code,
+            ref_hash: ItemHash::try_from(
+                "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e",
+            )
+            .unwrap(),
+            use_latest: true,
+            original: Some(StoreSummary {
+                sender: Address::from("0xABC".to_string()),
+                owner: Address::from("0xABC".to_string()),
+                created_at: Timestamp::from(1_700_000_000.0),
+            }),
+            latest: LatestStatus::UpToDate,
+        }];
         let volumes: Vec<NonRefVolume> = vec![];
 
         let value = render_show_json(&info, &refs, &volumes);
