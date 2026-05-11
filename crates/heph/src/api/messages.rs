@@ -1,10 +1,21 @@
 use actix_web::{HttpResponse, Responder, web};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
 use crate::corechannel;
 use crate::db::messages::{self, MessageFilter, StoredMessage};
 use crate::handlers::{self, IncomingMessage};
+
+/// Render an f64 epoch timestamp as an ISO-8601 string with microsecond precision and a `Z`
+/// suffix, matching the format pyaleph emits for pending messages.
+fn epoch_to_iso_micros(t: f64) -> String {
+    let secs = t.trunc() as i64;
+    let nanos = ((t.fract().abs() * 1_000_000_000.0).round() as u32).min(999_999_999);
+    DateTime::<Utc>::from_timestamp(secs, nanos)
+        .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap())
+        .to_rfc3339_opts(SecondsFormat::Micros, true)
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/v0/messages
@@ -213,6 +224,51 @@ struct MessageResponse {
     confirmations: Vec<()>,
 }
 
+/// Wire shape for a single message inside a `pending` status response, matching pyaleph.
+/// Distinct from `MessageResponse` because pending responses use ISO datetimes for `time`
+/// and include `reception_time`.
+#[derive(Serialize)]
+struct PendingMessageResponse {
+    sender: String,
+    chain: String,
+    signature: String,
+    #[serde(rename = "type")]
+    message_type: String,
+    item_content: Option<String>,
+    item_type: String,
+    item_hash: String,
+    time: String,
+    channel: Option<String>,
+    content: serde_json::Value,
+    reception_time: String,
+}
+
+fn stored_to_pending_response(msg: &StoredMessage) -> PendingMessageResponse {
+    let content: serde_json::Value = msg
+        .item_content
+        .as_deref()
+        .and_then(|ic| serde_json::from_str(ic).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let api_item_content = if msg.item_type == "inline" {
+        msg.item_content.clone()
+    } else {
+        None
+    };
+    PendingMessageResponse {
+        sender: msg.sender.clone(),
+        chain: msg.chain.clone(),
+        signature: msg.signature.clone(),
+        message_type: msg.message_type.clone(),
+        item_content: api_item_content,
+        item_type: msg.item_type.clone(),
+        item_hash: msg.item_hash.clone(),
+        time: epoch_to_iso_micros(msg.time),
+        channel: msg.channel.clone(),
+        content,
+        reception_time: epoch_to_iso_micros(msg.reception_time),
+    }
+}
+
 fn stored_to_response(msg: &StoredMessage) -> MessageResponse {
     let content: serde_json::Value = msg
         .item_content
@@ -391,8 +447,8 @@ pub async fn get_message(state: web::Data<AppState>, path: web::Path<String>) ->
                 "pending" => HttpResponse::Ok().json(serde_json::json!({
                     "status": "pending",
                     "item_hash": msg.item_hash,
-                    "reception_time": msg.reception_time,
-                    "message": message_resp,
+                    "reception_time": epoch_to_iso_micros(msg.reception_time),
+                    "messages": [stored_to_pending_response(&msg)],
                 })),
                 "forgotten" => {
                     // Strip content from forgotten messages
@@ -984,5 +1040,95 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 422);
+    }
+
+    /// GET on a pending message must return the pyaleph shape: a `messages: [...]`
+    /// array and ISO-8601 datetime strings for `time` / `reception_time`. The SDK
+    /// must be able to deserialize the response into `MessageWithStatus::Pending`.
+    #[actix_web::test]
+    async fn test_get_pending_message_matches_pyaleph_shape() {
+        use aleph_sdk::client::MessageWithStatus;
+        use aleph_types::message::{Message, MessageStatus};
+
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+        let db = state.db.clone();
+
+        let item_content = r#"{"type":"test-post","address":"0xCBD8c644d5628DB7Fd6D600681E15bcF82d79274","time":1700000050.0,"content":{"body":"pending body"}}"#;
+        let hash = ItemHash::Native(AlephItemHash::from_bytes(item_content.as_bytes())).to_string();
+
+        db.with_conn(|conn| {
+            messages::insert_message(
+                conn,
+                &messages::InsertMessage {
+                    item_hash: &hash,
+                    message_type: MessageType::Post,
+                    chain: "ETH",
+                    sender: "0xCBD8c644d5628DB7Fd6D600681E15bcF82d79274",
+                    signature: "0xabcd",
+                    item_type: "inline",
+                    item_content: Some(item_content),
+                    channel: Some("TEST"),
+                    time: 1_700_000_050.0,
+                    size: item_content.len() as i64,
+                    status: MessageStatus::Pending,
+                    reception_time: 1_700_000_051.5,
+                    owner: None,
+                    content_type: None,
+                    content_ref: None,
+                    content_key: None,
+                    content_item_hash: None,
+                    payment_type: None,
+                },
+            )
+        })
+        .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .configure(configure_routes),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v0/messages/{hash}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["status"], "pending");
+        assert!(
+            body["messages"].is_array(),
+            "expected `messages: [...]`, got {body}"
+        );
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert!(
+            body["reception_time"].is_string(),
+            "outer reception_time must be ISO string, got {}",
+            body["reception_time"]
+        );
+        let inner = &body["messages"][0];
+        assert!(
+            inner["time"].is_string(),
+            "inner time must be ISO string, got {}",
+            inner["time"]
+        );
+        assert!(
+            inner["reception_time"].is_string(),
+            "inner reception_time must be ISO string, got {}",
+            inner["reception_time"]
+        );
+
+        // The SDK must accept this response shape.
+        let parsed: MessageWithStatus<Message> = serde_json::from_value(body).unwrap();
+        match parsed {
+            MessageWithStatus::Pending { messages } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].item_hash.to_string(), hash);
+            }
+            other => panic!("expected Pending, got {other:?}"),
+        }
     }
 }
