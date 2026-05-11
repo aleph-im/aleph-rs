@@ -1,0 +1,20 @@
+{
+  "status": "pending",
+  "item_hash": "cab98cd9e1f957bd99259acff3eb35d960436121c7f567a2c9cb941c24e0c01b",
+  "reception_time": "2026-05-11T10:08:17.772651Z",
+  "messages": [
+    {
+      "sender": "0x4D52380D3191274a04846c89c069E6C3F2Ed94e4",
+      "chain": "ETH",
+      "signature": "0x89a633d6a4ee4ba52912c0293fa9a45d068bf0dd3dc1e4634476942385fb424f681599ff2e3851b140a95e8be7bdbe7e6b845e25932170b0274ca83f22d686d41b",
+      "type": "POST",
+      "item_content": null,
+      "item_type": "storage",
+      "item_hash": "cab98cd9e1f957bd99259acff3eb35d960436121c7f567a2c9cb941c24e0c01b",
+      "time": "2026-05-09T00:30:34.248660Z",
+      "channel": "aleph-scoring",
+      "content": null,
+      "reception_time": "2026-05-11T10:08:17.772651Z"
+    }
+  ]
+}
