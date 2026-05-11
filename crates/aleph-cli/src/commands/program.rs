@@ -1018,7 +1018,7 @@ async fn resolve_ref(aleph_client: &AlephClient, spec: RefSpec) -> RefInfo {
     // 2. Latest status.
     let latest = if !use_latest {
         LatestStatus::Pinned
-    } else if let Some(reason) = unresolved_reason.clone() {
+    } else if let Some(reason) = unresolved_reason {
         // If the original STORE didn't resolve, we still ran no amend query.
         LatestStatus::Unresolved { reason }
     } else {
@@ -1042,7 +1042,8 @@ async fn resolve_ref(aleph_client: &AlephClient, spec: RefSpec) -> RefInfo {
             Err(e) => {
                 let reason = format!("amend query failed: {e}");
                 eprintln!(
-                    "warning: cannot check latest for {}: {}",
+                    "warning: cannot check latest for {} ({}): {}",
+                    ref_hash,
                     label_display(&label),
                     reason
                 );
