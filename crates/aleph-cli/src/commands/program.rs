@@ -406,6 +406,86 @@ fn render_program_rows(rows: &[ProgramRow], json: bool) -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// `aleph program show` data model
+// =============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProgramInterface {
+    Asgi,
+    Binary,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ProgramShowInfo {
+    pub item_hash: ItemHash,
+    pub name: Option<String>,
+    pub created_at: Timestamp,
+    pub sender: Address,
+    pub owner: Address,
+    pub channel: Option<aleph_types::channel::Channel>,
+    pub entrypoint: String,
+    pub interface: ProgramInterface,
+    pub encoding: String,
+    pub vcpus: u32,
+    pub memory_mib: u64,
+    pub timeout_seconds: u32,
+    pub internet: bool,
+    pub persistent: bool,
+    pub updatable: bool,
+    pub env_vars: std::collections::BTreeMap<String, String>,
+    pub payment_kind: Option<String>,
+    pub payment_chain: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum RefLabel {
+    Code,
+    Runtime,
+    Data,
+    Immutable { mount: String },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct StoreSummary {
+    pub sender: Address,
+    pub owner: Address,
+    pub created_at: Timestamp,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum LatestStatus {
+    Pinned,
+    UpToDate,
+    Updated { hash: ItemHash, updated_at: Timestamp },
+    Unresolved { reason: String },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct RefInfo {
+    #[serde(flatten)]
+    pub label: RefLabel,
+    pub ref_hash: ItemHash,
+    pub use_latest: bool,
+    pub original: Option<StoreSummary>,
+    pub latest: LatestStatus,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum NonRefVolume {
+    Ephemeral { mount: String, size_mib: u64 },
+    Persistent {
+        mount: String,
+        size_mib: u64,
+        persistence: String,
+        name: Option<String>,
+    },
+}
+
 async fn handle_list(aleph_client: &AlephClient, json: bool, args: ProgramListArgs) -> Result<()> {
     let address = match args.address.as_deref() {
         Some(value) => resolve_address(value)?,
@@ -939,6 +1019,36 @@ mod tests {
             original_content.base.resources.vcpus
         );
         assert_eq!(cloned.base.allow_amend, original_content.base.allow_amend);
+    }
+
+    #[test]
+    fn show_types_serialize_round_trip() {
+        let info = ProgramShowInfo {
+            item_hash: ItemHash::try_from(
+                "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c",
+            )
+            .unwrap(),
+            name: Some("demo".into()),
+            created_at: Timestamp::from(1_700_000_000.0),
+            sender: Address::from("0xABCD".to_string()),
+            owner: Address::from("0xABCD".to_string()),
+            channel: None,
+            entrypoint: "main:app".into(),
+            interface: ProgramInterface::Asgi,
+            encoding: "zip".into(),
+            vcpus: 1,
+            memory_mib: 2048,
+            timeout_seconds: 30,
+            internet: true,
+            persistent: false,
+            updatable: true,
+            env_vars: std::collections::BTreeMap::new(),
+            payment_kind: Some("credit".into()),
+            payment_chain: Some("ETH".into()),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["item_hash"], "acab01087137c68a5e84734e75145482651accf3bea80fb9b723b761639ecc1c");
+        assert_eq!(json["interface"], "asgi");
     }
 
     #[test]
