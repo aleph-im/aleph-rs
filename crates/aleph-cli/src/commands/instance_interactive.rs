@@ -29,7 +29,12 @@ pub async fn resolve_interactive(
         let vm_images = aleph_client
             .get_vm_images_aggregate()
             .await
-            .map_err(|e| anyhow!("failed to fetch vm-images aggregate: {e}"))?
+            .map_err(|e| {
+                anyhow!(
+                    "failed to fetch vm-images aggregate: {e}. \
+                     As a fallback, run without -i and pass --image with a raw item hash or IPFS CID."
+                )
+            })?
             .vm_images;
         args.image = Some(prompt_image(&vm_images)?);
     }
