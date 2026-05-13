@@ -132,7 +132,8 @@ async fn handle_folder_upload(
     json: bool,
     args: FileUploadArgs,
 ) -> Result<()> {
-    use aleph_sdk::ipfs::{CidVersion, UploadFolderOptions};
+    use aleph_sdk::folder_hash::hash_folder_root;
+    use aleph_sdk::ipfs::{CidVersion, UploadFolderOptions, collect_folder_files};
 
     // Directory uploads always use IPFS. Reject only when the user explicitly
     // asked for native storage; an unset flag silently picks IPFS.
@@ -162,7 +163,7 @@ async fn handle_folder_upload(
             );
         } else {
             eprintln!(
-                "Dry run — would upload {} file(s), {} bytes total. No HTTP calls made.",
+                "Dry run: would upload {} file(s), {} bytes total. No HTTP calls made.",
                 entries.len(),
                 total_bytes
             );
@@ -170,18 +171,19 @@ async fn handle_folder_upload(
         return Ok(());
     }
 
-    let client = if let Some(gateway) = args.ipfs_gateway.clone() {
-        aleph_client.clone().with_ipfs_gateway(gateway)
-    } else {
-        aleph_client.clone()
-    };
-
-    if !json {
-        eprintln!("Hashing and uploading folder {}...", args.path.display());
+    if args.use_gateway_relay {
+        return handle_folder_upload_via_gateway(aleph_client, ccn_url, json, args, opts, &account)
+            .await;
     }
-    let file_hash = client.upload_folder_to_ipfs(&args.path, opts).await?;
+
+    // Authenticated CAR path (default).
     if !json {
-        eprintln!("  Directory CID (verified): {file_hash}");
+        eprintln!("Hashing folder {}...", args.path.display());
+    }
+    let entries = collect_folder_files(&args.path, opts.follow_symlinks)?;
+    let file_hash = hash_folder_root(&entries, &opts)?;
+    if !json {
+        eprintln!("  Directory CID: {file_hash}");
     }
 
     let mut builder = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Ipfs)
@@ -197,6 +199,53 @@ async fn handle_folder_upload(
     }
     let pending = builder.build()?;
 
+    if !json {
+        eprintln!("Uploading folder to CCN...");
+    }
+    aleph_client
+        .upload_folder_to_ipfs_authenticated(&args.path, &pending, true, opts)
+        .await?;
+    print_submission_result(ccn_url, &pending, "success", "processed", json)?;
+    Ok(())
+}
+
+async fn handle_folder_upload_via_gateway(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: FileUploadArgs,
+    opts: aleph_sdk::ipfs::UploadFolderOptions,
+    account: &crate::account::CliAccount,
+) -> Result<()> {
+    let client = if let Some(gateway) = args.ipfs_gateway.clone() {
+        aleph_client.clone().with_ipfs_gateway(gateway)
+    } else {
+        aleph_client.clone()
+    };
+
+    if !json {
+        eprintln!(
+            "Hashing and uploading folder via kubo gateway {}...",
+            args.path.display()
+        );
+    }
+    let file_hash = client.upload_folder_to_ipfs(&args.path, opts).await?;
+    if !json {
+        eprintln!("  Directory CID (verified): {file_hash}");
+    }
+
+    let mut builder = StoreBuilder::new(account, file_hash.clone(), StorageEngine::Ipfs)
+        .payment(resolve_payment(args.payment_type));
+    if let Some(owner) = args.on_behalf_of {
+        builder = builder.on_behalf_of(resolve_address(&owner)?);
+    }
+    if let Some(reference) = args.reference {
+        builder = builder.reference(reference);
+    }
+    if let Some(ch) = args.channel {
+        builder = builder.channel(Channel::from(ch));
+    }
+    let pending = builder.build()?;
     submit_or_preview(aleph_client, ccn_url, &pending, false, json).await?;
     Ok(())
 }
