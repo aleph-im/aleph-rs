@@ -77,6 +77,8 @@ fn write_cbor_bytestring_header(out: &mut Vec<u8>, len: usize) {
 mod tests {
     use super::*;
     use std::io::Read;
+    use cid::Cid as RawCid;
+    use multihash::Multihash;
 
     /// Read an unsigned LEB128 varint. Returns (value, bytes_consumed).
     // NOTE: This helper is only safe for round-tripping bytes from write_uvarint.
@@ -139,9 +141,6 @@ mod tests {
         assert_eq!(buf, vec![0x80, 0x01]);
     }
 
-    use cid::Cid as RawCid;
-    use multihash::Multihash;
-
     /// Build a CIDv1 dag-pb CID whose sha2-256 digest is `digest`. Used by
     /// header-byte tests to construct an arbitrary deterministic CID.
     fn make_cidv1_dagpb(digest: [u8; 32]) -> Vec<u8> {
@@ -186,8 +185,7 @@ mod tests {
 
     #[test]
     fn dagcbor_header_small_cid_uses_short_bytestring() {
-        // CIDv0 = 34 bytes (bare multihash). bytestring_len = 35.
-        // 35 > 23 -> uses 0x58 prefix.
+        // 34-byte payload (CIDv0-sized). bytestring_len = 35, uses 0x58 branch.
         let cid_bytes = vec![0u8; 34];
         let hdr = super::build_dagcbor_header(&cid_bytes);
         let tag_idx = hdr.iter().position(|&b| b == 0x2A).unwrap();
