@@ -35,7 +35,16 @@ pub enum FolderHashError {
     },
     #[error("HAMT recursion exceeded 8 levels (impossible hash collision)")]
     HamtDepthExceeded,
+    #[error("sink error: {0}")]
+    Sink(#[source] std::io::Error),
 }
+
+/// Visitor sink for `build_folder_dag`.
+///
+/// Called once per emitted block as `(cid_bytes, block_bytes)`. For dag-pb
+/// nodes `block_bytes` is the canonical pbnode encoding; for raw leaves it is
+/// the raw chunk. The root block is always emitted last.
+pub type BlockSink<'a> = dyn FnMut(&[u8], &[u8]) -> std::io::Result<()> + 'a;
 
 /// A node in the in-memory folder tree, before hashing.
 #[derive(Debug)]
@@ -104,7 +113,17 @@ fn build_cid_bytes(multihash: Vec<u8>, cid_v1: bool) -> Vec<u8> {
 ///
 /// Children must already be sorted by `name` (callers use a `BTreeMap` so this
 /// is automatic).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_plain_directory(children: &[ChildLink], cid_v1: bool) -> DagNode {
+    build_plain_directory_with_sink(children, cid_v1, &mut |_, _| Ok(()))
+        .expect("no-op sink cannot fail")
+}
+
+fn build_plain_directory_with_sink(
+    children: &[ChildLink],
+    cid_v1: bool,
+    sink: &mut BlockSink<'_>,
+) -> Result<DagNode, FolderHashError> {
     let links: Vec<merkledag::PbLink> = children
         .iter()
         .map(|c| merkledag::PbLink {
@@ -139,11 +158,13 @@ pub(crate) fn build_plain_directory(children: &[ChildLink], cid_v1: bool) -> Dag
     let node_size = node_bytes.len() as u64;
     let children_cumulative: u64 = children.iter().map(|c| c.cumulative_size).sum();
 
-    DagNode {
+    let dag_node = DagNode {
         cid_bytes,
         cumulative_size: node_size + children_cumulative,
         data_size: 0, // directories don't expose a payload size
-    }
+    };
+    sink(&dag_node.cid_bytes, &node_bytes).map_err(FolderHashError::Sink)?;
+    Ok(dag_node)
 }
 
 /// Kubo's HAMT sharding threshold.
@@ -222,21 +243,31 @@ fn hamt_slot(hash: u64, level: u32) -> u8 {
 }
 
 /// Build the root of a HAMT shard tree from `children`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_hamt_root(
     children: &[ChildLink],
     cid_v1: bool,
+) -> Result<DagNode, FolderHashError> {
+    build_hamt_root_with_sink(children, cid_v1, &mut |_, _| Ok(()))
+}
+
+fn build_hamt_root_with_sink(
+    children: &[ChildLink],
+    cid_v1: bool,
+    sink: &mut BlockSink<'_>,
 ) -> Result<DagNode, FolderHashError> {
     let hashed: Vec<(u64, ChildLink)> = children
         .iter()
         .map(|c| (hamt_hash_name(&c.name), c.clone()))
         .collect();
-    build_hamt_node(&hashed, 0, cid_v1)
+    build_hamt_node_with_sink(&hashed, 0, cid_v1, sink)
 }
 
-fn build_hamt_node(
+fn build_hamt_node_with_sink(
     entries: &[(u64, ChildLink)],
     level: u32,
     cid_v1: bool,
+    sink: &mut BlockSink<'_>,
 ) -> Result<DagNode, FolderHashError> {
     if level >= 8 {
         return Err(FolderHashError::HamtDepthExceeded);
@@ -273,7 +304,7 @@ fn build_hamt_node(
             )
         } else {
             // Subshard: recurse, link with name "{slot_hex}".
-            let sub = build_hamt_node(bucket, level + 1, cid_v1)?;
+            let sub = build_hamt_node_with_sink(bucket, level + 1, cid_v1, sink)?;
             (format!("{slot_idx:02X}"), sub)
         };
 
@@ -320,16 +351,37 @@ fn build_hamt_node(
 
     let node_size = node_bytes.len() as u64;
 
-    Ok(DagNode {
+    let dag_node = DagNode {
         cid_bytes,
         cumulative_size: node_size + children_cumulative,
         data_size: 0,
-    })
+    };
+    sink(&dag_node.cid_bytes, &node_bytes).map_err(FolderHashError::Sink)?;
+    Ok(dag_node)
 }
+
+/// Walk the folder DAG, emitting every block to `sink`. Returns the root CID.
+///
+/// `sink` is invoked once per emitted block as `(cid_bytes, block_bytes)`. For
+/// dag-pb nodes `block_bytes` is the canonical pbnode encoding; for raw leaves
+/// it is the raw chunk. The root block is emitted last.
+pub fn build_folder_dag(
+    entries: &[FolderEntry],
+    opts: &UploadFolderOptions,
+    sink: &mut BlockSink<'_>,
+) -> Result<ItemHash, FolderHashError> {
+    let tree = build_tree(entries);
+    let cid_v1 = matches!(opts.cid_version, CidVersion::V1);
+    let root = hash_dir_with_sink(&tree, cid_v1, sink)?;
+    cid_bytes_to_item_hash(&root.cid_bytes)
+}
+
 
 /// Build the local UnixFS root CID for `entries`, matching what kubo's
 /// HTTP `/api/v0/add?wrap-with-directory=true` produces given the same flat
 /// list of files via multipart.
+///
+/// This is a thin wrapper over `build_folder_dag` that discards block bytes.
 ///
 /// # Symlinks
 ///
@@ -344,25 +396,23 @@ fn build_hamt_node(
 /// This is a deliberate tradeoff that mirrors the multipart upload path; if
 /// symlink-preservation semantics are needed, both the walker and the upload
 /// would have to switch to `application/x-symlink` parts together.
-pub(crate) fn hash_folder_root(
+pub fn hash_folder_root(
     entries: &[FolderEntry],
     opts: &UploadFolderOptions,
 ) -> Result<ItemHash, FolderHashError> {
-    let tree = build_tree(entries);
-    let cid_v1 = matches!(opts.cid_version, CidVersion::V1);
-
-    // The root is a "wrapping directory" — entries are contained within it.
-    let root = hash_dir(&tree, cid_v1)?;
-
-    cid_bytes_to_item_hash(&root.cid_bytes)
+    build_folder_dag(entries, opts, &mut |_, _| Ok(()))
 }
 
-fn hash_dir(tree: &BTreeMap<String, TreeNode>, cid_v1: bool) -> Result<DagNode, FolderHashError> {
+fn hash_dir_with_sink(
+    tree: &BTreeMap<String, TreeNode>,
+    cid_v1: bool,
+    sink: &mut BlockSink<'_>,
+) -> Result<DagNode, FolderHashError> {
     let mut children: Vec<ChildLink> = Vec::with_capacity(tree.len());
     for (name, node) in tree {
         let dag = match node {
-            TreeNode::File(path) => hash_file(path, cid_v1)?,
-            TreeNode::Dir(sub) => hash_dir(sub, cid_v1)?,
+            TreeNode::File(path) => hash_file_with_sink(path, cid_v1, sink)?,
+            TreeNode::Dir(sub) => hash_dir_with_sink(sub, cid_v1, sink)?,
         };
         children.push(ChildLink {
             name: name.clone(),
@@ -372,13 +422,17 @@ fn hash_dir(tree: &BTreeMap<String, TreeNode>, cid_v1: bool) -> Result<DagNode, 
     }
 
     if should_shard(&children) {
-        build_hamt_root(&children, cid_v1)
+        build_hamt_root_with_sink(&children, cid_v1, sink)
     } else {
-        Ok(build_plain_directory(&children, cid_v1))
+        build_plain_directory_with_sink(&children, cid_v1, sink)
     }
 }
 
-fn hash_file(path: &std::path::Path, cid_v1: bool) -> Result<DagNode, FolderHashError> {
+fn hash_file_with_sink(
+    path: &std::path::Path,
+    cid_v1: bool,
+    sink: &mut BlockSink<'_>,
+) -> Result<DagNode, FolderHashError> {
     let mut hasher = if cid_v1 {
         Hasher::for_ipfs_v1_raw_leaves()
     } else {
@@ -398,13 +452,17 @@ fn hash_file(path: &std::path::Path, cid_v1: bool) -> Result<DagNode, FolderHash
         if n == 0 {
             break;
         }
-        hasher.update(&buf[..n]);
+        hasher
+            .update_with_sink(&buf[..n], sink)
+            .map_err(FolderHashError::Sink)?;
     }
 
-    // finalize_dag_node returns the root DagNode with the correct cumulative_size
+    // finalize_with_sink returns the root DagNode with the correct cumulative_size
     // (i.e. the sum of all block sizes in the subtree, not just the raw file bytes).
     // This is what kubo stores in PBLink.Tsize for the parent directory's link.
-    Ok(hasher.finalize_dag_node())
+    hasher
+        .finalize_with_sink(sink)
+        .map_err(FolderHashError::Sink)
 }
 
 fn cid_bytes_to_item_hash(bytes: &[u8]) -> Result<ItemHash, FolderHashError> {

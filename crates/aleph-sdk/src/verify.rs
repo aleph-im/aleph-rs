@@ -211,6 +211,13 @@ impl Hasher {
 
     /// Build a dag-pb leaf node from a chunk of data.
     pub(crate) fn build_leaf(chunk: &[u8]) -> DagNode {
+        let (node, _bytes) = Self::build_leaf_with_bytes(chunk);
+        node
+    }
+
+    /// Build a dag-pb leaf node from a chunk of data, also returning the
+    /// canonical pbnode bytes used to compute the CID.
+    pub(crate) fn build_leaf_with_bytes(chunk: &[u8]) -> (DagNode, Vec<u8>) {
         let unixfs_data = unixfs::Data {
             r#type: unixfs::DataType::File as i32,
             data: if chunk.is_empty() {
@@ -237,11 +244,12 @@ impl Hasher {
         let digest = Sha256::digest(&node_bytes);
         let cid_bytes = encode_multihash(&digest);
 
-        DagNode {
+        let dag_node = DagNode {
             cid_bytes,
             cumulative_size: node_bytes.len() as u64,
             data_size: chunk.len() as u64,
-        }
+        };
+        (dag_node, node_bytes)
     }
 
     /// Build a raw leaf node: hash the chunk directly without dag-pb/UnixFS wrapping.
@@ -265,6 +273,17 @@ impl Hasher {
     /// Build an internal dag-pb node from a list of children.
     /// When `v1` is true, produces CIDv1 dag-pb binary; otherwise bare multihash (CIDv0).
     pub(crate) fn build_internal_node(children: &[DagNode], v1: bool) -> DagNode {
+        let (node, _bytes) = Self::build_internal_node_with_bytes(children, v1);
+        node
+    }
+
+    /// Build an internal dag-pb node from a list of children, also returning the
+    /// canonical pbnode bytes used to compute the CID.
+    /// When `v1` is true, produces CIDv1 dag-pb binary; otherwise bare multihash (CIDv0).
+    pub(crate) fn build_internal_node_with_bytes(
+        children: &[DagNode],
+        v1: bool,
+    ) -> (DagNode, Vec<u8>) {
         let total_data_size: u64 = children.iter().map(|c| c.data_size).sum();
         let blocksizes: Vec<u64> = children.iter().map(|c| c.data_size).collect();
 
@@ -312,10 +331,113 @@ impl Hasher {
         let node_size = node_bytes.len() as u64;
         let children_cumulative: u64 = children.iter().map(|c| c.cumulative_size).sum();
 
-        DagNode {
+        let dag_node = DagNode {
             cid_bytes,
             cumulative_size: node_size + children_cumulative,
             data_size: total_data_size,
+        };
+        (dag_node, node_bytes)
+    }
+
+    /// Like `update`, but invokes `sink` for each complete leaf (raw or
+    /// pbnode-wrapped) as it is finalized.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn update_with_sink(
+        &mut self,
+        data: &[u8],
+        sink: &mut dyn FnMut(&[u8], &[u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Native { hasher, .. } | Self::CidRaw { hasher, .. } => {
+                hasher.update(data);
+                Ok(())
+            }
+            Self::DagPb {
+                buffer,
+                leaves,
+                raw_leaves,
+            } => {
+                let raw = *raw_leaves;
+                let mut remaining = data;
+                while !remaining.is_empty() {
+                    let space = CHUNK_SIZE - buffer.len();
+                    let take = remaining.len().min(space);
+                    buffer.extend_from_slice(&remaining[..take]);
+                    remaining = &remaining[take..];
+                    if buffer.len() == CHUNK_SIZE {
+                        let (leaf, block_bytes) = if raw {
+                            let bytes = buffer.clone();
+                            (Self::build_raw_leaf(buffer), bytes)
+                        } else {
+                            Self::build_leaf_with_bytes(buffer)
+                        };
+                        sink(&leaf.cid_bytes, &block_bytes)?;
+                        leaves.push(leaf);
+                        buffer.clear();
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Drain the trailing partial buffer (if any), emit final leaf and all
+    /// internal nodes up to the root, invoking `sink` for each block.
+    /// Returns the root `DagNode`.
+    ///
+    /// Panics if called on a `Native` or `CidRaw` hasher.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn finalize_with_sink(
+        self,
+        sink: &mut dyn FnMut(&[u8], &[u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<DagNode> {
+        match self {
+            Self::DagPb {
+                buffer,
+                mut leaves,
+                raw_leaves,
+            } => {
+                let v1 = raw_leaves;
+
+                // Single-leaf (or empty-file) fast path: file fits in one chunk.
+                if leaves.is_empty() {
+                    let (leaf, block_bytes) = if raw_leaves {
+                        let bytes = buffer.clone();
+                        (Self::build_raw_leaf(&buffer), bytes)
+                    } else {
+                        Self::build_leaf_with_bytes(&buffer)
+                    };
+                    sink(&leaf.cid_bytes, &block_bytes)?;
+                    return Ok(leaf);
+                }
+
+                // Flush remaining partial chunk.
+                if !buffer.is_empty() {
+                    let (leaf, block_bytes) = if raw_leaves {
+                        let bytes = buffer.clone();
+                        (Self::build_raw_leaf(&buffer), bytes)
+                    } else {
+                        Self::build_leaf_with_bytes(&buffer)
+                    };
+                    sink(&leaf.cid_bytes, &block_bytes)?;
+                    leaves.push(leaf);
+                }
+
+                // Build internal node tree, emitting each level to sink.
+                let mut nodes = leaves;
+                while nodes.len() > 1 {
+                    let mut next_level = Vec::with_capacity(nodes.len().div_ceil(MAX_LINKS));
+                    for chunk in nodes.chunks(MAX_LINKS) {
+                        let (internal, node_bytes) =
+                            Self::build_internal_node_with_bytes(chunk, v1);
+                        sink(&internal.cid_bytes, &node_bytes)?;
+                        next_level.push(internal);
+                    }
+                    nodes = next_level;
+                }
+                Ok(nodes.into_iter().next().unwrap())
+            }
+            _ => panic!("finalize_with_sink called on non-DagPb hasher"),
         }
     }
 
