@@ -4,9 +4,11 @@
 //! same flat list of file paths. Used by `AlephClient::upload_folder_to_ipfs`
 //! to verify that the IPFS gateway returns the expected CID after upload.
 //!
-//! Block bytes are hashed and discarded — there is no DAG retention. If we
-//! later need CAR upload (option C), the construction code stays the same;
-//! only the storage shape changes.
+//! Two public entry points share the same walk:
+//! `hash_folder_root` discards the block bytes and returns just the root
+//! CID; `build_folder_dag` invokes a caller-supplied sink for each
+//! `(cid_bytes, block_bytes)` pair as the walk progresses, which the
+//! authenticated CAR upload path uses to stream the DAG into a tempfile.
 //!
 //! # Test goldens
 //!
@@ -113,6 +115,10 @@ fn build_cid_bytes(multihash: Vec<u8>, cid_v1: bool) -> Vec<u8> {
 ///
 /// Children must already be sorted by `name` (callers use a `BTreeMap` so this
 /// is automatic).
+// .expect() is safe here: the only fallible path in the sinkful variant is
+// the sink itself, and a no-op sink never errors. (build_hamt_root cannot
+// take the same shape because its sinkful variant can also fail with
+// HamtDepthExceeded.)
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_plain_directory(children: &[ChildLink], cid_v1: bool) -> DagNode {
     build_plain_directory_with_sink(children, cid_v1, &mut |_, _| Ok(()))
