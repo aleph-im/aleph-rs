@@ -2,8 +2,10 @@
 //!
 //! Reference: https://ipld.io/specs/transport/car/carv1/
 //!
-//! Writer-only today; a reader is added in a later task so heph can
-//! validate uploaded CARs in its stub `add_car` handler.
+//! Provides a hand-rolled writer (`build_dagcbor_header` plus block-frame
+//! helpers added in a later task) and a strict reader (`read_carv1_root`)
+//! that heph re-uses to validate uploaded CARs in its stub `add_car`
+//! handler.
 
 use std::io::{self, Read, Write};
 
@@ -101,6 +103,8 @@ pub fn read_carv1_root(path: &std::path::Path) -> Result<String, InvalidCarFile>
     read_carv1_root_from(&mut f)
 }
 
+/// `Read`-based variant of [`read_carv1_root`]; the file entry point is a
+/// thin wrapper around this.
 pub(crate) fn read_carv1_root_from<R: Read>(r: &mut R) -> Result<String, InvalidCarFile> {
     let header_len = read_uvarint_checked(r)?;
     if header_len > MAX_CAR_HEADER_BYTES as u64 {
@@ -183,6 +187,8 @@ fn parse_dagcbor_header(bytes: &[u8]) -> Result<String, InvalidCarFile> {
         return Err(InvalidCarFile::UnsupportedVersion { got: version });
     }
     let cid = ::cid::Cid::try_from(&cid_bytes[..]).map_err(|_| InvalidCarFile::MalformedRootCid)?;
+    // Trailing bytes inside the declared header length are silently accepted.
+    // Producers we control never pad; aligns with pyaleph's parser behaviour.
     Ok(cid.to_string())
 }
 
@@ -509,5 +515,44 @@ mod tests {
         framed.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
         let err = super::read_carv1_root_from(&mut &framed[..]).unwrap_err();
         assert!(matches!(err, super::InvalidCarFile::MalformedHeader));
+    }
+
+    #[test]
+    fn read_carv1_root_overlong_varint_rejected() {
+        // 9 continuation bytes + a 10th byte with payload=2 at shift=63 -> overflow.
+        // Without the shift==63 guard, this would silently truncate (release) or
+        // panic (debug); the guard maps it to MalformedVarint.
+        let bytes = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02];
+        let err = super::read_carv1_root_from(&mut &bytes[..]).unwrap_err();
+        assert!(matches!(err, super::InvalidCarFile::MalformedVarint));
+    }
+
+    #[test]
+    fn read_carv1_root_version_first_ordering_accepted() {
+        // Craft a header with "version" first, then "roots". DAG-CBOR canonical
+        // ordering puts "roots" first (shorter), but our parser is defensively
+        // order-insensitive; this test pins that.
+        let cid_bytes = make_cidv1_dagpb([9u8; 32]);
+        let mut hdr = vec![0xA2];
+        // version: 1
+        hdr.extend_from_slice(&[0x67, b'v', b'e', b'r', b's', b'i', b'o', b'n']);
+        hdr.push(0x01);
+        // roots: [<cid>]
+        hdr.extend_from_slice(&[0x65, b'r', b'o', b'o', b't', b's']);
+        hdr.push(0x81);
+        hdr.extend_from_slice(&[0xD8, 0x2A]);
+        let bs_len = 1 + cid_bytes.len();
+        hdr.push(0x58);
+        hdr.push(bs_len as u8);
+        hdr.push(0x00);
+        hdr.extend_from_slice(&cid_bytes);
+
+        let mut framed = Vec::new();
+        super::write_uvarint(&mut framed, hdr.len() as u64).unwrap();
+        framed.extend_from_slice(&hdr);
+
+        let got = super::read_carv1_root_from(&mut &framed[..]).unwrap();
+        let expected = cid::Cid::try_from(&cid_bytes[..]).unwrap().to_string();
+        assert_eq!(got, expected);
     }
 }
