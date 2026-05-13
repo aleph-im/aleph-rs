@@ -129,12 +129,6 @@ pub async fn add_car(
         }));
     }
 
-    if msg.item_type != aleph_types::message::item_type::ItemType::Ipfs {
-        return HttpResponse::UnprocessableEntity().json(serde_json::json!({
-            "error": "metadata message must have item_type=ipfs for CAR upload"
-        }));
-    }
-
     if crate::handlers::verify_signature(msg).is_err() {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": "invalid signature"
@@ -170,6 +164,21 @@ pub async fn add_car(
             }));
         }
     };
+
+    match store_content.file_hash() {
+        aleph_types::item_hash::ItemHash::Ipfs(_) => {}
+        other => {
+            return HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                "error": format!(
+                    "Expected item_type=ipfs in STORE message, got {}",
+                    match other {
+                        aleph_types::item_hash::ItemHash::Native(_) => "storage",
+                        aleph_types::item_hash::ItemHash::Ipfs(_) => unreachable!(),
+                    }
+                )
+            }));
+        }
+    }
 
     let metadata_item_hash = store_content.file_hash().to_string();
 
@@ -236,12 +245,7 @@ mod tests {
     async fn add_car_rejects_wrong_content_type() {
         let tmpdir = tempfile::TempDir::new().unwrap();
         let state = make_test_state(&tmpdir);
-        let app = test::init_service(
-            App::new()
-                .app_data(state)
-                .configure(configure_routes),
-        )
-        .await;
+        let app = test::init_service(App::new().app_data(state).configure(configure_routes)).await;
         let req = test::TestRequest::post()
             .uri("/api/v0/ipfs/add_car")
             .insert_header(("content-type", "application/octet-stream"))
