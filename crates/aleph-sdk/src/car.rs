@@ -5,11 +5,10 @@
 //! Writer-only today; a reader is added in a later task so heph can
 //! validate uploaded CARs in its stub `add_car` handler.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 /// Upper bound on the declared CARv1 header size. A single-root header is
 /// ~40 bytes; this cap exists to bound allocations from a malicious varint.
-#[allow(dead_code)]
 pub(crate) const MAX_CAR_HEADER_BYTES: usize = 8 * 1024;
 
 /// Write an unsigned LEB128 varint.
@@ -73,12 +72,208 @@ fn write_cbor_bytestring_header(out: &mut Vec<u8>, len: usize) {
     }
 }
 
+/// Errors produced by [`read_carv1_root`].
+#[derive(Debug, thiserror::Error)]
+pub enum InvalidCarFile {
+    #[error("malformed varint")]
+    MalformedVarint,
+    #[error("declared header size exceeds maximum ({MAX_CAR_HEADER_BYTES} bytes)")]
+    HeaderTooLarge,
+    #[error("truncated CAR header")]
+    TruncatedHeader,
+    #[error("malformed DAG-CBOR header")]
+    MalformedHeader,
+    #[error("unsupported CAR version (got {got}, expected 1)")]
+    UnsupportedVersion { got: u64 },
+    #[error("expected exactly 1 root, got {got}")]
+    BadRootCount { got: usize },
+    #[error("malformed root CID")]
+    MalformedRootCid,
+    #[error("I/O error reading CAR file: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Read the CARv1 header from `path` and return its single root CID as a
+/// canonical string (base32 CIDv1 or base58btc CIDv0). Does not read or
+/// validate any block past the header.
+pub fn read_carv1_root(path: &std::path::Path) -> Result<String, InvalidCarFile> {
+    let mut f = std::fs::File::open(path)?;
+    read_carv1_root_from(&mut f)
+}
+
+pub(crate) fn read_carv1_root_from<R: Read>(r: &mut R) -> Result<String, InvalidCarFile> {
+    let header_len = read_uvarint_checked(r)?;
+    if header_len > MAX_CAR_HEADER_BYTES as u64 {
+        return Err(InvalidCarFile::HeaderTooLarge);
+    }
+    let mut header = vec![0u8; header_len as usize];
+    r.read_exact(&mut header)
+        .map_err(|_| InvalidCarFile::TruncatedHeader)?;
+    parse_dagcbor_header(&header)
+}
+
+fn read_uvarint_checked<R: Read>(r: &mut R) -> Result<u64, InvalidCarFile> {
+    let mut result: u64 = 0;
+    let mut shift = 0u32;
+    for _ in 0..10 {
+        let mut buf = [0u8; 1];
+        if r.read_exact(&mut buf).is_err() {
+            return Err(InvalidCarFile::MalformedVarint);
+        }
+        let byte = buf[0];
+        let payload = (byte & 0x7F) as u64;
+        // Reject over-long encodings: at shift 63, only payload 0 or 1 is valid,
+        // and the continuation bit must be clear.
+        if shift == 63 && (payload > 1 || byte & 0x80 != 0) {
+            return Err(InvalidCarFile::MalformedVarint);
+        }
+        result |= payload << shift;
+        if byte & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    Err(InvalidCarFile::MalformedVarint)
+}
+
+/// Parse the fixed `{"roots":[<cid>],"version":1}` shape this module emits.
+/// Accept entries in either order (defensive parity with the pyaleph parser).
+fn parse_dagcbor_header(bytes: &[u8]) -> Result<String, InvalidCarFile> {
+    let mut cur = HeaderCursor::new(bytes);
+    let head = cur.next_byte()?;
+    if head != 0xA2 {
+        return Err(InvalidCarFile::MalformedHeader);
+    }
+    let mut roots_cid: Option<Vec<u8>> = None;
+    let mut roots_count: Option<usize> = None;
+    let mut version: Option<u64> = None;
+    for _ in 0..2 {
+        let key = cur.read_text()?;
+        match key.as_str() {
+            "roots" => {
+                let n = cur.read_array_header()?;
+                roots_count = Some(n);
+                if n != 1 {
+                    // Report early - we cannot safely skip unknown array entries.
+                    return Err(InvalidCarFile::BadRootCount { got: n });
+                }
+                let tag1 = cur.next_byte()?;
+                let tag2 = cur.next_byte()?;
+                if tag1 != 0xD8 || tag2 != 0x2A {
+                    return Err(InvalidCarFile::MalformedRootCid);
+                }
+                let bs = cur.read_bytestring()?;
+                if bs.is_empty() || bs[0] != 0x00 {
+                    return Err(InvalidCarFile::MalformedRootCid);
+                }
+                roots_cid = Some(bs[1..].to_vec());
+            }
+            "version" => {
+                version = Some(cur.read_uint()?);
+            }
+            _ => return Err(InvalidCarFile::MalformedHeader),
+        }
+    }
+    if roots_count.is_none() {
+        return Err(InvalidCarFile::MalformedHeader);
+    }
+    let cid_bytes = roots_cid.ok_or(InvalidCarFile::MalformedRootCid)?;
+    let version = version.ok_or(InvalidCarFile::MalformedHeader)?;
+    if version != 1 {
+        return Err(InvalidCarFile::UnsupportedVersion { got: version });
+    }
+    let cid = ::cid::Cid::try_from(&cid_bytes[..]).map_err(|_| InvalidCarFile::MalformedRootCid)?;
+    Ok(cid.to_string())
+}
+
+struct HeaderCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> HeaderCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+    fn next_byte(&mut self) -> Result<u8, InvalidCarFile> {
+        let b = *self
+            .bytes
+            .get(self.pos)
+            .ok_or(InvalidCarFile::MalformedHeader)?;
+        self.pos += 1;
+        Ok(b)
+    }
+    fn take(&mut self, n: usize) -> Result<&'a [u8], InvalidCarFile> {
+        if self.pos + n > self.bytes.len() {
+            return Err(InvalidCarFile::MalformedHeader);
+        }
+        let out = &self.bytes[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(out)
+    }
+    fn read_text(&mut self) -> Result<String, InvalidCarFile> {
+        let head = self.next_byte()?;
+        let len = match head {
+            0x60..=0x77 => (head - 0x60) as usize,
+            0x78 => self.next_byte()? as usize,
+            0x79 => {
+                let hi = self.next_byte()? as u16;
+                let lo = self.next_byte()? as u16;
+                ((hi << 8) | lo) as usize
+            }
+            _ => return Err(InvalidCarFile::MalformedHeader),
+        };
+        let bytes = self.take(len)?;
+        std::str::from_utf8(bytes)
+            .map(|s| s.to_string())
+            .map_err(|_| InvalidCarFile::MalformedHeader)
+    }
+    fn read_array_header(&mut self) -> Result<usize, InvalidCarFile> {
+        let head = self.next_byte()?;
+        match head {
+            0x80..=0x97 => Ok((head - 0x80) as usize),
+            0x98 => Ok(self.next_byte()? as usize),
+            0x99 => {
+                let hi = self.next_byte()? as u16;
+                let lo = self.next_byte()? as u16;
+                Ok(((hi << 8) | lo) as usize)
+            }
+            _ => Err(InvalidCarFile::MalformedHeader),
+        }
+    }
+    fn read_bytestring(&mut self) -> Result<&'a [u8], InvalidCarFile> {
+        let head = self.next_byte()?;
+        let len = match head {
+            0x40..=0x57 => (head - 0x40) as usize,
+            0x58 => self.next_byte()? as usize,
+            0x59 => {
+                let hi = self.next_byte()? as u16;
+                let lo = self.next_byte()? as u16;
+                ((hi << 8) | lo) as usize
+            }
+            _ => return Err(InvalidCarFile::MalformedHeader),
+        };
+        self.take(len)
+    }
+    fn read_uint(&mut self) -> Result<u64, InvalidCarFile> {
+        let head = self.next_byte()?;
+        match head {
+            0x00..=0x17 => Ok(head as u64),
+            0x18 => Ok(self.next_byte()? as u64),
+            0x19 => Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as u64),
+            0x1A => Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()) as u64),
+            0x1B => Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap())),
+            _ => Err(InvalidCarFile::MalformedHeader),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
     use cid::Cid as RawCid;
     use multihash::Multihash;
+    use std::io::Read;
 
     /// Read an unsigned LEB128 varint. Returns (value, bytes_consumed).
     // NOTE: This helper is only safe for round-tripping bytes from write_uvarint.
@@ -195,5 +390,124 @@ mod tests {
             "bytestring should use 0x58 form for len 35"
         );
         assert_eq!(hdr[tag_idx + 2], 35);
+    }
+
+    #[test]
+    fn read_carv1_root_round_trip() {
+        let cid_bytes = make_cidv1_dagpb([7u8; 32]);
+        let header = super::build_dagcbor_header(&cid_bytes);
+        let mut framed = Vec::new();
+        super::write_uvarint(&mut framed, header.len() as u64).unwrap();
+        framed.extend_from_slice(&header);
+
+        let got = super::read_carv1_root_from(&mut &framed[..]).unwrap();
+        let expected_cid_str = cid::Cid::try_from(&cid_bytes[..]).unwrap().to_string();
+        assert_eq!(got, expected_cid_str);
+    }
+
+    #[test]
+    fn read_carv1_root_truncated_varint() {
+        let bytes = [0x80u8]; // continuation bit set, no follow-up
+        let err = super::read_carv1_root_from(&mut &bytes[..]).unwrap_err();
+        assert!(matches!(err, super::InvalidCarFile::MalformedVarint));
+    }
+
+    #[test]
+    fn read_carv1_root_oversized_header_declared() {
+        let mut bytes = Vec::new();
+        super::write_uvarint(&mut bytes, (super::MAX_CAR_HEADER_BYTES + 1) as u64).unwrap();
+        let err = super::read_carv1_root_from(&mut &bytes[..]).unwrap_err();
+        assert!(matches!(err, super::InvalidCarFile::HeaderTooLarge));
+    }
+
+    #[test]
+    fn read_carv1_root_truncated_body() {
+        let mut bytes = Vec::new();
+        super::write_uvarint(&mut bytes, 40).unwrap();
+        bytes.extend_from_slice(&[0u8; 20]); // claim 40, give 20
+        let err = super::read_carv1_root_from(&mut &bytes[..]).unwrap_err();
+        assert!(matches!(err, super::InvalidCarFile::TruncatedHeader));
+    }
+
+    #[test]
+    fn read_carv1_root_version_2_rejected() {
+        let cid_bytes = make_cidv1_dagpb([1u8; 32]);
+        let mut hdr = vec![0xA2];
+        hdr.extend_from_slice(&[0x65, b'r', b'o', b'o', b't', b's']);
+        hdr.push(0x81);
+        hdr.extend_from_slice(&[0xD8, 0x2A]);
+        let bs_len = 1 + cid_bytes.len();
+        hdr.push(0x58);
+        hdr.push(bs_len as u8);
+        hdr.push(0x00);
+        hdr.extend_from_slice(&cid_bytes);
+        hdr.extend_from_slice(&[0x67, b'v', b'e', b'r', b's', b'i', b'o', b'n']);
+        hdr.push(0x02); // version 2
+
+        let mut framed = Vec::new();
+        super::write_uvarint(&mut framed, hdr.len() as u64).unwrap();
+        framed.extend_from_slice(&hdr);
+
+        let err = super::read_carv1_root_from(&mut &framed[..]).unwrap_err();
+        assert!(matches!(
+            err,
+            super::InvalidCarFile::UnsupportedVersion { got: 2 }
+        ));
+    }
+
+    #[test]
+    fn read_carv1_root_zero_roots_rejected() {
+        let mut hdr = vec![0xA2];
+        hdr.extend_from_slice(&[0x65, b'r', b'o', b'o', b't', b's']);
+        hdr.push(0x80); // empty array
+        hdr.extend_from_slice(&[0x67, b'v', b'e', b'r', b's', b'i', b'o', b'n']);
+        hdr.push(0x01);
+
+        let mut framed = Vec::new();
+        super::write_uvarint(&mut framed, hdr.len() as u64).unwrap();
+        framed.extend_from_slice(&hdr);
+
+        let err = super::read_carv1_root_from(&mut &framed[..]).unwrap_err();
+        assert!(matches!(
+            err,
+            super::InvalidCarFile::BadRootCount { got: 0 }
+        ));
+    }
+
+    #[test]
+    fn read_carv1_root_two_roots_rejected() {
+        let cid_bytes = make_cidv1_dagpb([2u8; 32]);
+        let mut hdr = vec![0xA2];
+        hdr.extend_from_slice(&[0x65, b'r', b'o', b'o', b't', b's']);
+        hdr.push(0x82); // array of 2
+        for _ in 0..2 {
+            hdr.extend_from_slice(&[0xD8, 0x2A]);
+            let bs_len = 1 + cid_bytes.len();
+            hdr.push(0x58);
+            hdr.push(bs_len as u8);
+            hdr.push(0x00);
+            hdr.extend_from_slice(&cid_bytes);
+        }
+        hdr.extend_from_slice(&[0x67, b'v', b'e', b'r', b's', b'i', b'o', b'n']);
+        hdr.push(0x01);
+
+        let mut framed = Vec::new();
+        super::write_uvarint(&mut framed, hdr.len() as u64).unwrap();
+        framed.extend_from_slice(&hdr);
+
+        let err = super::read_carv1_root_from(&mut &framed[..]).unwrap_err();
+        assert!(matches!(
+            err,
+            super::InvalidCarFile::BadRootCount { got: 2 }
+        ));
+    }
+
+    #[test]
+    fn read_carv1_root_malformed_cbor_rejected() {
+        let mut framed = Vec::new();
+        super::write_uvarint(&mut framed, 4).unwrap();
+        framed.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        let err = super::read_carv1_root_from(&mut &framed[..]).unwrap_err();
+        assert!(matches!(err, super::InvalidCarFile::MalformedHeader));
     }
 }
