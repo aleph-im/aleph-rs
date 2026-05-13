@@ -1,10 +1,9 @@
-//! CARv1 reader/writer for IPFS directory uploads.
+//! CARv1 framing for IPFS directory uploads.
 //!
 //! Reference: https://ipld.io/specs/transport/car/carv1/
 //!
-//! The writer side is the primary surface; `read_carv1_root` exists for
-//! round-trip unit testing and so heph can validate uploaded CARs in its
-//! stub handler.
+//! Writer-only today; a reader is added in a later task so heph can
+//! validate uploaded CARs in its stub `add_car` handler.
 
 use std::io::{self, Write};
 
@@ -29,6 +28,8 @@ mod tests {
     use std::io::Read;
 
     /// Read an unsigned LEB128 varint. Returns (value, bytes_consumed).
+    // NOTE: This helper is only safe for round-tripping bytes from write_uvarint.
+    // Task 3's production reader must additionally reject payload > 1 at shift == 63.
     fn read_uvarint(r: &mut impl Read) -> io::Result<(u64, usize)> {
         let mut result: u64 = 0;
         let mut shift = 0u32;
