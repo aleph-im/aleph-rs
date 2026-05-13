@@ -190,3 +190,65 @@ fn golden_flat_dir_small_v0() {
         GOLDEN_FLAT_DIR_SMALL_V0
     );
 }
+
+#[test]
+fn build_folder_dag_matches_hash_folder_root_with_no_op_sink() {
+    use aleph_sdk::folder_hash::build_folder_dag;
+    use aleph_sdk::folder_hash::hash_folder_root;
+    use aleph_sdk::ipfs::UploadFolderOptions;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"hello").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), b"world").unwrap();
+    let entries = aleph_sdk::ipfs::collect_folder_files(tmp.path(), true).unwrap();
+    let opts = UploadFolderOptions::default();
+
+    let via_walker = build_folder_dag(&entries, &opts, &mut |_, _| Ok(())).unwrap();
+    let via_hasher = hash_folder_root(&entries, &opts).unwrap();
+    assert_eq!(via_walker, via_hasher);
+}
+
+#[test]
+fn build_folder_dag_blocks_self_consistent() {
+    use aleph_sdk::folder_hash::build_folder_dag;
+    use aleph_sdk::ipfs::UploadFolderOptions;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"abc").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), b"defgh").unwrap();
+    let entries = aleph_sdk::ipfs::collect_folder_files(tmp.path(), true).unwrap();
+    let opts = UploadFolderOptions::default();
+
+    let mut blocks: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let root = build_folder_dag(&entries, &opts, &mut |cid, block| {
+        blocks.push((cid.to_vec(), block.to_vec()));
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(!blocks.is_empty());
+    let last_cid_bytes = &blocks.last().unwrap().0;
+    let root_cid_str = match &root {
+        aleph_types::item_hash::ItemHash::Ipfs(cid) => cid.to_string(),
+        other => panic!("expected ItemHash::Ipfs, got {other:?}"),
+    };
+    let parsed = ::cid::Cid::try_from(&last_cid_bytes[..]).unwrap();
+    assert_eq!(parsed.to_string(), root_cid_str);
+}
+
+#[test]
+fn build_folder_dag_propagates_sink_error() {
+    use aleph_sdk::folder_hash::{FolderHashError, build_folder_dag};
+    use aleph_sdk::ipfs::UploadFolderOptions;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"abc").unwrap();
+    let entries = aleph_sdk::ipfs::collect_folder_files(tmp.path(), true).unwrap();
+    let opts = UploadFolderOptions::default();
+
+    let err = build_folder_dag(&entries, &opts, &mut |_, _| {
+        Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "test"))
+    })
+    .unwrap_err();
+    assert!(matches!(err, FolderHashError::Sink(_)));
+}
