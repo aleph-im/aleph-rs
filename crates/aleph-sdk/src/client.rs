@@ -2018,6 +2018,50 @@ fn build_storage_metadata_part(message: &PendingMessage, sync: bool) -> reqwest:
         .expect("application/json is a valid mime type")
 }
 
+/// Read a CARv1 body file fully and chain it after the in-memory header
+/// bytes, returning a single `reqwest::Body`.
+///
+/// The CARv1 producer in `upload_folder_to_ipfs_authenticated` writes the
+/// block-frame section to a tempfile during the DAG walk; this helper
+/// prepends the header (built in memory after the walk completes) and
+/// hands the combined body to reqwest. Buffers the whole CAR into memory
+/// at upload time; streaming-first is a future optimization (the 4 GiB
+/// server cap bounds memory usage).
+async fn build_car_upload_body(
+    header_bytes: Vec<u8>,
+    car_body_path: &std::path::Path,
+) -> std::io::Result<reqwest::Body> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(car_body_path).await?;
+    let mut body = Vec::with_capacity(header_bytes.len());
+    body.extend_from_slice(&header_bytes);
+    file.read_to_end(&mut body).await?;
+    Ok(reqwest::Body::from(body))
+}
+
+/// Extract the file CID from a STORE `PendingMessage`.
+///
+/// For STORE messages the file hash is embedded in `item_content` as the
+/// `"item_hash"` JSON field, not in `PendingMessage::item_hash` (which is the
+/// SHA-256 of the serialized message body). This helper deserializes that JSON
+/// and returns the file's `ItemHash`.
+fn extract_message_item_hash(message: &PendingMessage) -> Result<ItemHash, StorageError> {
+    let content: serde_json::Value = serde_json::from_str(&message.item_content).map_err(|e| {
+        StorageError::InvalidMetadata(format!("STORE message item_content is not JSON: {e}"))
+    })?;
+    let raw = content
+        .get("item_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            StorageError::InvalidMetadata("STORE message item_content is missing item_hash".into())
+        })?;
+    raw.parse::<ItemHash>()
+        .map_err(|source| StorageError::InvalidResponseHash {
+            value: raw.to_string(),
+            source,
+        })
+}
+
 impl AlephStorageClient for AlephClient {
     async fn get_file_size(&self, file_hash: &ItemHash) -> Result<Bytes, MessageError> {
         let url = self
@@ -2417,6 +2461,100 @@ impl AlephClient {
             });
         }
         Ok(remote_cid)
+    }
+
+    /// Upload a directory to pyaleph's authenticated IPFS CAR endpoint.
+    ///
+    /// The SDK rebuilds the UnixFS DAG locally, asserts its root matches
+    /// `message.item_hash` (fails with `CidMismatch` if not), writes
+    /// the DAG into a CARv1 temp file, and posts CAR + signed STORE metadata
+    /// to `/api/v0/ipfs/add_car`. Returns the root `ItemHash` on success.
+    pub async fn upload_folder_to_ipfs_authenticated(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+        message: &PendingMessage,
+        sync: bool,
+        opts: crate::ipfs::UploadFolderOptions,
+    ) -> Result<ItemHash, StorageError> {
+        use crate::car::{write_block_frame, write_carv1_header};
+        use crate::folder_hash::build_folder_dag;
+        use crate::ipfs::{CollectError, collect_folder_files};
+        use std::io::Write;
+
+        let path = path.as_ref();
+        let entries = collect_folder_files(path, opts.follow_symlinks).map_err(|e| match e {
+            CollectError::Empty(p) => StorageError::EmptyFolder(p),
+            CollectError::NonUtf8(p) => StorageError::NonUtf8Path(p),
+            CollectError::Walk { source, .. } => StorageError::Io(source.into()),
+        })?;
+
+        // 1. Walk the DAG, stream block frames into a tempfile body.
+        let mut body_tmp = tempfile::NamedTempFile::new()?;
+        let mut last_cid_bytes: Option<Vec<u8>> = None;
+        let local_root = build_folder_dag(&entries, &opts, &mut |cid, block| {
+            write_block_frame(&mut body_tmp, cid, block)?;
+            last_cid_bytes = Some(cid.to_vec());
+            Ok(())
+        })?;
+        body_tmp.flush()?;
+        let root_cid_bytes =
+            last_cid_bytes.expect("build_folder_dag always emits at least the root");
+
+        // 2. Sanity check the local root against metadata.item_hash.
+        let metadata_root = extract_message_item_hash(message)?;
+        if local_root != metadata_root {
+            return Err(StorageError::CidMismatch {
+                local: local_root,
+                remote: metadata_root,
+            });
+        }
+
+        // 3. Build the CARv1 header bytes.
+        let mut header_bytes = Vec::new();
+        write_carv1_header(&mut header_bytes, &root_cid_bytes)?;
+
+        // 4. Construct the multipart body.
+        let body = build_car_upload_body(header_bytes, body_tmp.path()).await?;
+        let file_part = reqwest::multipart::Part::stream(body)
+            .file_name("upload.car")
+            .mime_str("application/vnd.ipld.car")
+            .expect("application/vnd.ipld.car is a valid mime");
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .part("metadata", build_storage_metadata_part(message, sync));
+
+        let url = self
+            .ccn_url
+            .join("/api/v0/ipfs/add_car")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        // 5. POST and classify the response.
+        let response = self
+            .upload_client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+
+        let response = handle_storage_response(response).await?;
+        let upload: UploadResponse = response
+            .json()
+            .await
+            .map_err(StorageError::InvalidResponseBody)?;
+        let server_hash = upload.hash.parse::<ItemHash>().map_err(|source| {
+            StorageError::InvalidResponseHash {
+                value: upload.hash.clone(),
+                source,
+            }
+        })?;
+        if server_hash != local_root {
+            return Err(StorageError::UploadIntegrityMismatch {
+                expected: local_root,
+                actual: server_hash,
+            });
+        }
+        Ok(local_root)
     }
 }
 

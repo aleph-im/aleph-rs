@@ -47,12 +47,12 @@ walkdir = { workspace = true }
 hex = { workspace = true }
 p256 = { workspace = true }
 prost = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 alloy-network = { workspace = true }
 alloy-node-bindings = { workspace = true }
 alloy-signer-local = { workspace = true }
-tempfile = { workspace = true }
 wiremock = { workspace = true }
 
 [features]
@@ -79,4 +79,8 @@ required-features = ["test-helpers"]
 
 [[test]]
 name = "ipfs_upload"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "ipfs_car_upload"
 required-features = ["test-helpers"]
