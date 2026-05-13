@@ -29,9 +29,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 
 futures-util = "0.3"
+tempfile = "3"
 
 [dev-dependencies]
 aleph-sdk = { path = "../aleph-sdk" }
 reqwest = { version = "0.13", features = ["json"] }
-tempfile = "3"
 url = "2"
