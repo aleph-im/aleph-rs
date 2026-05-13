@@ -1,6 +1,7 @@
 pub mod aggregate_models;
 pub mod authorization;
 pub mod builder;
+pub mod car;
 pub mod client;
 pub mod corechannel;
 #[cfg(feature = "credits")]
