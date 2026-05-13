@@ -84,3 +84,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "ipfs_car_upload"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "car_roundtrip"
+required-features = ["test-helpers"]
