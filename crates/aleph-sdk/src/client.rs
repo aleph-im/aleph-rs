@@ -134,8 +134,12 @@ pub enum StorageError {
         expected: ItemHash,
         actual: ItemHash,
     },
+    #[error("CID mismatch: gateway returned {remote} but local computation produced {local}")]
+    CidMismatch { local: ItemHash, remote: ItemHash },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("local folder hash failed: {0}")]
+    FolderHashFailed(#[from] crate::folder_hash::FolderHashError),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -2203,6 +2207,16 @@ impl AlephClient {
     ///
     /// The caller is responsible for posting any STORE message that references
     /// the returned hash.
+    ///
+    /// # Symlinks
+    ///
+    /// Symlinks inside `path` are dereferenced (per `collect_folder_files`
+    /// `follow_symlinks=true` default) and their target's bytes are uploaded as
+    /// regular files. The resulting CID will NOT match `ipfs add -r` on the
+    /// same source folder if it contains symlinks — kubo's recursive add would
+    /// build UnixFS `Symlink` nodes whereas this function uploads the resolved
+    /// file bytes. Both the local hash and the gateway response agree on the
+    /// dereferenced representation, so verification still succeeds.
     pub async fn upload_folder_to_ipfs(
         &self,
         path: impl AsRef<std::path::Path> + Send,
@@ -2216,6 +2230,8 @@ impl AlephClient {
             CollectError::NonUtf8(p) => StorageError::NonUtf8Path(p),
             CollectError::Walk { source, .. } => StorageError::Io(source.into()),
         })?;
+
+        let local_cid = crate::folder_hash::hash_folder_root(&entries, &opts)?;
 
         let mut form = reqwest::multipart::Form::new();
         for entry in entries {
@@ -2259,7 +2275,14 @@ impl AlephClient {
             .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
 
         let cid = parse_ndjson_root(&body)?;
-        Ok(ItemHash::Ipfs(cid))
+        let remote_cid = ItemHash::Ipfs(cid);
+        if local_cid != remote_cid {
+            return Err(StorageError::CidMismatch {
+                local: local_cid,
+                remote: remote_cid,
+            });
+        }
+        Ok(remote_cid)
     }
 }
 

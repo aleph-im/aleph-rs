@@ -145,10 +145,8 @@ async fn handle_folder_upload(
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
-    let opts = UploadFolderOptions {
-        cid_version: CidVersion::V1,
-        ..Default::default()
-    };
+    let mut opts = UploadFolderOptions::default();
+    opts.cid_version = CidVersion::V1;
 
     if dry_run {
         let entries = walk_folder_summary(&args.path)?;
@@ -179,11 +177,11 @@ async fn handle_folder_upload(
     };
 
     if !json {
-        eprintln!("Uploading folder {}...", args.path.display());
+        eprintln!("Hashing and uploading folder {}...", args.path.display());
     }
     let file_hash = client.upload_folder_to_ipfs(&args.path, opts).await?;
     if !json {
-        eprintln!("  Directory CID: {file_hash}");
+        eprintln!("  Directory CID (verified): {file_hash}");
     }
 
     let mut builder = StoreBuilder::new(&account, file_hash.clone(), StorageEngine::Ipfs)
