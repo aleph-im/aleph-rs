@@ -102,7 +102,7 @@ async fn handle_single_file_upload(
         if json {
             println!("{}", serde_json::to_string_pretty(&pending)?);
         } else {
-            eprintln!("Dry run — message not submitted.\n");
+            eprintln!("Dry run: message not submitted.\n");
             println!("{}", serde_json::to_string_pretty(&pending)?);
         }
         return Ok(());
@@ -140,7 +140,7 @@ async fn handle_folder_upload(
     args: FileUploadArgs,
 ) -> Result<()> {
     use aleph_sdk::folder_hash::hash_folder_root;
-    use aleph_sdk::ipfs::{CidVersion, UploadFolderOptions, collect_folder_files};
+    use aleph_sdk::ipfs::{UploadFolderOptions, collect_folder_files};
 
     // Directory uploads always use IPFS. Reject only when the user explicitly
     // asked for native storage; an unset flag silently picks IPFS.
@@ -153,8 +153,7 @@ async fn handle_folder_upload(
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
-    let mut opts = UploadFolderOptions::default();
-    opts.cid_version = CidVersion::V1;
+    let opts = UploadFolderOptions::default();
 
     if dry_run {
         let entries = walk_folder_summary(&args.path)?;
