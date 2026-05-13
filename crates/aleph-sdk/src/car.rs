@@ -14,7 +14,6 @@ use std::io::{self, Read, Write};
 pub(crate) const MAX_CAR_HEADER_BYTES: usize = 8 * 1024;
 
 /// Write an unsigned LEB128 varint.
-#[allow(dead_code)]
 pub(crate) fn write_uvarint<W: Write>(w: &mut W, mut n: u64) -> io::Result<()> {
     while n >= 0x80 {
         w.write_all(&[(n as u8) | 0x80])?;
@@ -32,7 +31,6 @@ pub(crate) fn write_uvarint<W: Write>(w: &mut W, mut n: u64) -> io::Result<()> {
 /// `root_cid_bytes` is the canonical binary CID: for CIDv1, `[varint(1),
 /// varint(codec), multihash]`; for CIDv0, the bare multihash. Either is
 /// accepted; DAG-CBOR wraps it with the 0x00 multibase identity prefix.
-#[allow(dead_code)]
 pub(crate) fn build_dagcbor_header(root_cid_bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(48 + root_cid_bytes.len());
     out.push(0xA2); // map, 2 entries
@@ -54,7 +52,6 @@ pub(crate) fn build_dagcbor_header(root_cid_bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-#[allow(dead_code)]
 fn write_cbor_bytestring_header(out: &mut Vec<u8>, len: usize) {
     // Major type 2 (byte string). Short form 0x40..=0x57 for len 0..=23.
     if len <= 23 {
@@ -72,6 +69,28 @@ fn write_cbor_bytestring_header(out: &mut Vec<u8>, len: usize) {
         out.push(0x5B);
         out.extend_from_slice(&(len as u64).to_be_bytes());
     }
+}
+
+/// Write a complete CARv1 header (leading varint length + DAG-CBOR header)
+/// for a single-root file.
+#[allow(dead_code)]
+pub(crate) fn write_carv1_header<W: Write>(w: &mut W, root_cid_bytes: &[u8]) -> io::Result<()> {
+    let header = build_dagcbor_header(root_cid_bytes);
+    write_uvarint(w, header.len() as u64)?;
+    w.write_all(&header)
+}
+
+/// Write one CARv1 block frame: `varint(cid_len + data_len) || cid || data`.
+#[allow(dead_code)]
+pub(crate) fn write_block_frame<W: Write>(
+    w: &mut W,
+    cid_bytes: &[u8],
+    block_bytes: &[u8],
+) -> io::Result<()> {
+    let total = cid_bytes.len() + block_bytes.len();
+    write_uvarint(w, total as u64)?;
+    w.write_all(cid_bytes)?;
+    w.write_all(block_bytes)
 }
 
 /// Errors produced by [`read_carv1_root`].
@@ -554,5 +573,36 @@ mod tests {
         let got = super::read_carv1_root_from(&mut &framed[..]).unwrap();
         let expected = cid::Cid::try_from(&cid_bytes[..]).unwrap().to_string();
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn write_carv1_header_emits_varint_prefix_and_canonical_header() {
+        let cid_bytes = make_cidv1_dagpb([3u8; 32]);
+        let mut out = Vec::new();
+        super::write_carv1_header(&mut out, &cid_bytes).unwrap();
+
+        // Round-trip: a reader should recover the same CID.
+        let cid_str = super::read_carv1_root_from(&mut &out[..]).unwrap();
+        let expected = cid::Cid::try_from(&cid_bytes[..]).unwrap().to_string();
+        assert_eq!(cid_str, expected);
+    }
+
+    #[test]
+    fn write_block_frame_layout() {
+        let mut out = Vec::new();
+        super::write_block_frame(&mut out, b"abc", b"hello").unwrap();
+        // len = 3 + 5 = 8 -> varint 0x08
+        assert_eq!(out, b"\x08abchello");
+    }
+
+    #[test]
+    fn write_block_frame_large_payload_uses_multi_byte_varint() {
+        let cid = vec![0xAAu8; 36];
+        let block = vec![0xBBu8; 130]; // total 166 -> varint 0xA6 0x01
+        let mut out = Vec::new();
+        super::write_block_frame(&mut out, &cid, &block).unwrap();
+        assert_eq!(&out[..2], &[0xA6, 0x01]);
+        assert_eq!(&out[2..2 + cid.len()], &cid[..]);
+        assert_eq!(&out[2 + cid.len()..], &block[..]);
     }
 }
