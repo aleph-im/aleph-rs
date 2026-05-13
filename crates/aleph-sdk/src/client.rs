@@ -2030,13 +2030,14 @@ fn build_storage_metadata_part(message: &PendingMessage, sync: bool) -> reqwest:
 async fn build_car_upload_body(
     header_bytes: Vec<u8>,
     car_body_path: &std::path::Path,
-) -> std::io::Result<reqwest::Body> {
+) -> std::io::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
+    let file_size = tokio::fs::metadata(car_body_path).await?.len() as usize;
     let mut file = tokio::fs::File::open(car_body_path).await?;
-    let mut body = Vec::with_capacity(header_bytes.len());
+    let mut body = Vec::with_capacity(header_bytes.len() + file_size);
     body.extend_from_slice(&header_bytes);
     file.read_to_end(&mut body).await?;
-    Ok(reqwest::Body::from(body))
+    Ok(body)
 }
 
 /// Extract the file CID from a STORE `PendingMessage`.
@@ -2055,11 +2056,12 @@ fn extract_message_item_hash(message: &PendingMessage) -> Result<ItemHash, Stora
         .ok_or_else(|| {
             StorageError::InvalidMetadata("STORE message item_content is missing item_hash".into())
         })?;
-    raw.parse::<ItemHash>()
-        .map_err(|source| StorageError::InvalidResponseHash {
-            value: raw.to_string(),
-            source,
-        })
+    raw.parse::<ItemHash>().map_err(|source| {
+        StorageError::InvalidMetadata(format!(
+            "STORE message item_hash '{}' is not a valid ItemHash: {}",
+            raw, source,
+        ))
+    })
 }
 
 impl AlephStorageClient for AlephClient {
@@ -2515,7 +2517,7 @@ impl AlephClient {
 
         // 4. Construct the multipart body.
         let body = build_car_upload_body(header_bytes, body_tmp.path()).await?;
-        let file_part = reqwest::multipart::Part::stream(body)
+        let file_part = reqwest::multipart::Part::bytes(body)
             .file_name("upload.car")
             .mime_str("application/vnd.ipld.car")
             .expect("application/vnd.ipld.car is a valid mime");
