@@ -2,10 +2,9 @@
 //!
 //! Reference: https://ipld.io/specs/transport/car/carv1/
 //!
-//! Provides a hand-rolled writer (`build_dagcbor_header` plus block-frame
-//! helpers added in a later task) and a strict reader (`read_carv1_root`)
-//! that heph re-uses to validate uploaded CARs in its stub `add_car`
-//! handler.
+//! Provides hand-rolled writers (`write_carv1_header`, `write_block_frame`)
+//! and a strict reader (`read_carv1_root`) that heph re-uses to validate
+//! uploaded CARs in its stub `add_car` handler.
 
 use std::io::{self, Read, Write};
 
