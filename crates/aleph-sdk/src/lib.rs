@@ -11,5 +11,6 @@ pub mod crns_list;
 pub mod ipfs;
 pub mod messages;
 mod proto;
+pub mod scheduler;
 pub mod verify;
 pub mod ws;
