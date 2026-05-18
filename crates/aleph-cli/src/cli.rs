@@ -2358,22 +2358,34 @@ pub enum ImagesRootfsCommand {
 #[cfg(feature = "admin")]
 #[derive(Subcommand)]
 pub enum ImagesRuntimeCommand {
+    /// Add a new runtime entry. Fails if the name already exists.
     Add(AdminRuntimeAddArgs),
+    /// Modify an existing runtime entry. Fails if the name doesn't exist.
     Update(AdminRuntimeUpdateArgs),
+    /// Mark a runtime entry as deprecated.
     Deprecate(AdminEntryByNameArgs),
+    /// Mark a runtime entry as not deprecated.
     Undeprecate(AdminEntryByNameArgs),
+    /// Set the default runtime.
     Default(AdminEntryByNameArgs),
+    /// Clear the default runtime.
     ClearDefault(AdminTargetArgs),
 }
 
 #[cfg(feature = "admin")]
 #[derive(Subcommand)]
 pub enum ImagesFirmwareCommand {
+    /// Add a new firmware entry. Fails if the name already exists.
     Add(AdminRuntimeAddArgs),
+    /// Modify an existing firmware entry. Fails if the name doesn't exist.
     Update(AdminRuntimeUpdateArgs),
+    /// Mark a firmware entry as deprecated.
     Deprecate(AdminEntryByNameArgs),
+    /// Mark a firmware entry as not deprecated.
     Undeprecate(AdminEntryByNameArgs),
+    /// Set the default firmware.
     Default(AdminEntryByNameArgs),
+    /// Clear the default firmware.
     ClearDefault(AdminTargetArgs),
 }
 
