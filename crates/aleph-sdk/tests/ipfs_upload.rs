@@ -117,6 +117,7 @@ async fn upload_folder_errors_on_cid_mismatch() {
     Mock::given(method("POST"))
         .and(path("/api/v0/add"))
         .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -160,6 +161,7 @@ async fn upload_folder_surfaces_403_as_ipfs_disabled() {
     Mock::given(method("POST"))
         .and(path("/api/v0/add"))
         .respond_with(ResponseTemplate::new(403))
+        .expect(1)
         .mount(&server)
         .await;
 
