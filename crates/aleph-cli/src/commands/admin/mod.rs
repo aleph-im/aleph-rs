@@ -4,6 +4,8 @@ use url::Url;
 
 use crate::cli::AdminCommand;
 
+pub mod vm_images_mutate;
+
 pub(crate) fn is_truthy(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
