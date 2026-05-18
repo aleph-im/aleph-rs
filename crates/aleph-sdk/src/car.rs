@@ -1,6 +1,6 @@
 //! CARv1 framing for IPFS directory uploads.
 //!
-//! Reference: https://ipld.io/specs/transport/car/carv1/
+//! Reference: <https://ipld.io/specs/transport/car/carv1/>
 //!
 //! Provides hand-rolled writers (`write_carv1_header`, `write_block_frame`)
 //! and a strict reader (`read_carv1_root`) that heph re-uses to validate
