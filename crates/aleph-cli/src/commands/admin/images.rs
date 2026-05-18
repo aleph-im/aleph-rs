@@ -1,5 +1,5 @@
 use aleph_sdk::aggregate_models::pricing::PRICING_ADDRESS;
-use aleph_sdk::aggregate_models::vm_images::{VmImagesAggregate, VmImagesData};
+use aleph_sdk::aggregate_models::vm_images::{VM_IMAGES_KEY, VmImagesAggregate, VmImagesData};
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_types::channel::Channel;
@@ -17,7 +17,6 @@ use crate::commands::admin::vm_images_mutate::{
 };
 use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
 
-const DEFAULT_KEY: &str = "vm-images";
 
 pub async fn handle_images_command(
     aleph_client: &AlephClient,
@@ -253,7 +252,7 @@ async fn run_mutation(
         Some(s) => resolve_address(s)?,
         None => PRICING_ADDRESS.clone(),
     };
-    let target_key = target.key.clone().unwrap_or_else(|| DEFAULT_KEY.to_string());
+    let target_key = target.key.clone().unwrap_or_else(|| VM_IMAGES_KEY.to_string());
 
     let mut data: VmImagesData = match client
         .get_aggregate::<VmImagesAggregate>(&target_address, &target_key)
