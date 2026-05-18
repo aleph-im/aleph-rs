@@ -116,11 +116,10 @@ pub fn apply_mutation(
     match mutation {
         Mutation::Add { kind, name, entry } => apply_add(data, kind, name, entry),
         Mutation::Update { kind, name, patch } => apply_update(data, kind, name, patch),
-        Mutation::Deprecate { .. }
-        | Mutation::Undeprecate { .. }
-        | Mutation::SetDefault { .. }
-        | Mutation::ClearDefault { .. } => {
-            unimplemented!("subsequent tasks implement these variants")
+        Mutation::Deprecate { kind, name } => apply_deprecate(data, kind, name),
+        Mutation::Undeprecate { kind, name } => apply_undeprecate(data, kind, name),
+        Mutation::SetDefault { .. } | Mutation::ClearDefault { .. } => {
+            unimplemented!("Task 9 implements these")
         }
     }
 }
@@ -260,6 +259,57 @@ fn apply_update(
                 entry.description = v;
             }
         }
+    }
+    Ok(())
+}
+
+fn apply_deprecate(
+    data: &mut VmImagesData,
+    kind: Kind,
+    name: String,
+) -> Result<(), AdminImagesError> {
+    set_deprecated_flag(data, kind, name, true)
+}
+
+fn apply_undeprecate(
+    data: &mut VmImagesData,
+    kind: Kind,
+    name: String,
+) -> Result<(), AdminImagesError> {
+    set_deprecated_flag(data, kind, name, false)
+}
+
+fn set_deprecated_flag(
+    data: &mut VmImagesData,
+    kind: Kind,
+    name: String,
+    target: bool,
+) -> Result<(), AdminImagesError> {
+    let exists = match kind {
+        Kind::Rootfs => data.rootfs.contains_key(&name),
+        Kind::Runtime => data.runtimes.contains_key(&name),
+        Kind::Firmware => data.firmwares.contains_key(&name),
+    };
+    if !exists {
+        let available = join_active_names(data, kind);
+        return Err(AdminImagesError::NotFound { kind, name, available });
+    }
+    let was = match kind {
+        Kind::Rootfs => data.rootfs.get(&name).unwrap().deprecated,
+        Kind::Runtime => data.runtimes.get(&name).unwrap().deprecated,
+        Kind::Firmware => data.firmwares.get(&name).unwrap().deprecated,
+    };
+    if was == target {
+        return if target {
+            Err(AdminImagesError::AlreadyDeprecated { kind, name })
+        } else {
+            Err(AdminImagesError::NotDeprecated { kind, name })
+        };
+    }
+    match kind {
+        Kind::Rootfs => data.rootfs.get_mut(&name).unwrap().deprecated = target,
+        Kind::Runtime => data.runtimes.get_mut(&name).unwrap().deprecated = target,
+        Kind::Firmware => data.firmwares.get_mut(&name).unwrap().deprecated = target,
     }
     Ok(())
 }
@@ -620,5 +670,103 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AdminImagesError::NoFieldsToUpdate));
+    }
+
+    #[test]
+    fn apply_deprecate_flips_flag() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        apply_mutation(
+            &mut data,
+            Mutation::Deprecate {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+            },
+        )
+        .unwrap();
+        assert!(data.rootfs.get("ubuntu24").unwrap().deprecated);
+    }
+
+    #[test]
+    fn apply_deprecate_runtime_flips_flag() {
+        let mut data = VmImagesData::default();
+        data.runtimes.insert("py311".into(), image_entry());
+
+        apply_mutation(
+            &mut data,
+            Mutation::Deprecate {
+                kind: Kind::Runtime,
+                name: "py311".into(),
+            },
+        )
+        .unwrap();
+        assert!(data.runtimes.get("py311").unwrap().deprecated);
+    }
+
+    #[test]
+    fn apply_deprecate_rejects_already_deprecated() {
+        let mut data = VmImagesData::default();
+        let mut entry = rootfs_entry();
+        entry.deprecated = true;
+        data.rootfs.insert("ubuntu24".into(), entry);
+
+        let err = apply_mutation(
+            &mut data,
+            Mutation::Deprecate {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AdminImagesError::AlreadyDeprecated { .. }));
+    }
+
+    #[test]
+    fn apply_deprecate_rejects_unknown_name() {
+        let mut data = VmImagesData::default();
+        let err = apply_mutation(
+            &mut data,
+            Mutation::Deprecate {
+                kind: Kind::Rootfs,
+                name: "nope".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AdminImagesError::NotFound { .. }));
+    }
+
+    #[test]
+    fn apply_undeprecate_flips_flag() {
+        let mut data = VmImagesData::default();
+        let mut entry = rootfs_entry();
+        entry.deprecated = true;
+        data.rootfs.insert("ubuntu24".into(), entry);
+
+        apply_mutation(
+            &mut data,
+            Mutation::Undeprecate {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+            },
+        )
+        .unwrap();
+        assert!(!data.rootfs.get("ubuntu24").unwrap().deprecated);
+    }
+
+    #[test]
+    fn apply_undeprecate_rejects_not_deprecated() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        let err = apply_mutation(
+            &mut data,
+            Mutation::Undeprecate {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AdminImagesError::NotDeprecated { .. }));
     }
 }
