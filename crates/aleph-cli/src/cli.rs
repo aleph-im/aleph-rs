@@ -130,6 +130,12 @@ pub enum Commands {
         #[clap(subcommand)]
         command: AccountCommand,
     },
+    /// Admin commands (gated by `admin` cargo feature + ALEPH_ADMIN env var).
+    #[cfg(feature = "admin")]
+    Admin {
+        #[clap(subcommand)]
+        command: AdminCommand,
+    },
     /// Create aggregate key-value entries
     Aggregate {
         #[clap(subcommand)]
@@ -2300,6 +2306,22 @@ pub struct BuyCreditArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Subcommand)]
+pub enum AdminCommand {
+    /// Manage the `vm-images` aggregate.
+    Images {
+        #[clap(subcommand)]
+        command: ImagesCommand,
+    },
+}
+
+#[cfg(feature = "admin")]
+#[derive(Subcommand)]
+pub enum ImagesCommand {
+    // Filled in by Task 11.
 }
 
 pub fn parse_rfc3339_utc(s: &str) -> Result<DateTime<Utc>, String> {
