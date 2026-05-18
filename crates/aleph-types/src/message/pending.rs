@@ -6,6 +6,7 @@ use crate::message::{ContentSource, Message, MessageType};
 use crate::timestamp::Timestamp;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
+use thiserror::Error;
 
 /// A signed message ready for submission to the Aleph network.
 ///
@@ -49,24 +50,39 @@ impl Serialize for PendingMessage {
     }
 }
 
-impl From<&Message> for PendingMessage {
-    fn from(message: &Message) -> Self {
+/// Reasons a [`Message`] cannot be converted into a [`PendingMessage`] for re-submission.
+#[derive(Error, Debug)]
+pub enum PendingConversionError {
+    /// The message has no signature (legacy null-signature mainnet data).
+    /// Such messages cannot be re-posted: the target node would reject them.
+    #[error("message has no signature; cannot be re-posted")]
+    MissingSignature,
+}
+
+impl TryFrom<&Message> for PendingMessage {
+    type Error = PendingConversionError;
+
+    fn try_from(message: &Message) -> Result<Self, Self::Error> {
+        let signature = message
+            .signature
+            .clone()
+            .ok_or(PendingConversionError::MissingSignature)?;
         let (item_type, item_content) = match &message.content_source {
             ContentSource::Inline { item_content } => (ItemType::Inline, item_content.clone()),
             ContentSource::Storage => (ItemType::Storage, String::new()),
             ContentSource::Ipfs => (ItemType::Ipfs, String::new()),
         };
-        PendingMessage {
+        Ok(PendingMessage {
             chain: message.chain.clone(),
             sender: message.sender.clone(),
-            signature: message.signature.clone(),
+            signature,
             message_type: message.message_type,
             item_type,
             item_content,
             item_hash: message.item_hash.clone(),
             time: message.time.clone(),
             channel: message.channel.clone(),
-        }
+        })
     }
 }
 

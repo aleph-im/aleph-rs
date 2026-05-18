@@ -25,6 +25,11 @@ pub enum SignatureVerificationError {
     /// Signature verification is not implemented for this chain.
     #[error("Unsupported chain for signature verification: {0}")]
     UnsupportedChain(Chain),
+    /// The message has no signature attached. Some legacy pyaleph mainnet
+    /// messages were accepted without a signature and are served with
+    /// `signature: null`; nothing can be verified for them.
+    #[error("Message has no signature to verify")]
+    MissingSignature,
 }
 
 /// Constructs the verification buffer that was signed by the sender.
@@ -124,9 +129,9 @@ mod tests {
         let mut message: crate::message::Message = serde_json::from_str(json).unwrap();
 
         // Original signature ends with "1b" (v=27); replace with "00" (v=0)
-        let sig = message.signature.as_str().to_string();
+        let sig = message.signature.as_ref().unwrap().as_str().to_string();
         let normalized_sig = format!("{}00", &sig[..sig.len() - 2]);
-        message.signature = Signature::from(normalized_sig);
+        message.signature = Some(Signature::from(normalized_sig));
 
         message.verify_signature().unwrap();
     }

@@ -121,6 +121,7 @@ pub async fn handle_sync(args: SyncArgs) -> Result<()> {
     // POST missing messages
     let mut success = 0u32;
     let mut errors = 0u32;
+    let mut unsigned = 0u32;
     for (i, msg) in truly_missing.iter().enumerate() {
         eprint!(
             "[{}/{}] Posting {} ... ",
@@ -128,7 +129,14 @@ pub async fn handle_sync(args: SyncArgs) -> Result<()> {
             truly_missing.len(),
             msg.item_hash
         );
-        let pending = PendingMessage::from(*msg);
+        let pending = match PendingMessage::try_from(*msg) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("SKIPPED ({e})");
+                unsigned += 1;
+                continue;
+            }
+        };
         match with_retry(|| target_client.post_message(&pending, false)).await {
             Ok(resp) => {
                 eprintln!("{}", resp.message_status);
@@ -139,6 +147,9 @@ pub async fn handle_sync(args: SyncArgs) -> Result<()> {
                 errors += 1;
             }
         }
+    }
+    if unsigned > 0 {
+        eprintln!("{unsigned} unsigned legacy messages skipped (cannot be re-posted).");
     }
 
     eprintln!("Done. {} synced, {} errors.", success, errors);
