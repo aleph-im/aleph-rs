@@ -7,7 +7,7 @@
 //! The fixture-builder functions below mirror the bash fixtures in the regen
 //! script — keep them in sync.
 
-use aleph_sdk::ipfs::{CidVersion, UploadFolderOptions, collect_folder_files};
+use aleph_sdk::ipfs::{CidVersion, FolderEntry, UploadFolderOptions, collect_folder_files};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -62,6 +62,33 @@ fn fixture_hamt_long_names(root: &Path) {
     }
 }
 
+fn fixture_empty_file(root: &Path) {
+    fs::write(root.join("empty"), b"").unwrap();
+}
+
+fn fixture_utf8_names(root: &Path) {
+    // Cover 2-byte (latin extended), 3-byte (CJK), and 4-byte (emoji) UTF-8.
+    fs::write(root.join("café.txt"), b"a\n").unwrap();
+    fs::write(root.join("日本.txt"), b"b\n").unwrap();
+    fs::write(root.join("🚀.txt"), b"c\n").unwrap();
+}
+
+// Threshold boundary fixtures: 8-char names, 1-byte content.
+// boxo productionLinkSize = name.len() + cid.ByteLen() = 8 + 36 = 44.
+// 5957 * 44 = 262108 -> BasicDirectory (below 262144 HAMT threshold).
+// 5958 * 44 = 262152 -> HAMTDirectory (above threshold).
+fn fixture_threshold_below(root: &Path) {
+    for i in 0..5957u32 {
+        fs::write(root.join(format!("{i:08}")), b"x").unwrap();
+    }
+}
+
+fn fixture_threshold_above(root: &Path) {
+    for i in 0..5958u32 {
+        fs::write(root.join(format!("{i:08}")), b"x").unwrap();
+    }
+}
+
 fn fixture_hamt_multi_level(root: &Path) {
     // The collision pair is discovered by the find_hamt_collision example in Task 9.
     // Until then, both files are empty and this fixture won't be exercised
@@ -105,6 +132,14 @@ const GOLDEN_HAMT_LONG_NAMES_V1: &str =
 const GOLDEN_HAMT_MULTI_LEVEL_V1: &str =
     "bafybeiegiotpslrdicvq2duzx4gmigbxyocs7fw37q7hmwa3sseiz2tj7y";
 const GOLDEN_FLAT_DIR_SMALL_V0: &str = "QmaVbVDQrEVXH6EAQQExN82Xt44VmrQWkkey4S8eYcTNRs";
+const GOLDEN_EMPTY_DIRECTORY_V1: &str =
+    "bafybeiczsscdsbs7ffqz55asqdf3smv6klcw3gofszvwlyarci47bgf354";
+const GOLDEN_EMPTY_FILE_V1: &str = "bafybeigalvxqcgqiogiv6bimmxedgxbhu7cikwhwha2c2iqzdbnabewjai";
+const GOLDEN_UTF8_NAMES_V1: &str = "bafybeib5csmg24msmu4jmaczufo6s5cciojvsct4nb56db46ozy6mz4bji";
+const GOLDEN_THRESHOLD_BELOW_V1: &str =
+    "bafybeibqvqqd4yvkpt5olhxoayzzevdxkw5ucbk2hlnjrttpo6psbjwx4u";
+const GOLDEN_THRESHOLD_ABOVE_V1: &str =
+    "bafybeidzmazxweqx7qun4ezjil2iqmn7u23225yfxhekm5zysnwmmtbohe";
 
 #[test]
 
@@ -189,4 +224,84 @@ fn golden_flat_dir_small_v0() {
         hash_root(dir.path(), CidVersion::V0),
         GOLDEN_FLAT_DIR_SMALL_V0
     );
+}
+
+#[test]
+fn golden_empty_directory_v1() {
+    // collect_folder_files refuses empty roots, so bypass it.
+    let entries: Vec<FolderEntry> = vec![];
+    let mut opts = UploadFolderOptions::default();
+    opts.cid_version = CidVersion::V1;
+    let hash =
+        aleph_sdk::__test_only_hash_folder_root(&entries, &opts).expect("hashing must succeed");
+    assert_eq!(hash.to_string(), GOLDEN_EMPTY_DIRECTORY_V1);
+}
+
+#[test]
+fn golden_empty_file_v1() {
+    let dir = TempDir::new().unwrap();
+    fixture_empty_file(dir.path());
+    assert_eq!(hash_root(dir.path(), CidVersion::V1), GOLDEN_EMPTY_FILE_V1);
+}
+
+#[test]
+fn golden_utf8_names_v1() {
+    let dir = TempDir::new().unwrap();
+    fixture_utf8_names(dir.path());
+    assert_eq!(hash_root(dir.path(), CidVersion::V1), GOLDEN_UTF8_NAMES_V1);
+}
+
+#[test]
+fn golden_threshold_below_v1() {
+    // 5957 entries with 8-char names: stays a BasicDirectory.
+    let dir = TempDir::new().unwrap();
+    fixture_threshold_below(dir.path());
+    assert_eq!(
+        hash_root(dir.path(), CidVersion::V1),
+        GOLDEN_THRESHOLD_BELOW_V1
+    );
+}
+
+#[test]
+fn golden_threshold_above_v1() {
+    // 5958 entries: flips to HAMTDirectory. CIDs must differ from _BELOW_
+    // even though only one file was added.
+    let dir = TempDir::new().unwrap();
+    fixture_threshold_above(dir.path());
+    let above = hash_root(dir.path(), CidVersion::V1);
+    assert_eq!(above, GOLDEN_THRESHOLD_ABOVE_V1);
+    assert_ne!(
+        above, GOLDEN_THRESHOLD_BELOW_V1,
+        "below/above must differ: the +1 entry crosses the HAMT threshold"
+    );
+}
+
+#[test]
+fn order_independence_v1() {
+    // Building the same tree from two different input orderings must produce
+    // the same CID. Pins the BTreeMap-based tree assembly: callers (or future
+    // walker changes) cannot regress the invariant by yielding entries in a
+    // different order.
+    let dir = TempDir::new().unwrap();
+    fixture_nested_dir(dir.path());
+
+    let entries_a = collect_folder_files(dir.path(), true).unwrap();
+    let mut entries_b = collect_folder_files(dir.path(), true).unwrap();
+    entries_b.reverse();
+
+    let names_a: Vec<&str> = entries_a.iter().map(|e| e.relative_path.as_str()).collect();
+    let names_b: Vec<&str> = entries_b.iter().map(|e| e.relative_path.as_str()).collect();
+    assert_ne!(
+        names_a, names_b,
+        "test setup: the two input orderings must differ"
+    );
+
+    let mut opts = UploadFolderOptions::default();
+    opts.cid_version = CidVersion::V1;
+    let ha = aleph_sdk::__test_only_hash_folder_root(&entries_a, &opts).unwrap();
+    let hb = aleph_sdk::__test_only_hash_folder_root(&entries_b, &opts).unwrap();
+    assert_eq!(ha.to_string(), hb.to_string());
+
+    // Cross-check against the canonical golden so this can't drift silently.
+    assert_eq!(ha.to_string(), GOLDEN_NESTED_DIR_V1);
 }

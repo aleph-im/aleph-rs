@@ -88,6 +88,39 @@ mk_hamt_long_names() {
     done
 }
 
+mk_empty_directory() {
+    # Empty directory: leave $1 untouched (it was created by `mkdir -p` above).
+    :
+}
+
+mk_empty_file() {
+    local d="$1"
+    : > "$d/empty"
+}
+
+mk_utf8_names() {
+    local d="$1"
+    printf 'a\n' > "$d/café.txt"
+    printf 'b\n' > "$d/日本.txt"
+    printf 'c\n' > "$d/🚀.txt"
+}
+
+mk_threshold_below() {
+    local d="$1"
+    # 5957 entries with 8-char names: 5957 * (8 + 36) = 262108 < 262144 -> BasicDirectory.
+    for i in $(seq 0 5956); do
+        printf 'x' > "$(printf '%s/%08d' "$d" "$i")"
+    done
+}
+
+mk_threshold_above() {
+    local d="$1"
+    # 5958 entries: 5958 * 44 = 262152 >= 262144 -> HAMTDirectory.
+    for i in $(seq 0 5957); do
+        printf 'x' > "$(printf '%s/%08d' "$d" "$i")"
+    done
+}
+
 mk_hamt_multi_level() {
     local d="$1"
     local a b
@@ -105,7 +138,8 @@ mk_hamt_multi_level() {
 # === Run all fixtures ===
 
 for name in single_file_small single_file_multi_chunk flat_dir_small nested_dir \
-            hamt_short_names hamt_long_names hamt_multi_level; do
+            hamt_short_names hamt_long_names hamt_multi_level \
+            empty_directory empty_file utf8_names threshold_below threshold_above; do
     fdir="$WORK/$name"
     mkdir -p "$fdir"
     "mk_$name" "$fdir"
