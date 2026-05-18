@@ -408,7 +408,6 @@ impl Message {
 struct MessageHeaderRaw {
     chain: Chain,
     sender: Address,
-    // serde maps JSON `null` to `None` and a present value to `Some(Signature)`.
     signature: Option<Signature>,
     #[serde(flatten)]
     content_source: ContentSource,
