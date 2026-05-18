@@ -109,9 +109,9 @@ mod tests {
         assert_eq!(message.chain, Chain::Ethereum);
         assert_eq!(
             message.signature,
-            Signature::from(
+            Some(Signature::from(
                 "0x421c656709851fba752f323a117bc7a07f175a4dd7faf1d8fc1cd9a99028081a6419f9e8b0a7cd454bfef1c52d1f0675a7a59a7d07eb4ebdb22e18bbaf415f881c".to_string()
-            )
+            ))
         );
         assert_matches!(message.message_type, MessageType::Program);
         assert_matches!(

@@ -47,9 +47,9 @@ mod test {
         assert_eq!(message.chain, Chain::Ethereum);
         assert_eq!(
             message.signature,
-            signature!(
+            Some(signature!(
                 "0x4f7250efd67d989ac3067358ee657e301cd437fd0b4acb38342402e60125a0a209818f555386cd17b82080aba0a7a5cd83e4e1d8875c58b38f2e64cbe5dd308f1c"
-            )
+            ))
         );
         assert_matches!(message.message_type, MessageType::Instance);
         assert_matches!(

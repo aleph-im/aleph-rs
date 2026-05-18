@@ -224,7 +224,11 @@ pub struct MessageHeader {
     /// Sender address.
     pub sender: Address,
     /// Cryptographic signature of the message by the sender.
-    pub signature: Signature,
+    ///
+    /// `None` for legacy pre-enforcement-era mainnet messages that pyaleph
+    /// accepted unsigned and still serves with `signature: null`. Such
+    /// messages cannot be re-posted or signature-verified.
+    pub signature: Option<Signature>,
     /// Content of the message as created by the sender. Can either be inline or stored
     /// on Aleph Cloud.
     pub content_source: ContentSource,
@@ -266,10 +270,14 @@ impl MessageHeader {
     pub fn verify_signature(
         &self,
     ) -> Result<(), crate::verify_signature::SignatureVerificationError> {
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or(crate::verify_signature::SignatureVerificationError::MissingSignature)?;
         crate::verify_signature::verify(
             &self.chain,
             &self.sender,
-            &self.signature,
+            signature,
             self.message_type,
             &self.item_hash,
         )
@@ -299,7 +307,11 @@ pub struct Message {
     /// Sender address.
     pub sender: Address,
     /// Cryptographic signature of the message by the sender.
-    pub signature: Signature,
+    ///
+    /// `None` for legacy pre-enforcement-era mainnet messages that pyaleph
+    /// accepted unsigned and still serves with `signature: null`. Such
+    /// messages cannot be re-posted or signature-verified.
+    pub signature: Option<Signature>,
     /// Content of the message as created by the sender. Can either be inline or stored
     /// on Aleph Cloud.
     pub content_source: ContentSource,
@@ -376,10 +388,14 @@ impl Message {
     pub fn verify_signature(
         &self,
     ) -> Result<(), crate::verify_signature::SignatureVerificationError> {
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or(crate::verify_signature::SignatureVerificationError::MissingSignature)?;
         crate::verify_signature::verify(
             &self.chain,
             &self.sender,
-            &self.signature,
+            signature,
             self.message_type,
             &self.item_hash,
         )
@@ -392,7 +408,8 @@ impl Message {
 struct MessageHeaderRaw {
     chain: Chain,
     sender: Address,
-    signature: Signature,
+    // serde maps JSON `null` to `None` and a present value to `Some(Signature)`.
+    signature: Option<Signature>,
     #[serde(flatten)]
     content_source: ContentSource,
     item_hash: ItemHash,
@@ -608,6 +625,34 @@ mod tests {
         assert_eq!(reassembled, message);
     }
 
+    /// Pyaleph serves a small number of legacy mainnet messages (pre-signature
+    /// enforcement) with `signature: null`. They must deserialize successfully
+    /// so that listing endpoints can return whole pages without erroring out.
+    #[test]
+    fn test_deserialize_message_null_signature() {
+        let json = r#"{
+            "chain": "ETH",
+            "sender": "0x34924EF945b931d1E929375556f69CE2E7FE5dcc",
+            "signature": null,
+            "item_type": "storage",
+            "item_hash": "96c3e190177c0f372c24b4b19df032072b2de592224da220a940e980d86f4ce1",
+            "time": 1679321315.0,
+            "type": "STORE",
+            "content": {
+                "address": "0x34924EF945b931d1E929375556f69CE2E7FE5dcc",
+                "time": 1679321315.0,
+                "item_type": "storage",
+                "item_hash": "96c3e190177c0f372c24b4b19df032072b2de592224da220a940e980d86f4ce1"
+            }
+        }"#;
+
+        let message: Message = serde_json::from_str(json).unwrap();
+        assert!(message.signature.is_none());
+
+        let header: MessageHeader = serde_json::from_str(json).unwrap();
+        assert!(header.signature.is_none());
+    }
+
     #[test]
     fn test_deserialize_content_with_type() {
         let json = include_str!("../../../../fixtures/messages/post/post.json");
@@ -697,7 +742,7 @@ mod tests {
             #[test]
             fn test_verify_signature_invalid_hex() {
                 let mut message = post_message();
-                message.signature = Signature::from("not-a-hex-string".to_string());
+                message.signature = Some(Signature::from("not-a-hex-string".to_string()));
                 assert_matches!(
                     message.verify_signature(),
                     Err(SignatureVerificationError::InvalidSignature(_))
@@ -707,11 +752,11 @@ mod tests {
             #[test]
             fn test_verify_signature_wrong_but_valid_signature() {
                 let mut message = post_message();
-                message.signature = Signature::from(
+                message.signature = Some(Signature::from(
                     "0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001\
                      00"
                         .to_string(),
-                );
+                ));
                 // May recover to a different address or fail to recover entirely
                 assert_matches!(
                     message.verify_signature(),
@@ -772,9 +817,10 @@ mod tests {
             #[test]
             fn test_deserialize_sol_signature_format() {
                 let message = sol_post_message();
-                assert!(message.signature.public_key().is_some());
+                let sig = message.signature.as_ref().expect("sol fixture is signed");
+                assert!(sig.public_key().is_some());
                 assert_eq!(
-                    message.signature.public_key().unwrap(),
+                    sig.public_key().unwrap(),
                     "5SwCeHbZ9oY3556YFBEhPTHyy9t4yse26v7MUyGm2bHS"
                 );
             }

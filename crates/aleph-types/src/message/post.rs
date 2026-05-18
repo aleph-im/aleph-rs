@@ -51,9 +51,9 @@ mod tests {
         assert_eq!(message.chain, Chain::Ethereum);
         assert_eq!(
             message.signature,
-            signature!(
+            Some(signature!(
                 "0x636728dbea33fa6064f099045421b980dff3c71932cd89c2bf42387ebb6f53890a24e13f16678463876224772b90838c2b9557cd8fc2cdae45509ce8cb89e3fd1b"
-            )
+            ))
         );
         assert_matches!(message.message_type, MessageType::Post);
         assert_matches!(
@@ -115,9 +115,9 @@ mod tests {
         assert_eq!(message.chain, Chain::Ethereum);
         assert_eq!(
             message.signature,
-            signature!(
+            Some(signature!(
                 "0xf4a171d2715f2249c6f78160a83a64fb05c21962acdf3729e373fd4f527ed9f570274dedcc468195ba40a26002be0b72aedf260df74032d4ef5a12cb4ea838831c"
-            )
+            ))
         );
         assert_matches!(message.message_type, MessageType::Post);
         assert_matches!(
