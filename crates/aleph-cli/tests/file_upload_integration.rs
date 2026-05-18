@@ -1,12 +1,10 @@
-//! End-to-end test for `aleph file upload --json`.
+//! End-to-end tests for `aleph file upload`.
 //!
-//! Spawns a real heph server on an OS-assigned port, runs the compiled `aleph`
-//! binary against it with `--json --storage-engine storage`, and asserts that
-//! stdout is a parseable JSON envelope with the expected submission fields.
-//!
-//! Regression guard for the #142 bug where the default (native storage) path
-//! dropped the return value of `upload_file_to_storage` and emitted nothing
-//! to stdout, breaking downstream tooling that calls `json.loads(stdout)`.
+//! - `file_upload_json_emits_submission_envelope`: storage engine, runs the
+//!   compiled `aleph` binary against a real heph server.
+//! - `ipfs_upload_uses_authenticated_request_and_no_separate_post`: IPFS
+//!   engine, runs against a `wiremock::MockServer` (heph has no IPFS
+//!   endpoint) and asserts the single-request authenticated shape.
 
 use std::process::Command;
 use std::sync::Arc;
@@ -75,6 +73,9 @@ fn start_test_server() -> String {
     format!("http://127.0.0.1:{port}/")
 }
 
+/// Regression guard for the #142 bug where the default (native storage) path
+/// dropped the return value of `upload_file_to_storage` and emitted nothing
+/// to stdout, breaking downstream tooling that calls `json.loads(stdout)`.
 #[test]
 fn file_upload_json_emits_submission_envelope() {
     let base_url = start_test_server();
@@ -133,4 +134,112 @@ fn file_upload_json_emits_submission_envelope() {
     assert!(envelope["explorer_url"].is_string(), "envelope: {envelope}");
     assert_eq!(envelope["publication_status"], "success");
     assert_eq!(envelope["message_status"], "processed");
+}
+
+#[tokio::test]
+async fn ipfs_upload_uses_authenticated_request_and_no_separate_post() {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    let bytes: &[u8] = b"hello";
+    let expected_cid = aleph_sdk::verify::compute_cid(bytes).to_string();
+
+    let server = MockServer::start().await;
+
+    let body = format!(
+        r#"{{"status":"success","hash":"{expected_cid}","name":"upload","size":{}}}"#,
+        bytes.len()
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/api/v0/ipfs/add_file"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Critical regression guard: the IPFS auth path must NOT submit a
+    // separate /api/v0/messages POST. If it does, the test fails (expect(0)).
+    Mock::given(method("POST"))
+        .and(path("/api/v0/messages"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(bytes).unwrap();
+    let file_path = tmp.path().to_path_buf();
+
+    let private_key_hex = hex::encode(TEST_KEY);
+    let base_url = server.uri();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_aleph"))
+            .args([
+                "--ccn",
+                &base_url,
+                "--json",
+                "file",
+                "upload",
+                "--storage-engine",
+                "ipfs",
+                "--private-key",
+                &private_key_hex,
+                "--chain",
+                "eth",
+                file_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to spawn aleph binary")
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aleph exited non-zero\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+
+    let account = EvmAccount::new(Chain::Ethereum, &TEST_KEY).unwrap();
+    let expected_sender = Account::address(&account).as_str().to_string();
+
+    assert!(envelope["item_hash"].is_string(), "envelope: {envelope}");
+    assert_eq!(envelope["type"], "STORE");
+    assert_eq!(envelope["chain"], "ETH");
+    assert_eq!(envelope["sender"], expected_sender);
+    assert!(envelope["time"].is_number(), "envelope: {envelope}");
+    assert!(envelope["explorer_url"].is_string(), "envelope: {envelope}");
+    assert_eq!(envelope["publication_status"], "success");
+    assert_eq!(envelope["message_status"], "processed");
+
+    // Verify the request shape: exactly one POST to /api/v0/ipfs/add_file
+    // with both `file` and `metadata` parts in the multipart body.
+    let reqs: Vec<Request> = server.received_requests().await.unwrap();
+    let ipfs_reqs: Vec<&Request> = reqs
+        .iter()
+        .filter(|r| r.url.path() == "/api/v0/ipfs/add_file")
+        .collect();
+    assert_eq!(ipfs_reqs.len(), 1, "expected exactly one IPFS upload");
+    let body = std::str::from_utf8(&ipfs_reqs[0].body).expect("multipart body should be utf-8");
+    assert!(body.contains("name=\"file\""), "missing file part: {body}");
+    assert!(
+        body.contains("name=\"metadata\""),
+        "missing metadata part: {body}"
+    );
+    assert!(
+        body.contains("\"type\":\"STORE\""),
+        "missing STORE type: {body}"
+    );
+    assert!(
+        body.contains(&format!("\"sender\":\"{expected_sender}\"")),
+        "metadata should contain expected sender: {body}"
+    );
 }

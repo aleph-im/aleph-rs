@@ -10,6 +10,7 @@ pub mod addresses;
 pub mod aggregates;
 pub mod balances;
 pub mod costs;
+pub mod ipfs;
 pub mod messages;
 pub mod posts;
 pub mod storage;
@@ -88,6 +89,8 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             )
             .route("/storage/add_file", web::post().to(storage::add_file))
             .route("/storage/add_json", web::post().to(storage::add_json))
+            // IPFS
+            .route("/ipfs/add_car", web::post().to(ipfs::add_car))
             .route("/storage/{hash}", web::get().to(storage::get_base64))
             // Balances
             .route(

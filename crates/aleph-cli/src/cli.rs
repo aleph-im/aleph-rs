@@ -1296,6 +1296,13 @@ pub struct FileUploadArgs {
     #[arg(long, env = "ALEPH_IPFS_GATEWAY")]
     pub ipfs_gateway: Option<Url>,
 
+    /// Use the legacy unauthenticated kubo-gateway path for directory
+    /// uploads. Default is the authenticated `/api/v0/ipfs/add_car` endpoint
+    /// on the CCN. Pass this flag to force the older path; only meaningful
+    /// for directory uploads.
+    #[arg(long, default_value_t = false)]
+    pub use_gateway_relay: bool,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }

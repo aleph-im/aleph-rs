@@ -29,6 +29,7 @@ chrono = { workspace = true, features = ["serde"] }
 futures-util = { workspace = true }
 http = { workspace = true }
 memsizes = { workspace = true }
+murmur3 = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }
 reqwest-retry = { workspace = true }
@@ -46,12 +47,12 @@ walkdir = { workspace = true }
 hex = { workspace = true }
 p256 = { workspace = true }
 prost = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 alloy-network = { workspace = true }
 alloy-node-bindings = { workspace = true }
 alloy-signer-local = { workspace = true }
-tempfile = { workspace = true }
 wiremock = { workspace = true }
 
 [features]
@@ -65,7 +66,25 @@ credits = [
     "dep:alloy-rpc-types-eth",
     "dep:alloy-sol-types",
 ]
+# Exposes test-only helpers; not for production use.
+test-helpers = []
 
 [[test]]
 name = "credit_integration"
 required-features = ["credits"]
+
+[[test]]
+name = "folder_hash"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "ipfs_upload"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "ipfs_car_upload"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "car_roundtrip"
+required-features = ["test-helpers"]
