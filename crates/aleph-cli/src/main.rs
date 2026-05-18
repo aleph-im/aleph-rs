@@ -1,6 +1,6 @@
 use crate::cli::Cli;
 use aleph_sdk::client::AlephClient;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use std::sync::OnceLock;
 
 mod account;
@@ -57,7 +57,16 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let mut cmd = Cli::command();
+    #[cfg(feature = "admin")]
+    {
+        if !commands::admin::admin_env_enabled() {
+            cmd = cmd.mut_subcommand("admin", |c| c.hide(true));
+        }
+    }
+    let matches = cmd.get_matches();
+    let cli = Cli::from_arg_matches(&matches)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let json = cli.json;
 
     // Completions subcommand short-circuits: no network or config resolution
