@@ -153,6 +153,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?
         }
+        #[cfg(feature = "admin")]
+        cli::Commands::Admin {
+            command: admin_command,
+        } => {
+            commands::admin::handle_admin_command(
+                &aleph_client,
+                &ccn_url,
+                json,
+                admin_command,
+            )
+            .await?
+        }
         cli::Commands::Config { .. } => unreachable!(),
         cli::Commands::Completions { .. } => unreachable!(),
         cli::Commands::Credit {
