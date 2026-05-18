@@ -496,6 +496,10 @@ pub struct MessageFilterCli {
     #[arg(long, value_delimiter = ',')]
     pub addresses: Option<Vec<String>>,
 
+    /// Content owners. CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub owners: Option<Vec<String>>,
+
     /// Tags. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
     pub tags: Option<Vec<String>>,
@@ -550,7 +554,7 @@ impl From<MessageFilterCli> for MessageFilter {
             content_hashes: c.content_hashes,
             refs: c.refs,
             addresses: c.addresses.map(|v| v.into_iter().map(Into::into).collect()),
-            owners: None,
+            owners: c.owners.map(|v| v.into_iter().map(Into::into).collect()),
             tags: c.tags,
             hashes: c.hashes,
             channels: c.channels,
