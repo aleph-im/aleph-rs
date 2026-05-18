@@ -1107,3 +1107,70 @@ async fn test_sdk_get_vm_images_aggregate() {
     );
     assert_eq!(agg.vm_images.defaults.runtime, None);
 }
+
+/// Test that the wire format produced by the admin CLI handler round-trips
+/// through heph and the SDK's get_aggregate correctly.
+///
+/// The admin handler serializes a `VmImagesData` directly as the message
+/// content (no outer wrapper), so this test validates that exact shape.
+#[tokio::test]
+async fn test_admin_images_rootfs_add_round_trips() {
+    use aleph_sdk::aggregate_models::vm_images::{
+        RootfsEntry, VM_IMAGES_KEY, VmImagesAggregate, VmImagesData,
+    };
+    use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+    use aleph_types::chain::Address;
+    use aleph_types::item_hash::ItemHash;
+    use std::str::FromStr;
+    use url::Url;
+
+    let base_url = start_test_server();
+    let http_client = reqwest::Client::new();
+    let sdk_client = AlephClient::new(Url::parse(&base_url).unwrap());
+
+    let key = [9u8; 32];
+    let account = EvmAccount::new(Chain::Ethereum, &key).unwrap();
+    let addr = account.address().as_str().to_string();
+
+    // Build the same shape the admin CLI handler produces: a VmImagesData,
+    // serialized as the message content.
+    let mut data = VmImagesData::default();
+    data.rootfs.insert(
+        "ubuntu24".into(),
+        RootfsEntry {
+            hash: ItemHash::from_str(
+                "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e",
+            )
+            .unwrap(),
+            display_name: Some("Ubuntu 24.04".into()),
+            description: None,
+            min_disk_mib: Some(20480),
+            deprecated: false,
+        },
+    );
+
+    let body = serde_json::to_string(&data).unwrap();
+    let (msg, _) = build_aggregate_msg(&key, VM_IMAGES_KEY, &body, 1_700_000_002.0);
+
+    let resp = http_client
+        .post(format!("{base_url}/api/v0/messages"))
+        .json(&serde_json::json!({ "sync": true, "message": msg }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let agg: VmImagesAggregate = sdk_client
+        .get_aggregate(&Address::from(addr), VM_IMAGES_KEY)
+        .await
+        .unwrap();
+
+    let entry = agg.vm_images.rootfs.get("ubuntu24").unwrap();
+    assert_eq!(
+        entry.hash.to_string(),
+        "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+    );
+    assert_eq!(entry.display_name.as_deref(), Some("Ubuntu 24.04"));
+    assert_eq!(entry.min_disk_mib, Some(20480));
+    assert!(!entry.deprecated);
+}
