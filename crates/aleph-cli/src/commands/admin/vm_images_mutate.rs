@@ -115,8 +115,8 @@ pub fn apply_mutation(
 ) -> Result<(), AdminImagesError> {
     match mutation {
         Mutation::Add { kind, name, entry } => apply_add(data, kind, name, entry),
-        Mutation::Update { .. }
-        | Mutation::Deprecate { .. }
+        Mutation::Update { kind, name, patch } => apply_update(data, kind, name, patch),
+        Mutation::Deprecate { .. }
         | Mutation::Undeprecate { .. }
         | Mutation::SetDefault { .. }
         | Mutation::ClearDefault { .. } => {
@@ -183,6 +183,107 @@ fn apply_add(
         }
     }
     Ok(())
+}
+
+fn apply_update(
+    data: &mut VmImagesData,
+    kind: Kind,
+    name: String,
+    patch: EntryPatch,
+) -> Result<(), AdminImagesError> {
+    if patch.is_empty() {
+        return Err(AdminImagesError::NoFieldsToUpdate);
+    }
+    // min_disk_mib is rootfs-only.
+    if !matches!(kind, Kind::Rootfs) && patch.min_disk_mib.is_some() {
+        return Err(AdminImagesError::IrrelevantField);
+    }
+
+    match kind {
+        Kind::Rootfs => {
+            if !data.rootfs.contains_key(&name) {
+                return Err(AdminImagesError::NotFound {
+                    kind,
+                    name,
+                    available: join_active_names(data, kind),
+                });
+            }
+            let entry = data.rootfs.get_mut(&name).unwrap();
+            if let Some(hash) = patch.hash {
+                entry.hash = hash;
+            }
+            if let Some(v) = patch.display_name {
+                entry.display_name = v;
+            }
+            if let Some(v) = patch.description {
+                entry.description = v;
+            }
+            if let Some(v) = patch.min_disk_mib {
+                entry.min_disk_mib = v;
+            }
+        }
+        Kind::Runtime => {
+            if !data.runtimes.contains_key(&name) {
+                return Err(AdminImagesError::NotFound {
+                    kind,
+                    name,
+                    available: join_active_names(data, kind),
+                });
+            }
+            let entry = data.runtimes.get_mut(&name).unwrap();
+            if let Some(hash) = patch.hash {
+                entry.hash = hash;
+            }
+            if let Some(v) = patch.display_name {
+                entry.display_name = v;
+            }
+            if let Some(v) = patch.description {
+                entry.description = v;
+            }
+        }
+        Kind::Firmware => {
+            if !data.firmwares.contains_key(&name) {
+                return Err(AdminImagesError::NotFound {
+                    kind,
+                    name,
+                    available: join_active_names(data, kind),
+                });
+            }
+            let entry = data.firmwares.get_mut(&name).unwrap();
+            if let Some(hash) = patch.hash {
+                entry.hash = hash;
+            }
+            if let Some(v) = patch.display_name {
+                entry.display_name = v;
+            }
+            if let Some(v) = patch.description {
+                entry.description = v;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn join_active_names(data: &VmImagesData, kind: Kind) -> String {
+    let mut names: Vec<&str> = match kind {
+        Kind::Rootfs => data
+            .active_rootfs()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect(),
+        Kind::Runtime => data
+            .active_runtimes()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect(),
+        Kind::Firmware => data
+            .active_firmwares()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect(),
+    };
+    names.sort_unstable();
+    names.join(", ")
 }
 
 #[cfg(test)]
@@ -345,5 +446,179 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AdminImagesError::IrrelevantField));
+    }
+
+    #[test]
+    fn apply_update_patches_only_provided_fields() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        let patch = EntryPatch {
+            display_name: Some(Some("Ubuntu 24.04 LTS".into())),
+            ..Default::default()
+        };
+        apply_mutation(
+            &mut data,
+            Mutation::Update {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+                patch,
+            },
+        )
+        .unwrap();
+        let entry = data.rootfs.get("ubuntu24").unwrap();
+        assert_eq!(entry.display_name.as_deref(), Some("Ubuntu 24.04 LTS"));
+        assert_eq!(entry.hash, rootfs_hash());
+        assert_eq!(entry.min_disk_mib, Some(20480));
+    }
+
+    #[test]
+    fn apply_update_clear_display_name() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        let patch = EntryPatch {
+            display_name: Some(None),
+            ..Default::default()
+        };
+        apply_mutation(
+            &mut data,
+            Mutation::Update {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+                patch,
+            },
+        )
+        .unwrap();
+        assert!(data.rootfs.get("ubuntu24").unwrap().display_name.is_none());
+    }
+
+    #[test]
+    fn apply_update_clear_min_disk_mib() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        let patch = EntryPatch {
+            min_disk_mib: Some(None),
+            ..Default::default()
+        };
+        apply_mutation(
+            &mut data,
+            Mutation::Update {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+                patch,
+            },
+        )
+        .unwrap();
+        assert_eq!(data.rootfs.get("ubuntu24").unwrap().min_disk_mib, None);
+    }
+
+    #[test]
+    fn apply_update_change_hash() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        let patch = EntryPatch {
+            hash: Some(other_hash()),
+            ..Default::default()
+        };
+        apply_mutation(
+            &mut data,
+            Mutation::Update {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+                patch,
+            },
+        )
+        .unwrap();
+        assert_eq!(data.rootfs.get("ubuntu24").unwrap().hash, other_hash());
+    }
+
+    #[test]
+    fn apply_update_rejects_unknown_name() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        let patch = EntryPatch {
+            display_name: Some(Some("foo".into())),
+            ..Default::default()
+        };
+        let err = apply_mutation(
+            &mut data,
+            Mutation::Update {
+                kind: Kind::Rootfs,
+                name: "nope".into(),
+                patch,
+            },
+        )
+        .unwrap_err();
+        match err {
+            AdminImagesError::NotFound { kind, name, available } => {
+                assert_eq!(kind, Kind::Rootfs);
+                assert_eq!(name, "nope");
+                assert!(available.contains("ubuntu24"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_update_runtime_rejects_min_disk_mib() {
+        let mut data = VmImagesData::default();
+        data.runtimes.insert("py311".into(), image_entry());
+
+        let patch = EntryPatch {
+            min_disk_mib: Some(Some(1024)),
+            ..Default::default()
+        };
+        let err = apply_mutation(
+            &mut data,
+            Mutation::Update {
+                kind: Kind::Runtime,
+                name: "py311".into(),
+                patch,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AdminImagesError::IrrelevantField));
+    }
+
+    #[test]
+    fn apply_update_runtime_rejects_clear_min_disk_mib() {
+        let mut data = VmImagesData::default();
+        data.runtimes.insert("py311".into(), image_entry());
+
+        let patch = EntryPatch {
+            min_disk_mib: Some(None),
+            ..Default::default()
+        };
+        let err = apply_mutation(
+            &mut data,
+            Mutation::Update {
+                kind: Kind::Runtime,
+                name: "py311".into(),
+                patch,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AdminImagesError::IrrelevantField));
+    }
+
+    #[test]
+    fn apply_update_rejects_empty_patch() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        let err = apply_mutation(
+            &mut data,
+            Mutation::Update {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+                patch: EntryPatch::default(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AdminImagesError::NoFieldsToUpdate));
     }
 }
