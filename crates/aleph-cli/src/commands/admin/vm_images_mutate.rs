@@ -118,8 +118,10 @@ pub fn apply_mutation(
         Mutation::Update { kind, name, patch } => apply_update(data, kind, name, patch),
         Mutation::Deprecate { kind, name } => apply_deprecate(data, kind, name),
         Mutation::Undeprecate { kind, name } => apply_undeprecate(data, kind, name),
-        Mutation::SetDefault { .. } | Mutation::ClearDefault { .. } => {
-            unimplemented!("Task 9 implements these")
+        Mutation::SetDefault { kind, name } => apply_set_default(data, kind, name),
+        Mutation::ClearDefault { kind } => {
+            apply_clear_default(data, kind);
+            Ok(())
         }
     }
 }
@@ -312,6 +314,41 @@ fn set_deprecated_flag(
         Kind::Firmware => data.firmwares.get_mut(&name).unwrap().deprecated = target,
     }
     Ok(())
+}
+
+fn apply_set_default(
+    data: &mut VmImagesData,
+    kind: Kind,
+    name: String,
+) -> Result<(), AdminImagesError> {
+    let is_deprecated = match kind {
+        Kind::Rootfs => data.rootfs.get(&name).map(|e| e.deprecated),
+        Kind::Runtime => data.runtimes.get(&name).map(|e| e.deprecated),
+        Kind::Firmware => data.firmwares.get(&name).map(|e| e.deprecated),
+    };
+    match is_deprecated {
+        None => {
+            let available = join_active_names(data, kind);
+            Err(AdminImagesError::NotFound { kind, name, available })
+        }
+        Some(true) => Err(AdminImagesError::DefaultPointsAtDeprecated { name }),
+        Some(false) => {
+            match kind {
+                Kind::Rootfs => data.defaults.rootfs = Some(name),
+                Kind::Runtime => data.defaults.runtime = Some(name),
+                Kind::Firmware => data.defaults.firmware = Some(name),
+            }
+            Ok(())
+        }
+    }
+}
+
+fn apply_clear_default(data: &mut VmImagesData, kind: Kind) {
+    match kind {
+        Kind::Rootfs => data.defaults.rootfs = None,
+        Kind::Runtime => data.defaults.runtime = None,
+        Kind::Firmware => data.defaults.firmware = None,
+    }
 }
 
 fn join_active_names(data: &VmImagesData, kind: Kind) -> String {
@@ -768,5 +805,120 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AdminImagesError::NotDeprecated { .. }));
+    }
+
+    #[test]
+    fn apply_set_default_rootfs_happy() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        apply_mutation(
+            &mut data,
+            Mutation::SetDefault {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(data.defaults.rootfs.as_deref(), Some("ubuntu24"));
+    }
+
+    #[test]
+    fn apply_set_default_runtime_happy() {
+        let mut data = VmImagesData::default();
+        data.runtimes.insert("py311".into(), image_entry());
+
+        apply_mutation(
+            &mut data,
+            Mutation::SetDefault {
+                kind: Kind::Runtime,
+                name: "py311".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(data.defaults.runtime.as_deref(), Some("py311"));
+    }
+
+    #[test]
+    fn apply_set_default_firmware_happy() {
+        let mut data = VmImagesData::default();
+        data.firmwares.insert("ovmf".into(), image_entry());
+
+        apply_mutation(
+            &mut data,
+            Mutation::SetDefault {
+                kind: Kind::Firmware,
+                name: "ovmf".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(data.defaults.firmware.as_deref(), Some("ovmf"));
+    }
+
+    #[test]
+    fn apply_set_default_rejects_unknown_name() {
+        let mut data = VmImagesData::default();
+        data.rootfs.insert("ubuntu24".into(), rootfs_entry());
+
+        let err = apply_mutation(
+            &mut data,
+            Mutation::SetDefault {
+                kind: Kind::Rootfs,
+                name: "nope".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AdminImagesError::NotFound { .. }));
+    }
+
+    #[test]
+    fn apply_set_default_rejects_deprecated_target() {
+        let mut data = VmImagesData::default();
+        let mut entry = rootfs_entry();
+        entry.deprecated = true;
+        data.rootfs.insert("ubuntu24".into(), entry);
+
+        let err = apply_mutation(
+            &mut data,
+            Mutation::SetDefault {
+                kind: Kind::Rootfs,
+                name: "ubuntu24".into(),
+            },
+        )
+        .unwrap_err();
+        match err {
+            AdminImagesError::DefaultPointsAtDeprecated { name } => {
+                assert_eq!(name, "ubuntu24");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_clear_default_clears_field() {
+        let mut data = VmImagesData::default();
+        data.defaults.rootfs = Some("ubuntu24".into());
+
+        apply_mutation(
+            &mut data,
+            Mutation::ClearDefault {
+                kind: Kind::Rootfs,
+            },
+        )
+        .unwrap();
+        assert!(data.defaults.rootfs.is_none());
+    }
+
+    #[test]
+    fn apply_clear_default_idempotent() {
+        let mut data = VmImagesData::default();
+        apply_mutation(
+            &mut data,
+            Mutation::ClearDefault {
+                kind: Kind::Runtime,
+            },
+        )
+        .unwrap();
+        assert!(data.defaults.runtime.is_none());
     }
 }
