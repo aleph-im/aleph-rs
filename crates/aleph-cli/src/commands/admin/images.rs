@@ -275,7 +275,7 @@ async fn run_mutation(
 
     let envelope = serde_json::json!({
         "key": &target_key,
-        "content": { "vm-images": &data },
+        "content": &data,
     });
     let mut builder = MessageBuilder::new(&account, MessageType::Aggregate, envelope);
     if let Some(ch) = target.channel.as_ref() {
