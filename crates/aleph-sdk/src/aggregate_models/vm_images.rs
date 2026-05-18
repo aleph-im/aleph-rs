@@ -2,18 +2,18 @@
 //! and confidential UEFI firmware curated on the network.
 
 use aleph_types::item_hash::ItemHash;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const VM_IMAGES_KEY: &str = "vm-images";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VmImagesAggregate {
     #[serde(rename = "vm-images")]
     pub vm_images: VmImagesData,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct VmImagesData {
     #[serde(default)]
     pub rootfs: BTreeMap<String, RootfsEntry>,
@@ -25,7 +25,7 @@ pub struct VmImagesData {
     pub defaults: VmImageDefaults,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImageEntry {
     pub hash: ItemHash,
     #[serde(default)]
@@ -36,7 +36,7 @@ pub struct ImageEntry {
     pub deprecated: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RootfsEntry {
     pub hash: ItemHash,
     #[serde(default)]
@@ -49,7 +49,7 @@ pub struct RootfsEntry {
     pub deprecated: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct VmImageDefaults {
     #[serde(default)]
     pub rootfs: Option<String>,
@@ -305,5 +305,24 @@ mod tests {
                 .as_deref(),
             Some("Python 3.11")
         );
+    }
+
+    #[test]
+    fn serialize_round_trips_full_fixture() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let json = serde_json::to_string(&agg).unwrap();
+        let round_tripped: VmImagesAggregate = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.vm_images.rootfs.len(), 3);
+        assert_eq!(round_tripped.vm_images.runtimes.len(), 1);
+        assert_eq!(round_tripped.vm_images.firmwares.len(), 1);
+        assert_eq!(
+            round_tripped.vm_images.defaults.rootfs.as_deref(),
+            Some("ubuntu24")
+        );
+        assert_eq!(
+            round_tripped.vm_images.rootfs.get("ubuntu24").unwrap().hash.to_string(),
+            "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+        );
+        assert!(round_tripped.vm_images.rootfs.get("old-image").unwrap().deprecated);
     }
 }
