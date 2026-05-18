@@ -9,6 +9,7 @@ Rust tooling for the [Aleph Cloud](https://aleph.cloud) protocol: a CLI for end 
 - **[aleph-cli](crates/aleph-cli)**: `aleph` command-line interface
 - **[aleph-sdk](crates/aleph-sdk)**: async Rust SDK
 - **[aleph-types](crates/aleph-types)**: protocol types and signature verification
+- **[aleph-ccn](crates/aleph-ccn)**: production Core Channel Node — Rust port of [pyaleph](https://github.com/aleph-im/pyaleph)
 - **[heph](crates/heph)**: local single-binary CCN for testing (think Anvil for Aleph)
 
 ---
@@ -137,6 +138,19 @@ To trim dependencies (e.g. for a server that only verifies hashes):
 ```toml
 aleph-types = { version = "0.9", default-features = false }
 ```
+
+---
+
+## aleph-ccn (production CCN)
+
+[aleph-ccn](crates/aleph-ccn) is a faithful Rust port of [pyaleph](https://github.com/aleph-im/pyaleph): the full production Core Channel Node, with PostgreSQL persistence (tokio-postgres + refinery migrations), RabbitMQ messaging (lapin), Redis cache, IPFS gateway, P2P pubsub, multi-chain signature verification (EVM/Solana/Substrate/Tezos/Cosmos/Nuls2), an Ethereum on-chain fetcher with batched-log retry, the cost engine, balance/credit lifecycle jobs, and the full `/api/v0` + `/api/v1` HTTP/WebSocket surface (axum). Use it when you need an actual node on the live network — for local tests, reach for Heph instead.
+
+```sh
+cargo build --release -p aleph-ccn
+./target/release/aleph-ccn  # reads config.yaml + Postgres/Redis/RabbitMQ
+```
+
+See [`crates/aleph-ccn`](crates/aleph-ccn) for configuration, migrations, and operational notes.
 
 ---
 
