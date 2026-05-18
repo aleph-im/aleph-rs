@@ -220,7 +220,7 @@ Forget is irreversible. You can only forget messages your own address owns \
     Get(GetMessageArgs),
     // Boxing because of a large enum variant.
     /// List messages (with filters)
-    List(Box<MessageFilterCli>),
+    List(Box<MessageListArgs>),
     /// Sync messages from one node to another
     Sync(Box<SyncArgs>),
 }
@@ -535,11 +535,17 @@ pub struct MessageFilterCli {
     /// Message statuses. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
     pub message_statuses: Option<Vec<MessageStatusCli>>,
+}
 
+#[derive(Debug, Clone, Args)]
+pub struct MessageListArgs {
+    /// Maximum number of messages to return. Walks cursor pagination
+    /// server-side; safe for large values (no offset cost).
     #[arg(long, default_value = "200")]
-    pub pagination: u32,
-    #[arg(long, default_value = "1")]
-    pub page: u32,
+    pub count: u32,
+
+    #[command(flatten)]
+    pub filter: MessageFilterCli,
 }
 
 impl From<MessageFilterCli> for MessageFilter {
