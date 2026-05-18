@@ -14,12 +14,15 @@
 //! via `tests/regen-folder-hash-goldens.sh`. Run it after any change that
 //! could affect output bytes.
 
-use crate::ipfs::FolderEntry;
+use crate::ipfs::{CidVersion, FolderEntry, UploadFolderOptions};
 use crate::proto::{merkledag, unixfs};
-use crate::verify::{DAG_PB_CODEC, DagNode, encode_multihash, encode_pbnode_canonical};
+use crate::verify::{DAG_PB_CODEC, DagNode, Hasher, encode_multihash, encode_pbnode_canonical};
+use aleph_types::item_hash::ItemHash;
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +83,20 @@ pub(crate) struct ChildLink {
     pub cumulative_size: u64,
 }
 
+/// Wrap a sha2-256 multihash as either a CIDv1 dag-pb binary (version byte
+/// 0x01 + codec 0x70 + multihash) or a bare CIDv0 multihash.
+fn build_cid_bytes(multihash: Vec<u8>, cid_v1: bool) -> Vec<u8> {
+    if cid_v1 {
+        let mut cid = Vec::with_capacity(2 + multihash.len());
+        cid.push(0x01);
+        cid.push(DAG_PB_CODEC as u8);
+        cid.extend_from_slice(&multihash);
+        cid
+    } else {
+        multihash
+    }
+}
+
 /// Build a plain UnixFS Directory node from a list of children.
 ///
 /// `cid_v1`: when `true`, returns a CIDv1 dag-pb CID (codec 0x70). When `false`,
@@ -117,16 +134,7 @@ pub(crate) fn build_plain_directory(children: &[ChildLink], cid_v1: bool) -> Dag
     let node_bytes = encode_pbnode_canonical(&node);
     let digest = Sha256::digest(&node_bytes);
     let mh = encode_multihash(&digest);
-
-    let cid_bytes = if cid_v1 {
-        let mut cid = Vec::with_capacity(2 + mh.len());
-        cid.push(0x01); // CID version
-        cid.push(DAG_PB_CODEC as u8); // 0x70
-        cid.extend_from_slice(&mh);
-        cid
-    } else {
-        mh
-    };
+    let cid_bytes = build_cid_bytes(mh, cid_v1);
 
     let node_size = node_bytes.len() as u64;
     let children_cumulative: u64 = children.iter().map(|c| c.cumulative_size).sum();
@@ -308,16 +316,7 @@ fn build_hamt_node(
     let node_bytes = encode_pbnode_canonical(&node);
     let digest = Sha256::digest(&node_bytes);
     let mh = encode_multihash(&digest);
-
-    let cid_bytes = if cid_v1 {
-        let mut cid = Vec::with_capacity(2 + mh.len());
-        cid.push(0x01);
-        cid.push(DAG_PB_CODEC as u8);
-        cid.extend_from_slice(&mh);
-        cid
-    } else {
-        mh
-    };
+    let cid_bytes = build_cid_bytes(mh, cid_v1);
 
     let node_size = node_bytes.len() as u64;
 
@@ -327,12 +326,6 @@ fn build_hamt_node(
         data_size: 0,
     })
 }
-
-use crate::ipfs::{CidVersion, UploadFolderOptions};
-use crate::verify::Hasher;
-use aleph_types::item_hash::ItemHash;
-use std::fs::File;
-use std::io::Read;
 
 /// Build the local UnixFS root CID for `entries`, matching what kubo's
 /// HTTP `/api/v0/add?wrap-with-directory=true` produces given the same flat
@@ -361,7 +354,7 @@ pub(crate) fn hash_folder_root(
     // The root is a "wrapping directory" — entries are contained within it.
     let root = hash_dir(&tree, cid_v1)?;
 
-    cid_bytes_to_item_hash(&root.cid_bytes, cid_v1)
+    cid_bytes_to_item_hash(&root.cid_bytes)
 }
 
 fn hash_dir(tree: &BTreeMap<String, TreeNode>, cid_v1: bool) -> Result<DagNode, FolderHashError> {
@@ -414,12 +407,14 @@ fn hash_file(path: &std::path::Path, cid_v1: bool) -> Result<DagNode, FolderHash
     Ok(hasher.finalize_dag_node())
 }
 
-fn cid_bytes_to_item_hash(bytes: &[u8], cid_v1: bool) -> Result<ItemHash, FolderHashError> {
-    let cid_str = if cid_v1 {
+fn cid_bytes_to_item_hash(bytes: &[u8]) -> Result<ItemHash, FolderHashError> {
+    // CIDv1 binary starts with 0x01 (version byte); CIDv0 binary is a bare
+    // sha2-256 multihash starting with 0x12 (multihash code). Mirrors the
+    // byte-sniff in `verify::Hasher::finalize`.
+    let cid_str = if bytes.first() == Some(&0x01) {
         let parsed = ::cid::Cid::try_from(bytes).expect("hash_folder_root produces valid CIDs");
         parsed.to_string()
     } else {
-        // CIDv0 binary input is a bare multihash (34 bytes).
         let mh = multihash::Multihash::<64>::from_bytes(bytes)
             .expect("CIDv0 multihash bytes must parse");
         let parsed = ::cid::Cid::new_v0(mh).expect("valid sha2-256 multihash");
