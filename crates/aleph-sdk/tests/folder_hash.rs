@@ -94,7 +94,7 @@ fn fixture_hamt_multi_level(root: &Path) {
     // Until then, both files are empty and this fixture won't be exercised
     // (test is #[ignore]'d).
     let collision_a = include_str!("hamt_collision_a.txt").trim();
-    let collision_b = include_str!("hamt_collision_b.txt").trim();
+    let collision_a = include_str!("hamt_collision_a.txt").trim();
     if !collision_a.is_empty() && !collision_b.is_empty() {
         fs::write(root.join(collision_a), b"a").unwrap();
         fs::write(root.join(collision_b), b"b").unwrap();
