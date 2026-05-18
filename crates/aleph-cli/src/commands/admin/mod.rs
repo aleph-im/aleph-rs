@@ -4,6 +4,7 @@ use url::Url;
 
 use crate::cli::AdminCommand;
 
+pub mod images;
 pub mod vm_images_diff;
 pub mod vm_images_mutate;
 
@@ -31,13 +32,17 @@ pub(crate) fn require_admin_env() -> Result<()> {
 }
 
 pub async fn handle_admin_command(
-    _aleph_client: &AlephClient,
-    _ccn_url: &Url,
-    _json: bool,
-    _command: AdminCommand,
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    command: AdminCommand,
 ) -> Result<()> {
     require_admin_env()?;
-    anyhow::bail!("admin: handler not yet implemented (Task 11 wires this up)")
+    match command {
+        AdminCommand::Images { command } => {
+            images::handle_images_command(aleph_client, ccn_url, json, command).await
+        }
+    }
 }
 
 #[cfg(test)]
