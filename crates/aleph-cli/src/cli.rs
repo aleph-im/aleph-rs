@@ -2396,6 +2396,11 @@ pub struct AdminTargetArgs {
     #[arg(long)]
     pub address: Option<String>,
     /// Aggregate key. Defaults to "vm-images".
+    ///
+    /// Non-default keys are intended for fresh aggregates only - the SDK's
+    /// VmImagesAggregate deserializer is hard-wired to look for a "vm-images"
+    /// field in the API response, so reading back a non-default key only works
+    /// before any content has been published under it.
     #[arg(long)]
     pub key: Option<String>,
     /// Channel name.
