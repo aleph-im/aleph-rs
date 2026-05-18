@@ -27,7 +27,7 @@ const WIRE_TYPE_LEN: u8 = 2;
 /// Links=2), but the IPFS dag-pb spec mandates Links before Data. Without this
 /// ordering the SHA-256 digest — and therefore the CID — will differ from what
 /// IPFS computes.
-fn encode_pbnode_canonical(node: &merkledag::PbNode) -> Vec<u8> {
+pub(crate) fn encode_pbnode_canonical(node: &merkledag::PbNode) -> Vec<u8> {
     let mut buf = Vec::new();
 
     // Links (field 2) first
@@ -64,10 +64,10 @@ pub enum VerifyError {
 }
 
 /// Raw codec for CIDv1 (identity mapping of bytes to CID).
-const RAW_CODEC: u64 = 0x55;
+pub(crate) const RAW_CODEC: u64 = 0x55;
 
 /// dag-pb codec for CIDv1.
-const DAG_PB_CODEC: u64 = 0x70;
+pub(crate) const DAG_PB_CODEC: u64 = 0x70;
 
 /// IPFS default chunk size: 256 KiB.
 pub(crate) const CHUNK_SIZE: usize = 262144;
@@ -76,7 +76,7 @@ pub(crate) const CHUNK_SIZE: usize = 262144;
 const MAX_LINKS: usize = 174;
 
 /// Encode a SHA-256 digest as a multihash: [0x12, 0x20, ...32 bytes...]
-fn encode_multihash(digest: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_multihash(digest: &[u8]) -> Vec<u8> {
     let mut mh = Vec::with_capacity(2 + digest.len());
     mh.push(0x12); // SHA-256 code
     mh.push(0x20); // 32 bytes
@@ -126,6 +126,20 @@ impl Hasher {
             buffer: Vec::with_capacity(CHUNK_SIZE),
             leaves: Vec::new(),
             raw_leaves: false,
+        }
+    }
+
+    /// Creates a hasher for IPFS CIDv1 dag-pb with raw leaves.
+    ///
+    /// Matches kubo's `ipfs add --cid-version=1 --raw-leaves` defaults: chunks
+    /// of 256 KiB are stored as raw blocks (codec 0x55) and the file root (if
+    /// the file spans multiple chunks) is a dag-pb node linking those raw leaves.
+    /// A single-chunk file collapses to a bare raw block whose CID is `bafkrei…`.
+    pub(crate) fn for_ipfs_v1_raw_leaves() -> Self {
+        Self::DagPb {
+            buffer: Vec::with_capacity(CHUNK_SIZE),
+            leaves: Vec::new(),
+            raw_leaves: true,
         }
     }
 
@@ -305,6 +319,52 @@ impl Hasher {
         }
     }
 
+    /// Build the root `DagNode` for a `DagPb` hasher, including the correct
+    /// cumulative_size for use as `PBLink.Tsize` in a parent directory node.
+    ///
+    /// Panics if called on a `Native` or `CidRaw` hasher (only `DagPb` produces
+    /// a DAG node with meaningful cumulative_size).
+    pub(crate) fn finalize_dag_node(self) -> DagNode {
+        match self {
+            Self::DagPb {
+                buffer,
+                mut leaves,
+                raw_leaves,
+            } => {
+                let make_leaf = |chunk: &[u8]| {
+                    if raw_leaves {
+                        Self::build_raw_leaf(chunk)
+                    } else {
+                        Self::build_leaf(chunk)
+                    }
+                };
+
+                // Flush any remaining bytes in buffer as the last chunk.
+                if !buffer.is_empty() {
+                    leaves.push(make_leaf(&buffer));
+                }
+
+                let v1 = raw_leaves;
+
+                if leaves.is_empty() {
+                    make_leaf(&[])
+                } else if leaves.len() == 1 {
+                    leaves.into_iter().next().unwrap()
+                } else {
+                    let mut nodes = leaves;
+                    while nodes.len() > 1 {
+                        nodes = nodes
+                            .chunks(MAX_LINKS)
+                            .map(|c| Self::build_internal_node(c, v1))
+                            .collect();
+                    }
+                    nodes.into_iter().next().unwrap()
+                }
+            }
+            _ => panic!("finalize_dag_node called on non-DagPb hasher"),
+        }
+    }
+
     /// Finalize the hasher and return the computed `ItemHash`.
     pub fn finalize(self) -> ItemHash {
         match self {
@@ -322,46 +382,18 @@ impl Hasher {
                 let cid = Cid::try_from(computed_cid_str.as_str()).expect("valid computed CID");
                 ItemHash::Ipfs(cid)
             }
-            Self::DagPb {
-                buffer,
-                mut leaves,
-                raw_leaves,
-            } => {
-                let make_leaf = |chunk: &[u8]| {
-                    if raw_leaves {
-                        Self::build_raw_leaf(chunk)
-                    } else {
-                        Self::build_leaf(chunk)
-                    }
-                };
+            Self::DagPb { .. } => {
+                let root_node = self.finalize_dag_node();
+                let root_cid_bytes = root_node.cid_bytes;
 
-                // Flush any remaining bytes in buffer as the last chunk
-                if !buffer.is_empty() {
-                    leaves.push(make_leaf(&buffer));
-                }
-
-                let v1 = raw_leaves;
-
-                let root_cid_bytes = if leaves.is_empty() {
-                    make_leaf(&[]).cid_bytes
-                } else if leaves.len() == 1 {
-                    leaves.into_iter().next().unwrap().cid_bytes
-                } else {
-                    let mut nodes = leaves;
-                    while nodes.len() > 1 {
-                        nodes = nodes
-                            .chunks(MAX_LINKS)
-                            .map(|c| Self::build_internal_node(c, v1))
-                            .collect();
-                    }
-                    nodes.into_iter().next().unwrap().cid_bytes
-                };
-
-                let computed_cid_str = if v1 {
+                // CIDv1 binary starts with 0x01 (version byte); CIDv0 bare
+                // multihash starts with 0x12 (sha2-256 code).
+                let computed_cid_str = if root_cid_bytes.first() == Some(&0x01) {
                     let lib_cid =
                         LibCid::try_from(&root_cid_bytes[..]).expect("valid CIDv1 from build");
                     lib_cid.to_string()
                 } else {
+                    // CIDv0: bare multihash (raw_leaves=false)
                     bs58::encode(&root_cid_bytes).into_string()
                 };
 
@@ -867,5 +899,23 @@ mod tests {
         let hash = hasher.finalize();
         let expected_cid = compute_cid(&data);
         assert_eq!(hash, ItemHash::Ipfs(expected_cid));
+    }
+
+    #[test]
+    fn for_ipfs_v1_raw_leaves_hashes_short_input() {
+        let mut h = Hasher::for_ipfs_v1_raw_leaves();
+        h.update(b"hello\n");
+        let item = h.finalize();
+        let cid = match item {
+            ItemHash::Ipfs(c) => c,
+            _ => panic!("expected ItemHash::Ipfs"),
+        };
+        // CIDv1 raw for "hello\n" (6 bytes): SHA-256("hello\n") = 5891b5b5...
+        // encoded as [0x01, 0x55, 0x12, 0x20, ...digest...] in base32lower.
+        // Verified: printf 'hello\n' | sha256sum gives 5891b5b5...
+        assert_eq!(
+            cid.to_string(),
+            "bafkreicysg23kiwv34eg2d7qweipxwosdo2py4ldv42nbauguluen5v6am"
+        );
     }
 }

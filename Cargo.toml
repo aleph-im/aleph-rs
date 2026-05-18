@@ -22,6 +22,7 @@ alloy-signer-local = { version = "1.8" }
 alloy-rpc-types-eth = { version = "1.8" }
 alloy-node-bindings = { version = "1.8" }
 memsizes = { version = "1.0.0", features = ["serde"] }
+murmur3 = { version = "0.5" }
 async-trait = { version = "0.1" }
 anyhow = { version = "1.0.100" }
 async-stream = { version = "0.3" }
