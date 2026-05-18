@@ -28,9 +28,9 @@ pub struct VmImagesData {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImageEntry {
     pub hash: ItemHash,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
     pub deprecated: bool,
@@ -39,11 +39,11 @@ pub struct ImageEntry {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RootfsEntry {
     pub hash: ItemHash,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_disk_mib: Option<u64>,
     #[serde(default)]
     pub deprecated: bool,
@@ -51,11 +51,11 @@ pub struct RootfsEntry {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct VmImageDefaults {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
 }
 
@@ -324,5 +324,17 @@ mod tests {
             "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
         );
         assert!(round_tripped.vm_images.rootfs.get("old-image").unwrap().deprecated);
+    }
+
+    #[test]
+    fn serialize_omits_none_option_fields() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let json = serde_json::to_string(&agg).unwrap();
+        // ubuntu22 has no display_name in the fixture; the round-trip must not emit "null".
+        assert!(!json.contains(r#""display_name":null"#), "json = {json}");
+        // defaults.runtime is unset in the fixture; same property for the defaults block.
+        assert!(!json.contains(r#""runtime":null"#), "json = {json}");
+        // defaults.rootfs IS set ("ubuntu24"); make sure we still emit it.
+        assert!(json.contains(r#""rootfs":"ubuntu24""#), "json = {json}");
     }
 }
