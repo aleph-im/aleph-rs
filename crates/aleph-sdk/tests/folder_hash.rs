@@ -90,9 +90,6 @@ fn fixture_threshold_above(root: &Path) {
 }
 
 fn fixture_hamt_multi_level(root: &Path) {
-    // The collision pair is discovered by the find_hamt_collision example in Task 9.
-    // Until then, both files are empty and this fixture won't be exercised
-    // (test is #[ignore]'d).
     let collision_a = include_str!("hamt_collision_a.txt").trim();
     let collision_a = include_str!("hamt_collision_a.txt").trim();
     if !collision_a.is_empty() && !collision_b.is_empty() {
