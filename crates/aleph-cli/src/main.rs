@@ -1,6 +1,6 @@
 use crate::cli::Cli;
 use aleph_sdk::client::AlephClient;
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::{CommandFactory, FromArgMatches};
 use std::sync::OnceLock;
 
 mod account;
@@ -57,6 +57,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    #[allow(unused_mut)]
     let mut cmd = Cli::command();
     #[cfg(feature = "admin")]
     {
