@@ -1,0 +1,134 @@
+[package]
+name = "aleph-ccn"
+version = "0.1.0"
+edition = "2024"
+description = "Reference Rust port of pyaleph — Aleph.im Core Channel Node"
+license = "MIT"
+
+[[bin]]
+name = "aleph-ccn"
+path = "src/main.rs"
+
+[lib]
+name = "aleph_ccn"
+path = "src/lib.rs"
+
+[dependencies]
+aleph-types = { path = "../aleph-types", features = ["account-evm", "signature-sol"] }
+aleph-sdk = { path = "../aleph-sdk" }
+
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "sync", "time", "signal", "process"] }
+tokio-stream = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+
+axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+hyper = { version = "1", features = ["full"] }
+
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+deadpool-postgres = { version = "0.14" }
+postgres-types = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-serde_json-1"] }
+refinery = { version = "0.8", features = ["tokio-postgres"] }
+
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_with = { workspace = true }
+serde_yaml = "0.9"
+
+chrono = { workspace = true, features = ["serde"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+clap = { workspace = true }
+config = { version = "0.15", default-features = false, features = ["yaml"] }
+
+hex = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+base58 = "0.2"
+bs58 = { workspace = true }
+base64 = { workspace = true }
+
+# Cryptography for chain signature verification.
+# - ed25519-dalek: Solana, Tezos Ed25519 keys (tz1).
+# - k256: secp256k1 for Avalanche, Cosmos, NULS, NULS2, Tezos secp keys (tz2).
+# - p256: Tezos P-256 keys (tz3).
+# - ripemd: RIPEMD-160 for Avalanche/NULS address derivation.
+# - bech32: Cosmos / Avalanche bech32 address parsing.
+# - schnorrkel: Substrate (DOT) sr25519 signatures.
+# - blake2: required by Substrate/Tezos for address hashing.
+ed25519-dalek = { workspace = true }
+k256 = { workspace = true }
+p256 = { workspace = true }
+ripemd = "0.1"
+bech32 = "0.11"
+schnorrkel = { version = "0.11", default-features = false, features = ["std", "preaudit_deprecated"] }
+blake2 = "0.10"
+
+# EVM RPC: used by `chains::ethereum::EthereumConnector` (fetcher/packer).
+alloy-primitives = { workspace = true }
+alloy-provider = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-sol-types = { workspace = true }
+alloy-contract = { workspace = true }
+alloy-network = { workspace = true }
+alloy-signer-local = { workspace = true }
+
+rust_decimal = { version = "1", features = ["serde-with-str", "db-postgres"] }
+bigdecimal = "0.4"
+num-bigint = "0.4"
+
+url = { workspace = true }
+percent-encoding = "2"
+reqwest = { workspace = true }
+
+cid = { workspace = true }
+multihash = { workspace = true }
+multihash-codetable = { workspace = true }
+
+parking_lot = "0.12"
+dashmap = "6"
+once_cell = "1"
+
+# RSA keypair generation for the node identity (services::keys).
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+
+# Optional / pinned features
+redis = { version = "0.27", features = ["tokio-comp", "aio", "connection-manager"] }
+bytes = { workspace = true }
+async-stream = { workspace = true }
+lapin = { version = "2", default-features = false, features = ["rustls", "rustls-native-certs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+assert_matches = { workspace = true }
+rstest = { workspace = true }
+serial_test = "3"
+http = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+tracing-subscriber = { version = "0.3" }
+# Integration test infrastructure: real Postgres via Docker, plus a
+# thin axum router-test helper. testcontainers tests are gated behind
+# `#[ignore]` so the default `cargo test` run remains hermetic.
+testcontainers = "0.20"
+testcontainers-modules = { version = "0.8", features = ["postgres"] }
+axum-test = "17"
+# Embedded PostgreSQL — downloads a postgres binary at test time so the E2E
+# suite can run without a Docker daemon. Used by tests/common when
+# `start_postgres()` falls back to non-Docker mode.
+postgresql_embedded = { version = "0.20", default-features = false, features = ["rustls", "tokio", "zonky"] }
+# WebSocket client used by `tests/ws_*.rs` integration tests to drive the
+# `/api/ws0/*` endpoints exposed by the controllers crate.
+tokio-tungstenite = { version = "0.26" }
+
+[features]
+default = []
+# Enables `tests/db_smoke.rs` end-to-end test (requires a docker daemon).
+_e2e = []

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/aleph-ccn",
     "crates/aleph-cli",
     "crates/aleph-sdk",
     "crates/aleph-types",

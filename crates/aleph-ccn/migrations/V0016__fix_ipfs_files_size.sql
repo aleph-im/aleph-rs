@@ -1,0 +1,4 @@
+-- no-op revision: 77e68941d36c
+-- Original migration was a Python-only IPFS stat backfill that contacted an IPFS node
+-- to populate missing file sizes. Cannot be ported to pure SQL; sizes will be
+-- populated as files are re-fetched at runtime.

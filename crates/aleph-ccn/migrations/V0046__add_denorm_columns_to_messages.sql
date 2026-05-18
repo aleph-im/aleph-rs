@@ -1,0 +1,10 @@
+ALTER TABLE messages ADD COLUMN status VARCHAR;
+ALTER TABLE messages ADD COLUMN reception_time TIMESTAMPTZ;
+ALTER TABLE messages ADD COLUMN owner VARCHAR;
+ALTER TABLE messages ADD COLUMN content_type VARCHAR;
+ALTER TABLE messages ADD COLUMN content_ref VARCHAR;
+ALTER TABLE messages ADD COLUMN content_key VARCHAR;
+ALTER TABLE messages ADD COLUMN content_item_hash VARCHAR;
+ALTER TABLE messages ADD COLUMN first_confirmed_at TIMESTAMPTZ;
+ALTER TABLE messages ADD COLUMN first_confirmed_height BIGINT;
+ALTER TABLE messages ADD COLUMN payment_type VARCHAR;
