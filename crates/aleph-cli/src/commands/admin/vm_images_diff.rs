@@ -169,7 +169,7 @@ fn render_rootfs_diff(out: &mut String, b: &RootfsEntry, a: &RootfsEntry, indent
         &b.display_name,
         &a.display_name,
     );
-    diff_opt_string(out, indent, "description ", &b.description, &a.description);
+    diff_opt_string(out, indent, "description", &b.description, &a.description);
     diff_opt_u64(out, indent, "min_disk_mib", b.min_disk_mib, a.min_disk_mib);
     if b.deprecated != a.deprecated {
         let _ = writeln!(
@@ -191,7 +191,7 @@ fn render_image_diff(out: &mut String, b: &ImageEntry, a: &ImageEntry, indent: &
         &b.display_name,
         &a.display_name,
     );
-    diff_opt_string(out, indent, "description ", &b.description, &a.description);
+    diff_opt_string(out, indent, "description", &b.description, &a.description);
     if b.deprecated != a.deprecated {
         let _ = writeln!(
             out,
