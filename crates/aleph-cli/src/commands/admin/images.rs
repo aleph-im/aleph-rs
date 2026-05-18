@@ -9,14 +9,14 @@ use url::Url;
 
 use crate::cli::{
     AdminEntryByNameArgs, AdminRootfsUpdateArgs, AdminRuntimeAddArgs, AdminRuntimeUpdateArgs,
-    AdminTargetArgs, ImagesCommand, ImagesFirmwareCommand, ImagesRootfsCommand, ImagesRuntimeCommand,
+    AdminTargetArgs, ImagesCommand, ImagesFirmwareCommand, ImagesRootfsCommand,
+    ImagesRuntimeCommand,
 };
 use crate::commands::admin::vm_images_diff::render_diff;
 use crate::commands::admin::vm_images_mutate::{
-    apply_mutation, AdminImagesError, EntryPatch, Kind, Mutation, NewEntry,
+    AdminImagesError, EntryPatch, Kind, Mutation, NewEntry, apply_mutation,
 };
 use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
-
 
 pub async fn handle_images_command(
     aleph_client: &AlephClient,
@@ -29,24 +29,12 @@ pub async fn handle_images_command(
             handle_rootfs(aleph_client, ccn_url, json, command).await
         }
         ImagesCommand::Runtime { command } => {
-            handle_runtime_or_firmware(
-                aleph_client,
-                ccn_url,
-                json,
-                Kind::Runtime,
-                command.into(),
-            )
-            .await
+            handle_runtime_or_firmware(aleph_client, ccn_url, json, Kind::Runtime, command.into())
+                .await
         }
         ImagesCommand::Firmware { command } => {
-            handle_runtime_or_firmware(
-                aleph_client,
-                ccn_url,
-                json,
-                Kind::Firmware,
-                command.into(),
-            )
-            .await
+            handle_runtime_or_firmware(aleph_client, ccn_url, json, Kind::Firmware, command.into())
+                .await
         }
     }
 }
@@ -72,9 +60,7 @@ async fn handle_rootfs(
             };
             run_mutation(client, ccn_url, json, &args.target, mutation).await
         }
-        ImagesRootfsCommand::Update(args) => {
-            run_rootfs_update(client, ccn_url, json, args).await
-        }
+        ImagesRootfsCommand::Update(args) => run_rootfs_update(client, ccn_url, json, args).await,
         ImagesRootfsCommand::Deprecate(args) => {
             let mutation = Mutation::Deprecate {
                 kind: Kind::Rootfs,
@@ -97,9 +83,7 @@ async fn handle_rootfs(
             run_mutation(client, ccn_url, json, &args.target, mutation).await
         }
         ImagesRootfsCommand::ClearDefault(target) => {
-            let mutation = Mutation::ClearDefault {
-                kind: Kind::Rootfs,
-            };
+            let mutation = Mutation::ClearDefault { kind: Kind::Rootfs };
             run_mutation(client, ccn_url, json, &target, mutation).await
         }
     }
@@ -252,7 +236,10 @@ async fn run_mutation(
         Some(s) => resolve_address(s)?,
         None => PRICING_ADDRESS.clone(),
     };
-    let target_key = target.key.clone().unwrap_or_else(|| VM_IMAGES_KEY.to_string());
+    let target_key = target
+        .key
+        .clone()
+        .unwrap_or_else(|| VM_IMAGES_KEY.to_string());
 
     let mut data: VmImagesData = match client
         .get_aggregate::<VmImagesAggregate>(&target_address, &target_key)

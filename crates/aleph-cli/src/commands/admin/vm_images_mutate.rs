@@ -1,6 +1,4 @@
-use aleph_sdk::aggregate_models::vm_images::{
-    ImageEntry, RootfsEntry, VmImagesData,
-};
+use aleph_sdk::aggregate_models::vm_images::{ImageEntry, RootfsEntry, VmImagesData};
 use aleph_types::item_hash::ItemHash;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,10 +107,7 @@ pub enum AdminImagesError {
     NoFieldsToUpdate,
 }
 
-pub fn apply_mutation(
-    data: &mut VmImagesData,
-    mutation: Mutation,
-) -> Result<(), AdminImagesError> {
+pub fn apply_mutation(data: &mut VmImagesData, mutation: Mutation) -> Result<(), AdminImagesError> {
     match mutation {
         Mutation::Add { kind, name, entry } => apply_add(data, kind, name, entry),
         Mutation::Update { kind, name, patch } => apply_update(data, kind, name, patch),
@@ -294,7 +289,11 @@ fn set_deprecated_flag(
     };
     if !exists {
         let available = join_active_names(data, kind);
-        return Err(AdminImagesError::NotFound { kind, name, available });
+        return Err(AdminImagesError::NotFound {
+            kind,
+            name,
+            available,
+        });
     }
     let was = match kind {
         Kind::Rootfs => data.rootfs.get(&name).unwrap().deprecated,
@@ -329,7 +328,11 @@ fn apply_set_default(
     match is_deprecated {
         None => {
             let available = join_active_names(data, kind);
-            Err(AdminImagesError::NotFound { kind, name, available })
+            Err(AdminImagesError::NotFound {
+                kind,
+                name,
+                available,
+            })
         }
         Some(true) => Err(AdminImagesError::DefaultPointsAtDeprecated { name }),
         Some(false) => {
@@ -353,16 +356,8 @@ fn apply_clear_default(data: &mut VmImagesData, kind: Kind) {
 
 fn join_active_names(data: &VmImagesData, kind: Kind) -> String {
     let mut names: Vec<&str> = match kind {
-        Kind::Rootfs => data
-            .active_rootfs()
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect(),
-        Kind::Runtime => data
-            .active_runtimes()
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect(),
+        Kind::Rootfs => data.active_rootfs().into_iter().map(|(n, _)| n).collect(),
+        Kind::Runtime => data.active_runtimes().into_iter().map(|(n, _)| n).collect(),
         Kind::Firmware => data
             .active_firmwares()
             .into_iter()
@@ -376,23 +371,17 @@ fn join_active_names(data: &VmImagesData, kind: Kind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aleph_sdk::aggregate_models::vm_images::{
-        ImageEntry, RootfsEntry, VmImagesData,
-    };
+    use aleph_sdk::aggregate_models::vm_images::{ImageEntry, RootfsEntry, VmImagesData};
     use std::str::FromStr;
 
     fn rootfs_hash() -> ItemHash {
-        ItemHash::from_str(
-            "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e",
-        )
-        .unwrap()
+        ItemHash::from_str("5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e")
+            .unwrap()
     }
 
     fn other_hash() -> ItemHash {
-        ItemHash::from_str(
-            "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c",
-        )
-        .unwrap()
+        ItemHash::from_str("4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c")
+            .unwrap()
     }
 
     fn rootfs_entry() -> RootfsEntry {
@@ -641,7 +630,11 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            AdminImagesError::NotFound { kind, name, available } => {
+            AdminImagesError::NotFound {
+                kind,
+                name,
+                available,
+            } => {
                 assert_eq!(kind, Kind::Rootfs);
                 assert_eq!(name, "nope");
                 assert!(available.contains("ubuntu24"));
@@ -899,13 +892,7 @@ mod tests {
         let mut data = VmImagesData::default();
         data.defaults.rootfs = Some("ubuntu24".into());
 
-        apply_mutation(
-            &mut data,
-            Mutation::ClearDefault {
-                kind: Kind::Rootfs,
-            },
-        )
-        .unwrap();
+        apply_mutation(&mut data, Mutation::ClearDefault { kind: Kind::Rootfs }).unwrap();
         assert!(data.defaults.rootfs.is_none());
     }
 

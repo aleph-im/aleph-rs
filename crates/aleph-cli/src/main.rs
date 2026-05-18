@@ -65,8 +65,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let matches = cmd.get_matches();
-    let cli = Cli::from_arg_matches(&matches)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let cli =
+        Cli::from_arg_matches(&matches).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let json = cli.json;
 
     // Completions subcommand short-circuits: no network or config resolution
@@ -167,13 +167,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Admin {
             command: admin_command,
         } => {
-            commands::admin::handle_admin_command(
-                &aleph_client,
-                &ccn_url,
-                json,
-                admin_command,
-            )
-            .await?
+            commands::admin::handle_admin_command(&aleph_client, &ccn_url, json, admin_command)
+                .await?
         }
         cli::Commands::Config { .. } => unreachable!(),
         cli::Commands::Completions { .. } => unreachable!(),

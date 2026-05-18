@@ -22,7 +22,11 @@ fn render_rootfs_section(
     before: &BTreeMap<String, RootfsEntry>,
     after: &BTreeMap<String, RootfsEntry>,
 ) {
-    let names: BTreeSet<&str> = before.keys().chain(after.keys()).map(String::as_str).collect();
+    let names: BTreeSet<&str> = before
+        .keys()
+        .chain(after.keys())
+        .map(String::as_str)
+        .collect();
     let mut body = String::new();
     for name in names {
         match (before.get(name), after.get(name)) {
@@ -57,7 +61,11 @@ fn render_image_section(
     before: &BTreeMap<String, ImageEntry>,
     after: &BTreeMap<String, ImageEntry>,
 ) {
-    let names: BTreeSet<&str> = before.keys().chain(after.keys()).map(String::as_str).collect();
+    let names: BTreeSet<&str> = before
+        .keys()
+        .chain(after.keys())
+        .map(String::as_str)
+        .collect();
     let mut body = String::new();
     for name in names {
         match (before.get(name), after.get(name)) {
@@ -87,11 +95,7 @@ fn render_image_section(
     }
 }
 
-fn render_defaults_section(
-    out: &mut String,
-    before: &VmImageDefaults,
-    after: &VmImageDefaults,
-) {
+fn render_defaults_section(out: &mut String, before: &VmImageDefaults, after: &VmImageDefaults) {
     let mut lines = String::new();
     render_default_line(&mut lines, "rootfs", &before.rootfs, &after.rootfs);
     render_default_line(&mut lines, "runtime", &before.runtime, &after.runtime);
@@ -158,11 +162,21 @@ fn render_rootfs_diff(out: &mut String, b: &RootfsEntry, a: &RootfsEntry, indent
     if b.hash != a.hash {
         let _ = writeln!(out, "{indent}hash:         {} -> {}", b.hash, a.hash);
     }
-    diff_opt_string(out, indent, "display_name", &b.display_name, &a.display_name);
+    diff_opt_string(
+        out,
+        indent,
+        "display_name",
+        &b.display_name,
+        &a.display_name,
+    );
     diff_opt_string(out, indent, "description ", &b.description, &a.description);
     diff_opt_u64(out, indent, "min_disk_mib", b.min_disk_mib, a.min_disk_mib);
     if b.deprecated != a.deprecated {
-        let _ = writeln!(out, "{indent}deprecated:   {} -> {}", b.deprecated, a.deprecated);
+        let _ = writeln!(
+            out,
+            "{indent}deprecated:   {} -> {}",
+            b.deprecated, a.deprecated
+        );
     }
 }
 
@@ -170,10 +184,20 @@ fn render_image_diff(out: &mut String, b: &ImageEntry, a: &ImageEntry, indent: &
     if b.hash != a.hash {
         let _ = writeln!(out, "{indent}hash:         {} -> {}", b.hash, a.hash);
     }
-    diff_opt_string(out, indent, "display_name", &b.display_name, &a.display_name);
+    diff_opt_string(
+        out,
+        indent,
+        "display_name",
+        &b.display_name,
+        &a.display_name,
+    );
     diff_opt_string(out, indent, "description ", &b.description, &a.description);
     if b.deprecated != a.deprecated {
-        let _ = writeln!(out, "{indent}deprecated:   {} -> {}", b.deprecated, a.deprecated);
+        let _ = writeln!(
+            out,
+            "{indent}deprecated:   {} -> {}",
+            b.deprecated, a.deprecated
+        );
     }
 }
 
@@ -187,7 +211,12 @@ fn diff_opt_string(
     if before == after {
         return;
     }
-    let _ = writeln!(out, "{indent}{label}: {} -> {}", opt_str(before), opt_str(after));
+    let _ = writeln!(
+        out,
+        "{indent}{label}: {} -> {}",
+        opt_str(before),
+        opt_str(after)
+    );
 }
 
 fn diff_opt_u64(
@@ -200,7 +229,12 @@ fn diff_opt_u64(
     if before == after {
         return;
     }
-    let _ = writeln!(out, "{indent}{label}: {} -> {}", opt_num(before), opt_num(after));
+    let _ = writeln!(
+        out,
+        "{indent}{label}: {} -> {}",
+        opt_num(before),
+        opt_num(after)
+    );
 }
 
 fn opt_str(v: &Option<String>) -> String {
@@ -224,16 +258,12 @@ mod tests {
     use std::str::FromStr;
 
     fn h1() -> ItemHash {
-        ItemHash::from_str(
-            "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e",
-        )
-        .unwrap()
+        ItemHash::from_str("5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e")
+            .unwrap()
     }
     fn h2() -> ItemHash {
-        ItemHash::from_str(
-            "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c",
-        )
-        .unwrap()
+        ItemHash::from_str("4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c")
+            .unwrap()
     }
 
     #[test]

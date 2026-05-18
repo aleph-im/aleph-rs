@@ -320,10 +320,23 @@ mod tests {
             Some("ubuntu24")
         );
         assert_eq!(
-            round_tripped.vm_images.rootfs.get("ubuntu24").unwrap().hash.to_string(),
+            round_tripped
+                .vm_images
+                .rootfs
+                .get("ubuntu24")
+                .unwrap()
+                .hash
+                .to_string(),
             "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
         );
-        assert!(round_tripped.vm_images.rootfs.get("old-image").unwrap().deprecated);
+        assert!(
+            round_tripped
+                .vm_images
+                .rootfs
+                .get("old-image")
+                .unwrap()
+                .deprecated
+        );
     }
 
     #[test]
