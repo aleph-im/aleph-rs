@@ -315,6 +315,7 @@ dependencies = [
  "toml",
  "url",
  "walkdir",
+ "wiremock",
  "zeroize",
 ]
 

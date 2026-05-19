@@ -139,11 +139,64 @@ pub async fn submit_or_preview(
     )
 }
 
+/// Report the outcome of an authenticated file upload (`/api/v0/{storage,ipfs}/add_file`).
+///
+/// The upload endpoint returns 2xx once the file is pinned and the STORE
+/// message has been queued for ingest; it does NOT carry final processing
+/// status in the response body. To avoid lying to the user when the message
+/// is subsequently rejected (e.g. insufficient credits), we follow up with a
+/// status fetch via `get_message` and surface the real outcome.
+///
+/// On `Rejected`, bails with a formatted error mirroring `submit_or_preview`.
+/// On any other variant, prints the standard submission envelope.
+pub async fn report_authenticated_upload_status(
+    client: &aleph_sdk::client::AlephClient,
+    ccn_url: &Url,
+    pending: &PendingMessage,
+    json: bool,
+) -> Result<()> {
+    let status = client.get_message(&pending.item_hash).await?;
+    match status {
+        MessageWithStatus::Rejected { error_code, .. } => {
+            let explorer = format!("{}api/v0/messages/{}", ccn_url.as_str(), pending.item_hash);
+            if json {
+                let envelope = serde_json::json!({
+                    "error": "message rejected",
+                    "rejection_code": error_code,
+                    "rejection_reason": describe_rejection_error_code(error_code),
+                    "item_hash": pending.item_hash.to_string(),
+                    "explorer_url": explorer,
+                });
+                println!("{}", serde_json::to_string_pretty(&envelope)?);
+                bail!("Message rejected by the CCN (error code {error_code})");
+            }
+            bail!(
+                "Message rejected by the CCN: {reason} (error code {error_code}).\nSee: {explorer}",
+                reason = describe_rejection_error_code(error_code),
+            );
+        }
+        MessageWithStatus::Processed { .. } => {
+            print_submission_result(ccn_url, pending, "success", "processed", json)
+        }
+        MessageWithStatus::Pending { .. } => {
+            print_submission_result(ccn_url, pending, "success", "pending", json)
+        }
+        MessageWithStatus::Removing { .. } => {
+            print_submission_result(ccn_url, pending, "success", "removing", json)
+        }
+        MessageWithStatus::Removed { .. } => {
+            print_submission_result(ccn_url, pending, "success", "removed", json)
+        }
+        MessageWithStatus::Forgotten { .. } => {
+            print_submission_result(ccn_url, pending, "success", "forgotten", json)
+        }
+    }
+}
+
 /// Emit the CLI's standard "message submitted" envelope.
 ///
-/// Used by both the generic `submit_or_preview` path and the authenticated
-/// file-upload path, which gets a server-side guarantee that the message has
-/// been processed but no structured status response body to draw from.
+/// Used by `submit_or_preview` and by `report_authenticated_upload_status`
+/// for the post-upload status fetch.
 pub fn print_submission_result(
     ccn_url: &Url,
     pending: &PendingMessage,
