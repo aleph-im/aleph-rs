@@ -171,7 +171,7 @@ pub async fn report_authenticated_upload_status(
                 bail!("Message rejected by the CCN (error code {error_code})");
             }
             bail!(
-                "Message rejected by the CCN: {reason} (error code {error_code}). See: {explorer}",
+                "Message rejected by the CCN: {reason} (error code {error_code}).\nSee: {explorer}",
                 reason = describe_rejection_error_code(error_code),
             );
         }
