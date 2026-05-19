@@ -140,7 +140,7 @@ fn file_upload_json_emits_submission_envelope() {
 async fn ipfs_upload_uses_authenticated_request_and_no_separate_post() {
     use std::io::Write;
     use tempfile::NamedTempFile;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     let bytes: &[u8] = b"hello";
@@ -156,6 +156,27 @@ async fn ipfs_upload_uses_authenticated_request_and_no_separate_post() {
     Mock::given(method("POST"))
         .and(path("/api/v0/ipfs/add_file"))
         .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // After the authenticated upload, the CLI fetches message status via
+    // `GET /api/v0/messages/{hash}` to catch the case where the upload
+    // succeeded HTTP-wise but the STORE message was rejected (e.g. insufficient
+    // credits on pyaleph). Mock a Pending response here: the test's actual
+    // intent is to assert the request shape below, not the specific status.
+    // The simpler Pending payload avoids constructing a full Message JSON.
+    let test_sender = EvmAccount::new(Chain::Ethereum, &TEST_KEY)
+        .unwrap()
+        .address()
+        .as_str()
+        .to_string();
+    let pending_body = format!(
+        r#"{{"status":"pending","messages":[{{"sender":"{test_sender}","chain":"ETH","signature":null,"item_type":"inline","item_content":"{{}}","type":"STORE","item_hash":"0000000000000000000000000000000000000000000000000000000000000000","time":"2026-05-19T00:00:00Z","channel":null,"content":null}}]}}"#
+    );
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v0/messages/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(pending_body))
         .expect(1)
         .mount(&server)
         .await;
@@ -218,7 +239,9 @@ async fn ipfs_upload_uses_authenticated_request_and_no_separate_post() {
     assert!(envelope["time"].is_number(), "envelope: {envelope}");
     assert!(envelope["explorer_url"].is_string(), "envelope: {envelope}");
     assert_eq!(envelope["publication_status"], "success");
-    assert_eq!(envelope["message_status"], "processed");
+    // Mock returns Pending (see the GET mock above). The point of this test
+    // is the request shape, not the specific message status string.
+    assert_eq!(envelope["message_status"], "pending");
 
     // Verify the request shape: exactly one POST to /api/v0/ipfs/add_file
     // with both `file` and `metadata` parts in the multipart body.
@@ -241,5 +264,95 @@ async fn ipfs_upload_uses_authenticated_request_and_no_separate_post() {
     assert!(
         body.contains(&format!("\"sender\":\"{expected_sender}\"")),
         "metadata should contain expected sender: {body}"
+    );
+}
+
+/// pyaleph's `/api/v0/ipfs/add_file` returns HTTP 200 even when the STORE
+/// message is subsequently rejected (e.g. insufficient credits). The CLI must
+/// follow up with a `GET /api/v0/messages/{hash}` and surface the rejection
+/// as a non-zero exit, instead of lying with "Message processed".
+#[tokio::test]
+async fn ipfs_upload_surfaces_rejection_from_message_status() {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let bytes: &[u8] = b"hello";
+    let expected_cid = aleph_sdk::verify::compute_cid(bytes).to_string();
+
+    let server = MockServer::start().await;
+
+    let upload_body = format!(
+        r#"{{"status":"success","hash":"{expected_cid}","name":"upload","size":{}}}"#,
+        bytes.len()
+    );
+    Mock::given(method("POST"))
+        .and(path("/api/v0/ipfs/add_file"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(upload_body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // GET status returns Rejected with error_code 6 (insufficient credit
+    // balance). This is the exact scenario the user hit in production.
+    let test_sender = EvmAccount::new(Chain::Ethereum, &TEST_KEY)
+        .unwrap()
+        .address()
+        .as_str()
+        .to_string();
+    let rejected_body = format!(
+        r#"{{"status":"rejected","message":{{"sender":"{test_sender}","chain":"ETH","signature":null,"type":"STORE","item_hash":"0000000000000000000000000000000000000000000000000000000000000000","time":1234567890.0,"channel":null,"content":null}},"error_code":6}}"#
+    );
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v0/messages/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rejected_body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(bytes).unwrap();
+    let file_path = tmp.path().to_path_buf();
+
+    let private_key_hex = hex::encode(TEST_KEY);
+    let base_url = server.uri();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_aleph"))
+            .args([
+                "--ccn",
+                &base_url,
+                "file",
+                "upload",
+                "--storage-engine",
+                "ipfs",
+                "--private-key",
+                &private_key_hex,
+                "--chain",
+                "eth",
+                file_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to spawn aleph binary")
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "CLI must exit non-zero on rejected message; got exit {:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rejected") && stderr.contains("6"),
+        "stderr must mention rejection and error code 6, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("insufficient credit balance"),
+        "stderr must describe error code 6 as 'insufficient credit balance', got:\n{stderr}"
     );
 }

@@ -1,7 +1,9 @@
 use crate::cli::{
     FileCommand, FileDownloadArgs, FilePinArgs, FileUploadArgs, PaymentTypeCli, StorageEngineCli,
 };
-use crate::common::{print_submission_result, resolve_account, resolve_address, submit_or_preview};
+use crate::common::{
+    report_authenticated_upload_status, resolve_account, resolve_address, submit_or_preview,
+};
 use aleph_sdk::client::{AlephClient, AlephStorageClient, hash_file};
 use aleph_sdk::messages::StoreBuilder;
 use aleph_sdk::verify::Hasher;
@@ -121,7 +123,11 @@ async fn handle_single_file_upload(
                 .await?;
         }
     }
-    print_submission_result(ccn_url, &pending, "success", "processed", json)?;
+    // The upload endpoint returns 2xx once the file is pinned and the STORE
+    // is queued for ingest. pyaleph may still reject the message after that
+    // (e.g. insufficient credits), so fetch the final status before claiming
+    // success.
+    report_authenticated_upload_status(aleph_client, ccn_url, &pending, json).await?;
 
     Ok(())
 }
