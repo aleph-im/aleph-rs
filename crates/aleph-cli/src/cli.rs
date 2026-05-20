@@ -2076,6 +2076,10 @@ pub struct ProgramUpdateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
+    /// Sign on behalf of another address (requires authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2121,6 +2125,10 @@ pub struct ProgramPersistArgs {
     /// Skip the confirmation prompt for the forget step.
     #[arg(short = 'y', long)]
     pub yes: bool,
+
+    /// Sign on behalf of another address (requires authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
