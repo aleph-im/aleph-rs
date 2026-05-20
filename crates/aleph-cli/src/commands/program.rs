@@ -177,8 +177,10 @@ async fn handle_create(
             print_submission_result(ccn_url, &store_pending, "success", "processed", json)?;
         }
         StorageEngine::Ipfs => {
-            aleph_client.upload_file_to_ipfs(archive.path()).await?;
-            submit_or_preview(aleph_client, ccn_url, &store_pending, false, json).await?;
+            aleph_client
+                .upload_file_to_ipfs(archive.path(), Some(&store_pending), true)
+                .await?;
+            print_submission_result(ccn_url, &store_pending, "success", "processed", json)?;
         }
     }
 
