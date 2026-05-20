@@ -190,7 +190,42 @@ async fn handle_domain_add(
         builder = builder.on_behalf_of(owner_address);
     }
     let pending = builder.build()?;
-    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await?;
+    if !dry_run && !json {
+        print_domain_add_next_steps(&args.domain, kind);
+    }
+    Ok(())
+}
+
+/// Print TTY-only post-add guidance pointing the user at the remaining steps
+/// the aggregate write alone can't accomplish (DNS, content verification).
+///
+/// Aggregate-only: this just records the domain → target mapping. The user
+/// still has to point DNS at the Aleph gateway and wait for propagation
+/// before `https://<domain>` resolves to the content. We don't hardcode the
+/// gateway host because it differs per deployment (mainnet/testnet/custom);
+/// the dashboard is the source of truth.
+fn print_domain_add_next_steps(domain: &str, kind: DomainTargetType) {
+    eprintln!();
+    eprintln!("Domain '{domain}' registered in the aggregate.");
+    eprintln!("Next steps:");
+    eprintln!("  1. Configure DNS for '{domain}' (CNAME or A record) to point at the");
+    eprintln!("     Aleph gateway. The exact target is shown by the Aleph dashboard");
+    eprintln!("     under your website's 'Custom domain' panel.");
+    eprintln!("  2. Wait for DNS propagation, then visit https://{domain}");
+    match kind {
+        DomainTargetType::Ipfs => {
+            eprintln!("  3. Verify the underlying content via the IPFS gateway with the");
+            eprintln!("     CID printed by `aleph website show <name>` (field 'IPFS CID').");
+        }
+        DomainTargetType::Program | DomainTargetType::Instance => {
+            eprintln!("  3. Confirm the underlying program/instance is reachable via the");
+            eprintln!("     usual Aleph runtime URL before troubleshooting DNS.");
+        }
+    }
+    eprintln!(
+        "Use `aleph domain list` to confirm the entry, or `aleph domain remove {domain}` to revert."
+    );
 }
 
 async fn handle_domain_attach(
