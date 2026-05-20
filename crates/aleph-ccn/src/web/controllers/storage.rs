@@ -2,6 +2,8 @@
 //! including the multipart upload pipeline (raw + form-data + optional STORE
 //! metadata).
 
+use std::{path::PathBuf, process};
+
 use axum::Router;
 use axum::body::Body;
 use axum::extract::multipart::Field;
@@ -14,6 +16,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use bytes::Bytes;
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::db::accessors::files::{
     count_file_pins, get_file, get_file_tag, get_message_file_pin, insert_grace_period_file_pin,
@@ -123,22 +126,123 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-async fn read_multipart_field_limited(mut field: Field<'_>, limit: usize) -> WebResult<Vec<u8>> {
-    let mut out = Vec::new();
+struct TempUpload {
+    path: PathBuf,
+    size: usize,
+}
+
+impl Drop for TempUpload {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+enum StorageUpload {
+    Memory(Vec<u8>),
+    Temp(TempUpload),
+}
+
+impl StorageUpload {
+    fn len(&self) -> usize {
+        match self {
+            Self::Memory(bytes) => bytes.len(),
+            Self::Temp(upload) => upload.size,
+        }
+    }
+
+    async fn hash(&self) -> WebResult<String> {
+        match self {
+            Self::Memory(bytes) => Ok(sha256_hex(bytes)),
+            Self::Temp(upload) => sha256_file(&upload.path).await,
+        }
+    }
+
+    async fn write_to_engine(
+        &self,
+        engine: &dyn crate::services::storage::engine::StorageEngine,
+        hash: &str,
+    ) -> WebResult<()> {
+        match self {
+            Self::Memory(bytes) => engine
+                .write(hash, bytes)
+                .await
+                .map_err(|e| WebError::Internal(format!("storage: {e}"))),
+            Self::Temp(upload) => engine
+                .write_file(hash, &upload.path)
+                .await
+                .map_err(|e| WebError::Internal(format!("storage: {e}"))),
+        }
+    }
+}
+
+async fn create_upload_temp_file() -> WebResult<(PathBuf, tokio::fs::File)> {
+    let pid = process::id();
+    for _ in 0..16 {
+        let nonce = rand::random::<u64>();
+        let path = std::env::temp_dir().join(format!("aleph-ccn-storage-upload-{pid}-{nonce}"));
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(WebError::Internal(format!("temp upload file: {e}"))),
+        }
+    }
+    Err(WebError::Internal(
+        "could not create unique upload temp file".into(),
+    ))
+}
+
+async fn stream_field_to_temp_file(
+    mut field: Field<'_>,
+    limit: usize,
+) -> WebResult<TempUpload> {
+    let (path, mut file) = create_upload_temp_file().await?;
+    let mut size = 0usize;
     while let Some(chunk) = field
         .chunk()
         .await
         .map_err(|e| WebError::BadRequest(format!("Multipart error: {e}")))?
     {
-        let next_len = out.len().saturating_add(chunk.len());
-        if next_len > limit {
+        size = size.saturating_add(chunk.len());
+        if size > limit {
+            drop(file);
+            let _ = tokio::fs::remove_file(&path).await;
             return Err(WebError::PayloadTooLarge(format!(
-                "size {next_len} exceeds upload limit {limit}"
+                "size {size} exceeds upload limit {limit}"
             )));
         }
-        out.extend_from_slice(&chunk);
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| WebError::Internal(format!("temp upload write: {e}")))?;
     }
-    Ok(out)
+    file.flush()
+        .await
+        .map_err(|e| WebError::Internal(format!("temp upload flush: {e}")))?;
+    Ok(TempUpload { path, size })
+}
+
+async fn sha256_file(path: &PathBuf) -> WebResult<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| WebError::Internal(format!("temp upload open: {e}")))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| WebError::Internal(format!("temp upload read: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 // ---------------------------------------------------------------------------
@@ -169,12 +273,12 @@ async fn storage_add_file(
         .unwrap_or("")
         .to_string();
 
-    let (file_bytes, metadata_bytes): (Vec<u8>, Option<Vec<u8>>) =
+    let (file_upload, metadata_bytes): (StorageUpload, Option<Vec<u8>>) =
         if content_type.starts_with("multipart/form-data") {
             let mut multipart = Multipart::from_request(request, &())
                 .await
                 .map_err(|e| WebError::BadRequest(format!("Invalid multipart body: {e}")))?;
-            let mut file_bytes: Option<Vec<u8>> = None;
+            let mut file_upload: Option<TempUpload> = None;
             let mut metadata_bytes: Option<Vec<u8>> = None;
             while let Some(field) = multipart
                 .next_field()
@@ -183,8 +287,8 @@ async fn storage_add_file(
             {
                 match field.name() {
                     Some("file") => {
-                        let data = read_multipart_field_limited(field, max_file_size).await?;
-                        file_bytes = Some(data);
+                        let upload = stream_field_to_temp_file(field, max_file_size).await?;
+                        file_upload = Some(upload);
                     }
                     Some("metadata") => {
                         metadata_bytes = Some(
@@ -199,9 +303,9 @@ async fn storage_add_file(
                 }
             }
             (
-                file_bytes.ok_or_else(|| {
+                StorageUpload::Temp(file_upload.ok_or_else(|| {
                     WebError::BadRequest("No 'file' field in multipart request".into())
-                })?,
+                })?),
                 metadata_bytes,
             )
         } else {
@@ -209,7 +313,7 @@ async fn storage_add_file(
             let bytes = axum::body::to_bytes(request.into_body(), max_unauth + 1)
                 .await
                 .map_err(|e| WebError::PayloadTooLarge(e.to_string()))?;
-            (bytes.to_vec(), None)
+            (StorageUpload::Memory(bytes.to_vec()), None)
         };
 
     let limit = if metadata_bytes.is_some() {
@@ -217,10 +321,10 @@ async fn storage_add_file(
     } else {
         max_unauth
     };
-    if file_bytes.len() > limit {
+    if file_upload.len() > limit {
         return Err(WebError::PayloadTooLarge(format!(
             "{} exceeds max file size {limit}",
-            file_bytes.len()
+            file_upload.len()
         )));
     }
 
@@ -236,23 +340,20 @@ async fn storage_add_file(
         }
     };
 
-    let hash = sha256_hex(&file_bytes);
+    let hash = file_upload.hash().await?;
 
     // Auth + balance check, if metadata was attached. Mirrors pyaleph's
     // `_verify_message_signature` + `_verify_user_balance`.
     let has_metadata = parsed_metadata.is_some();
     if let Some(meta) = parsed_metadata.as_ref() {
-        verify_store_metadata(&state, meta, Some(&hash), file_bytes.len(), ItemType::Storage)
+        verify_store_metadata(&state, meta, Some(&hash), file_upload.len(), ItemType::Storage)
             .await?;
     }
 
-    engine
-        .write(&hash, &file_bytes)
-        .await
-        .map_err(|e| WebError::Internal(format!("storage: {e}")))?;
+    file_upload.write_to_engine(&*engine, &hash).await?;
 
     let client = get_db(&state).await?;
-    upsert_file(&**client, &hash, file_bytes.len() as i64, FileType::File).await?;
+    upsert_file(&**client, &hash, file_upload.len() as i64, FileType::File).await?;
     if !has_metadata {
         insert_upload_grace_pin(&**client, &state, &hash).await?;
     }

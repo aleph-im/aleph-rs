@@ -84,6 +84,7 @@ pub fn build_content_handlers(
     cfg: &HandlersConfig,
     storage_engine: Arc<dyn StorageEngine>,
     ipfs: Option<Arc<IpfsService>>,
+    storage_service: Option<Arc<StorageService>>,
 ) -> HashMap<MessageType, Arc<dyn ContentHandler>> {
     let vm_handler: Arc<dyn ContentHandler> = Arc::new(VmMessageHandler::new());
     let post_handler: Arc<dyn ContentHandler> = Arc::new(PostMessageHandler::new(
@@ -93,7 +94,7 @@ pub fn build_content_handlers(
         cfg.credit_balances_post_types.clone(),
         cfg.credit_balances_channels.clone(),
     ));
-    let store_handler: Arc<dyn ContentHandler> = Arc::new(StoreMessageHandler::new(
+    let mut store_handler = StoreMessageHandler::new(
         storage_engine,
         ipfs,
         cfg.storage_grace_period_hours,
@@ -102,7 +103,11 @@ pub fn build_content_handlers(
         cfg.store_files,
         cfg.ipfs_stat_timeout,
         cfg.api_servers.clone(),
-    ));
+    );
+    if let Some(storage_service) = storage_service {
+        store_handler = store_handler.with_storage_service(storage_service);
+    }
+    let store_handler: Arc<dyn ContentHandler> = Arc::new(store_handler);
     let aggregate_handler: Arc<dyn ContentHandler> = Arc::new(AggregateMessageHandler::new());
 
     let mut handlers: HashMap<MessageType, Arc<dyn ContentHandler>> = HashMap::new();
@@ -506,7 +511,12 @@ impl MessageHandler {
         authority_lookup: Arc<dyn AuthorityLookup>,
         cfg: &HandlersConfig,
     ) -> Self {
-        let handlers = build_content_handlers(cfg, storage_engine.clone(), ipfs.clone());
+        let handlers = build_content_handlers(
+            cfg,
+            storage_engine.clone(),
+            ipfs.clone(),
+            Some(storage_service.clone()),
+        );
         Self {
             signature_verifier,
             storage_engine,
@@ -946,7 +956,7 @@ mod tests {
     #[test]
     fn build_content_handlers_covers_all_types() {
         let engine: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::default());
-        let table = build_content_handlers(&make_cfg(), engine, None);
+        let table = build_content_handlers(&make_cfg(), engine, None, None);
         for mt in [
             MessageType::Aggregate,
             MessageType::Forget,

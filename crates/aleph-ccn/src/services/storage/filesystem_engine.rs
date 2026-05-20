@@ -65,6 +65,12 @@ impl StorageEngine for FileSystemStorageEngine {
         fs::write(&path, content).await.map_err(AlephError::Io)
     }
 
+    async fn write_file(&self, filename: &str, source: &Path) -> AlephResult<()> {
+        let path = self.resolve(filename);
+        fs::copy(source, path).await.map_err(AlephError::Io)?;
+        Ok(())
+    }
+
     async fn delete(&self, filename: &str) -> AlephResult<()> {
         let path = self.resolve(filename);
         match fs::remove_file(&path).await {

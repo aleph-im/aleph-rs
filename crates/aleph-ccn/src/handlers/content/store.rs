@@ -22,6 +22,7 @@ use crate::services::cost::{
 use crate::services::cost_validation::validate_balance_for_payment;
 use crate::services::ipfs::IpfsService;
 use crate::services::storage::engine::StorageEngine;
+use crate::storage::StorageService;
 use crate::toolkit::constants::MIB;
 use crate::toolkit::costs::{
     StoreAndProgramFreeInput, are_store_and_program_free, is_credit_only_required,
@@ -163,6 +164,7 @@ pub struct StoreMessageHandler {
     /// HTTP API servers used as a fallback when a `storage`-type file is
     /// missing locally. Mirrors Python's `api-servers` peers list.
     pub api_servers: Vec<String>,
+    pub storage_service: Option<Arc<StorageService>>,
 }
 
 impl StoreMessageHandler {
@@ -185,7 +187,13 @@ impl StoreMessageHandler {
             store_files,
             ipfs_stat_timeout_secs,
             api_servers,
+            storage_service: None,
         }
+    }
+
+    pub fn with_storage_service(mut self, storage_service: Arc<StorageService>) -> Self {
+        self.storage_service = Some(storage_service);
+        self
     }
 
     async fn pin_and_tag_file(
@@ -329,6 +337,43 @@ impl StoreMessageHandler {
             }
         })?;
         if !exists {
+            if let Some(storage_service) = &self.storage_service {
+                match storage_service
+                    .get_hash_content(
+                        &file_hash,
+                        item_type,
+                        Duration::from_secs(15),
+                        4,
+                        true,
+                        true,
+                        self.store_files,
+                    )
+                    .await
+                {
+                    Ok(raw) => {
+                        upsert_file(client, &file_hash, raw.value.len() as i64, FileType::File)
+                            .await
+                            .map_err(|e| MessageProcessingException::InternalError {
+                                errors: vec![format!("DB error upserting file: {e}")],
+                            })?;
+                        return Ok(());
+                    }
+                    Err(crate::AlephError::InvalidMessage(msg)) => {
+                        return Err(MessageProcessingException::InvalidMessageFormat {
+                            errors: vec![msg],
+                        });
+                    }
+                    Err(crate::AlephError::NotFound(_))
+                    | Err(crate::AlephError::Ipfs(_))
+                    | Err(crate::AlephError::P2p(_)) => {}
+                    Err(e) => {
+                        return Err(MessageProcessingException::InternalError {
+                            errors: vec![format!("Storage service fetch failed: {e}")],
+                        });
+                    }
+                }
+            }
+
             // For IPFS we can fetch via the gateway.
             if item_type == ItemType::Ipfs && self.ipfs_enabled {
                 if let Some(ipfs) = &self.ipfs_service {

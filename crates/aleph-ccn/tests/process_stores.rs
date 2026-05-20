@@ -8,19 +8,28 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use base64::Engine as _;
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
 use serde_json::{Value, json};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use aleph_ccn::AlephResult;
 use aleph_ccn::db::accessors::files::{
     count_file_pins, get_file, get_file_tag, get_message_file_pin, is_pinned_file,
 };
 use aleph_ccn::db::models::messages::MessageDb;
 use aleph_ccn::handlers::content::content_handler::ContentHandler;
 use aleph_ccn::handlers::content::store::{IpfsFileStats, StoreMessageHandler, should_pin_on_ipfs};
+use aleph_ccn::services::ipfs::IpfsService;
+use aleph_ccn::services::ipfs::common::IpfsEndpoint;
+use aleph_ccn::services::p2p::jobs::ApiServerLookup;
 use aleph_ccn::services::storage::engine::StorageEngine;
 use aleph_ccn::services::storage::in_memory::InMemoryStorageEngine;
+use aleph_ccn::storage::{StorageService, verify_content_hash_sha256};
 use aleph_ccn::types::channel::Channel;
 use aleph_ccn::types::files::{FileTag, FileType};
 use aleph_ccn::types::message_status::MessageStatus;
@@ -86,6 +95,38 @@ fn handler() -> StoreMessageHandler {
 
 fn handler_with_storage(storage: Arc<dyn StorageEngine>) -> StoreMessageHandler {
     StoreMessageHandler::new(storage, None, 24, 25 * 1024 * 1024, false, true, 5, Vec::new())
+}
+
+struct StaticApiServers(Vec<String>);
+
+#[async_trait::async_trait]
+impl ApiServerLookup for StaticApiServers {
+    async fn get_api_servers(&self) -> AlephResult<Vec<String>> {
+        Ok(self.0.clone())
+    }
+}
+
+fn storage_service(
+    storage: Arc<dyn StorageEngine>,
+    api_servers: Vec<String>,
+) -> Arc<StorageService> {
+    let endpoint = IpfsEndpoint {
+        scheme: "http".into(),
+        host: "127.0.0.1".into(),
+        port: 1,
+        timeout: Duration::from_millis(1),
+    };
+    let ipfs = Arc::new(IpfsService::from_parts(
+        reqwest::Client::new(),
+        None,
+        endpoint.clone(),
+        endpoint,
+    ));
+    Arc::new(
+        StorageService::new(storage, ipfs, Arc::new(StaticApiServers(api_servers)))
+            .with_ipfs_enabled(false)
+            .with_http_p2p_enabled(true),
+    )
 }
 
 #[tokio::test]
@@ -274,6 +315,54 @@ async fn fetch_related_content_storage_reads_from_engine() {
     let stored = file.unwrap();
     assert_eq!(stored.size, "Hello, world!".len() as i64);
     assert_eq!(stored.r#type, FileType::File);
+}
+
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
+async fn fetch_related_content_storage_uses_storage_service_peer_fallback() {
+    let pg = start_postgres().await;
+    let body = b"Hello from peer";
+    let file_hash = verify_content_hash_sha256(body);
+    let peer = MockServer::start().await;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v0/storage/{file_hash}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "content": encoded,
+        })))
+        .expect(1)
+        .mount(&peer)
+        .await;
+
+    let storage = Arc::new(InMemoryStorageEngine::default());
+    let storage_dyn: Arc<dyn StorageEngine> = storage.clone();
+    let h = handler_with_storage(storage_dyn.clone())
+        .with_storage_service(storage_service(storage_dyn, vec![peer.uri()]));
+
+    let msg = store_message(
+        "12635384e43c7af6b3297f6571644c30f3f07ac681bfd14b9c556c63e661a69e",
+        "0xowner",
+        &file_hash,
+        "storage",
+        None,
+        1_700_000_000.0,
+    );
+
+    {
+        let mut client = pg.pool.get().await.unwrap();
+        let tx = client.transaction().await.unwrap();
+        ContentHandler::fetch_related_content(&h, &*tx, &msg).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    assert_eq!(
+        storage.read(&file_hash).await.unwrap().unwrap().as_ref(),
+        body
+    );
+    let client = pg.pool.get().await.unwrap();
+    let file = get_file(&**client, &file_hash).await.unwrap().unwrap();
+    assert_eq!(file.size, body.len() as i64);
 }
 
 #[tokio::test]
