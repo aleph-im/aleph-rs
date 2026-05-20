@@ -495,12 +495,14 @@ async fn handle_update(
     };
 
     // 1. Fetch the existing program message and verify ownership / amend flag.
+    // Compare against `owner()` (= content.address), not `sender`: when the
+    // program was created via delegation, `sender` is the delegate's key.
     let program = fetch_program_message(aleph_client, &args.item_hash).await?;
-    if program.sender != owner_address {
+    if program.owner() != &owner_address {
         bail!(
-            "you are not the owner of program {} (sender: {})",
+            "address {owner_address} does not own program {} (owner: {})",
             args.item_hash,
-            program.sender
+            program.owner()
         );
     }
     let MessageContentEnum::Program(program_content) = program.content() else {
@@ -646,12 +648,14 @@ async fn handle_persist_or_unpersist(
         None => account.address().clone(),
     };
 
+    // Compare against `owner()` (= content.address), not `sender`: when the
+    // program was created via delegation, `sender` is the delegate's key.
     let program = fetch_program_message(aleph_client, &args.item_hash).await?;
-    if program.sender != owner_address {
+    if program.owner() != &owner_address {
         bail!(
-            "you are not the owner of program {} (sender: {})",
+            "address {owner_address} does not own program {} (owner: {})",
             args.item_hash,
-            program.sender
+            program.owner()
         );
     }
     let MessageContentEnum::Program(program_content) = program.content() else {
