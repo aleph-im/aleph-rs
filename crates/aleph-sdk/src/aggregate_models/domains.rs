@@ -29,6 +29,7 @@ pub struct DomainEntry {
     pub program_type: DomainTargetType,
     /// `volume_id` of the website (or program/instance message hash).
     pub message_id: String,
+    #[serde(with = "super::serde_helpers::epoch_secs_lenient")]
     pub updated_at: f64,
     #[serde(default, skip_serializing_if = "is_empty_options")]
     pub options: DomainOptions,
@@ -63,6 +64,28 @@ mod tests {
         assert_eq!(entry.message_id, "vol_abc");
         assert_eq!(entry.options.catch_all_path.as_deref(), Some("/404.html"));
         assert!(agg.get("removed.example.com").unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_dashboard_iso_timestamps() {
+        // The frontend dashboard writes `updated_at` as an RFC-3339 string
+        // instead of the f64 epoch seconds the spec calls for; accept both.
+        let raw = serde_json::json!({
+            "site.example.com": {
+                "type": "ipfs",
+                "programType": "ipfs",
+                "message_id": "vol_abc",
+                "updated_at": "2026-01-18T22:30:40.691Z",
+                "options": {}
+            }
+        });
+        let agg: DomainsAggregate = serde_json::from_value(raw).unwrap();
+        let entry = agg.get("site.example.com").unwrap().as_ref().unwrap();
+        assert!(
+            (entry.updated_at - 1768775440.691).abs() < 1e-3,
+            "got {}",
+            entry.updated_at
+        );
     }
 
     #[test]
