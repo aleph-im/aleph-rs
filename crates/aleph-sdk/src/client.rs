@@ -567,16 +567,33 @@ struct GetMessageResponse {
 }
 
 #[derive(Debug, Copy, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SortBy {
     Time,
     TxTime,
 }
 
-#[derive(Debug, Copy, Clone, Serialize)]
+#[derive(Debug, Copy, Clone)]
 pub enum SortOrder {
     Asc,
     Desc,
 }
+
+impl SortOrder {
+    fn as_i8(self) -> i8 {
+        match self {
+            SortOrder::Asc => 1,
+            SortOrder::Desc => -1,
+        }
+    }
+}
+
+impl Serialize for SortOrder {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i8(self.as_i8())
+    }
+}
+
 impl std::fmt::Display for SortOrder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -2805,6 +2822,18 @@ mod tests {
     use super::*;
     use crate::aggregate_models::corechannel::CORECHANNEL_ADDRESS;
     use aleph_types::{address, channel, item_hash};
+
+    #[test]
+    fn sort_by_serializes_kebab_case() {
+        assert_eq!(serde_json::to_value(SortBy::Time).unwrap(), "time");
+        assert_eq!(serde_json::to_value(SortBy::TxTime).unwrap(), "tx-time");
+    }
+
+    #[test]
+    fn sort_order_serializes_as_signed_int() {
+        assert_eq!(serde_json::to_value(SortOrder::Asc).unwrap(), 1);
+        assert_eq!(serde_json::to_value(SortOrder::Desc).unwrap(), -1);
+    }
 
     #[test]
     fn test_storage_error_display() {
