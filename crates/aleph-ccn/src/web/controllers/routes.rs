@@ -23,7 +23,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .merge(accounts::routes())
         // prices::routes needs the state to wire the auth-token middleware
         // on `/api/v0/price/recalculate` and `/api/v0/price/{item_hash}/recalculate`.
-        .merge(prices::routes(state))
+        .merge(prices::routes(state.clone()))
         .merge(storage::routes())
-        .merge(ipfs::routes())
+        .merge(ipfs::routes(state))
 }

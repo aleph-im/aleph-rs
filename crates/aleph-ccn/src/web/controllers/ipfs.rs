@@ -10,6 +10,7 @@ use std::time::Duration;
 use std::{path::PathBuf, process};
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::multipart::Field;
 use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
@@ -30,10 +31,23 @@ use crate::web::controllers::error::{WebError, WebResult};
 use crate::web::controllers::storage::{StoreMetadata, verify_store_metadata};
 use crate::web::controllers::utils::{broadcast_and_process_message, get_db, json_text_response};
 
-pub fn routes() -> Router<AppState> {
+pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v0/ipfs/add_file", post(ipfs_add_file))
-        .route("/api/v0/ipfs/add_car", post(ipfs_add_car))
+        .route(
+            "/api/v0/ipfs/add_car",
+            post(ipfs_add_car).layer(DefaultBodyLimit::max(car_body_limit(&state))),
+        )
+}
+
+fn car_body_limit(state: &AppState) -> usize {
+    const MULTIPART_METADATA_HEADROOM: u64 = 1024 * 1024;
+    let configured = state
+        .config
+        .ipfs
+        .max_upload_car_size
+        .saturating_add(MULTIPART_METADATA_HEADROOM);
+    usize::try_from(configured).unwrap_or(usize::MAX)
 }
 
 struct TempUpload {

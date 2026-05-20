@@ -90,13 +90,14 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 fn request_body_limit(state: &AppState) -> usize {
+    request_body_limit_for_settings(&state.config)
+}
+
+fn request_body_limit_for_settings(config: &Settings) -> usize {
     const MULTIPART_METADATA_HEADROOM: u64 = 1024 * 1024;
-    let configured = state
-        .config
+    let configured = config
         .storage
         .max_file_size
-        .max(state.config.ipfs.max_upload_file_size)
-        .max(state.config.ipfs.max_upload_car_size)
         .saturating_add(MULTIPART_METADATA_HEADROOM);
     usize::try_from(configured).unwrap_or(usize::MAX)
 }
@@ -112,4 +113,19 @@ pub async fn serve(state: AppState, host: &str, port: u16) -> AlephResult<()> {
         .await
         .map_err(crate::AlephError::Io)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_body_limit_ignores_large_car_upload_cap() {
+        let mut settings = Settings::default();
+        settings.storage.max_file_size = 10;
+        settings.ipfs.max_upload_file_size = 20;
+        settings.ipfs.max_upload_car_size = 1_000_000;
+
+        assert_eq!(request_body_limit_for_settings(&settings), 1024 * 1024 + 10);
+    }
 }
