@@ -283,7 +283,7 @@ fn parse_kv_pairs(s: &str) -> Result<Vec<(&str, &str)>, String> {
         .collect()
 }
 
-fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
+pub(crate) fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
@@ -292,6 +292,7 @@ fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
             let mut mount: Option<String> = None;
             let mut size_mib: Option<u64> = None;
             let mut persistence: Option<VolumePersistence> = None;
+            let mut comment: Option<String> = None;
             for (k, v) in pairs {
                 match k {
                     "name" => name = Some(v.to_string()),
@@ -304,6 +305,7 @@ fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
                             _ => bail!("invalid persistence: '{v}'"),
                         })
                     }
+                    "comment" => comment = Some(v.to_string()),
                     _ => bail!("unknown persistent volume key: '{k}'"),
                 }
             }
@@ -311,7 +313,7 @@ fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
             let mount = mount.context("persistent volume requires mount")?;
             Ok(MachineVolume::Persistent(PersistentVolume {
                 base: BaseVolume {
-                    comment: None,
+                    comment,
                     mount: Some(mount.into()),
                 },
                 parent: None,
@@ -323,7 +325,7 @@ fn parse_persistent_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
         .collect()
 }
 
-fn parse_ephemeral_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
+pub(crate) fn parse_ephemeral_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
@@ -346,7 +348,7 @@ fn parse_ephemeral_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
         .collect()
 }
 
-fn parse_immutable_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
+pub(crate) fn parse_immutable_volumes(specs: &[String]) -> Result<Vec<MachineVolume>> {
     specs
         .iter()
         .map(|spec| {
@@ -927,6 +929,17 @@ mod tests {
         if let MachineVolume::Persistent(v) = &volumes[0] {
             assert_eq!(v.persistence, Some(VolumePersistence::Store));
             assert_eq!(v.name, Some("db".to_string()));
+        } else {
+            panic!("expected persistent volume");
+        }
+    }
+
+    #[test]
+    fn parse_persistent_volume_with_comment() {
+        let specs = vec!["name=db,mount=/var/db,size=500MiB,comment=My database".to_string()];
+        let volumes = parse_persistent_volumes(&specs).unwrap();
+        if let MachineVolume::Persistent(v) = &volumes[0] {
+            assert_eq!(v.base.comment, Some("My database".to_string()));
         } else {
             panic!("expected persistent volume");
         }

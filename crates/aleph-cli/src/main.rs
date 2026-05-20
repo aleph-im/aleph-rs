@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod common;
 mod config;
+mod program;
 
 #[cfg(unix)]
 static ORIGINAL_TERMIOS: OnceLock<libc::termios> = OnceLock::new();
@@ -155,6 +156,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         cli::Commands::Config { .. } => unreachable!(),
         cli::Commands::Completions { .. } => unreachable!(),
+        cli::Commands::Program {
+            command: program_command,
+        } => {
+            commands::program::handle_program_command(
+                &aleph_client,
+                &ccn_url,
+                json,
+                program_command,
+            )
+            .await?
+        }
         cli::Commands::Credit {
             command: credit_command,
         } => {

@@ -537,6 +537,7 @@ impl<'a, A: Account> ProgramBuilder<'a, A> {
 
     pub fn build(self) -> Result<PendingMessage, MessageBuildError> {
         let content = ProgramContent {
+            program_type: Default::default(),
             base: ExecutableContent {
                 allow_amend: self.allow_amend,
                 metadata: self.metadata,
