@@ -187,45 +187,55 @@ async fn handle_domain_add(
     let mut builder =
         AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content).channel(channel);
     if args.on_behalf_of.is_some() {
-        builder = builder.on_behalf_of(owner_address);
+        builder = builder.on_behalf_of(owner_address.clone());
     }
     let pending = builder.build()?;
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await?;
     if !dry_run && !json {
-        print_domain_add_next_steps(&args.domain, kind);
+        print_domain_add_next_steps(&args.domain, kind, &owner_address);
     }
     Ok(())
 }
 
-/// Print TTY-only post-add guidance pointing the user at the remaining steps
-/// the aggregate write alone can't accomplish (DNS, content verification).
+/// Print TTY-only post-add guidance: the aggregate write only records the
+/// `domain -> message_id` mapping; nothing resolves `https://<domain>` until
+/// the user adds the DNS records the Aleph gateway expects.
 ///
-/// Aggregate-only: this just records the domain → target mapping. The user
-/// still has to point DNS at the Aleph gateway and wait for propagation
-/// before `https://<domain>` resolves to the content. We don't hardcode the
-/// gateway host because it differs per deployment (mainnet/testnet/custom);
-/// the dashboard is the source of truth.
-fn print_domain_add_next_steps(domain: &str, kind: DomainTargetType) {
+/// For type=ipfs we print the three concrete records the public.aleph.sh
+/// gateway requires (CNAME for the host, CNAME for `_dnslink.<host>`, TXT
+/// for `_control.<host>` containing the owner address). For program/instance
+/// entries we fall back to a generic pointer since the gateway/record layout
+/// differs.
+fn print_domain_add_next_steps(
+    domain: &str,
+    kind: DomainTargetType,
+    owner: &aleph_types::chain::Address,
+) {
     eprintln!();
     eprintln!("Domain '{domain}' registered in the aggregate.");
-    eprintln!("Next steps:");
-    eprintln!("  1. Configure DNS for '{domain}' (CNAME or A record) to point at the");
-    eprintln!("     Aleph gateway. The exact target is shown by the Aleph dashboard");
-    eprintln!("     under your website's 'Custom domain' panel.");
-    eprintln!("  2. Wait for DNS propagation, then visit https://{domain}");
     match kind {
         DomainTargetType::Ipfs => {
-            eprintln!("  3. Verify the underlying content via the IPFS gateway with the");
-            eprintln!("     CID printed by `aleph website show <name>` (field 'IPFS CID').");
+            eprintln!("To finish wiring it up, create the following DNS records:");
+            eprintln!();
+            eprintln!("  CNAME {domain}");
+            eprintln!("        -> ipfs.public.aleph.sh");
+            eprintln!();
+            eprintln!("  CNAME _dnslink.{domain}");
+            eprintln!("        -> _dnslink.{domain}.static.public.aleph.sh");
+            eprintln!();
+            eprintln!("  TXT   _control.{domain}");
+            eprintln!("        -> {owner}");
+            eprintln!();
+            eprintln!("Once DNS has propagated, https://{domain} will serve the site.");
         }
         DomainTargetType::Program | DomainTargetType::Instance => {
-            eprintln!("  3. Confirm the underlying program/instance is reachable via the");
-            eprintln!("     usual Aleph runtime URL before troubleshooting DNS.");
+            eprintln!("Configure DNS for '{domain}' to point at the Aleph runtime host for");
+            eprintln!("your program/instance, then visit https://{domain} once DNS has");
+            eprintln!("propagated. See the Aleph dashboard for the exact target.");
         }
     }
-    eprintln!(
-        "Use `aleph domain list` to confirm the entry, or `aleph domain remove {domain}` to revert."
-    );
+    eprintln!();
+    eprintln!("Inspect with `aleph domain list`, revert with `aleph domain remove {domain}`.");
 }
 
 async fn handle_domain_attach(
