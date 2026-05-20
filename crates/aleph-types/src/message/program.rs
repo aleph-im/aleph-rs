@@ -48,8 +48,22 @@ pub struct Export {
     pub mount: PathBuf,
 }
 
+/// Machine type discriminator for PROGRAM messages. Always `"vm-function"`.
+///
+/// pyaleph requires this field on the program content; absence is rejected as
+/// `InvalidMessageFormat`. It exists because `MessageType::Program` historically
+/// covered both standard functions and persistent VMs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProgramType {
+    #[default]
+    #[serde(rename = "vm-function")]
+    VmFunction,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgramContent {
+    #[serde(default, rename = "type")]
+    pub program_type: ProgramType,
     #[serde(flatten)]
     pub base: ExecutableContent,
     /// Code to execute.
