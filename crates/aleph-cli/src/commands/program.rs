@@ -195,7 +195,55 @@ async fn handle_create(
     }
     submit_or_preview(aleph_client, ccn_url, &program_pending, false, json).await?;
 
+    if !json {
+        if let Some((host, path)) = vm_run_urls(&program_pending.item_hash) {
+            eprintln!("Try it at:");
+            eprintln!("  {host}");
+            eprintln!("  {path}");
+        }
+    }
+
     Ok(())
+}
+
+/// Build the two aleph.sh URLs that route to a CRN serving the program.
+///
+/// Mirrors aleph-client (Python): `https://aleph.sh/vm/{hex}` and
+/// `https://{base32}.aleph.sh`, where `base32` is the lowercased
+/// no-padding base32 of the 32 raw hash bytes. Only emitted for native
+/// hashes; IPFS-stored content has no matching subdomain form.
+fn vm_run_urls(item_hash: &ItemHash) -> Option<(String, String)> {
+    match item_hash {
+        ItemHash::Native(hash) => {
+            let hex = hash.to_string();
+            let host = format!("https://{}.aleph.sh", base32_lower_nopad(hash.as_bytes()));
+            let path = format!("https://aleph.sh/vm/{hex}");
+            Some((host, path))
+        }
+        ItemHash::Ipfs(_) => None,
+    }
+}
+
+/// RFC 4648 base32 (lowercase, no padding). 32 input bytes -> 52 chars.
+fn base32_lower_nopad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let mut buffer: u32 = 0;
+    let mut bits_in_buffer: u32 = 0;
+    for &byte in bytes {
+        buffer = (buffer << 8) | byte as u32;
+        bits_in_buffer += 8;
+        while bits_in_buffer >= 5 {
+            bits_in_buffer -= 5;
+            let idx = ((buffer >> bits_in_buffer) & 0x1f) as usize;
+            out.push(ALPHABET[idx] as char);
+        }
+    }
+    if bits_in_buffer > 0 {
+        let idx = ((buffer << (5 - bits_in_buffer)) & 0x1f) as usize;
+        out.push(ALPHABET[idx] as char);
+    }
+    out
 }
 
 /// Resolve (vcpus, memory_mib) from either a `--size <slug>` lookup against
@@ -542,6 +590,48 @@ fn build_forget_for_program<A: Account>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base32_lower_nopad_matches_python_b32encode() {
+        // Reference vectors produced with Python:
+        //   import base64
+        //   base64.b32encode(bytes.fromhex(HEX)).rstrip(b"=").lower().decode()
+        let cases = [
+            (
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            (
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "777777777777777777777777777777777777777777777777777q",
+            ),
+            (
+                "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e",
+                "tjdtlpfa2p3qglo5mzm4gu4hwv5uobkqzeyyihtimlwoj2pgki7a",
+            ),
+        ];
+        for (hex, expected) in cases {
+            let bytes = hex::decode(hex).unwrap();
+            assert_eq!(base32_lower_nopad(&bytes), expected, "hex={hex}");
+        }
+    }
+
+    #[test]
+    fn vm_run_urls_emit_both_forms_for_native_hash() {
+        let h = ItemHash::try_from(
+            "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e",
+        )
+        .unwrap();
+        let (host, path) = vm_run_urls(&h).unwrap();
+        assert_eq!(
+            host,
+            "https://tjdtlpfa2p3qglo5mzm4gu4hwv5uobkqzeyyihtimlwoj2pgki7a.aleph.sh"
+        );
+        assert_eq!(
+            path,
+            "https://aleph.sh/vm/9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e"
+        );
+    }
 
     #[test]
     fn parse_env_vars_basic() {
