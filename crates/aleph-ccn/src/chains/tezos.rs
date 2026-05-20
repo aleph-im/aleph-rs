@@ -31,6 +31,7 @@ use crate::AlephResult;
 use crate::config::Settings;
 use crate::db::DbPool;
 use crate::db::accessors::chains::{get_last_height, upsert_chain_sync_status};
+use crate::schemas::chains::tezos_indexer_response::SyncStatus;
 use crate::toolkit::timestamp::timestamp_to_datetime;
 use crate::types::chain_sync::{ChainEventType, ChainSyncProtocol};
 use aleph_types::chain::Chain;
@@ -360,6 +361,26 @@ pub struct TezosIndexerResponse {
     pub data: TezosEventsData,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TezosStatusResponse {
+    pub data: TezosStatusData,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TezosStatusData {
+    #[serde(rename = "indexStatus")]
+    pub index_status: TezosStatus,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TezosStatus {
+    pub status: SyncStatus,
+}
+
+pub fn make_tezos_status_query() -> &'static str {
+    "{indexStatus {status}}"
+}
+
 /// Build the Tezos indexer GraphQL query. Mirrors `make_graphql_query` in pyaleph.
 pub fn make_tezos_query(sync_contract: &str, event_type: &str, limit: u32, skip: u32) -> String {
     format!(
@@ -407,6 +428,15 @@ impl TezosConnector {
             protocol_version: 1,
             content: payload,
         }
+    }
+
+    /// Read the Tezos indexer status. Pyaleph does not advance the cursor
+    /// unless the indexer reports `synced`.
+    pub async fn get_indexer_status(&self, indexer_url: &str) -> AlephResult<SyncStatus> {
+        let body = serde_json::json!({ "query": make_tezos_status_query() });
+        let resp = self.http.post(indexer_url).json(&body).send().await?;
+        let parsed: TezosStatusResponse = resp.json().await?;
+        Ok(parsed.data.index_status.status)
     }
 
     /// Pull a single page of events from the Tezos indexer.
@@ -482,6 +512,23 @@ impl ChainReader for TezosConnector {
         let indexer_url = cfg.tezos.indexer_url.clone();
         let sync_contract = cfg.tezos.sync_contract.clone();
         loop {
+            match self.get_indexer_status(&indexer_url).await {
+                Ok(SyncStatus::Synced) => {}
+                Ok(status) => {
+                    tracing::warn!(
+                        status = ?status,
+                        "Tezos indexer is not yet synced, waiting until it is"
+                    );
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Tezos fetcher: status poll failed");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    continue;
+                }
+            }
+
             let skip = if let Some(pool) = &self.pool {
                 match pool.get().await {
                     Ok(client) => get_last_height(&**client, Chain::Tezos, ChainEventType::Message)
@@ -566,6 +613,30 @@ mod tests {
         assert_eq!(b[0], 0x05);
         assert_eq!(b[1], 0x01);
         assert_eq!(b[2], 0x00);
+    }
+
+    #[tokio::test]
+    async fn tezos_indexer_status_decodes_synced() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        let body = serde_json::json!({
+            "data": {
+                "indexStatus": {
+                    "status": "synced"
+                }
+            }
+        });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&mock)
+            .await;
+
+        let publisher = Arc::new(PendingTxPublisher::new(Box::new(TracingPendingTxSink)));
+        let connector = TezosConnector::new(publisher);
+        let status = connector.get_indexer_status(&mock.uri()).await.unwrap();
+        assert_eq!(status, SyncStatus::Synced);
     }
 
     #[tokio::test]
