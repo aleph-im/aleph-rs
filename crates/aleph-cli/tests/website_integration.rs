@@ -91,7 +91,7 @@ fn website_list_json_round_trip() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aleph"))
         .args([
-            "--ccn-url",
+            "--ccn",
             &base_url,
             "--json",
             "website",
@@ -132,7 +132,7 @@ fn website_show_resolves_ipfs_cid() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aleph"))
         .args([
-            "--ccn-url",
+            "--ccn",
             &base_url,
             "--json",
             "website",
@@ -194,7 +194,7 @@ fn website_deploy_dry_run_snapshot() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aleph"))
         .args([
-            "--ccn-url",
+            "--ccn",
             &base_url,
             "--json",
             "website",
@@ -205,6 +205,8 @@ fn website_deploy_dry_run_snapshot() {
             &volume_id,
             "--private-key",
             "0x0101010101010101010101010101010101010101010101010101010101010101",
+            "--chain",
+            "eth",
             "--dry-run",
         ])
         .output()

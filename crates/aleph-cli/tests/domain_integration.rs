@@ -69,7 +69,7 @@ fn domain_list_json_round_trip() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aleph"))
         .args([
-            "--ccn-url",
+            "--ccn",
             &base_url,
             "--json",
             "domain",
