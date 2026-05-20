@@ -12,11 +12,10 @@ use std::sync::Arc;
 
 use aleph_types::message::MessageType;
 use aleph_types::message::item_type::ItemType;
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use lapin::{BasicProperties, Channel, options::BasicPublishOptions};
 
-use crate::AlephResult;
+use crate::{AlephError, AlephResult};
 use crate::chains::signature_verifier::SignatureVerifier;
 use crate::db::accessors::cost::upsert_costs;
 use crate::db::accessors::files::{insert_content_file_pin, upsert_file};
@@ -37,6 +36,7 @@ use crate::handlers::content::vm::VmMessageHandler;
 use crate::permissions::AuthorityLookup;
 use crate::services::ipfs::IpfsService;
 use crate::services::storage::engine::StorageEngine;
+use crate::storage::StorageService;
 use crate::toolkit::timestamp::{timestamp_to_datetime, utc_now};
 use crate::types::files::FileType;
 use crate::types::message_processing_result::{FailedMessage, ProcessedMessage};
@@ -464,64 +464,26 @@ async fn insert_pending_message_on_conflict_nothing(
 /// `StorageService.get_message_content(pending_message)`.
 async fn fetch_message_content(
     pending: &PendingMessageDb,
-    storage: &Arc<dyn StorageEngine>,
-    ipfs: Option<&Arc<IpfsService>>,
+    storage: &StorageService,
 ) -> Result<(serde_json::Value, usize), MessageProcessingException> {
-    match pending.item_type {
-        ItemType::Inline => {
-            let body = pending.item_content.as_deref().ok_or_else(|| {
-                MessageProcessingException::InvalidMessageFormat {
-                    errors: vec!["Inline message missing item_content".into()],
-                }
-            })?;
-            let v: serde_json::Value = serde_json::from_str(body).map_err(|e| {
-                MessageProcessingException::InvalidMessageFormat {
-                    errors: vec![format!("Invalid inline JSON: {e}")],
-                }
-            })?;
-            Ok((v, body.len()))
-        }
-        ItemType::Storage => {
-            let bytes = storage.read(&pending.item_hash).await.map_err(|e| {
-                MessageProcessingException::InternalError {
-                    errors: vec![format!("Storage read error: {e}")],
-                }
-            })?;
-            let bytes = bytes.ok_or_else(|| {
+    let content = storage
+        .get_message_content(pending)
+        .await
+        .map_err(|e| match e {
+            AlephError::NotFound(_) | AlephError::Ipfs(_) | AlephError::P2p(_) => {
                 MessageProcessingException::message_content_unavailable(pending.item_hash.clone())
-            })?;
-            let len = bytes.len();
-            let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-                MessageProcessingException::InvalidMessageFormat {
-                    errors: vec![format!("Invalid stored JSON: {e}")],
-                }
-            })?;
-            Ok((v, len))
-        }
-        ItemType::Ipfs => {
-            let ipfs = ipfs.ok_or_else(|| {
-                MessageProcessingException::message_content_unavailable(pending.item_hash.clone())
-            })?;
-            let bytes: Option<Bytes> = ipfs
-                .get_ipfs_content(&pending.item_hash, std::time::Duration::from_secs(30), 2)
-                .await
-                .map_err(|_| {
-                    MessageProcessingException::message_content_unavailable(
-                        pending.item_hash.clone(),
-                    )
-                })?;
-            let bytes = bytes.ok_or_else(|| {
-                MessageProcessingException::message_content_unavailable(pending.item_hash.clone())
-            })?;
-            let len = bytes.len();
-            let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-                MessageProcessingException::InvalidMessageFormat {
-                    errors: vec![format!("Invalid IPFS JSON: {e}")],
-                }
-            })?;
-            Ok((v, len))
-        }
-    }
+            }
+            AlephError::InvalidMessage(msg) => {
+                MessageProcessingException::InvalidMessageFormat { errors: vec![msg] }
+            }
+            AlephError::Json(e) => MessageProcessingException::InvalidMessageFormat {
+                errors: vec![e.to_string()],
+            },
+            other => MessageProcessingException::InternalError {
+                errors: vec![format!("Content fetch error: {other}")],
+            },
+        })?;
+    Ok((content.value, content.raw_value.len()))
 }
 
 /// Coordinates verification, fetch, dependency/permission/balance checks and
@@ -530,6 +492,7 @@ pub struct MessageHandler {
     pub signature_verifier: Arc<SignatureVerifier>,
     pub storage_engine: Arc<dyn StorageEngine>,
     pub ipfs: Option<Arc<IpfsService>>,
+    pub storage_service: Arc<StorageService>,
     pub authority_lookup: Arc<dyn AuthorityLookup>,
     pub handlers: HashMap<MessageType, Arc<dyn ContentHandler>>,
 }
@@ -539,6 +502,7 @@ impl MessageHandler {
         signature_verifier: Arc<SignatureVerifier>,
         storage_engine: Arc<dyn StorageEngine>,
         ipfs: Option<Arc<IpfsService>>,
+        storage_service: Arc<StorageService>,
         authority_lookup: Arc<dyn AuthorityLookup>,
         cfg: &HandlersConfig,
     ) -> Self {
@@ -547,6 +511,7 @@ impl MessageHandler {
             signature_verifier,
             storage_engine,
             ipfs,
+            storage_service,
             authority_lookup,
             handlers,
         }
@@ -570,8 +535,7 @@ impl MessageHandler {
         &self,
         pending: &PendingMessageDb,
     ) -> Result<MessageDb, MessageProcessingException> {
-        let (content, size) =
-            fetch_message_content(pending, &self.storage_engine, self.ipfs.as_ref()).await?;
+        let (content, size) = fetch_message_content(pending, &self.storage_service).await?;
         let reception_time = Some(pending.reception_time);
         Ok(MessageDb::from_pending_message(
             pending,
@@ -857,9 +821,15 @@ pub fn now() -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::ipfs::common::IpfsEndpoint;
     use crate::services::storage::in_memory::InMemoryStorageEngine;
+    use crate::storage::{StorageService, verify_content_hash_sha256};
     use aleph_types::chain::Chain;
     use async_trait::async_trait;
+    use base64::Engine as _;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     struct AlwaysAllow;
     #[async_trait]
@@ -873,6 +843,88 @@ mod tests {
         ) -> Option<Box<dyn crate::permissions::MessageForAuth + Send + Sync>> {
             None
         }
+    }
+
+    struct EmptyApiServerLookup;
+
+    #[async_trait]
+    impl crate::services::p2p::jobs::ApiServerLookup for EmptyApiServerLookup {
+        async fn get_api_servers(&self) -> AlephResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct StaticApiServerLookup(Vec<String>);
+
+    #[async_trait]
+    impl crate::services::p2p::jobs::ApiServerLookup for StaticApiServerLookup {
+        async fn get_api_servers(&self) -> AlephResult<Vec<String>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn storage_service(engine: Arc<dyn StorageEngine>) -> StorageService {
+        storage_service_with(
+            engine,
+            Arc::new(EmptyApiServerLookup),
+            false,
+            IpfsEndpoint {
+                scheme: "http".into(),
+                host: "127.0.0.1".into(),
+                port: 1,
+                timeout: Duration::from_millis(1),
+            },
+        )
+    }
+
+    fn storage_service_with(
+        engine: Arc<dyn StorageEngine>,
+        cache: Arc<dyn crate::services::p2p::jobs::ApiServerLookup>,
+        ipfs_enabled: bool,
+        endpoint: IpfsEndpoint,
+    ) -> StorageService {
+        let ipfs = Arc::new(IpfsService::from_parts(
+            reqwest::Client::new(),
+            None,
+            endpoint.clone(),
+            endpoint,
+        ));
+        StorageService::new(engine, ipfs, cache)
+            .with_ipfs_enabled(ipfs_enabled)
+            .with_http_p2p_enabled(true)
+    }
+
+    fn pending_with_item(item_hash: &str, item_type: ItemType) -> PendingMessageDb {
+        PendingMessageDb {
+            id: 1,
+            item_hash: item_hash.into(),
+            r#type: MessageType::Post,
+            chain: Chain::Ethereum,
+            sender: "0xabc".into(),
+            signature: None,
+            item_type,
+            item_content: None,
+            content: None,
+            time: Utc::now(),
+            channel: None,
+            reception_time: Utc::now(),
+            check_message: false,
+            next_attempt: Utc::now(),
+            retries: 0,
+            tx_hash: None,
+            fetched: false,
+            origin: None,
+        }
+    }
+
+    fn ipfs_endpoint(server: &MockServer) -> IpfsEndpoint {
+        let endpoint = IpfsEndpoint {
+            scheme: "http".into(),
+            host: server.address().ip().to_string(),
+            port: server.address().port(),
+            timeout: Duration::from_millis(1),
+        };
+        endpoint
     }
 
     fn make_cfg() -> HandlersConfig {
@@ -939,7 +991,8 @@ mod tests {
             fetched: true,
             origin: Some("p2p".into()),
         };
-        let (v, size) = fetch_message_content(&pending, &engine, None)
+        let storage = storage_service(engine);
+        let (v, size) = fetch_message_content(&pending, &storage)
             .await
             .unwrap();
         assert_eq!(v["address"], "0xabc");
@@ -969,9 +1022,8 @@ mod tests {
             fetched: true,
             origin: None,
         };
-        let err = fetch_message_content(&pending, &engine, None)
-            .await
-            .unwrap_err();
+        let storage = storage_service(engine);
+        let err = fetch_message_content(&pending, &storage).await.unwrap_err();
         assert!(matches!(
             err,
             MessageProcessingException::InvalidMessageFormat { .. }
@@ -1001,13 +1053,93 @@ mod tests {
             fetched: false,
             origin: None,
         };
-        let err = fetch_message_content(&pending, &engine, None)
-            .await
-            .unwrap_err();
+        let storage = storage_service(engine);
+        let err = fetch_message_content(&pending, &storage).await.unwrap_err();
         assert!(matches!(
             err,
             MessageProcessingException::MessageContentUnavailable { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn fetch_message_content_storage_uses_peer_http_fallback() {
+        let body = br#"{"address":"0xabc","time":1.0}"#;
+        let item_hash = verify_content_hash_sha256(body);
+        let peer = MockServer::start().await;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/storage/{item_hash}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "success",
+                "content": encoded,
+            })))
+            .expect(1)
+            .mount(&peer)
+            .await;
+        let engine: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::default());
+        let storage = storage_service_with(
+            engine.clone(),
+            Arc::new(StaticApiServerLookup(vec![peer.uri()])),
+            false,
+            IpfsEndpoint {
+                scheme: "http".into(),
+                host: "127.0.0.1".into(),
+                port: 1,
+                timeout: Duration::from_millis(1),
+            },
+        );
+        let pending = pending_with_item(&item_hash, ItemType::Storage);
+
+        let (value, size) = fetch_message_content(&pending, &storage).await.unwrap();
+
+        assert_eq!(value["address"], "0xabc");
+        assert_eq!(size, body.len());
+        assert!(engine.read(&item_hash).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn fetch_message_content_ipfs_uses_peer_http_before_ipfs_fetch() {
+        let body = br#"{"address":"0xabc","time":1.0}"#;
+        let cid = "QmYwAPJzv5CZsnAzt8auVZRn2xFZ9WMiFjCwXfBvWvD8B";
+        let peer = MockServer::start().await;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/storage/{cid}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "success",
+                "content": encoded,
+            })))
+            .expect(1)
+            .mount(&peer)
+            .await;
+
+        let ipfs = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v0/add"))
+            .and(query_param("cid-version", "0"))
+            .and(query_param("pin", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "{{\"Name\":\"file\",\"Hash\":\"{cid}\",\"Size\":\"{}\"}}\n",
+                body.len()
+            )))
+            .expect(1)
+            .mount(&ipfs)
+            .await;
+
+        let engine: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::default());
+        let storage = storage_service_with(
+            engine.clone(),
+            Arc::new(StaticApiServerLookup(vec![peer.uri()])),
+            true,
+            ipfs_endpoint(&ipfs),
+        );
+        let pending = pending_with_item(cid, ItemType::Ipfs);
+
+        let (value, size) = fetch_message_content(&pending, &storage).await.unwrap();
+
+        assert_eq!(value["address"], "0xabc");
+        assert_eq!(size, body.len());
+        assert!(engine.read(cid).await.unwrap().is_some());
     }
 
     #[test]

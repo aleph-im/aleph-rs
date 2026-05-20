@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -35,8 +36,12 @@ use aleph_ccn::db::models::messages::MessageDb;
 use aleph_ccn::db::models::pending_messages::PendingMessageDb;
 use aleph_ccn::handlers::message_handler::{HandlersConfig, MessageHandler};
 use aleph_ccn::permissions::{AuthorityLookup, MessageForAuth};
+use aleph_ccn::services::ipfs::IpfsService;
+use aleph_ccn::services::ipfs::common::IpfsEndpoint;
+use aleph_ccn::services::p2p::jobs::ApiServerLookup;
 use aleph_ccn::services::p2p::protocol::{Identify, MockP2pClient};
 use aleph_ccn::services::storage::engine::StorageEngine;
+use aleph_ccn::storage::StorageService;
 use aleph_ccn::toolkit::constants::{
     DEFAULT_PRICE_AGGREGATE, DEFAULT_SETTINGS_AGGREGATE, PRICE_AGGREGATE_KEY,
     PRICE_AGGREGATE_OWNER, SETTINGS_AGGREGATE_KEY, SETTINGS_AGGREGATE_OWNER,
@@ -157,6 +162,32 @@ impl AuthorityLookup for StubAuthorityLookup {
             .cloned()
             .map(|m| Box::new(m) as Box<dyn MessageForAuth + Send + Sync>)
     }
+}
+
+struct EmptyApiServerLookup;
+
+#[async_trait]
+impl ApiServerLookup for EmptyApiServerLookup {
+    async fn get_api_servers(&self) -> AlephResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
+fn test_storage_service(storage: Arc<dyn StorageEngine>) -> Arc<StorageService> {
+    let endpoint = IpfsEndpoint {
+        scheme: "http".into(),
+        host: "127.0.0.1".into(),
+        port: 1,
+        timeout: Duration::from_millis(1),
+    };
+    let ipfs = Arc::new(IpfsService::from_parts(
+        reqwest::Client::new(),
+        None,
+        endpoint.clone(),
+        endpoint,
+    ));
+    let cache: Arc<dyn ApiServerLookup> = Arc::new(EmptyApiServerLookup);
+    Arc::new(StorageService::new(storage, ipfs, cache).with_ipfs_enabled(false))
 }
 
 /// Lightweight `MessageForAuth` builder used by permissions tests.
@@ -607,8 +638,9 @@ pub fn build_message_handler(_pool: DbPool) -> Arc<MessageHandler> {
     let signature_verifier = Arc::new(SignatureVerifier::new());
     Arc::new(MessageHandler::new(
         signature_verifier,
-        storage,
+        storage.clone(),
         None,
+        test_storage_service(storage),
         lookup,
         &cfg,
     ))
@@ -639,8 +671,9 @@ pub fn build_message_handler_with_storage(
     let signature_verifier = Arc::new(SignatureVerifier::new());
     Arc::new(MessageHandler::new(
         signature_verifier,
-        storage_dyn,
+        storage_dyn.clone(),
         None,
+        test_storage_service(storage_dyn),
         lookup,
         &cfg,
     ))

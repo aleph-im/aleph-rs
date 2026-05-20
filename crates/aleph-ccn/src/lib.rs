@@ -242,13 +242,6 @@ pub async fn run_with_options(
         .with_storage_engine(job_storage_engine.clone()),
     );
     state.message_publisher = message_publisher.clone();
-    let message_handler = Arc::new(handlers::message_handler::MessageHandler::new(
-        Arc::new(chains::signature_verifier::SignatureVerifier::new()),
-        job_storage_engine.clone(),
-        ipfs_service.clone(),
-        Arc::new(permissions::DbAuthorityLookup::new(pool.clone())),
-        &handlers_config(&cfg),
-    ));
 
     let cancel = jobs::job_utils::CancelToken::new();
     let node_cache = Arc::new(
@@ -272,6 +265,14 @@ pub async fn run_with_options(
         .with_ipfs_enabled(cfg.ipfs.enabled)
         .with_http_p2p_enabled(cfg.p2p.clients.iter().any(|client| client == "http")),
     );
+    let message_handler = Arc::new(handlers::message_handler::MessageHandler::new(
+        Arc::new(chains::signature_verifier::SignatureVerifier::new()),
+        job_storage_engine.clone(),
+        ipfs_service.clone(),
+        chain_storage_service.clone(),
+        Arc::new(permissions::DbAuthorityLookup::new(pool.clone())),
+        &handlers_config(&cfg),
+    ));
     let chain_data_service = Arc::new(chains::chain_data_service::ChainDataService::with_storage(
         chain_storage_service,
     ));
