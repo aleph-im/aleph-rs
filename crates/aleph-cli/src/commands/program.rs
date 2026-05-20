@@ -1191,7 +1191,7 @@ pub(crate) fn render_show_text(
     }
 
     if !volumes.is_empty() {
-        writeln!(out, "VOLUMES (no STORE)").unwrap();
+        writeln!(out, "OTHER VOLUMES").unwrap();
         for v in volumes {
             match v {
                 NonRefVolume::Ephemeral { mount, size_mib } => {
@@ -1782,7 +1782,7 @@ mod tests {
         assert!(out.contains("Latest         ffff"));
         assert!(out.contains("Status         forgotten"));
         assert!(!out.contains("Env vars"));
-        assert!(!out.contains("VOLUMES (no STORE)"));
+        assert!(!out.contains("OTHER VOLUMES"));
     }
 
     #[test]
