@@ -44,6 +44,21 @@ async fn post_json(app: axum::Router, uri: &str, body: serde_json::Value) -> (St
     (status, body)
 }
 
+async fn post_bytes(app: axum::Router, uri: &str, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::from(body))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, body)
+}
+
 async fn insert_file(pool: &aleph_ccn::db::DbPool, hash: &str, size: i64) {
     let client = pool.get().await.unwrap();
     aleph_ccn::db::accessors::files::upsert_file(&**client, hash, size, FileType::File)
@@ -242,6 +257,21 @@ async fn storage_add_file_disabled_or_validates() {
         .await
         .unwrap();
     assert!(response.status().is_client_error());
+}
+
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
+async fn storage_raw_upload_uses_unauthenticated_limit() {
+    let pg = start_postgres().await;
+    let mut state = make_app_state(pg.pool.clone());
+    let config = std::sync::Arc::make_mut(&mut state.config);
+    config.storage.max_file_size = 1024;
+    config.storage.max_unauthenticated_upload_file_size = 8;
+    let app = aleph_ccn::web::build_router(state);
+
+    let (status, _) = post_bytes(app, "/api/v0/storage/add_file", vec![b'x'; 9]).await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]

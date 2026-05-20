@@ -188,9 +188,14 @@ async fn ipfs_add_file(
         && expected_hash != cid
     {
         let client = get_db(&state).await?;
-        let delete_by = utc_now() + chrono::Duration::hours(grace_period_hours);
-        insert_grace_period_file_pin(&**client, &cid, utc_now(), delete_by, None, None, None)
-            .await?;
+        apply_orphan_ipfs_grace_pin(
+            &**client,
+            &cid,
+            file_upload.size as i64,
+            FileType::File,
+            grace_period_hours,
+        )
+        .await;
         return Err(WebError::Unprocessable(format!(
             "File hash does not match ({cid} != {expected_hash})"
         )));

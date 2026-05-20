@@ -199,7 +199,7 @@ async fn storage_add_file(
             )
         } else {
             // Raw upload — body is the file bytes.
-            let bytes = axum::body::to_bytes(request.into_body(), max_file_size + 1)
+            let bytes = axum::body::to_bytes(request.into_body(), max_unauth + 1)
                 .await
                 .map_err(|e| WebError::PayloadTooLarge(e.to_string()))?;
             (bytes.to_vec(), None)
@@ -358,6 +358,8 @@ pub(crate) async fn verify_store_metadata(
 
     // 4. Balance check, only when the file is larger than the unauthenticated
     //    upload cap. Mirrors pyaleph's `_verify_user_balance`.
+    let charged_address =
+        store_content_address(&meta.message_dict).unwrap_or_else(|| pending_store.sender.clone());
     use crate::toolkit::constants::MIB;
     let mib = MIB as usize;
     let estimated_size_mib = file_size.div_ceil(mib) as i64;
@@ -368,10 +370,7 @@ pub(crate) async fn verify_store_metadata(
         let cost_content_obj = cost_content_value
             .as_object_mut()
             .ok_or_else(|| WebError::Unprocessable("Invalid store message content".into()))?;
-        cost_content_obj.insert(
-            "address".into(),
-            Value::String(pending_store.sender.to_string()),
-        );
+        cost_content_obj.insert("address".into(), Value::String(charged_address.clone()));
         cost_content_obj.insert(
             "estimated_size_mib".into(),
             Value::Number(serde_json::Number::from(estimated_size_mib)),
@@ -383,7 +382,7 @@ pub(crate) async fn verify_store_metadata(
                 WebError::Internal(format!("storage cost estimation failed: {e}"))
             })?;
         let validation =
-            validate_balance_for_payment(&**client, &pending_store.sender, message_cost, payment_type)
+            validate_balance_for_payment(&**client, &charged_address, message_cost, payment_type)
                 .await
                 .map_err(WebError::from)?;
         if let BalanceValidation::Invalid(exception) = validation {
@@ -391,6 +390,26 @@ pub(crate) async fn verify_store_metadata(
         }
     }
     Ok(content_item_hash)
+}
+
+fn store_content_address(message_dict: &Value) -> Option<String> {
+    if let Some(address) = message_dict
+        .get("content")
+        .and_then(|content| content.get("address"))
+        .and_then(Value::as_str)
+    {
+        return Some(address.to_owned());
+    }
+    message_dict
+        .get("item_content")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|content| {
+            content
+                .get("address")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -644,4 +663,31 @@ async fn get_file_pins_count(
     let client = get_db(&state).await?;
     let count = count_file_pins(&**client, &hash).await?;
     Ok(json_text_response(StatusCode::OK, count.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_content_address_prefers_content_address() {
+        let message = json!({
+            "sender": "sender",
+            "content": {"address": "owner"},
+            "item_content": "{\"address\":\"legacy-owner\"}"
+        });
+        assert_eq!(store_content_address(&message).as_deref(), Some("owner"));
+    }
+
+    #[test]
+    fn store_content_address_reads_legacy_item_content_address() {
+        let message = json!({
+            "sender": "sender",
+            "item_content": "{\"address\":\"legacy-owner\"}"
+        });
+        assert_eq!(
+            store_content_address(&message).as_deref(),
+            Some("legacy-owner")
+        );
+    }
 }

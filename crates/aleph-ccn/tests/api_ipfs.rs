@@ -25,6 +25,18 @@ use aleph_ccn::services::ipfs::IpfsService;
 
 use common::{make_app_state, start_postgres};
 
+const SIGNED_STORE_MESSAGE_JSON: &str = r#"{
+  "chain": "ETH",
+  "channel": "TEST",
+  "sender": "0x696879aE4F6d8DaDD5b8F1cbb1e663B89b08f106",
+  "type": "STORE",
+  "time": 1652794362.573859,
+  "item_type": "inline",
+  "item_content": "{\"address\":\"0x696879aE4F6d8DaDD5b8F1cbb1e663B89b08f106\",\"time\":1652794362.5736332,\"item_type\":\"storage\",\"item_hash\":\"5ccdd7bccfbc5955e2e40166dd0cdea0b093154fd87bc2bea57e7c768cde2f21\",\"mime_type\":\"text/plain\"}",
+  "item_hash": "f6fc4884e3ec3624bd3f60a3c37abf83a130777086061b1a373e659f2bab4d06",
+  "signature": "0x7b87c29388a7a452353f9cae8718b66158fb5bdc93f032964226745ee04919092550791b93f79e5ee1981f2d9d6e5ac0cae0d28b68bb63fe0fcbd79015a6f3ea1b"
+}"#;
+
 async fn post_multipart(
     app: axum::Router,
     uri: &str,
@@ -220,6 +232,46 @@ async fn ipfs_add_file_stat_timeout_returns_504_and_grace_pins() {
     let body = String::from_utf8(body).unwrap();
     assert!(body.contains("Timeout"), "{body}");
     assert_eq!(file_and_grace_pin_count(&pg.pool, cid).await, (11, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
+async fn ipfs_add_file_cid_mismatch_returns_422_and_grace_pins_actual_cid() {
+    let pg = start_postgres().await;
+    let server = wiremock::MockServer::start().await;
+    let actual_cid = "QmFile1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    Mock::given(method("POST"))
+        .and(path("/api/v0/add"))
+        .and(query_param("cid-version", "0"))
+        .and(query_param("pin", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            "{{\"Name\":\"file\",\"Hash\":\"{actual_cid}\",\"Size\":\"11\"}}\n"
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let app = aleph_ccn::web::build_router(ipfs_enabled_state(pg.pool.clone(), &server.uri()));
+    let boundary = "----alephTest";
+    let metadata = json!({
+        "sync": false,
+        "message": serde_json::from_str::<Value>(SIGNED_STORE_MESSAGE_JSON).unwrap(),
+    })
+    .to_string();
+    let body = build_multipart(
+        boundary,
+        &[
+            ("file", "f.txt", b"hello world"),
+            ("metadata", "", metadata.as_bytes()),
+        ],
+    );
+
+    let (status, body) = post_multipart(app, "/api/v0/ipfs/add_file", boundary, body).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains("File hash does not match"), "{body}");
+    assert_eq!(file_and_grace_pin_count(&pg.pool, actual_cid).await, (11, 1));
 }
 
 #[tokio::test]
