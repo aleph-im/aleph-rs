@@ -132,9 +132,7 @@ async fn resolve_target(
         .get(target)
         .and_then(|e| e.as_ref())
         .map(|e| e.volume_id.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!("target '{target}' not found in your websites aggregate")
-        })
+        .ok_or_else(|| anyhow::anyhow!("target '{target}' not found in your websites aggregate"))
 }
 
 async fn handle_domain_add(

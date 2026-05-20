@@ -2451,9 +2451,6 @@ pub struct WebsiteDeployArgs {
     pub volume_id: Option<String>,
     #[arg(long)]
     pub channel: Option<String>,
-    /// Override IPFS gateway URL (otherwise pulled from network config).
-    #[arg(long)]
-    pub ipfs_gateway: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2478,8 +2475,6 @@ pub struct WebsiteUpdateArgs {
     pub idempotent: bool,
     #[arg(long)]
     pub channel: Option<String>,
-    #[arg(long)]
-    pub ipfs_gateway: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }

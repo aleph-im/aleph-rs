@@ -238,7 +238,11 @@ async fn resolve_store_ipfs_cid(
     };
     let store = match message.content.content {
         MessageContentEnum::Store(s) => s,
-        _ => return Err(anyhow::anyhow!("message '{volume_id}' is not a STORE message")),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "message '{volume_id}' is not a STORE message"
+            ));
+        }
     };
     // StoreContent's `file_hash` field is private; reconstruct via file_hash() and pattern-match
     // on the resulting ItemHash. Equivalent to inspecting StorageBackend directly, but uses
@@ -260,36 +264,32 @@ struct DeployOut {
     domains_attached: Vec<String>,
 }
 
-/// Upload a folder to IPFS and submit the matching STORE message.
+/// Upload a folder to IPFS via the CCN's authenticated CAR endpoint and
+/// register the matching STORE message in one round-trip.
 ///
-/// Resolves the IPFS gateway (CLI override → default network → builtin), uploads
-/// `path`, builds a STORE pending message and (unless `dry_run`) submits it.
-/// Returns `(ipfs_cid_string, store_item_hash_string)`.
-///
-/// The inner `submit_or_preview` call always passes `false` for `json` so the
-/// caller's `--json` envelope remains the sole stdout document.
+/// Hashes the folder locally to get the root CID, builds and signs a STORE
+/// pending message, and (unless `dry_run`) posts the CARv1 stream plus the
+/// signed metadata to `/api/v0/ipfs/add_car` on the CCN. Returns
+/// `(ipfs_cid_string, store_item_hash_string)`.
 async fn upload_folder_and_store(
     aleph_client: &AlephClient,
-    ccn_url: &Url,
     account: &crate::account::CliAccount,
     path: &std::path::Path,
-    ipfs_gateway_override: Option<&str>,
     channel: &str,
     dry_run: bool,
 ) -> anyhow::Result<(String, String)> {
-    let store = crate::config::store::ConfigStore::open()?;
-    let gateway = crate::common::resolve_ipfs_gateway_url(&store, None, ipfs_gateway_override)?;
-    let client = aleph_client.clone().with_ipfs_gateway(gateway);
-    let cid = client
-        .upload_folder_to_ipfs(path, aleph_sdk::ipfs::UploadFolderOptions::default())
-        .await?;
-    let cid_str = cid.to_string();
-    let pending_store = StoreBuilder::new(account, cid, StorageEngine::Ipfs)
+    let opts = aleph_sdk::ipfs::UploadFolderOptions::default();
+    let entries = aleph_sdk::ipfs::collect_folder_files(path, opts.follow_symlinks)?;
+    let file_hash = aleph_sdk::folder_hash::hash_folder_root(&entries, &opts)?;
+    let cid_str = file_hash.to_string();
+    let pending_store = StoreBuilder::new(account, file_hash, StorageEngine::Ipfs)
         .channel(Channel::from(channel.to_string()))
         .build()?;
     let store_hash = pending_store.item_hash.to_string();
     if !dry_run {
-        submit_or_preview(aleph_client, ccn_url, &pending_store, dry_run, false).await?;
+        aleph_client
+            .upload_folder_to_ipfs_authenticated(path, &pending_store, true, opts)
+            .await?;
     }
     Ok((cid_str, store_hash))
 }
@@ -297,20 +297,19 @@ async fn upload_folder_and_store(
 /// Deploy a static site as an Aleph "website" entry.
 ///
 /// Two paths:
-/// * `--volume-id <hash>` — skip upload+STORE and reuse an existing IPFS volume.
+/// * `--volume-id <hash>`: skip upload+STORE and reuse an existing IPFS volume.
 ///   The CID is best-effort recovered from the STORE message for display only.
-/// * default — upload `<path>` to IPFS, submit a STORE message, then write the
-///   `websites` aggregate entry.
+/// * default: upload `<path>` directly to the CCN as a CARv1 stream via the
+///   authenticated `/api/v0/ipfs/add_car` endpoint (which both pins the folder
+///   and registers the STORE in a single request), then write the `websites`
+///   aggregate entry.
 ///
-/// In `--json` mode, only the final [`DeployOut`] envelope is emitted on stdout
-/// — the inner STORE and aggregate submissions are silenced so the output is a
-/// single parseable JSON document. In `--dry-run` mode the inner submissions
-/// are skipped entirely; the [`DeployOut`] envelope is the single document
-/// representing the dry-run state.
-///
-/// Folder uploads target the IPFS gateway resolved by
-/// [`crate::common::resolve_ipfs_gateway_url`] (CLI override → default
-/// network's `ipfs_gateway_url` → builtin fallback).
+/// In `--json` mode, only the final [`DeployOut`] envelope is emitted on
+/// stdout (the inner aggregate submission is silenced so the output is a
+/// single parseable JSON document). In `--dry-run` mode the folder is hashed
+/// locally to compute the volume_id, but neither the CAR upload nor the
+/// aggregate submission is sent; the [`DeployOut`] envelope is the single
+/// document representing the dry-run state.
 async fn handle_website_deploy(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -360,16 +359,7 @@ async fn handle_website_deploy(
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        upload_folder_and_store(
-            aleph_client,
-            ccn_url,
-            &account,
-            &args.path,
-            args.ipfs_gateway.as_deref(),
-            &channel,
-            dry_run,
-        )
-        .await?
+        upload_folder_and_store(aleph_client, &account, &args.path, &channel, dry_run).await?
     };
 
     // 7. Build the websites aggregate entry and submit the partial update.
@@ -501,29 +491,27 @@ struct UpdateOut {
 /// submits a partial aggregate update.
 ///
 /// Two paths mirror `handle_website_deploy`:
-/// * `--volume-id <hash>` — skip upload+STORE; CID is best-effort recovered
+/// * `--volume-id <hash>`: skip upload+STORE; CID is best-effort recovered
 ///   for display only.
-/// * default — upload `<path>` to IPFS, submit a STORE message, then write
-///   the aggregate.
+/// * default: upload `<path>` directly to the CCN as a CARv1 stream via the
+///   authenticated `/api/v0/ipfs/add_car` endpoint (which pins the folder
+///   and registers the STORE in one request), then write the aggregate.
 ///
 /// `--idempotent` short-circuits when the new `volume_id` is identical to
-/// the existing one — no aggregate write, exit success.
+/// the existing one: no aggregate write, exit success.
 ///
-/// Same `--json` / `--dry-run` discipline as deploy: inner submissions pass
-/// `false` for `json`, dry-run skips inner submissions entirely, and only
-/// the final [`UpdateOut`] envelope reaches stdout.
+/// Same `--json` / `--dry-run` discipline as deploy: the inner aggregate
+/// submission passes `false` for `json`; dry-run hashes the folder locally
+/// but skips both the CAR upload and the aggregate submission. Only the
+/// final [`UpdateOut`] envelope reaches stdout.
 ///
 /// Domain re-pointing is on by default: every domain entry whose
 /// `message_id == old.volume_id` is rewritten to point at `new_volume_id`
 /// in a single follow-up aggregate POST. `--skip-domain-update` opts out
 /// entirely (no aggregate read either). `--domain <D>` flags restrict the
-/// re-pointing to that allowlist. The re-pointing step is best-effort —
+/// re-pointing to that allowlist. The re-pointing step is best-effort:
 /// a failure logs a warning and clears `domains_repointed`, but does not
 /// fail the command (the website update itself already succeeded).
-///
-/// Folder uploads target the IPFS gateway resolved by
-/// [`crate::common::resolve_ipfs_gateway_url`] (CLI override → default
-/// network's `ipfs_gateway_url` → builtin fallback).
 async fn handle_website_update(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -568,16 +556,7 @@ async fn handle_website_update(
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        upload_folder_and_store(
-            aleph_client,
-            ccn_url,
-            &account,
-            &args.path,
-            args.ipfs_gateway.as_deref(),
-            &channel,
-            dry_run,
-        )
-        .await?
+        upload_folder_and_store(aleph_client, &account, &args.path, &channel, dry_run).await?
     };
 
     // 5. Idempotent short-circuit: nothing changed → no aggregate write.

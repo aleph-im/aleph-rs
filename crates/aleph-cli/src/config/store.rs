@@ -6,7 +6,6 @@ use std::path::PathBuf;
 pub const BUILTIN_CCN_NAME: &str = "official";
 pub const BUILTIN_CCN_URL: &str = "https://api.aleph.im";
 pub const BUILTIN_NETWORK_NAME: &str = "mainnet";
-pub const BUILTIN_IPFS_GATEWAY_URL: &str = "https://ipfs.aleph.cloud";
 
 /// One named CCN endpoint inside a network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,18 +24,6 @@ pub struct NetworkEntry {
     pub ccns: Vec<CcnEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ethereum: Option<EthereumConfig>,
-    /// IPFS gateway URL for folder uploads (Kubo HTTP API).
-    /// Defaults to <https://ipfs.aleph.cloud> when None.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipfs_gateway_url: Option<String>,
-}
-
-impl NetworkEntry {
-    pub fn ipfs_gateway_url(&self) -> &str {
-        self.ipfs_gateway_url
-            .as_deref()
-            .unwrap_or(BUILTIN_IPFS_GATEWAY_URL)
-    }
 }
 
 /// Partial update for a network's Ethereum config. Any `Some` field overwrites
@@ -199,7 +186,6 @@ impl ConfigStore {
             default_ccn: None,
             ccns: Vec::new(),
             ethereum: None,
-            ipfs_gateway_url: None,
         });
         if manifest.default_network.is_none() {
             manifest.default_network = Some(name.to_string());
@@ -362,7 +348,6 @@ impl ConfigStore {
                 url: BUILTIN_CCN_URL.to_string(),
             }],
             ethereum: Some(EthereumConfig::mainnet_defaults()),
-            ipfs_gateway_url: None,
         });
         if manifest.default_network.is_none() {
             manifest.default_network = Some(BUILTIN_NETWORK_NAME.to_string());
@@ -394,7 +379,6 @@ mod tests {
                     url: "https://api.aleph.im".to_string(),
                 }],
                 ethereum: None,
-                ipfs_gateway_url: None,
             }],
         };
         let serialized = toml::to_string_pretty(&manifest).unwrap();
@@ -422,7 +406,6 @@ mod tests {
                     url: "https://api.aleph.im".to_string(),
                 }],
                 ethereum: Some(EthereumConfig::mainnet_defaults()),
-                ipfs_gateway_url: None,
             }],
         };
         let serialized = toml::to_string_pretty(&manifest).unwrap();
@@ -828,42 +811,6 @@ mod tests {
         let nets = store.list_networks().unwrap();
         assert_eq!(nets.len(), 1);
         assert_eq!(nets[0].ccns.len(), 1);
-    }
-
-    #[test]
-    fn ipfs_gateway_url_falls_back_to_builtin() {
-        let entry = NetworkEntry {
-            name: "n".into(),
-            default_ccn: None,
-            ccns: vec![],
-            ethereum: None,
-            ipfs_gateway_url: None,
-        };
-        assert_eq!(entry.ipfs_gateway_url(), BUILTIN_IPFS_GATEWAY_URL);
-
-        let entry = NetworkEntry {
-            name: "n".into(),
-            default_ccn: None,
-            ccns: vec![],
-            ethereum: None,
-            ipfs_gateway_url: Some("https://custom.example/".into()),
-        };
-        assert_eq!(entry.ipfs_gateway_url(), "https://custom.example/");
-    }
-
-    #[test]
-    fn deserializes_existing_config_without_ipfs_gateway_url() {
-        let toml_text = r#"
-default_network = "mainnet"
-[[networks]]
-name = "mainnet"
-default_ccn = "official"
-[[networks.ccns]]
-name = "official"
-url = "https://api.aleph.im"
-"#;
-        let manifest: ConfigManifest = toml::from_str(toml_text).unwrap();
-        assert!(manifest.networks[0].ipfs_gateway_url.is_none());
     }
 
     #[test]
