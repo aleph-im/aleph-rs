@@ -2354,6 +2354,11 @@ pub struct DomainAddArgs {
     /// Channel name.
     #[arg(long)]
     pub channel: Option<String>,
+    /// Sign on behalf of another address (requires an authorization from that
+    /// address). The aggregate write and any website-name lookup target the
+    /// owner.
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2366,6 +2371,11 @@ pub struct DomainAttachArgs {
     pub target: String,
     #[arg(long)]
     pub channel: Option<String>,
+    /// Sign on behalf of another address (requires an authorization from that
+    /// address). The aggregate write and any website-name lookup target the
+    /// owner.
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2378,6 +2388,10 @@ pub struct DomainDetachArgs {
     pub yes: bool,
     #[arg(long)]
     pub channel: Option<String>,
+    /// Sign on behalf of another address (requires an authorization from that
+    /// address). The aggregate write targets the owner.
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2480,6 +2494,10 @@ pub struct WebsiteUpdateArgs {
     pub idempotent: bool,
     #[arg(long)]
     pub channel: Option<String>,
+    /// Sign on behalf of another address (requires an authorization from that
+    /// address). All aggregate writes and the STORE upload target the owner.
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }

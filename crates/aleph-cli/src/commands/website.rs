@@ -541,14 +541,17 @@ async fn handle_website_update(
         validate_folder(&args.path, false)?;
     }
 
-    // 2. Resolve signing account.
+    // 2. Resolve signing account and the effective owner address.
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
+    let owner_address = match args.on_behalf_of.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
 
-    // 3. Read aggregate; refuse if entry is missing or null.
-    let websites: WebsitesAggregate = aleph_client
-        .get_websites_aggregate(account.address())
-        .await?;
+    // 3. Read aggregate; refuse if entry is missing or null. Look up under
+    //    the *owner* address so `--on-behalf-of` updates the right entry.
+    let websites: WebsitesAggregate = aleph_client.get_websites_aggregate(&owner_address).await?;
     let old = websites
         .get(&args.name)
         .and_then(|e| e.clone())
@@ -572,7 +575,9 @@ async fn handle_website_update(
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        upload_folder_and_store(aleph_client, &account, &args.path, &channel, None, dry_run).await?
+        let owner = (args.on_behalf_of.is_some()).then_some(&owner_address);
+        upload_folder_and_store(aleph_client, &account, &args.path, &channel, owner, dry_run)
+            .await?
     };
 
     // 5. Idempotent short-circuit: nothing changed → no aggregate write.
@@ -627,9 +632,12 @@ async fn handle_website_update(
     // 7. Submit the partial aggregate update.
     let mut content = serde_json::Map::new();
     content.insert(args.name.clone(), serde_json::to_value(&new_entry)?);
-    let pending_agg = AggregateBuilder::new(&account, WEBSITES_AGGREGATE_KEY, content)
-        .channel(Channel::from(channel.clone()))
-        .build()?;
+    let mut agg_builder = AggregateBuilder::new(&account, WEBSITES_AGGREGATE_KEY, content)
+        .channel(Channel::from(channel.clone()));
+    if args.on_behalf_of.is_some() {
+        agg_builder = agg_builder.on_behalf_of(owner_address.clone());
+    }
+    let pending_agg = agg_builder.build()?;
     // Inner submission passes `false` for `json` and is skipped in dry-run
     // (same single-document discipline as deploy). On failure after a STORE
     // succeeded, surface the new volume_id so the user can retry without
@@ -661,9 +669,7 @@ async fn handle_website_update(
     let mut domains_repointed: Vec<String> = vec![];
     if !args.skip_domain_update {
         use aleph_sdk::aggregate_models::domains::{DOMAINS_AGGREGATE_KEY, DomainEntry};
-        let domains = aleph_client
-            .get_domains_aggregate(account.address())
-            .await?;
+        let domains = aleph_client.get_domains_aggregate(&owner_address).await?;
         let now = now_secs_f64();
         let mut content = serde_json::Map::new();
         let allowlist: Option<std::collections::HashSet<&String>> = if args.domain.is_empty() {
@@ -688,9 +694,12 @@ async fn handle_website_update(
             domains_repointed.push(name.clone());
         }
         if !content.is_empty() {
-            let pending = AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content)
-                .channel(Channel::from(channel.clone()))
-                .build()?;
+            let mut dom_builder = AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content)
+                .channel(Channel::from(channel.clone()));
+            if args.on_behalf_of.is_some() {
+                dom_builder = dom_builder.on_behalf_of(owner_address.clone());
+            }
+            let pending = dom_builder.build()?;
             if !dry_run
                 && let Err(e) =
                     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, false).await

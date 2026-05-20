@@ -5,8 +5,8 @@ use crate::cli::{
     DomainListArgs, DomainRemoveArgs,
 };
 use crate::common::{
-    confirm_tty, format_epoch_for_tty, now_secs_f64, resolve_account, resolve_address_or_active,
-    submit_or_preview,
+    confirm_tty, format_epoch_for_tty, now_secs_f64, resolve_account, resolve_address,
+    resolve_address_or_active, submit_or_preview,
 };
 use aleph_sdk::aggregate_models::domains::{
     DOMAINS_AGGREGATE_KEY, DomainEntry, DomainOptions, DomainTargetType, DomainsAggregate,
@@ -115,19 +115,16 @@ fn looks_like_item_hash(s: &str) -> bool {
 ///
 /// If `target` looks like an item hash (exactly 64 ASCII hex characters),
 /// it is returned as-is. Otherwise it is treated as a website name and looked
-/// up in the signing address's `websites` aggregate; the website's
-/// `volume_id` is returned.
+/// up in `owner`'s `websites` aggregate; the website's `volume_id` is returned.
 async fn resolve_target(
     aleph_client: &AlephClient,
-    account: &impl Account,
+    owner: &aleph_types::chain::Address,
     target: &str,
 ) -> anyhow::Result<String> {
     if looks_like_item_hash(target) {
         return Ok(target.to_string());
     }
-    let websites = aleph_client
-        .get_websites_aggregate(account.address())
-        .await?;
+    let websites = aleph_client.get_websites_aggregate(owner).await?;
     websites
         .get(target)
         .and_then(|e| e.as_ref())
@@ -143,16 +140,18 @@ async fn handle_domain_add(
 ) -> anyhow::Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
+    let owner_address = match args.on_behalf_of.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
 
     // Resolve the target: either a raw item-hash-looking string or a website
-    // name to look up in the signing address's `websites` aggregate.
-    let message_id = resolve_target(aleph_client, &account, &args.target).await?;
+    // name to look up in the owner address's `websites` aggregate.
+    let message_id = resolve_target(aleph_client, &owner_address, &args.target).await?;
 
     // Pre-flight: refuse if the domain already has a non-null entry and
-    // --force was not passed.
-    let existing = aleph_client
-        .get_domains_aggregate(account.address())
-        .await?;
+    // --force was not passed. Check under the owner's aggregate.
+    let existing = aleph_client.get_domains_aggregate(&owner_address).await?;
     if let Some(Some(_)) = existing.get(&args.domain)
         && !args.force
     {
@@ -185,9 +184,12 @@ async fn handle_domain_add(
     let mut content = serde_json::Map::new();
     content.insert(args.domain.clone(), serde_json::to_value(&entry)?);
     let channel = Channel::from(args.channel.unwrap_or_else(|| WEBSITE_CHANNEL.to_string()));
-    let pending = AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content)
-        .channel(channel)
-        .build()?;
+    let mut builder =
+        AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content).channel(channel);
+    if args.on_behalf_of.is_some() {
+        builder = builder.on_behalf_of(owner_address);
+    }
+    let pending = builder.build()?;
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
 }
 
@@ -199,10 +201,12 @@ async fn handle_domain_attach(
 ) -> anyhow::Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
+    let owner_address = match args.on_behalf_of.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
 
-    let agg = aleph_client
-        .get_domains_aggregate(account.address())
-        .await?;
+    let agg = aleph_client.get_domains_aggregate(&owner_address).await?;
     let mut entry = agg
         .get(&args.domain)
         .and_then(|e| e.clone())
@@ -213,16 +217,19 @@ async fn handle_domain_attach(
             )
         })?;
 
-    let new_message_id = resolve_target(aleph_client, &account, &args.target).await?;
+    let new_message_id = resolve_target(aleph_client, &owner_address, &args.target).await?;
     entry.message_id = new_message_id;
     entry.updated_at = now_secs_f64();
 
     let mut content = serde_json::Map::new();
     content.insert(args.domain.clone(), serde_json::to_value(&entry)?);
     let channel = Channel::from(args.channel.unwrap_or_else(|| WEBSITE_CHANNEL.to_string()));
-    let pending = AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content)
-        .channel(channel)
-        .build()?;
+    let mut builder =
+        AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content).channel(channel);
+    if args.on_behalf_of.is_some() {
+        builder = builder.on_behalf_of(owner_address);
+    }
+    let pending = builder.build()?;
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
 }
 
@@ -237,10 +244,12 @@ async fn handle_domain_detach(
     }
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
+    let owner_address = match args.on_behalf_of.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
 
-    let agg = aleph_client
-        .get_domains_aggregate(account.address())
-        .await?;
+    let agg = aleph_client.get_domains_aggregate(&owner_address).await?;
     let mut entry = agg
         .get(&args.domain)
         .and_then(|e| e.clone())
@@ -251,9 +260,12 @@ async fn handle_domain_detach(
     let mut content = serde_json::Map::new();
     content.insert(args.domain.clone(), serde_json::to_value(&entry)?);
     let channel = Channel::from(args.channel.unwrap_or_else(|| WEBSITE_CHANNEL.to_string()));
-    let pending = AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content)
-        .channel(channel)
-        .build()?;
+    let mut builder =
+        AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content).channel(channel);
+    if args.on_behalf_of.is_some() {
+        builder = builder.on_behalf_of(owner_address);
+    }
+    let pending = builder.build()?;
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
 }
 
