@@ -1,0 +1,19 @@
+{
+  "data": {
+    "domains": {
+      "site.example.com": {
+        "type": "ipfs",
+        "programType": "ipfs",
+        "message_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "updated_at": 1714001000.0,
+        "options": { "catch_all_path": "/404.html" }
+      },
+      "detached.example.com": {
+        "type": "ipfs",
+        "programType": "ipfs",
+        "message_id": "",
+        "updated_at": 1713999000.0
+      }
+    }
+  }
+}

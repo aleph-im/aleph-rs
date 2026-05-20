@@ -1,11 +1,29 @@
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aleph_sdk::client::{AlephMessageClient, MessageError, MessageWithStatus};
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::pending::PendingMessage;
 use anyhow::{Result, anyhow, bail};
 use url::Url;
+
+/// Current Unix time as fractional seconds, matching the float `updated_at`
+/// field used across the dashboard's aggregates (`websites`, `domains`, ...).
+pub fn now_secs_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Format a fractional Unix timestamp (as stored in dashboard aggregates) as
+/// `YYYY-MM-DD HH:MM:SS UTC` for TTY display. Falls back to the raw float
+/// formatting if the value is out of the chrono range.
+pub fn format_epoch_for_tty(secs: f64) -> String {
+    chrono::DateTime::from_timestamp(secs as i64, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| secs.to_string())
+}
 
 /// Returns true if the error is an HTTP 429 Too Many Requests.
 pub fn is_rate_limited(err: &MessageError) -> bool {
@@ -500,6 +518,34 @@ pub fn resolve_account(identity: &IdentityArgs) -> Result<CliAccount> {
     load_account_by_name(&store, &name)
 }
 
+/// Resolve an address from an explicit `--address` value, falling back to the
+/// active (default) account when no value is supplied.
+///
+/// Used by read-only listing commands that operate on the signed-in user's
+/// data by default but accept `--address <NAME-OR-HEX>` to inspect another
+/// account. Returns a clear error when no override is given and no default
+/// account is configured, telling the caller exactly what to do.
+pub fn resolve_address_or_active(maybe_addr: Option<&str>) -> Result<Address> {
+    if let Some(value) = maybe_addr {
+        return resolve_address(value);
+    }
+    let store =
+        AccountStore::open().map_err(|e| anyhow::anyhow!("failed to open account store: {e}"))?;
+    let name = store
+        .default_account_name()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no --address given and no default account set; \
+                 use --address <ADDRESS> or: aleph account use <NAME>"
+            )
+        })?;
+    let entry = store
+        .get_account(&name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(Address::from(entry.address))
+}
+
 /// Resolve a user-supplied value to an address using a provided `AccountStore`
 /// (testable form).
 ///
@@ -536,6 +582,33 @@ pub fn resolve_address(value: &str) -> Result<Address> {
     }
     let store = AccountStore::open().map_err(|e| anyhow!("failed to open account store: {e}"))?;
     resolve_address_with_store(&store, value)
+}
+
+/// Prompt the user for `y/N` confirmation on a TTY.
+///
+/// Returns `Ok(true)` if the user types `y` / `yes` (case-insensitive),
+/// `Ok(false)` for anything else (including an empty line - the default is
+/// "no"). Errors when stdin is not a terminal: callers should pass `--yes`
+/// to confirm non-interactively rather than silently proceed or skip.
+///
+/// The prompt is written to stderr so it doesn't pollute stdout (which may
+/// be captured by tooling expecting JSON output).
+pub fn confirm_tty(prompt: &str) -> Result<bool> {
+    use std::io::{self, IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "{} refusing to prompt without a TTY; pass --yes to confirm non-interactively",
+            prompt
+        ));
+    }
+    eprint!("{} [y/N] ", prompt);
+    io::stderr().flush()?;
+    let mut s = String::new();
+    io::stdin().read_line(&mut s)?;
+    Ok(matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// Format a user-supplied address value for display.
