@@ -382,7 +382,6 @@ pub fn build_folder_dag(
     cid_bytes_to_item_hash(&root.cid_bytes)
 }
 
-
 /// Build the local UnixFS root CID for `entries`, matching what kubo's
 /// HTTP `/api/v0/add?wrap-with-directory=true` produces given the same flat
 /// list of files via multipart.
