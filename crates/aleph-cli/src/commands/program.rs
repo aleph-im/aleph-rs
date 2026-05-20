@@ -157,11 +157,14 @@ async fn handle_create(
     // single envelope; for create we want STORE first then PROGRAM, so we
     // emit them inline and skip both submission paths.
     if dry_run {
-        if !json {
+        if json {
+            let envelopes = serde_json::json!([store_pending, program_pending]);
+            println!("{}", serde_json::to_string_pretty(&envelopes)?);
+        } else {
             eprintln!("Dry run - messages not submitted.\n");
+            println!("{}", serde_json::to_string_pretty(&store_pending)?);
+            println!("{}", serde_json::to_string_pretty(&program_pending)?);
         }
-        println!("{}", serde_json::to_string_pretty(&store_pending)?);
-        println!("{}", serde_json::to_string_pretty(&program_pending)?);
         return Ok(());
     }
 
