@@ -22,6 +22,7 @@ use chrono::Utc;
 use super::abc::{ChainReader, ChainWriter, Verifier};
 use super::chain_data_service::{ChainDataService, PendingTxPublisher};
 use super::evm::EvmVerifier;
+use super::indexer_reader::AlephIndexerReader;
 use crate::AlephError;
 use crate::AlephResult;
 use crate::config::Settings;
@@ -227,6 +228,7 @@ impl EthereumConnector {
 #[async_trait]
 impl ChainReader for EthereumConnector {
     async fn fetcher(&self, cfg: &Settings) -> AlephResult<()> {
+        let rpc_sync_fetcher = async {
         let poll = Duration::from_secs(cfg.ethereum.message_delay.max(1));
         let authorized: std::collections::HashSet<EvmAddress> =
             self.authorized_emitters.iter().copied().collect();
@@ -261,7 +263,7 @@ impl ChainReader for EthereumConnector {
                     .saturating_add(range.saturating_sub(1))
                     .min(latest);
                 let logs_res = self
-                    .fetch_logs(window_start, BlockNumberOrTag::Number(window_end))
+                    .fetch_sync_logs(window_start, BlockNumberOrTag::Number(window_end))
                     .await;
                 let logs = match logs_res {
                     Ok(l) => l,
@@ -305,6 +307,27 @@ impl ChainReader for EthereumConnector {
                 range = (range.saturating_mul(2)).min(self.max_block_range.max(1));
             }
             Self::sleep(poll).await;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), AlephError>(())
+        };
+
+        if let Some(pool) = self.pool.clone() {
+            let reader = AlephIndexerReader::new(Chain::Ethereum);
+            let contract_address = format!("{:#x}", self.contract_address);
+            tokio::try_join!(
+                rpc_sync_fetcher,
+                reader.run(
+                    pool,
+                    self.pending_tx_publisher.clone(),
+                    cfg.aleph.indexer_url.clone(),
+                    contract_address,
+                    ChainEventType::Message,
+                )
+            )?;
+            Ok(())
+        } else {
+            rpc_sync_fetcher.await
         }
     }
 }
