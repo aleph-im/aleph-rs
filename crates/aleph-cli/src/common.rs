@@ -500,16 +500,15 @@ pub fn resolve_account(identity: &IdentityArgs) -> Result<CliAccount> {
     load_account_by_name(&store, &name)
 }
 
-/// Resolve a user-supplied value to an address.
+/// Resolve a user-supplied value to an address using a provided `AccountStore`
+/// (testable form).
 ///
 /// Accepts either a raw address (hex string starting with "0x"), an account
-/// name, or an alias name from the local account store.
-pub fn resolve_address(value: &str) -> Result<Address> {
+/// name, or an alias name from the store.
+pub fn resolve_address_with_store(store: &AccountStore, value: &str) -> Result<Address> {
     if value.starts_with("0x") || value.starts_with("0X") {
         return Ok(Address::from(value.to_string()));
     }
-
-    let store = AccountStore::open().map_err(|e| anyhow!("failed to open account store: {e}"))?;
 
     // Try account first, then alias.
     if let Ok(entry) = store.get_account(value) {
@@ -522,6 +521,21 @@ pub fn resolve_address(value: &str) -> Result<Address> {
     Err(anyhow!(
         "'{value}' is not a valid address or known account/alias name"
     ))
+}
+
+/// Resolve a user-supplied value to an address using the user-global account
+/// store.
+///
+/// Accepts either a raw address (hex string starting with "0x"), an account
+/// name, or an alias name from the local account store.
+pub fn resolve_address(value: &str) -> Result<Address> {
+    // Hex addresses don't need the store; skip the open() to avoid touching
+    // disk for the common case.
+    if value.starts_with("0x") || value.starts_with("0X") {
+        return Ok(Address::from(value.to_string()));
+    }
+    let store = AccountStore::open().map_err(|e| anyhow!("failed to open account store: {e}"))?;
+    resolve_address_with_store(&store, value)
 }
 
 /// Format a user-supplied address value for display.
@@ -762,6 +776,65 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("network 'barenet' has no default CCN"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn temp_account_store() -> (TempDir, AccountStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::with_manifest_path(dir.path().join("accounts.toml"));
+        (dir, store)
+    }
+
+    #[test]
+    fn resolve_address_accepts_hex() {
+        let (_dir, store) = temp_account_store();
+        let addr = resolve_address_with_store(&store, "0xABCD1234").unwrap();
+        assert_eq!(addr.to_string(), "0xABCD1234");
+    }
+
+    #[test]
+    fn resolve_address_accepts_uppercase_prefix() {
+        let (_dir, store) = temp_account_store();
+        let addr = resolve_address_with_store(&store, "0XdeadBEEF").unwrap();
+        assert_eq!(addr.to_string(), "0XdeadBEEF");
+    }
+
+    #[test]
+    fn resolve_address_finds_account_by_name() {
+        let (_dir, store) = temp_account_store();
+        // add_ledger_account doesn't touch the OS keyring.
+        store
+            .add_ledger_account(
+                "alice",
+                aleph_types::chain::Chain::Ethereum,
+                "0xAAAA1111".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+
+        let addr = resolve_address_with_store(&store, "alice").unwrap();
+        assert_eq!(addr.to_string(), "0xAAAA1111");
+    }
+
+    #[test]
+    fn resolve_address_finds_alias_by_name() {
+        let (_dir, store) = temp_account_store();
+        store
+            .add_alias("treasurer", "0xBBBB2222".to_string())
+            .unwrap();
+
+        let addr = resolve_address_with_store(&store, "treasurer").unwrap();
+        assert_eq!(addr.to_string(), "0xBBBB2222");
+    }
+
+    #[test]
+    fn resolve_address_rejects_unknown_name() {
+        let (_dir, store) = temp_account_store();
+        let err = resolve_address_with_store(&store, "nobody").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'nobody' is not a valid address or known account/alias name"),
             "unexpected error: {err}"
         );
     }
