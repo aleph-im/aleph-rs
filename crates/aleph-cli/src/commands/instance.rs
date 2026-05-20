@@ -4,6 +4,7 @@ use crate::cli::{
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter};
 use aleph_sdk::messages::InstanceBuilder;
+use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
@@ -24,7 +25,29 @@ use futures_util::StreamExt;
 use memsizes::MiB;
 use url::Url;
 
+/// Source filter that surfaced this row from the CCN.
+///
+/// CCN queries are run separately for `addresses=` (sender) and `owners=`
+/// (resource owner). A row may be in one set, the other, or both. Used to
+/// decide whether the per-VM scheduler fallback should fire (only for rows
+/// that came from the sender filter and were not enriched by the bulk call).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SourceFlags {
+    pub owner: bool,
+    pub sender: bool,
+}
+
+impl SourceFlags {
+    pub fn merge(&mut self, other: SourceFlags) {
+        self.owner |= other.owner;
+        self.sender |= other.sender;
+    }
+}
+
 /// One row of `aleph instance list` output, extracted from an INSTANCE message.
+///
+/// Fields populated post-merge with data from the scheduler stay `None` when
+/// the scheduler is unreachable or has no record of the VM.
 #[derive(Debug, Clone)]
 pub(crate) struct InstanceRow {
     pub item_hash: ItemHash,
@@ -32,6 +55,13 @@ pub(crate) struct InstanceRow {
     pub owner: Address,
     pub node_hash: Option<String>,
     pub created_at: Timestamp,
+    /// Effective scheduler status, e.g. `dispatched`, `unschedulable`.
+    pub status: Option<String>,
+    /// Node hash where the VM is currently allocated, per the scheduler.
+    pub allocated_node: Option<String>,
+    /// Full scheduler entry, used for `--json` passthrough.
+    pub scheduler_raw: Option<VmEntry>,
+    pub source_flags: SourceFlags,
 }
 
 fn name_from_metadata(
@@ -49,6 +79,36 @@ fn node_from_requirements(requirements: Option<&HostRequirements>) -> Option<Str
         .and_then(|n| n.node_hash.clone())
 }
 
+/// First 12 chars of the item hash, lower-cased. Used in the text table.
+fn format_item_hash_short(hash: &ItemHash) -> String {
+    let s = hash.to_string();
+    s.chars().take(12).collect()
+}
+
+/// Last 10 chars of a node hash. Returns `s` unchanged if shorter than 10.
+fn format_node_short(node: &str) -> String {
+    if node.len() <= 10 {
+        return node.to_string();
+    }
+    node[node.len() - 10..].to_string()
+}
+
+/// Pure merge: copy scheduler fields onto rows whose `item_hash` is present
+/// in the map. Rows without a match are left unchanged. Map entries with no
+/// matching row are dropped (CCN remains authoritative).
+pub(crate) fn merge_scheduler_into_rows(
+    rows: &mut [InstanceRow],
+    scheduler_by_hash: &std::collections::HashMap<ItemHash, VmEntry>,
+) {
+    for row in rows.iter_mut() {
+        if let Some(entry) = scheduler_by_hash.get(&row.item_hash) {
+            row.status = Some(entry.status.clone());
+            row.allocated_node = entry.allocated_node.clone();
+            row.scheduler_raw = Some(entry.clone());
+        }
+    }
+}
+
 /// Convert an INSTANCE message into a row. Returns `None` for non-instance
 /// messages (defensive — callers already filter by `MessageType::Instance`,
 /// but the CCN can occasionally return a mis-typed payload).
@@ -62,6 +122,10 @@ pub(crate) fn extract_instance_row(message: &Message) -> Option<InstanceRow> {
         owner: message.owner().clone(),
         node_hash: node_from_requirements(instance.base.requirements.as_ref()),
         created_at: message.content.time.clone(),
+        status: None,
+        allocated_node: None,
+        scheduler_raw: None,
+        source_flags: SourceFlags::default(),
     })
 }
 
@@ -76,23 +140,41 @@ async fn fetch_instance_rows(
 
     let mut by_hash: HashMap<ItemHash, InstanceRow> = HashMap::new();
 
-    for filter in [
-        MessageFilter {
-            message_type: Some(MessageType::Instance),
-            addresses: Some(vec![address.clone()]),
-            ..Default::default()
-        },
-        MessageFilter {
-            message_type: Some(MessageType::Instance),
-            owners: Some(vec![address.clone()]),
-            ..Default::default()
-        },
-    ] {
+    let filters = [
+        (
+            MessageFilter {
+                message_type: Some(MessageType::Instance),
+                addresses: Some(vec![address.clone()]),
+                ..Default::default()
+            },
+            SourceFlags {
+                sender: true,
+                owner: false,
+            },
+        ),
+        (
+            MessageFilter {
+                message_type: Some(MessageType::Instance),
+                owners: Some(vec![address.clone()]),
+                ..Default::default()
+            },
+            SourceFlags {
+                sender: false,
+                owner: true,
+            },
+        ),
+    ];
+
+    for (filter, flags) in filters {
         let mut stream = Box::pin(aleph_client.get_messages_iterator(filter, None));
         while let Some(message) = stream.next().await {
             let message = message?;
-            if let Some(row) = extract_instance_row(&message) {
-                by_hash.entry(row.item_hash.clone()).or_insert(row);
+            if let Some(mut row) = extract_instance_row(&message) {
+                row.source_flags = flags;
+                by_hash
+                    .entry(row.item_hash.clone())
+                    .and_modify(|existing| existing.source_flags.merge(flags))
+                    .or_insert(row);
             } else {
                 eprintln!(
                     "warning: skipping message {} with non-instance content",
@@ -112,6 +194,57 @@ async fn fetch_instance_rows(
     });
     Ok(rows)
 }
+
+/// Bulk-fetch every VM the scheduler knows about for `address`, indexed by
+/// `item_hash`. On HTTP / network error, prints a warning to stderr and
+/// returns an empty map so the caller can degrade gracefully.
+async fn fetch_scheduler_map(
+    scheduler: &SchedulerClient,
+    address: &Address,
+) -> std::collections::HashMap<ItemHash, VmEntry> {
+    use std::collections::HashMap;
+
+    match scheduler.list_vms_by_owner(address).await {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|entry| (entry.vm_hash.clone(), entry))
+            .collect(),
+        Err(err) => {
+            eprintln!("warning: scheduler unreachable, status/allocation unavailable: {err}");
+            HashMap::new()
+        }
+    }
+}
+
+/// For rows the bulk owner-filtered call did not enrich (the rare
+/// "sender but not owner" case), fire one per-VM call to fill in the gap.
+/// Errors and 404s are silent: the row simply stays unenriched.
+///
+/// This is replaced by a single second bulk call once the scheduler ships
+/// its `created_by` filter.
+async fn enrich_with_fallback(
+    scheduler: &SchedulerClient,
+    rows: &[InstanceRow],
+    scheduler_map: &mut std::collections::HashMap<ItemHash, VmEntry>,
+) {
+    for row in rows {
+        let needs_fallback = !scheduler_map.contains_key(&row.item_hash)
+            && row.source_flags.sender
+            && !row.source_flags.owner;
+        if !needs_fallback {
+            continue;
+        }
+        match scheduler.get_vm(&row.item_hash).await {
+            Ok(Some(entry)) => {
+                scheduler_map.insert(row.item_hash.clone(), entry);
+            }
+            Ok(None) => {} // 404: scheduler has no record; row stays unenriched.
+            Err(_) => {}   // silent per spec; bulk-call warning already printed.
+        }
+    }
+}
+
+const SCHEDULER_BASE_URL: &str = "https://scheduler.api.aleph.cloud";
 
 async fn handle_instance_list(
     aleph_client: &AlephClient,
@@ -133,7 +266,15 @@ async fn handle_instance_list(
         }
     };
 
-    let rows = fetch_instance_rows(aleph_client, &address).await?;
+    let mut rows = fetch_instance_rows(aleph_client, &address).await?;
+
+    let scheduler = SchedulerClient::new(
+        Url::parse(SCHEDULER_BASE_URL).expect("SCHEDULER_BASE_URL is a valid URL"),
+    );
+    let mut scheduler_map = fetch_scheduler_map(&scheduler, &address).await;
+    enrich_with_fallback(&scheduler, &rows, &mut scheduler_map).await;
+    merge_scheduler_into_rows(&mut rows, &scheduler_map);
+
     render_rows(&rows, json)
 }
 
@@ -152,6 +293,7 @@ fn format_rows_json(rows: &[InstanceRow]) -> serde_json::Value {
                     .to_datetime()
                     .ok()
                     .map(|dt| dt.to_rfc3339()),
+                "scheduler": r.scheduler_raw,
             })
         })
         .collect();
@@ -161,51 +303,69 @@ fn format_rows_json(rows: &[InstanceRow]) -> serde_json::Value {
 fn format_rows_text(rows: &[InstanceRow]) -> String {
     use std::fmt::Write;
 
-    let hash_w = rows
-        .iter()
-        .map(|r| r.item_hash.to_string().len())
-        .chain(std::iter::once("ITEM HASH".len()))
-        .max()
-        .unwrap_or("ITEM HASH".len());
+    const HASH_HEADER: &str = "ITEM_HASH";
+    const NAME_HEADER: &str = "NAME";
+    const OWNER_HEADER: &str = "OWNER";
+    const STATUS_HEADER: &str = "STATUS";
+    const ALLOC_HEADER: &str = "ALLOCATED";
+
+    // Hash column: 12-char prefix.
+    let hash_w = HASH_HEADER.len().max(12);
     let name_w = rows
         .iter()
         .map(|r| r.name.as_deref().unwrap_or(MISSING_VALUE).len())
-        .chain(std::iter::once("NAME".len()))
+        .chain(std::iter::once(NAME_HEADER.len()))
         .max()
-        .unwrap_or("NAME".len());
+        .unwrap_or(NAME_HEADER.len());
     let owner_w = rows
         .iter()
         .map(|r| r.owner.to_string().len())
-        .chain(std::iter::once("OWNER".len()))
+        .chain(std::iter::once(OWNER_HEADER.len()))
         .max()
-        .unwrap_or("OWNER".len());
+        .unwrap_or(OWNER_HEADER.len());
+    let status_w = rows
+        .iter()
+        .map(|r| r.status.as_deref().unwrap_or(MISSING_VALUE).len())
+        .chain(std::iter::once(STATUS_HEADER.len()))
+        .max()
+        .unwrap_or(STATUS_HEADER.len());
 
     let mut out = String::new();
     writeln!(
         out,
-        "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  NODE",
-        "ITEM HASH",
-        "NAME",
-        "OWNER",
+        "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {:<status_w$}  {}",
+        HASH_HEADER,
+        NAME_HEADER,
+        OWNER_HEADER,
+        STATUS_HEADER,
+        ALLOC_HEADER,
         hash_w = hash_w,
         name_w = name_w,
         owner_w = owner_w,
+        status_w = status_w,
     )
     .expect("writing to String cannot fail");
 
     for row in rows {
         let name = row.name.as_deref().unwrap_or(MISSING_VALUE);
-        let node = row.node_hash.as_deref().unwrap_or(MISSING_VALUE);
+        let status = row.status.as_deref().unwrap_or(MISSING_VALUE);
+        let allocated = row
+            .allocated_node
+            .as_deref()
+            .map(format_node_short)
+            .unwrap_or_else(|| MISSING_VALUE.to_string());
         writeln!(
             out,
-            "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {}",
-            row.item_hash,
+            "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {:<status_w$}  {}",
+            format_item_hash_short(&row.item_hash),
             name,
             row.owner,
-            node,
+            status,
+            allocated,
             hash_w = hash_w,
             name_w = name_w,
             owner_w = owner_w,
+            status_w = status_w,
         )
         .expect("writing to String cannot fail");
     }
@@ -1180,6 +1340,10 @@ mod tests {
             owner: Address::from("0xAbCd1234567890aBcDEf1234567890AbCdEF1234".to_string()),
             node_hash: node.map(|s| s.to_string()),
             created_at: Timestamp::from(epoch_seconds),
+            status: None,
+            allocated_node: None,
+            scheduler_raw: None,
+            source_flags: Default::default(),
         }
     }
 
@@ -1221,6 +1385,53 @@ mod tests {
         // Second row: missing name and node_hash serialize as JSON null.
         assert!(arr[1]["name"].is_null());
         assert!(arr[1]["node_hash"].is_null());
+
+        // No scheduler data in these fixture rows: field must be null.
+        assert!(arr[0]["scheduler"].is_null());
+        assert!(arr[1]["scheduler"].is_null());
+    }
+
+    #[test]
+    fn format_rows_json_includes_scheduler_object_when_enriched() {
+        // Build a row and populate scheduler fields manually (mimics what
+        // merge_scheduler_into_rows would do).
+        let mut row = sample_row(
+            "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99",
+            Some("foo"),
+            Some("requested-node"),
+            1_700_000_000.0,
+        );
+        row.status = Some("dispatched".to_string());
+        row.allocated_node =
+            Some("d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77".to_string());
+        row.scheduler_raw = Some(make_vm_entry(
+            "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99",
+            "dispatched",
+            Some("d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77"),
+        ));
+
+        let v = format_rows_json(&[row]);
+        let arr = v.as_array().expect("json array");
+        assert_eq!(arr[0]["scheduler"]["status"], "dispatched");
+        assert_eq!(
+            arr[0]["scheduler"]["allocated_node"],
+            "d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77"
+        );
+        // Top-level node_hash (CCN-requested) preserved alongside scheduler.allocated_node.
+        assert_eq!(arr[0]["node_hash"], "requested-node");
+    }
+
+    #[test]
+    fn format_rows_json_scheduler_is_null_when_unenriched() {
+        let row = sample_row(
+            "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99",
+            Some("foo"),
+            None,
+            1_700_000_000.0,
+        );
+        let v = format_rows_json(&[row]);
+        let arr = v.as_array().expect("json array");
+        assert!(arr[0]["scheduler"].is_null());
     }
 
     #[test]
@@ -1244,25 +1455,26 @@ mod tests {
 
         // Header + two data rows.
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].contains("ITEM HASH"));
+        assert!(lines[0].contains("ITEM_HASH"));
         assert!(lines[0].contains("NAME"));
         assert!(lines[0].contains("OWNER"));
-        assert!(lines[0].contains("NODE"));
+        assert!(lines[0].contains("STATUS"));
+        assert!(lines[0].contains("ALLOCATED"));
 
-        // Populated row renders the real values.
+        // Populated row renders the 12-char hash prefix (not full 64-char hash).
+        assert!(lines[1].contains("000000000000"));
         assert!(
-            lines[1].contains("0000000000000000000000000000000000000000000000000000000000000001")
+            !lines[1].contains("0000000000000000000000000000000000000000000000000000000000000001")
         );
         assert!(lines[1].contains("vm-a"));
-        assert!(lines[1].contains("aa00"));
 
         // Missing fields use the ASCII `-` placeholder (not `—`).
         assert!(!lines[2].contains('—'));
-        // Exactly two `-` placeholders on the missing-fields row: one for NAME
-        // and one for NODE. Check with word boundaries (space on each side).
+        // Exactly three `-` placeholders on the missing-fields row: NAME, STATUS,
+        // and ALLOCATED. Check with word boundaries (space on each side).
         assert_eq!(
             lines[2].matches(" - ").count() + lines[2].ends_with(" -") as usize,
-            2
+            3
         );
     }
 
@@ -1271,7 +1483,7 @@ mod tests {
         let text = format_rows_text(&[]);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("ITEM HASH"));
+        assert!(lines[0].contains("ITEM_HASH"));
     }
 
     #[test]
@@ -1289,5 +1501,94 @@ mod tests {
     fn resolve_instance_specs_applies_overrides() {
         let specs = resolve_instance_specs_from_flags(Some(4), Some(8192), Some(40 * 1024));
         assert_eq!(specs.unwrap(), (4, 8192, 40 * 1024));
+    }
+
+    use aleph_sdk::scheduler::VmEntry;
+
+    fn make_vm_entry(hash: &str, status: &str, node: Option<&str>) -> VmEntry {
+        let json = serde_json::json!({
+            "vm_hash": hash,
+            "vm_type": "instance",
+            "allocated_node": node,
+            "status": status,
+            "scheduling_status": "scheduled",
+            "migration_target": null,
+            "owner": "0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072"
+        });
+        serde_json::from_value(json).expect("valid VmEntry json")
+    }
+
+    #[test]
+    fn merge_populates_status_and_allocated_when_scheduler_has_entry() {
+        const MERGE_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000042";
+        let mut rows = vec![sample_row(MERGE_HASH, None, None, 0.0)];
+        let hash: ItemHash = rows[0].item_hash.clone();
+        let entry = make_vm_entry(
+            &hash.to_string(),
+            "dispatched",
+            Some("d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77"),
+        );
+        let mut map = std::collections::HashMap::new();
+        map.insert(hash, entry);
+
+        merge_scheduler_into_rows(&mut rows, &map);
+
+        assert_eq!(rows[0].status.as_deref(), Some("dispatched"));
+        assert_eq!(
+            rows[0].allocated_node.as_deref(),
+            Some("d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77")
+        );
+        assert!(rows[0].scheduler_raw.is_some());
+    }
+
+    #[test]
+    fn merge_leaves_row_blank_when_hash_not_in_map() {
+        const MERGE_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000042";
+        let mut rows = vec![sample_row(MERGE_HASH, None, None, 0.0)];
+        let map = std::collections::HashMap::<ItemHash, VmEntry>::new();
+        merge_scheduler_into_rows(&mut rows, &map);
+        assert!(rows[0].status.is_none());
+        assert!(rows[0].allocated_node.is_none());
+        assert!(rows[0].scheduler_raw.is_none());
+    }
+
+    #[test]
+    fn merge_does_not_add_scheduler_only_rows() {
+        let mut rows: Vec<InstanceRow> = vec![];
+        let mut map = std::collections::HashMap::new();
+        let scheduler_only_hash: ItemHash =
+            "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99"
+                .parse()
+                .expect("valid item hash");
+        map.insert(
+            scheduler_only_hash.clone(),
+            make_vm_entry(
+                &scheduler_only_hash.to_string(),
+                "dispatched",
+                Some("anything"),
+            ),
+        );
+        merge_scheduler_into_rows(&mut rows, &map);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn format_item_hash_short_takes_first_12() {
+        let hash: ItemHash = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99"
+            .parse()
+            .expect("valid item hash");
+        assert_eq!(format_item_hash_short(&hash), "5a586d6f59f6");
+    }
+
+    #[test]
+    fn format_node_short_takes_last_10() {
+        let s = "d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77";
+        assert_eq!(format_node_short(s), "78e0709d77");
+    }
+
+    #[test]
+    fn format_node_short_passthrough_when_short() {
+        assert_eq!(format_node_short("abc"), "abc");
+        assert_eq!(format_node_short("0123456789"), "0123456789");
     }
 }

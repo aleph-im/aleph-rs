@@ -12,6 +12,7 @@ pub mod folder_hash;
 pub mod ipfs;
 pub mod messages;
 mod proto;
+pub mod scheduler;
 pub mod verify;
 pub mod ws;
 
