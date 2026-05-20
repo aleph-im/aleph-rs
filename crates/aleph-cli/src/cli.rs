@@ -2126,6 +2126,10 @@ pub struct ProgramPersistArgs {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
+    /// Sign on behalf of another address (requires authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }

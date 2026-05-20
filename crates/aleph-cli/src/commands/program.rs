@@ -639,8 +639,15 @@ async fn handle_persist_or_unpersist(
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
+    // Effective owner: the program's authoring address. Differs from the
+    // signing account when --on-behalf-of is set (delegated authoring).
+    let owner_address = match &args.on_behalf_of {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
+
     let program = fetch_program_message(aleph_client, &args.item_hash).await?;
-    if &program.sender != account.address() {
+    if program.sender != owner_address {
         bail!(
             "you are not the owner of program {} (sender: {})",
             args.item_hash,
@@ -659,7 +666,11 @@ async fn handle_persist_or_unpersist(
 
     let new_content = clone_program_for_repersist(&program, new_persistent)?;
     let value = serde_json::to_value(&new_content)?;
-    let new_pending = MessageBuilder::new(&account, MessageType::Program, value).build()?;
+    let mut new_builder = MessageBuilder::new(&account, MessageType::Program, value);
+    if args.on_behalf_of.is_some() {
+        new_builder = new_builder.on_behalf_of(owner_address.clone());
+    }
+    let new_pending = new_builder.build()?;
 
     let action_label = if new_persistent {
         "persistent"
@@ -685,7 +696,13 @@ async fn handle_persist_or_unpersist(
 
     if !args.keep_prev {
         // The code STORE is reused by the new program; do not forget it.
-        let forget = build_forget_for_program(&account, &program, "Re-persisted", None)?;
+        let forget = build_forget_for_program(
+            &account,
+            &program,
+            "Re-persisted",
+            None,
+            args.on_behalf_of.as_ref().map(|_| owner_address.clone()),
+        )?;
         submit_or_preview(aleph_client, ccn_url, &forget, dry_run, json).await?;
     }
 
@@ -713,7 +730,7 @@ async fn handle_delete(
         );
     }
 
-    let program_forget = build_forget_for_program(&account, &program, &args.reason, None)?;
+    let program_forget = build_forget_for_program(&account, &program, &args.reason, None, None)?;
 
     let code_ref = if args.keep_code {
         None
@@ -869,11 +886,15 @@ fn build_forget_for_program<A: Account>(
     program: &Message,
     reason: &str,
     channel: Option<Channel>,
+    on_behalf_of: Option<Address>,
 ) -> Result<PendingMessage> {
     if program.message_type != MessageType::Program {
         bail!("expected PROGRAM message, got {:?}", program.message_type);
     }
     let mut builder = ForgetBuilder::new(account, vec![program.item_hash.clone()]).reason(reason);
+    if let Some(owner) = on_behalf_of {
+        builder = builder.on_behalf_of(owner);
+    }
     if let Some(ch) = channel {
         builder = builder.channel(ch);
     }
@@ -1049,7 +1070,8 @@ mod tests {
         ));
         let program: Message = serde_json::from_str(raw).unwrap();
         let account = TestAccount::new();
-        let pending = build_forget_for_program(&account, &program, "User deletion", None).unwrap();
+        let pending =
+            build_forget_for_program(&account, &program, "User deletion", None, None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
         let hashes = value["hashes"].as_array().unwrap();
         assert_eq!(hashes.len(), 1);
