@@ -105,10 +105,12 @@ async fn handle_create(
         resolve_program_resources(aleph_client, args.size.as_deref(), args.vcpus, args.memory)
             .await?;
 
-    // 6. Build PROGRAM
+    // 6. Build PROGRAM. `code.ref` is the STORE message's item_hash, not the
+    // raw file hash - the VM supervisor resolves it by looking up the STORE
+    // and following its embedded file reference.
     let mut program_builder = ProgramBuilder::new(
         &account,
-        file_hash.clone(),
+        store_pending.item_hash.clone(),
         args.entrypoint.clone(),
         args.runtime.clone(),
     )
