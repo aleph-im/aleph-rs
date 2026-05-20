@@ -280,13 +280,20 @@ async fn handle_domain_remove(
     }
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
+    let owner_address = match args.on_behalf_of.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
 
     let mut content = serde_json::Map::new();
     content.insert(args.domain.clone(), serde_json::Value::Null);
     let channel = Channel::from(args.channel.unwrap_or_else(|| WEBSITE_CHANNEL.to_string()));
-    let pending = AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content)
-        .channel(channel)
-        .build()?;
+    let mut builder =
+        AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content).channel(channel);
+    if args.on_behalf_of.is_some() {
+        builder = builder.on_behalf_of(owner_address);
+    }
+    let pending = builder.build()?;
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
 }
 

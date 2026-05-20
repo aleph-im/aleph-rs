@@ -780,18 +780,18 @@ async fn handle_website_delete(
     }
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
+    let owner_address = match args.on_behalf_of.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
 
-    let websites: WebsitesAggregate = aleph_client
-        .get_websites_aggregate(account.address())
-        .await?;
+    let websites: WebsitesAggregate = aleph_client.get_websites_aggregate(&owner_address).await?;
     let entry = websites
         .get(&args.name)
         .and_then(|e| e.clone())
         .ok_or_else(|| anyhow::anyhow!("website '{}' not found", args.name))?;
 
-    let domains: DomainsAggregate = aleph_client
-        .get_domains_aggregate(account.address())
-        .await?;
+    let domains: DomainsAggregate = aleph_client.get_domains_aggregate(&owner_address).await?;
     let orphaned_domains: Vec<String> = domains
         .iter()
         .filter_map(|(d, e)| {
@@ -807,9 +807,12 @@ async fn handle_website_delete(
         .unwrap_or_else(|| WEBSITE_CHANNEL.to_string());
     let mut content = serde_json::Map::new();
     content.insert(args.name.clone(), serde_json::Value::Null);
-    let pending = AggregateBuilder::new(&account, WEBSITES_AGGREGATE_KEY, content)
-        .channel(Channel::from(channel))
-        .build()?;
+    let mut builder = AggregateBuilder::new(&account, WEBSITES_AGGREGATE_KEY, content)
+        .channel(Channel::from(channel));
+    if args.on_behalf_of.is_some() {
+        builder = builder.on_behalf_of(owner_address);
+    }
+    let pending = builder.build()?;
     if !dry_run {
         submit_or_preview(aleph_client, ccn_url, &pending, dry_run, false).await?;
     }

@@ -2403,6 +2403,10 @@ pub struct DomainRemoveArgs {
     pub yes: bool,
     #[arg(long)]
     pub channel: Option<String>,
+    /// Sign on behalf of another address (requires an authorization from that
+    /// address). The soft-delete aggregate write targets the owner.
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2509,6 +2513,10 @@ pub struct WebsiteDeleteArgs {
     pub yes: bool,
     #[arg(long)]
     pub channel: Option<String>,
+    /// Sign on behalf of another address (requires an authorization from that
+    /// address). The soft-delete aggregate write targets the owner.
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
