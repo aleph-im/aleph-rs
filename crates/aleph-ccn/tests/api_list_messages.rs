@@ -177,6 +177,21 @@ async fn message_hashes_endpoint() {
 }
 
 #[tokio::test]
+async fn message_hashes_hash_only_false_accepts_query_string_bool() {
+    let pg = start_postgres().await;
+    seed(&pg.pool).await;
+    let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
+    let (status, body) = get(app, "/api/v0/messages/hashes?hash_only=false").await;
+    assert_eq!(status, StatusCode::OK);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let hashes = v["hashes"].as_array().unwrap();
+    assert!(!hashes.is_empty());
+    assert!(hashes[0]["item_hash"].is_string());
+    assert!(hashes[0]["status"].is_string() || hashes[0]["status"].is_null());
+    assert!(hashes[0]["reception_time"].is_string() || hashes[0]["reception_time"].is_null());
+}
+
+#[tokio::test]
 async fn message_status_endpoint() {
     let pg = start_postgres().await;
     let f = fixture_messages_with_status();

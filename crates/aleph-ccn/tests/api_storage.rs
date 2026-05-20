@@ -280,6 +280,18 @@ async fn storage_add_json_basic() {
 
 #[tokio::test]
 #[ignore = "requires docker; run with --ignored"]
+async fn storage_add_json_accepts_configured_body_above_axum_default() {
+    let pg = start_postgres().await;
+    let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
+    let body = json!({ "payload": "a".repeat(3 * 1024 * 1024) });
+
+    let (status, bytes) = post_json(app, "/api/v0/storage/add_json", body).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+}
+
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
 async fn storage_add_ipfs_json_disabled_returns_403() {
     let pg = start_postgres().await;
     let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));

@@ -8,6 +8,7 @@ pub mod controllers;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -73,6 +74,7 @@ impl AppState {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let body_limit = request_body_limit(&state);
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -81,9 +83,22 @@ pub fn build_router(state: AppState) -> Router {
     // is owned by `controllers::version`. We delegate to the controllers tree.
     Router::new()
         .merge(controllers::routes::router(state.clone()))
+        .layer(DefaultBodyLimit::max(body_limit))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
+}
+
+fn request_body_limit(state: &AppState) -> usize {
+    const MULTIPART_METADATA_HEADROOM: u64 = 1024 * 1024;
+    let configured = state
+        .config
+        .storage
+        .max_file_size
+        .max(state.config.ipfs.max_upload_file_size)
+        .max(state.config.ipfs.max_upload_car_size)
+        .saturating_add(MULTIPART_METADATA_HEADROOM);
+    usize::try_from(configured).unwrap_or(usize::MAX)
 }
 
 /// Bind + serve the router. Returns when the listener is closed.

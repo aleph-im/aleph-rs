@@ -67,12 +67,19 @@ async fn add_ipfs_json(State(state): State<AppState>, body: Bytes) -> WebResult<
         .ok_or_else(|| WebError::Forbidden("IPFS is disabled on this node".into()))?;
     let value: serde_json::Value =
         serde_json::from_slice(&body).map_err(|e| WebError::Unprocessable(e.to_string()))?;
+    let canonical = serde_json::to_vec(&value).map_err(|e| WebError::Internal(e.to_string()))?;
     let hash = ipfs
         .add_json(&value)
         .await
         .map_err(|e| WebError::Internal(format!("ipfs: {e}")))?;
+    if let Some(engine) = state.storage_engine.clone() {
+        engine
+            .write(&hash, &canonical)
+            .await
+            .map_err(|e| WebError::Internal(format!("storage: {e}")))?;
+    }
     let client = get_db(&state).await?;
-    upsert_file(&**client, &hash, body.len() as i64, FileType::File).await?;
+    upsert_file(&**client, &hash, canonical.len() as i64, FileType::File).await?;
     insert_upload_grace_pin(&**client, &state, &hash).await?;
     let resp = json!({ "status": "success", "hash": hash });
     Ok(json_text_response(StatusCode::OK, resp.to_string()))

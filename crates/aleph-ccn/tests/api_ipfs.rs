@@ -21,6 +21,7 @@ use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
 use aleph_ccn::config::IpfsSettings;
+use aleph_ccn::db::accessors::files::get_file;
 use aleph_ccn::services::ipfs::IpfsService;
 
 use common::{make_app_state, start_postgres};
@@ -62,6 +63,22 @@ async fn post_multipart(
 }
 
 async fn post_json(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, body)
+}
+
+async fn post_raw_json(app: axum::Router, uri: &str, body: &str) -> (StatusCode, Vec<u8>) {
     let req = Request::builder()
         .method("POST")
         .uri(uri)
@@ -192,6 +209,42 @@ async fn ipfs_add_json_disabled_returns_403() {
     let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
     let (status, _) = post_json(app, "/api/v0/ipfs/add_json", json!({"name": "test"})).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
+async fn ipfs_add_json_stores_canonical_bytes_locally() {
+    let pg = start_postgres().await;
+    let server = wiremock::MockServer::start().await;
+    let cid = "QmJsonaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    Mock::given(method("POST"))
+        .and(path("/api/v0/add"))
+        .and(query_param("cid-version", "0"))
+        .and(query_param("pin", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            "{{\"Name\":\"\",\"Hash\":\"{cid}\",\"Size\":\"1\"}}\n"
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let state = ipfs_enabled_state(pg.pool.clone(), &server.uri());
+    let storage = state.storage_engine.clone().expect("storage engine");
+    let app = aleph_ccn::web::build_router(state);
+    let raw_body = "{\n  \"z\": 1,\n  \"a\": [true, false]\n}";
+    let parsed: Value = serde_json::from_str(raw_body).unwrap();
+    let canonical = serde_json::to_vec(&parsed).unwrap();
+
+    let (status, body) = post_raw_json(app, "/api/v0/ipfs/add_json", raw_body).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        storage.read(cid).await.unwrap().as_deref(),
+        Some(canonical.as_slice())
+    );
+    let client = pg.pool.get().await.unwrap();
+    let file = get_file(&**client, cid).await.unwrap().expect("file row");
+    assert_eq!(file.size, canonical.len() as i64);
 }
 
 #[tokio::test]

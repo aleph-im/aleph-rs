@@ -692,11 +692,61 @@ pub struct MessageHashesQueryParams {
     pub sort_order: SortOrder,
 
     #[serde(default = "default_true")]
+    #[serde(deserialize_with = "deserialize_bool_flexible")]
     pub hash_only: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn deserialize_bool_flexible<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BoolVisitor;
+
+    impl Visitor<'_> for BoolVisitor {
+        type Value = bool;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a bool or a bool-like query string")
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            match v.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Ok(true),
+                "false" | "0" | "no" | "off" => Ok(false),
+                _ => Err(E::custom(format!("invalid boolean value: {v}"))),
+            }
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+            self.visit_str(&v)
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            match v {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(E::custom(format!("invalid boolean integer: {v}"))),
+            }
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            match v {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(E::custom(format!("invalid boolean integer: {v}"))),
+            }
+        }
+    }
+
+    deserializer.deserialize_any(BoolVisitor)
 }
 
 impl Default for MessageHashesQueryParams {
