@@ -195,12 +195,10 @@ async fn handle_create(
     }
     submit_or_preview(aleph_client, ccn_url, &program_pending, false, json).await?;
 
-    if !json {
-        if let Some((host, path)) = vm_run_urls(&program_pending.item_hash) {
-            eprintln!("Try it at:");
-            eprintln!("  {host}");
-            eprintln!("  {path}");
-        }
+    if !json && let Some((host, path)) = vm_run_urls(&program_pending.item_hash) {
+        eprintln!("Try it at:");
+        eprintln!("  {host}");
+        eprintln!("  {path}");
     }
 
     Ok(())
@@ -538,8 +536,15 @@ async fn handle_delete(
             )?;
             submit_or_preview(aleph_client, ccn_url, &store_forget, dry_run, json).await?;
         } else {
-            forget_code_store(aleph_client, ccn_url, &account, &args.item_hash, &code_ref, json)
-                .await?;
+            forget_code_store(
+                aleph_client,
+                ccn_url,
+                &account,
+                &args.item_hash,
+                &code_ref,
+                json,
+            )
+            .await?;
         }
     }
 
@@ -654,8 +659,7 @@ fn build_forget_for_program<A: Account>(
     if program.message_type != MessageType::Program {
         bail!("expected PROGRAM message, got {:?}", program.message_type);
     }
-    let mut builder =
-        ForgetBuilder::new(account, vec![program.item_hash.clone()]).reason(reason);
+    let mut builder = ForgetBuilder::new(account, vec![program.item_hash.clone()]).reason(reason);
     if let Some(ch) = channel {
         builder = builder.channel(ch);
     }
@@ -707,10 +711,9 @@ mod tests {
 
     #[test]
     fn vm_run_urls_emit_both_forms_for_native_hash() {
-        let h = ItemHash::try_from(
-            "9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e",
-        )
-        .unwrap();
+        let h =
+            ItemHash::try_from("9a4735bca0d3f7032ddd6659c35387b57b470550c931841e6862ece4e9e6523e")
+                .unwrap();
         let (host, path) = vm_run_urls(&h).unwrap();
         assert_eq!(
             host,
@@ -817,8 +820,7 @@ mod tests {
         ));
         let program: Message = serde_json::from_str(raw).unwrap();
         let account = TestAccount::new();
-        let pending =
-            build_forget_for_program(&account, &program, "User deletion", None).unwrap();
+        let pending = build_forget_for_program(&account, &program, "User deletion", None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
         let hashes = value["hashes"].as_array().unwrap();
         assert_eq!(hashes.len(), 1);

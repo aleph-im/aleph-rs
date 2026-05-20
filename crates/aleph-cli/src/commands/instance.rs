@@ -936,8 +936,7 @@ mod tests {
 
     #[test]
     fn parse_persistent_volume_with_comment() {
-        let specs =
-            vec!["name=db,mount=/var/db,size=500MiB,comment=My database".to_string()];
+        let specs = vec!["name=db,mount=/var/db,size=500MiB,comment=My database".to_string()];
         let volumes = parse_persistent_volumes(&specs).unwrap();
         if let MachineVolume::Persistent(v) = &volumes[0] {
             assert_eq!(v.base.comment, Some("My database".to_string()));
