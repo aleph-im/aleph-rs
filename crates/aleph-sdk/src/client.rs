@@ -136,6 +136,28 @@ pub enum StorageError {
     },
     #[error("CID mismatch: gateway returned {remote} but local computation produced {local}")]
     CidMismatch { local: ItemHash, remote: ItemHash },
+    /// 422: the CAR header's declared root does not match the metadata's
+    /// STORE item_hash. No IPFS side effects on the server. The two CID
+    /// strings come from the server's body and are not re-validated here.
+    #[error("CAR header root does not match metadata: car={car_root}, metadata={metadata_root}")]
+    CarHeaderRootMismatch {
+        car_root: String,
+        metadata_root: String,
+    },
+    /// 422: pyaleph imported the CAR successfully but the imported root
+    /// differs from the declared root (CAR header lied). The root is now
+    /// pinned on the server under the 24h grace period.
+    #[error(
+        "imported root does not match expected: kubo={kubo_root}, expected={expected_root}; root is pinned on the node under grace period"
+    )]
+    ImportedRootMismatch {
+        kubo_root: String,
+        expected_root: String,
+    },
+    /// 502/504: kubo or the pinning backend is unavailable or timed out.
+    /// Transient; retry.
+    #[error("IPFS backend unavailable: {0}")]
+    IpfsBackendUnavailable(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("local folder hash failed: {0}")]
@@ -1910,15 +1932,45 @@ fn classify_status_and_body(status: reqwest::StatusCode, body: &str) -> Option<S
         }
         StatusCode::FORBIDDEN => Some(StorageError::InvalidSignature),
         StatusCode::PAYLOAD_TOO_LARGE => Some(StorageError::FileTooLarge),
-        StatusCode::UNPROCESSABLE_ENTITY => Some(StorageError::InvalidMetadata(body.to_string())),
+        StatusCode::UNPROCESSABLE_ENTITY => {
+            if body.contains("Root CID does not match")
+                && let Some((car_root, metadata_root)) = parse_cid_pair(body)
+            {
+                return Some(StorageError::CarHeaderRootMismatch {
+                    car_root,
+                    metadata_root,
+                });
+            }
+            if body.contains("Imported root does not match expected")
+                && let Some((kubo_root, expected_root)) = parse_cid_pair(body)
+            {
+                return Some(StorageError::ImportedRootMismatch {
+                    kubo_root,
+                    expected_root,
+                });
+            }
+            Some(StorageError::InvalidMetadata(body.to_string()))
+        }
+        StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT => {
+            Some(StorageError::IpfsBackendUnavailable(body.to_string()))
+        }
         _ => None,
     }
+}
+
+/// Parse `"... (A != B)..."` and return (A, B). Tolerates surrounding text.
+fn parse_cid_pair(body: &str) -> Option<(String, String)> {
+    let open = body.find('(')?;
+    let close = body[open..].find(')')?;
+    let inner = &body[open + 1..open + close];
+    let (a, b) = inner.split_once(" != ")?;
+    Some((a.trim().to_string(), b.trim().to_string()))
 }
 
 /// Inspects an upload response: returns the success response unchanged,
 /// or maps non-success status codes to a `StorageError`.
 ///
-/// 403 and 422 require body inspection; other statuses do not. For
+/// 403, 422, 502, and 504 require body inspection; other statuses do not. For
 /// unmapped non-success codes the helper falls back to `UploadFailed`
 /// to preserve the existing retryable-error semantics.
 async fn handle_storage_response(
@@ -1931,10 +1983,15 @@ async fn handle_storage_response(
     }
     if matches!(
         status,
-        StatusCode::FORBIDDEN | StatusCode::UNPROCESSABLE_ENTITY
+        StatusCode::FORBIDDEN
+            | StatusCode::UNPROCESSABLE_ENTITY
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::GATEWAY_TIMEOUT
     ) {
         let body = response.text().await.unwrap_or_default();
-        return Err(classify_status_and_body(status, &body).expect("403 / 422 always classify"));
+        return Err(
+            classify_status_and_body(status, &body).expect("403/422/502/504 always classify")
+        );
     }
     if let Some(err) = classify_status_and_body(status, "") {
         return Err(err);
@@ -1959,6 +2016,52 @@ fn build_storage_metadata_part(message: &PendingMessage, sync: bool) -> reqwest:
     reqwest::multipart::Part::text(serialize_storage_metadata(message, sync))
         .mime_str("application/json")
         .expect("application/json is a valid mime type")
+}
+
+/// Read a CARv1 body file fully and chain it after the in-memory header
+/// bytes, returning a single `reqwest::Body`.
+///
+/// The CARv1 producer in `upload_folder_to_ipfs_authenticated` writes the
+/// block-frame section to a tempfile during the DAG walk; this helper
+/// prepends the header (built in memory after the walk completes) and
+/// hands the combined body to reqwest. Buffers the whole CAR into memory
+/// at upload time; streaming-first is a future optimization (the 4 GiB
+/// server cap bounds memory usage).
+async fn build_car_upload_body(
+    header_bytes: Vec<u8>,
+    car_body_path: &std::path::Path,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let file_size = tokio::fs::metadata(car_body_path).await?.len() as usize;
+    let mut file = tokio::fs::File::open(car_body_path).await?;
+    let mut body = Vec::with_capacity(header_bytes.len() + file_size);
+    body.extend_from_slice(&header_bytes);
+    file.read_to_end(&mut body).await?;
+    Ok(body)
+}
+
+/// Extract the file CID from a STORE `PendingMessage`.
+///
+/// For STORE messages the file hash is embedded in `item_content` as the
+/// `"item_hash"` JSON field, not in `PendingMessage::item_hash` (which is the
+/// SHA-256 of the serialized message body). This helper deserializes that JSON
+/// and returns the file's `ItemHash`.
+fn extract_message_item_hash(message: &PendingMessage) -> Result<ItemHash, StorageError> {
+    let content: serde_json::Value = serde_json::from_str(&message.item_content).map_err(|e| {
+        StorageError::InvalidMetadata(format!("STORE message item_content is not JSON: {e}"))
+    })?;
+    let raw = content
+        .get("item_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            StorageError::InvalidMetadata("STORE message item_content is missing item_hash".into())
+        })?;
+    raw.parse::<ItemHash>().map_err(|source| {
+        StorageError::InvalidMetadata(format!(
+            "STORE message item_hash '{}' is not a valid ItemHash: {}",
+            raw, source,
+        ))
+    })
 }
 
 impl AlephStorageClient for AlephClient {
@@ -2360,6 +2463,100 @@ impl AlephClient {
             });
         }
         Ok(remote_cid)
+    }
+
+    /// Upload a directory to pyaleph's authenticated IPFS CAR endpoint.
+    ///
+    /// The SDK rebuilds the UnixFS DAG locally, asserts its root matches
+    /// `message.item_hash` (fails with `CidMismatch` if not), writes
+    /// the DAG into a CARv1 temp file, and posts CAR + signed STORE metadata
+    /// to `/api/v0/ipfs/add_car`. Returns the root `ItemHash` on success.
+    pub async fn upload_folder_to_ipfs_authenticated(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+        message: &PendingMessage,
+        sync: bool,
+        opts: crate::ipfs::UploadFolderOptions,
+    ) -> Result<ItemHash, StorageError> {
+        use crate::car::{write_block_frame, write_carv1_header};
+        use crate::folder_hash::build_folder_dag;
+        use crate::ipfs::{CollectError, collect_folder_files};
+        use std::io::Write;
+
+        let path = path.as_ref();
+        let entries = collect_folder_files(path, opts.follow_symlinks).map_err(|e| match e {
+            CollectError::Empty(p) => StorageError::EmptyFolder(p),
+            CollectError::NonUtf8(p) => StorageError::NonUtf8Path(p),
+            CollectError::Walk { source, .. } => StorageError::Io(source.into()),
+        })?;
+
+        // 1. Walk the DAG, stream block frames into a tempfile body.
+        let mut body_tmp = tempfile::NamedTempFile::new()?;
+        let mut last_cid_bytes: Option<Vec<u8>> = None;
+        let local_root = build_folder_dag(&entries, &opts, &mut |cid, block| {
+            write_block_frame(&mut body_tmp, cid, block)?;
+            last_cid_bytes = Some(cid.to_vec());
+            Ok(())
+        })?;
+        body_tmp.flush()?;
+        let root_cid_bytes =
+            last_cid_bytes.expect("build_folder_dag always emits at least the root");
+
+        // 2. Sanity check the local root against metadata.item_hash.
+        let metadata_root = extract_message_item_hash(message)?;
+        if local_root != metadata_root {
+            return Err(StorageError::CidMismatch {
+                local: local_root,
+                remote: metadata_root,
+            });
+        }
+
+        // 3. Build the CARv1 header bytes.
+        let mut header_bytes = Vec::new();
+        write_carv1_header(&mut header_bytes, &root_cid_bytes)?;
+
+        // 4. Construct the multipart body.
+        let body = build_car_upload_body(header_bytes, body_tmp.path()).await?;
+        let file_part = reqwest::multipart::Part::bytes(body)
+            .file_name("upload.car")
+            .mime_str("application/vnd.ipld.car")
+            .expect("application/vnd.ipld.car is a valid mime");
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .part("metadata", build_storage_metadata_part(message, sync));
+
+        let url = self
+            .ccn_url
+            .join("/api/v0/ipfs/add_car")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        // 5. POST and classify the response.
+        let response = self
+            .upload_client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+
+        let response = handle_storage_response(response).await?;
+        let upload: UploadResponse = response
+            .json()
+            .await
+            .map_err(StorageError::InvalidResponseBody)?;
+        let server_hash = upload.hash.parse::<ItemHash>().map_err(|source| {
+            StorageError::InvalidResponseHash {
+                value: upload.hash.clone(),
+                source,
+            }
+        })?;
+        if server_hash != local_root {
+            return Err(StorageError::UploadIntegrityMismatch {
+                expected: local_root,
+                actual: server_hash,
+            });
+        }
+        Ok(local_root)
     }
 }
 
@@ -3590,6 +3787,76 @@ mod tests {
             match err {
                 Some(StorageError::InvalidMetadata(s)) => assert_eq!(s, body),
                 other => panic!("expected InvalidMetadata, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classify_status_422_car_header_root_mismatch() {
+            let body = "Root CID does not match (bafy1 != bafy2)";
+            let err = classify_status_and_body(reqwest::StatusCode::UNPROCESSABLE_ENTITY, body);
+            match err {
+                Some(StorageError::CarHeaderRootMismatch {
+                    car_root,
+                    metadata_root,
+                }) => {
+                    assert_eq!(car_root, "bafy1");
+                    assert_eq!(metadata_root, "bafy2");
+                }
+                other => panic!("expected CarHeaderRootMismatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classify_status_422_imported_root_mismatch() {
+            let body = "Imported root does not match expected (bafy3 != bafy4); CAR header declared a root that does not correspond to the imported DAG";
+            let err = classify_status_and_body(reqwest::StatusCode::UNPROCESSABLE_ENTITY, body);
+            match err {
+                Some(StorageError::ImportedRootMismatch {
+                    kubo_root,
+                    expected_root,
+                }) => {
+                    assert_eq!(kubo_root, "bafy3");
+                    assert_eq!(expected_root, "bafy4");
+                }
+                other => panic!("expected ImportedRootMismatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classify_status_422_unknown_body_falls_back_to_invalid_metadata() {
+            let body = "some other 422 reason";
+            let err = classify_status_and_body(reqwest::StatusCode::UNPROCESSABLE_ENTITY, body);
+            match err {
+                Some(StorageError::InvalidMetadata(s)) => assert_eq!(s, body),
+                other => panic!("expected InvalidMetadata, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classify_status_502_bad_gateway_is_ipfs_backend_unavailable() {
+            let err = classify_status_and_body(
+                reqwest::StatusCode::BAD_GATEWAY,
+                "Failed to import CAR into IPFS: kubo unreachable",
+            );
+            match err {
+                Some(StorageError::IpfsBackendUnavailable(s)) => {
+                    assert!(s.contains("kubo unreachable"));
+                }
+                other => panic!("expected IpfsBackendUnavailable, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classify_status_504_gateway_timeout_is_ipfs_backend_unavailable() {
+            let err = classify_status_and_body(
+                reqwest::StatusCode::GATEWAY_TIMEOUT,
+                "Timed out waiting for IPFS stat",
+            );
+            match err {
+                Some(StorageError::IpfsBackendUnavailable(s)) => {
+                    assert!(s.contains("Timed out"));
+                }
+                other => panic!("expected IpfsBackendUnavailable, got {other:?}"),
             }
         }
 
