@@ -396,6 +396,7 @@ impl TezosConnector {
         let datetime = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| timestamp_to_datetime(0.0));
+        let payload = normalize_tezos_message_payload(&event.payload);
         PendingChainTx {
             hash: event.operation_hash.clone(),
             chain: Chain::Tezos,
@@ -404,7 +405,7 @@ impl TezosConnector {
             publisher: event.source.clone(),
             protocol: ChainSyncProtocol::SmartContract,
             protocol_version: 1,
-            content: event.payload.clone(),
+            content: payload,
         }
     }
 
@@ -442,6 +443,37 @@ impl TezosConnector {
         }
         Ok(out)
     }
+}
+
+fn normalize_tezos_message_payload(payload: &serde_json::Value) -> serde_json::Value {
+    let address = payload
+        .get("address")
+        .or_else(|| payload.get("addr"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let event_type = payload
+        .get("type")
+        .or_else(|| payload.get("msgtype"))
+        .or_else(|| payload.get("message_type"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let content = payload
+        .get("content")
+        .or_else(|| payload.get("msgcontent"))
+        .or_else(|| payload.get("message_content"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let timestamp = payload
+        .get("timestamp")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    serde_json::json!({
+        "address": address,
+        "type": event_type,
+        "content": content,
+        "timestamp": timestamp,
+    })
 }
 
 #[async_trait]
@@ -553,9 +585,10 @@ mod tests {
                         "operationHash": "ophash1",
                         "type": "MessageEvent",
                         "payload": {
-                            "address": "tz1abc",
-                            "type": "STORE_IPFS",
-                            "content": "QmHash"
+                            "addr": "tz1abc",
+                            "msgtype": "STORE_IPFS",
+                            "msgcontent": "QmHash",
+                            "timestamp": 1704164645.0
                         }
                     }
                 ]
@@ -574,6 +607,9 @@ mod tests {
         assert_eq!(txs[0].chain, Chain::Tezos);
         assert_eq!(txs[0].protocol, ChainSyncProtocol::SmartContract);
         assert_eq!(txs[0].height, 42);
+        assert_eq!(txs[0].content["address"], "tz1abc");
+        assert_eq!(txs[0].content["type"], "STORE_IPFS");
+        assert_eq!(txs[0].content["content"], "QmHash");
     }
 
     #[test]

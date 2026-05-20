@@ -21,6 +21,8 @@ pub enum WebError {
     NotFound(String),
     /// 410 Gone (FORGOTTEN/REMOVED).
     Gone(String),
+    /// 502 Bad Gateway.
+    BadGateway(String),
     /// 504 Gateway Timeout.
     GatewayTimeout(String),
     /// 413 Payload Too Large.
@@ -40,6 +42,7 @@ impl WebError {
             WebError::Forbidden(_) => StatusCode::FORBIDDEN,
             WebError::NotFound(_) => StatusCode::NOT_FOUND,
             WebError::Gone(_) => StatusCode::GONE,
+            WebError::BadGateway(_) => StatusCode::BAD_GATEWAY,
             WebError::GatewayTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             WebError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             WebError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -55,6 +58,7 @@ impl WebError {
             | WebError::Forbidden(s)
             | WebError::NotFound(s)
             | WebError::Gone(s)
+            | WebError::BadGateway(s)
             | WebError::GatewayTimeout(s)
             | WebError::PayloadTooLarge(s)
             | WebError::Unprocessable(s)

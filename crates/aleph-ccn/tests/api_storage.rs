@@ -8,12 +8,12 @@ mod common;
 
 use axum::body::{Body, to_bytes};
 use http::{Request, StatusCode};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use aleph_ccn::types::files::FileType;
 
-use common::{make_app_state, start_postgres};
+use common::{insert_default_aggregates, make_app_state, start_postgres};
 
 async fn get(app: axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
     let response = app
@@ -59,6 +59,53 @@ async fn post_bytes(app: axum::Router, uri: &str, body: Vec<u8>) -> (StatusCode,
     (status, body)
 }
 
+async fn post_multipart(
+    app: axum::Router,
+    uri: &str,
+    boundary: &str,
+    body: Vec<u8>,
+) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, body)
+}
+
+fn build_multipart(boundary: &str, parts: &[(&str, &str, &[u8])]) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    for (name, filename, data) in parts {
+        buf.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        if filename.is_empty() {
+            buf.extend_from_slice(
+                format!("content-disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            );
+        } else {
+            buf.extend_from_slice(
+                format!(
+                    "content-disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        buf.extend_from_slice(data);
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    buf
+}
+
 async fn insert_file(pool: &aleph_ccn::db::DbPool, hash: &str, size: i64) {
     let client = pool.get().await.unwrap();
     aleph_ccn::db::accessors::files::upsert_file(&**client, hash, size, FileType::File)
@@ -68,6 +115,20 @@ async fn insert_file(pool: &aleph_ccn::db::DbPool, hash: &str, size: i64) {
 
 const FILE_CONTENT: &[u8] = b"Hello earthlings, I come in pieces";
 const FILE_SHA256: &str = "bb6e53f2738e5934b9a2125a9dc3d76211720e5152bdbcd4b236363d18d4f8a3";
+const SIGNED_STORAGE_FILE_CONTENT: &[u8] = b"Hello Aleph.im\n";
+const SIGNED_STORAGE_FILE_SHA256: &str =
+    "0214e5578f5acb5d36ea62255cbf1157a4bdde7b9612b5db4899b2175e310b6f";
+const SIGNED_STORAGE_MESSAGE_JSON: &str = r#"{
+  "chain": "ETH",
+  "sender": "0x6dA130FD646f826C1b8080C07448923DF9a79aaA",
+  "type": "STORE",
+  "channel": "null",
+  "signature": "0x2b90dcfa8f93506150df275a4fe670e826be0b4b751badd6ec323648a6a738962f47274f71a9939653fb6d49c25055821f547447fb3b33984a579008d93eca431b",
+  "time": 1692193373.7144432,
+  "item_type": "inline",
+  "item_content": "{\"address\":\"0x6dA130FD646f826C1b8080C07448923DF9a79aaA\",\"time\":1692193373.714271,\"item_type\":\"storage\",\"item_hash\":\"0214e5578f5acb5d36ea62255cbf1157a4bdde7b9612b5db4899b2175e310b6f\",\"mime_type\":\"text/plain\"}",
+  "item_hash": "8227acbc2f7c43899efd9f63ea9d8119a4cb142f3ba2db5fe499ccfab86dfaed"
+}"#;
 
 #[tokio::test]
 #[ignore = "requires docker; run with --ignored"]
@@ -272,6 +333,36 @@ async fn storage_raw_upload_uses_unauthenticated_limit() {
     let (status, _) = post_bytes(app, "/api/v0/storage/add_file", vec![b'x'; 9]).await;
 
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
+async fn storage_signed_small_upload_still_requires_balance() {
+    let pg = start_postgres().await;
+    insert_default_aggregates(&pg.pool).await.unwrap();
+    let state = make_app_state(pg.pool.clone());
+    let storage = state.storage_engine.clone();
+    let app = aleph_ccn::web::build_router(state);
+    let boundary = "----alephTest";
+    let metadata = json!({
+        "sync": false,
+        "message": serde_json::from_str::<Value>(SIGNED_STORAGE_MESSAGE_JSON).unwrap(),
+    })
+    .to_string();
+    let body = build_multipart(
+        boundary,
+        &[
+            ("file", "hello.txt", SIGNED_STORAGE_FILE_CONTENT),
+            ("metadata", "", metadata.as_bytes()),
+        ],
+    );
+
+    let (status, _) = post_multipart(app, "/api/v0/storage/add_file", boundary, body).await;
+
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    if let Some(engine) = storage {
+        assert!(!engine.exists(SIGNED_STORAGE_FILE_SHA256).await.unwrap());
+    }
 }
 
 #[tokio::test]

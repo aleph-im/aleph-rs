@@ -18,6 +18,7 @@ use aleph_ccn::db::accessors::messages::get_message_status;
 use aleph_ccn::db::models::cron_jobs::CronJobDb;
 use aleph_ccn::db::models::messages::MessageDb;
 use aleph_ccn::jobs::cron::balance_job::BalanceCronJob;
+use aleph_ccn::jobs::cron::credit_balance_job::CreditBalanceCronJob;
 use aleph_ccn::jobs::cron::cron_job::CronJob;
 use aleph_ccn::toolkit::constants::{MiB, STORE_AND_PROGRAM_COST_CUTOFF_HEIGHT};
 use aleph_ccn::types::channel::Channel;
@@ -158,6 +159,45 @@ async fn seed_message_cost(
             "INSERT INTO account_costs(owner, item_hash, type, name, payment_type, cost_hold, cost_stream, cost_credit) \
              VALUES ($1, $2, 'STORAGE', 'store', 'hold', $3, 0, 0)",
             &[&owner.to_string(), &item_hash.to_string(), &cost_d],
+        )
+        .await
+        .unwrap();
+}
+
+async fn seed_credit_message_cost(
+    pool: &aleph_ccn::db::DbPool,
+    owner: &str,
+    item_hash: &str,
+    cost: &str,
+) {
+    let client = pool.get().await.unwrap();
+    let cost_d = Decimal::from_str(cost).unwrap();
+    client
+        .execute(
+            "INSERT INTO account_costs(owner, item_hash, type, name, payment_type, cost_hold, cost_stream, cost_credit) \
+             VALUES ($1, $2, 'STORAGE', 'store', 'credit', 0, 0, $3)",
+            &[&owner.to_string(), &item_hash.to_string(), &cost_d],
+        )
+        .await
+        .unwrap();
+}
+
+async fn seed_credit_balance(pool: &aleph_ccn::db::DbPool, address: &str, amount: i64) {
+    let client = pool.get().await.unwrap();
+    let now = Utc::now();
+    client
+        .execute(
+            "INSERT INTO credit_history(address, amount, credit_ref, credit_index, payment_method, message_timestamp) \
+             VALUES ($1, $2, 'credit-balance-job-test', 0, 'credit_distribution', $3)",
+            &[&address.to_string(), &amount, &now],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO credit_balances(address, credit_ref, credit_index, amount_remaining, message_timestamp) \
+             VALUES ($1, 'credit-balance-job-test', 0, $2, $3)",
+            &[&address.to_string(), &amount, &now],
         )
         .await
         .unwrap();
@@ -363,4 +403,46 @@ async fn balance_job_recovers_messages_with_sufficient_balance() {
     let client = pg.pool.get().await.unwrap();
     let status = get_message_status(&**client, &message_hash).await.unwrap().unwrap();
     assert_eq!(status.status, MessageStatus::Processed);
+}
+
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
+async fn credit_balance_job_uses_fractional_daily_costs() {
+    let pg = start_postgres().await;
+    let now = Utc::now();
+    let cron = seed_cron_job(&pg.pool, "credit_balance_fractional", now).await;
+
+    let wallet = "0xcreditfractional";
+    let message_hash = "cafe1234".repeat(4);
+    let file_hash = "beef".repeat(16);
+
+    seed_credit_balance(&pg.pool, wallet, 10).await;
+    seed_store_message(
+        &pg.pool,
+        &message_hash,
+        wallet,
+        &file_hash,
+        MessageStatus::Processed,
+        30,
+    )
+    .await;
+    seed_credit_message_cost(&pg.pool, wallet, &message_hash, "0.5").await;
+    seed_chain_confirmation(
+        &pg.pool,
+        &message_hash,
+        STORE_AND_PROGRAM_COST_CUTOFF_HEIGHT + 1000,
+    )
+    .await;
+
+    let job = CreditBalanceCronJob::new(25 * 1024 * 1024);
+    let mut client = pg.pool.get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    job.run(now, &cron, &tx).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let status = get_message_status(&**pg.pool.get().await.unwrap(), &message_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.status, MessageStatus::Removing);
 }

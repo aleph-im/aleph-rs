@@ -32,12 +32,15 @@ const PENDING_TX_LEASE_SECONDS: i64 = 300;
 /// implement this trait directly.
 #[async_trait]
 pub trait TxMessageProvider: Send + Sync {
-    /// Returns the list of message dicts carried by `tx`, optionally
-    /// updating `seen_ids` to deduplicate previously-processed payloads.
+    /// Returns the list of message dicts carried by `tx`.
+    ///
+    /// `seen_ids` is kept for archive payload deduplication by providers that
+    /// need it, but duplicate message hashes from chain transactions must still
+    /// be returned so processed messages can record each confirmation.
     async fn get_tx_messages(
         &self,
         tx: &PendingChainTx,
-        seen_ids: &mut HashSet<String>,
+        _seen_ids: &mut HashSet<String>,
     ) -> AlephResult<Vec<Value>>;
 }
 
@@ -64,14 +67,11 @@ impl TxMessageProvider for ChainDataService {
     async fn get_tx_messages(
         &self,
         tx: &PendingChainTx,
-        seen_ids: &mut HashSet<String>,
+        _seen_ids: &mut HashSet<String>,
     ) -> AlephResult<Vec<Value>> {
         let decoded = self.get_tx_messages_from_tx(&tx.to_chain_tx_db()).await?;
         let mut out = Vec::with_capacity(decoded.len());
         for message in decoded {
-            if !seen_ids.insert(message.item_hash.clone()) {
-                continue;
-            }
             out.push(serde_json::to_value(message)?);
         }
         Ok(out)
@@ -96,7 +96,7 @@ impl TxMessageProvider for DbTxMessageProvider {
     async fn get_tx_messages(
         &self,
         tx: &PendingChainTx,
-        seen_ids: &mut HashSet<String>,
+        _seen_ids: &mut HashSet<String>,
     ) -> AlephResult<Vec<Value>> {
         let client = self
             .pool
@@ -109,9 +109,6 @@ impl TxMessageProvider for DbTxMessageProvider {
             .await?;
         let mut out = Vec::with_capacity(decoded.len());
         for message in decoded {
-            if !seen_ids.insert(message.item_hash.clone()) {
-                continue;
-            }
             out.push(serde_json::to_value(message)?);
         }
         Ok(out)

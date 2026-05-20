@@ -235,7 +235,8 @@ async fn storage_add_file(
     // `_verify_message_signature` + `_verify_user_balance`.
     let has_metadata = parsed_metadata.is_some();
     if let Some(meta) = parsed_metadata.as_ref() {
-        verify_store_metadata(&state, meta, Some(&hash), file_bytes.len(), max_unauth).await?;
+        verify_store_metadata(&state, meta, Some(&hash), file_bytes.len(), ItemType::Storage)
+            .await?;
     }
 
     engine
@@ -306,7 +307,7 @@ pub(crate) async fn verify_store_metadata(
     meta: &StoreMetadata,
     expected_file_hash: Option<&str>,
     file_size: usize,
-    max_unauthenticated_upload_file_size: usize,
+    expected_item_type: ItemType,
 ) -> WebResult<String> {
     // 1. Parse + validate the wire payload as a STORE PendingMessage.
     let parsed = parse_pending_message(meta.message_dict.clone())
@@ -335,9 +336,9 @@ pub(crate) async fn verify_store_metadata(
     }
     let content_item_type = crate::schemas::base_messages::item_type_from_hash(&content_item_hash)
         .map_err(|e| WebError::Unprocessable(format!("Invalid STORE file hash: {e}")))?;
-    if content_item_type != ItemType::Storage && content_item_type != ItemType::Ipfs {
+    if content_item_type != expected_item_type {
         return Err(WebError::Unprocessable(format!(
-            "Unsupported STORE item type: {content_item_type:?}"
+            "Unsupported STORE item type for this endpoint: {content_item_type:?}"
         )));
     }
     // 3. Signature verification — delegates to the chain dispatcher.
@@ -356,38 +357,36 @@ pub(crate) async fn verify_store_metadata(
         .await
         .map_err(|_| WebError::Forbidden("Invalid signature on STORE metadata".into()))?;
 
-    // 4. Balance check, only when the file is larger than the unauthenticated
-    //    upload cap. Mirrors pyaleph's `_verify_user_balance`.
+    // 4. Balance check. Mirrors pyaleph's `_verify_user_balance`, which runs
+    //    for every authenticated upload regardless of file size.
     let charged_address =
         store_content_address(&meta.message_dict).unwrap_or_else(|| pending_store.sender.clone());
     use crate::toolkit::constants::MIB;
     let mib = MIB as usize;
     let estimated_size_mib = file_size.div_ceil(mib) as i64;
-    if (estimated_size_mib as usize) * mib > max_unauthenticated_upload_file_size {
-        let client = get_db(state).await?;
-        let mut cost_content_value = serde_json::to_value(content)
-            .map_err(|e| WebError::Internal(format!("store content serialization: {e}")))?;
-        let cost_content_obj = cost_content_value
-            .as_object_mut()
-            .ok_or_else(|| WebError::Unprocessable("Invalid store message content".into()))?;
-        cost_content_obj.insert("address".into(), Value::String(charged_address.clone()));
-        cost_content_obj.insert(
-            "estimated_size_mib".into(),
-            Value::Number(serde_json::Number::from(estimated_size_mib)),
-        );
-        let cost_content = CostContent::new(CostContentKind::Store, &cost_content_value);
-        let payment_type = get_payment_type(&cost_content);
-        let (message_cost, _) =
-            get_total_and_detailed_costs(&**client, &cost_content, "").await.map_err(|e| {
-                WebError::Internal(format!("storage cost estimation failed: {e}"))
-            })?;
-        let validation =
-            validate_balance_for_payment(&**client, &charged_address, message_cost, payment_type)
-                .await
-                .map_err(WebError::from)?;
-        if let BalanceValidation::Invalid(exception) = validation {
-            return Err(WebError::PaymentRequired(exception.to_string()));
-        }
+    let client = get_db(state).await?;
+    let mut cost_content_value = serde_json::to_value(content)
+        .map_err(|e| WebError::Internal(format!("store content serialization: {e}")))?;
+    let cost_content_obj = cost_content_value
+        .as_object_mut()
+        .ok_or_else(|| WebError::Unprocessable("Invalid store message content".into()))?;
+    cost_content_obj.insert("address".into(), Value::String(charged_address.clone()));
+    cost_content_obj.insert(
+        "estimated_size_mib".into(),
+        Value::Number(serde_json::Number::from(estimated_size_mib)),
+    );
+    let cost_content = CostContent::new(CostContentKind::Store, &cost_content_value);
+    let payment_type = get_payment_type(&cost_content);
+    let (message_cost, _) =
+        get_total_and_detailed_costs(&**client, &cost_content, "").await.map_err(|e| {
+            WebError::Internal(format!("storage cost estimation failed: {e}"))
+        })?;
+    let validation =
+        validate_balance_for_payment(&**client, &charged_address, message_cost, payment_type)
+            .await
+            .map_err(WebError::from)?;
+    if let BalanceValidation::Invalid(exception) = validation {
+        return Err(WebError::PaymentRequired(exception.to_string()));
     }
     Ok(content_item_hash)
 }

@@ -87,7 +87,7 @@ fn sample_chain_tx() -> PendingChainTx {
 }
 
 #[tokio::test]
-async fn chain_data_service_provider_decodes_and_deduplicates_on_item_hash() {
+async fn chain_data_service_provider_preserves_duplicate_item_hashes_for_confirmations() {
     let mut chain_tx = sample_chain_tx();
     chain_tx.content = json!({
         "messages": [
@@ -130,10 +130,11 @@ async fn chain_data_service_provider_decodes_and_deduplicates_on_item_hash() {
         .await
         .unwrap();
 
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
     assert_eq!(messages[0]["item_hash"], "deadbeef0001");
-    assert_eq!(messages[1]["item_hash"], "deadbeef0002");
-    assert_eq!(seen.len(), 2);
+    assert_eq!(messages[1]["item_hash"], "deadbeef0001");
+    assert_eq!(messages[2]["item_hash"], "deadbeef0002");
+    assert!(seen.is_empty());
 }
 
 async fn seed_pending_tx(pool: &aleph_ccn::db::DbPool, chain_tx: &PendingChainTx) {

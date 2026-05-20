@@ -236,21 +236,9 @@ async fn ipfs_add_file_stat_timeout_returns_504_and_grace_pins() {
 
 #[tokio::test]
 #[ignore = "requires docker; run with --ignored"]
-async fn ipfs_add_file_cid_mismatch_returns_422_and_grace_pins_actual_cid() {
+async fn ipfs_add_file_rejects_storage_metadata_before_kubo_add() {
     let pg = start_postgres().await;
     let server = wiremock::MockServer::start().await;
-    let actual_cid = "QmFile1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    Mock::given(method("POST"))
-        .and(path("/api/v0/add"))
-        .and(query_param("cid-version", "0"))
-        .and(query_param("pin", "true"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
-            "{{\"Name\":\"file\",\"Hash\":\"{actual_cid}\",\"Size\":\"11\"}}\n"
-        )))
-        .expect(1)
-        .mount(&server)
-        .await;
-
     let app = aleph_ccn::web::build_router(ipfs_enabled_state(pg.pool.clone(), &server.uri()));
     let boundary = "----alephTest";
     let metadata = json!({
@@ -270,8 +258,8 @@ async fn ipfs_add_file_cid_mismatch_returns_422_and_grace_pins_actual_cid() {
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let body = String::from_utf8(body).unwrap();
-    assert!(body.contains("File hash does not match"), "{body}");
-    assert_eq!(file_and_grace_pin_count(&pg.pool, actual_cid).await, (11, 1));
+    assert!(body.contains("Unsupported STORE item type"), "{body}");
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

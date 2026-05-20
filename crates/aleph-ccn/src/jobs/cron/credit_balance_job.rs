@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 use crate::AlephResult;
 use crate::db::accessors::balances::{get_credit_balance, get_updated_credit_balance_accounts};
@@ -63,7 +63,8 @@ impl CronJob for CreditBalanceCronJob {
         );
 
         for address in accounts {
-            let mut remaining_credits = get_credit_balance(pg, &address, None).await?;
+            let mut remaining_credits =
+                Decimal::from(get_credit_balance(pg, &address, None).await?);
 
             let mut to_delete: Vec<String> = Vec::new();
             let mut to_recover: Vec<String> = Vec::new();
@@ -83,22 +84,11 @@ impl CronJob for CreditBalanceCronJob {
                 );
 
                 // Cost is per hour, so multiply by 24 to compute the 1-day
-                // minimum runtime guard. Use `Decimal::to_i64` so we do not
-                // silently truncate fractional totals via `to_string().parse()`
-                // (Python keeps `Decimal` precision end-to-end here, but the
-                // downstream comparison only needs an integer — skip the row
-                // entirely if the cost doesn't fit `i64`).
-                let Some(cost_i) = row.total.to_i64() else {
-                    tracing::warn!(
-                        "Skipping credit message {}: total cost {} does not fit i64",
-                        row.item_hash,
-                        row.total
-                    );
-                    continue;
-                };
-                let daily_cost = cost_i.saturating_mul(24);
+                // minimum runtime guard. Keep Decimal precision end-to-end,
+                // matching pyaleph and preserving fractional credit costs.
+                let daily_cost = row.total * Decimal::from(24);
                 let should_remove = remaining_credits < daily_cost;
-                remaining_credits = (remaining_credits - cost_i).max(0);
+                remaining_credits = (remaining_credits - row.total).max(Decimal::ZERO);
 
                 let status = match get_message_status(pg, &row.item_hash).await? {
                     Some(s) => s,
@@ -196,24 +186,12 @@ mod tests {
     }
 
     #[test]
-    fn decimal_to_i64_avoids_string_parse_zeroing() {
-        // The old conversion path was `row.total.to_string().parse::<i64>()`,
-        // which silently zeroes any fractional or scientific Decimal because
-        // the `i64::from_str` call fails on "12.5". `Decimal::to_i64`
-        // truncates toward zero (returning Some(12) for 12.5) so we keep
-        // meaningful magnitude.
+    fn decimal_arithmetic_preserves_fractional_credit_costs() {
         let frac: rust_decimal::Decimal = "12.5".parse().unwrap();
-        // Confirm that the legacy path zeroes the value.
-        assert_eq!(frac.to_string().parse::<i64>().unwrap_or(0), 0);
-        // Confirm the new path keeps the integer magnitude.
-        assert_eq!(frac.to_i64(), Some(12));
+        let daily = frac * rust_decimal::Decimal::from(24);
+        assert_eq!(daily, "300.0".parse().unwrap());
 
-        let exact: rust_decimal::Decimal = "12".parse().unwrap();
-        assert_eq!(exact.to_i64(), Some(12));
-
-        // For sums that genuinely exceed i64, `to_i64` returns None so the
-        // job skips the row instead of feeding a poisoned value forward.
-        let huge = rust_decimal::Decimal::MAX;
-        assert!(huge.to_i64().is_none());
+        let remaining: rust_decimal::Decimal = "10".parse().unwrap();
+        assert!(remaining < daily);
     }
 }

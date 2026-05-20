@@ -15,6 +15,7 @@ use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
+use aleph_types::message::item_type::ItemType;
 use bytes::Bytes;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
@@ -172,7 +173,7 @@ async fn ipfs_add_file(
                 meta,
                 None,
                 file_upload.size as usize,
-                max_unauth_upload as usize,
+                ItemType::Ipfs,
             )
             .await?,
         )
@@ -294,14 +295,14 @@ async fn ipfs_add_car(
         &parsed_metadata,
         Some(&car_root),
         car_upload.size as usize,
-        0,
+        ItemType::Ipfs,
     )
     .await?;
 
     let imported_roots = ipfs
         .dag_import_path(&car_upload.path, true)
         .await
-        .map_err(|e| WebError::Internal(format!("Failed to import CAR into IPFS: {e}")))?;
+        .map_err(|e| WebError::BadGateway(format!("Failed to import CAR into IPFS: {e}")))?;
     if imported_roots.len() != 1 || imported_roots.first() != Some(&car_root) {
         let kubo_root = imported_roots
             .first()
@@ -324,7 +325,7 @@ async fn ipfs_add_car(
                 grace_period_hours,
             )
             .await;
-            return Err(WebError::Internal(format!("ipfs stat: {e}")));
+            return Err(WebError::GatewayTimeout(format!("ipfs stat: {e}")));
         }
     };
 

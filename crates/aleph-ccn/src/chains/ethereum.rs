@@ -27,7 +27,7 @@ use crate::AlephResult;
 use crate::config::Settings;
 use crate::db::DbPool;
 use crate::db::accessors::chains::{get_last_height, upsert_chain_sync_status};
-use crate::types::chain_sync::ChainEventType;
+use crate::types::chain_sync::{ChainEventType, ChainSyncProtocol};
 use aleph_types::chain::Chain;
 
 /// Embedded Ethereum sync contract ABI.
@@ -302,7 +302,7 @@ impl ChainReader for EthereumConnector {
                             continue;
                         }
                     };
-                    if !authorized.is_empty() {
+                    if !authorized.is_empty() && pending.protocol != ChainSyncProtocol::SmartContract {
                         let publisher_addr = pending.publisher.parse::<EvmAddress>().ok();
                         if let Some(addr) = publisher_addr {
                             if !authorized.contains(&addr) {
