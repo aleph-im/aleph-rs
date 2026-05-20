@@ -1525,7 +1525,7 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
-    /// Persistent volume: `name=N,mount=PATH,size=SIZE[,persistence=host|store]`.
+    /// Persistent volume: `name=N,mount=PATH,size=SIZE[,persistence=host|store][,comment=TEXT]`.
     /// SIZE uses human-readable format (e.g. 10GB, 500MiB). Can be repeated.
     #[arg(long)]
     pub persistent_volume: Option<Vec<String>>,
@@ -2031,7 +2031,7 @@ pub struct ProgramCreateArgs {
     #[arg(long)]
     pub env_vars: Option<String>,
 
-    /// Persistent volume: `name=N,mount=PATH,size=SIZE[,persistence=host|store]`.
+    /// Persistent volume: `name=N,mount=PATH,size=SIZE[,persistence=host|store][,comment=TEXT]`.
     /// Can be repeated.
     #[arg(long)]
     pub persistent_volume: Option<Vec<String>>,
