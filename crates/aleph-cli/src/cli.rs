@@ -2049,7 +2049,8 @@ pub struct ProgramCreateArgs {
     pub storage_engine: StorageEngineCli,
 
     /// Payment type for both the STORE and the PROGRAM messages.
-    #[arg(long, value_enum, default_value_t = PaymentTypeCli::Credit)]
+    /// PROGRAM does not yet support credit payments, so defaults to `hold`.
+    #[arg(long, value_enum, default_value_t = PaymentTypeCli::Hold)]
     pub payment_type: PaymentTypeCli,
 
     /// Channel name (default: ALEPH-CLOUDSOLUTIONS).
