@@ -57,6 +57,7 @@ impl ChainReader for BscConnector {
                     pool.clone(),
                     publisher.clone(),
                     cfg.aleph.indexer_url.clone(),
+                    cfg.bsc.sync_contract.clone(),
                     ChainEventType::Message,
                 )
                 .await;

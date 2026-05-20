@@ -14,8 +14,9 @@ use crate::AlephResult;
 use crate::chains::chain_data_service::{PendingChainTx, PendingTxPublisher};
 use crate::db::DbPool;
 use crate::db::accessors::chains::{
-    IndexerMultiRange, get_last_height, update_indexer_multirange, upsert_chain_sync_status,
+    add_indexer_range, get_missing_indexer_datetime_multirange,
 };
+use crate::schemas::chains::indexer_response::DateTimeRange;
 use crate::toolkit::range::{MultiRange, Range};
 use crate::toolkit::timestamp::timestamp_to_datetime;
 use crate::types::chain_sync::{ChainEventType, ChainSyncProtocol};
@@ -158,6 +159,18 @@ pub struct IndexerResponse<T> {
     pub data: T,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AccountStateData {
+    #[serde(default)]
+    pub state: Vec<AccountState>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountState {
+    #[serde(default)]
+    pub processed: Vec<DateTimeRange>,
+}
+
 /// `AlephIndexerReader` mirrors the Python class but operates statelessly:
 /// the caller passes the URL/contract on each call.
 pub struct AlephIndexerReader {
@@ -197,6 +210,18 @@ impl AlephIndexerReader {
         let body = serde_json::json!({ "query": query });
         let resp = self.http.post(indexer_url).json(&body).send().await?;
         let resp: IndexerResponse<IndexerEventData> = resp.json().await?;
+        Ok(resp.data)
+    }
+
+    pub async fn fetch_account_state(
+        &self,
+        indexer_url: &str,
+        accounts: &[String],
+    ) -> AlephResult<AccountStateData> {
+        let query = make_account_state_query(self.blockchain, accounts, EntityType::Log);
+        let body = serde_json::json!({ "query": query });
+        let resp = self.http.post(indexer_url).json(&body).send().await?;
+        let resp: IndexerResponse<AccountStateData> = resp.json().await?;
         Ok(resp.data)
     }
 
@@ -249,29 +274,26 @@ impl AlephIndexerReader {
         })
     }
 
-    /// Pull all new events for the configured smart contract and persist
-    /// the corresponding pending-tx rows. Mirrors
-    /// `AlephIndexerReader.fetch_new_events`.
-    pub async fn fetch_new_events(
+    async fn fetch_range(
         &self,
         pool: &DbPool,
         publisher: &PendingTxPublisher,
         indexer_url: &str,
         event_type: ChainEventType,
-        last_height: u64,
+        datetime_range: Range<DateTime<Utc>>,
     ) -> AlephResult<Vec<PendingChainTx>> {
         let mut results: Vec<PendingChainTx> = Vec::new();
-        let mut cursor_block: u64 = last_height;
+        let mut start_datetime = datetime_range.lower;
+        let end_datetime = datetime_range.upper;
         let limit: u32 = 1000;
-        let upper_bound: u64 = u64::MAX / 2;
 
         loop {
             let data = self
                 .fetch_events(
                     indexer_url,
                     event_type,
+                    Some((start_datetime, end_datetime)),
                     None,
-                    Some((cursor_block, upper_bound)),
                     limit,
                 )
                 .await?;
@@ -282,11 +304,17 @@ impl AlephIndexerReader {
             };
 
             if nb == 0 {
+                let synced_range =
+                    Range::new(start_datetime, end_datetime, true, true).expect("range bounds");
+                let client = pool
+                    .get()
+                    .await
+                    .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
+                add_indexer_range(&**client, self.chain.clone(), event_type, synced_range).await?;
                 break;
             }
 
-            let mut last_dt: Option<DateTime<Utc>> = None;
-            let mut last_block: u64 = cursor_block;
+            let mut last_dt: DateTime<Utc> = start_datetime;
 
             match event_type {
                 ChainEventType::Message => {
@@ -298,8 +326,7 @@ impl AlephIndexerReader {
                             );
                             continue;
                         };
-                        last_dt = Some(tx.datetime);
-                        last_block = tx.height.max(last_block);
+                        last_dt = tx.datetime;
                         publisher.publish(&tx).await?;
                         results.push(tx);
                     }
@@ -313,8 +340,7 @@ impl AlephIndexerReader {
                             );
                             continue;
                         };
-                        last_dt = Some(tx.datetime);
-                        last_block = tx.height.max(last_block);
+                        last_dt = tx.datetime;
                         publisher.publish(&tx).await?;
                         results.push(tx);
                     }
@@ -322,36 +348,84 @@ impl AlephIndexerReader {
             };
 
             // Persist range progress.
-            if let Some(end_dt) = last_dt {
-                let start_dt = timestamp_to_datetime(0.0);
-                let client = pool
-                    .get()
-                    .await
-                    .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
-                if let Ok(range) = Range::new(start_dt, end_dt, true, true) {
-                    let mut mr: MultiRange<DateTime<Utc>> = MultiRange::default();
-                    mr.add_range(range);
-                    let imr = IndexerMultiRange {
-                        chain: self.chain.clone(),
-                        event_type,
-                        datetime_multirange: mr,
-                    };
-                    update_indexer_multirange(&**client, &imr).await?;
-                }
-                upsert_chain_sync_status(
-                    &**client,
-                    self.chain.clone(),
-                    event_type,
-                    last_block.min(i32::MAX as u64) as i32,
-                    Utc::now(),
-                )
+            let synced_upper = if (nb as u32) >= limit {
+                last_dt
+            } else {
+                end_datetime
+            };
+            let synced_range =
+                Range::new(start_datetime, synced_upper, true, (nb as u32) < limit)
+                    .expect("range bounds");
+            let client = pool
+                .get()
+                .await
+                .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
+            add_indexer_range(&**client, self.chain.clone(), event_type, synced_range.clone())
                 .await?;
-            }
 
             if (nb as u32) < limit {
                 break;
             }
-            cursor_block = last_block.saturating_add(1);
+            start_datetime = synced_range.upper;
+        }
+
+        Ok(results)
+    }
+
+    /// Pull all missing processed indexer ranges for the configured smart
+    /// contract and persist the corresponding pending-tx rows. Mirrors
+    /// `AlephIndexerReader.fetch_new_events`.
+    pub async fn fetch_new_events(
+        &self,
+        pool: &DbPool,
+        publisher: &PendingTxPublisher,
+        indexer_url: &str,
+        smart_contract_address: &str,
+        event_type: ChainEventType,
+    ) -> AlephResult<Vec<PendingChainTx>> {
+        let account_state = self
+            .fetch_account_state(indexer_url, &[smart_contract_address.to_string()])
+            .await?;
+        let Some(state) = account_state.state.first() else {
+            tracing::warn!(
+                account = smart_contract_address,
+                "No account data found. Is the indexer up to date?"
+            );
+            return Ok(Vec::new());
+        };
+
+        let mut indexer_multirange: MultiRange<DateTime<Utc>> = MultiRange::default();
+        for processed in &state.processed {
+            let range = Range::new(processed.start, processed.end, true, true)
+                .map_err(|e| crate::AlephError::Chain(format!("invalid indexer range: {e}")))?;
+            indexer_multirange.add_range(range);
+        }
+
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
+        let missing = get_missing_indexer_datetime_multirange(
+            &**client,
+            self.chain.clone(),
+            event_type,
+            &indexer_multirange,
+        )
+        .await?;
+        drop(client);
+
+        let mut results = Vec::new();
+        for range_to_sync in missing.iter() {
+            let mut txs = self
+                .fetch_range(
+                    pool,
+                    publisher,
+                    indexer_url,
+                    event_type,
+                    range_to_sync.clone(),
+                )
+                .await?;
+            results.append(&mut txs);
         }
 
         Ok(results)
@@ -364,23 +438,18 @@ impl AlephIndexerReader {
         pool: DbPool,
         publisher: Arc<PendingTxPublisher>,
         indexer_url: String,
+        smart_contract_address: String,
         event_type: ChainEventType,
     ) -> AlephResult<()> {
         loop {
-            let start_height = match pool.get().await {
-                Ok(client) => get_last_height(&**client, self.chain.clone(), event_type)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|h| h.max(0) as u64 + 1)
-                    .unwrap_or(0),
-                Err(e) => {
-                    tracing::warn!(error = %e, "indexer run: could not read last height");
-                    0
-                }
-            };
             if let Err(e) = self
-                .fetch_new_events(&pool, &publisher, &indexer_url, event_type, start_height)
+                .fetch_new_events(
+                    &pool,
+                    &publisher,
+                    &indexer_url,
+                    &smart_contract_address,
+                    event_type,
+                )
                 .await
             {
                 tracing::warn!(error = %e, "indexer run: fetch_new_events failed");
