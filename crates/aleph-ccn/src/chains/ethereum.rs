@@ -293,28 +293,7 @@ impl ChainReader for EthereumConnector {
                         break;
                     }
                 };
-                for log in &logs {
-                    let pending = match self.chain_data_service.parse_log(log) {
-                        Ok(Some(p)) => p,
-                        Ok(None) => continue,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "ETH fetcher: parse_log error");
-                            continue;
-                        }
-                    };
-                    if !authorized.is_empty() && pending.protocol != ChainSyncProtocol::SmartContract {
-                        let publisher_addr = pending.publisher.parse::<EvmAddress>().ok();
-                        if let Some(addr) = publisher_addr {
-                            if !authorized.contains(&addr) {
-                                tracing::trace!(%pending.publisher, "ETH: unauthorized emitter");
-                                continue;
-                            }
-                        }
-                    }
-                    if let Err(e) = self.pending_tx_publisher.publish(&pending).await {
-                        tracing::warn!(error = %e, "ETH fetcher: publish failed");
-                    }
-                }
+                self.publish_window_logs(&logs, &authorized).await?;
                 // Persist the sync progress so subsequent restarts pick up
                 // where we left off. Mirrors `upsert_chain_sync_status` in
                 // pyaleph's `_request_transactions`.
@@ -331,6 +310,34 @@ impl ChainReader for EthereumConnector {
 }
 
 impl EthereumConnector {
+    async fn publish_window_logs(
+        &self,
+        logs: &[Log],
+        authorized: &std::collections::HashSet<EvmAddress>,
+    ) -> AlephResult<()> {
+        for log in logs {
+            let pending = match self.chain_data_service.parse_log(log) {
+                Ok(Some(p)) => p,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ETH fetcher: parse_log error");
+                    continue;
+                }
+            };
+            if !authorized.is_empty() && pending.protocol != ChainSyncProtocol::SmartContract {
+                let publisher_addr = pending.publisher.parse::<EvmAddress>().ok();
+                if let Some(addr) = publisher_addr {
+                    if !authorized.contains(&addr) {
+                        tracing::trace!(%pending.publisher, "ETH: unauthorized emitter");
+                        continue;
+                    }
+                }
+            }
+            self.pending_tx_publisher.publish(&pending).await?;
+        }
+        Ok(())
+    }
+
     async fn read_persisted_start_height(&self) -> u64 {
         let Some(pool) = self.pool.as_ref() else {
             return self.start_height;
@@ -544,8 +551,62 @@ impl ChainWriter for EthereumConnector {
 mod tests {
     use super::*;
     use crate::chains::abc::SimplePendingMessage;
+    use crate::chains::chain_data_service::{PendingChainTx, PendingTxSink};
+    use alloy_primitives::{B256, address};
     use aleph_types::chain::Chain;
     use aleph_types::message::MessageType;
+    use url::Url;
+
+    struct FailingPendingTxSink;
+
+    #[async_trait::async_trait]
+    impl PendingTxSink for FailingPendingTxSink {
+        async fn publish(&self, _tx: &PendingChainTx) -> AlephResult<()> {
+            Err(AlephError::P2p("forced publish failure".into()))
+        }
+    }
+
+    fn make_sync_log(block: u64) -> Log {
+        let payload = serde_json::json!({
+            "protocol": "aleph",
+            "version": 1,
+            "content": { "messages": [] },
+        })
+        .to_string();
+        let event = SyncEvent {
+            timestamp: U256::from(1700000000u64),
+            addr: address!("23eC28598DCeB2f7082Cc3a9D670592DfEd6e0dC"),
+            message: payload,
+        };
+        Log {
+            inner: alloy_primitives::Log {
+                address: address!("23eC28598DCeB2f7082Cc3a9D670592DfEd6e0dC"),
+                data: event.encode_log_data(),
+            },
+            block_hash: None,
+            block_number: Some(block),
+            block_timestamp: None,
+            transaction_hash: Some(B256::ZERO),
+            transaction_index: None,
+            log_index: None,
+            removed: false,
+        }
+    }
+
+    fn test_connector_with_sink(sink: Box<dyn PendingTxSink>) -> EthereumConnector {
+        let url: Url = "http://127.0.0.1:1".parse().unwrap();
+        EthereumConnector {
+            provider: Arc::new(ProviderBuilder::new().connect_http(url).erased()),
+            contract_address: address!("23eC28598DCeB2f7082Cc3a9D670592DfEd6e0dC"),
+            authorized_emitters: Vec::new(),
+            max_gas_price: 0,
+            start_height: 0,
+            max_block_range: 100,
+            pool: None,
+            chain_data_service: Arc::new(ChainDataService::new()),
+            pending_tx_publisher: Arc::new(PendingTxPublisher::new(sink)),
+        }
+    }
 
     #[test]
     fn sync_event_topic_is_keccak() {
@@ -572,6 +633,20 @@ mod tests {
         };
         let v = EthereumVerifier::default();
         assert!(v.verify_signature(&msg).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn publish_window_logs_returns_publish_failure() {
+        let connector = test_connector_with_sink(Box::new(FailingPendingTxSink));
+        let logs = vec![make_sync_log(10)];
+        let authorized = std::collections::HashSet::new();
+
+        let err = connector
+            .publish_window_logs(&logs, &authorized)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:?}").contains("forced publish failure"));
     }
 
     #[tokio::test]

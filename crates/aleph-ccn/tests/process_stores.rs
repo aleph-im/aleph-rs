@@ -499,7 +499,9 @@ async fn fetch_related_content_storage_with_wrong_hash_kind_yields_invalid_forma
 // validation) and assert the failure shape that the production code raises.
 // ---------------------------------------------------------------------------
 
-use aleph_ccn::toolkit::constants::STORE_AND_PROGRAM_COST_CUTOFF_TIMESTAMP;
+use aleph_ccn::toolkit::constants::{
+    CREDIT_ONLY_CUTOFF_TIMESTAMP, STORE_AND_PROGRAM_COST_CUTOFF_TIMESTAMP,
+};
 use common::insert_default_aggregates;
 
 fn store_message_with_size(
@@ -542,12 +544,12 @@ fn store_message_with_size(
     }
 }
 
-/// Ports test_process_store_with_not_enough_balance: a STORE with payment.type=hold
-/// (the default) over the unauthenticated-upload threshold must fail when the
-/// sender has no balance.
+/// In the paid-hold window, a STORE with payment.type=hold (the default) over
+/// the unauthenticated-upload threshold must fail when the sender has no
+/// balance.
 #[tokio::test]
 #[ignore = "requires docker; run with --ignored"]
-async fn check_balance_fails_when_balance_below_cost_for_large_store() {
+async fn check_balance_fails_when_balance_below_cost_for_large_hold_store() {
     let pg = start_postgres().await;
     insert_default_aggregates(&pg.pool).await.unwrap();
     let h = handler();
@@ -558,7 +560,7 @@ async fn check_balance_fails_when_balance_below_cost_for_large_store() {
         "734a1287a2b7b5be060312ff5b05ad1bcf838950492e3428f2ac6437a1acad26",
         "0xpoor",
         STORE_FILE_HASH,
-        (STORE_AND_PROGRAM_COST_CUTOFF_TIMESTAMP - 1) as f64,
+        (STORE_AND_PROGRAM_COST_CUTOFF_TIMESTAMP + 1) as f64,
         large_size,
     );
 
@@ -578,10 +580,10 @@ async fn check_balance_fails_when_balance_below_cost_for_large_store() {
 }
 
 /// Ports test_new_store_message_requires_credits: a STORE submitted after the
-/// store-and-program cost cutoff must use payment_type=credit.
+/// credit-only cutoff must use payment_type=credit.
 #[tokio::test]
 #[ignore = "requires docker; run with --ignored"]
-async fn pre_check_balance_rejects_new_hold_message_without_credits() {
+async fn check_balance_rejects_hold_message_after_credit_only_cutoff() {
     let pg = start_postgres().await;
     insert_default_aggregates(&pg.pool).await.unwrap();
     let h = handler();
@@ -590,7 +592,7 @@ async fn pre_check_balance_rejects_new_hold_message_without_credits() {
         "844a1287a2b7b5be060312ff5b05ad1bcf838950492e3428f2ac6437a1acad26",
         "0xnewuser",
         STORE_FILE_HASH,
-        (STORE_AND_PROGRAM_COST_CUTOFF_TIMESTAMP + 1) as f64,
+        (CREDIT_ONLY_CUTOFF_TIMESTAMP + 1) as f64,
         26 * 1024 * 1024,
     );
 
@@ -603,6 +605,34 @@ async fn pre_check_balance_rejects_new_hold_message_without_credits() {
     assert!(
         err.contains("InvalidPaymentMethod"),
         "expected InvalidPaymentMethod, got {err}",
+    );
+}
+
+/// During the paid-hold window, small hold STORE messages remain exempt from
+/// balance validation.
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
+async fn check_balance_allows_small_hold_store_after_store_cost_cutoff() {
+    let pg = start_postgres().await;
+    insert_default_aggregates(&pg.pool).await.unwrap();
+    let h = handler();
+
+    let small = 1024 * 1024;
+    let msg = store_message_with_size(
+        "a44a1287a2b7b5be060312ff5b05ad1bcf838950492e3428f2ac6437a1acad26",
+        "0xsmallhold",
+        STORE_FILE_HASH,
+        (STORE_AND_PROGRAM_COST_CUTOFF_TIMESTAMP + 1) as f64,
+        small,
+    );
+
+    let mut client = pg.pool.get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    let res = ContentHandler::check_balance(&h, &*tx, &msg).await;
+    tx.commit().await.unwrap();
+    assert!(
+        res.is_ok(),
+        "small hold store must pass during paid-hold window, got {res:?}",
     );
 }
 

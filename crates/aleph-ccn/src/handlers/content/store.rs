@@ -438,7 +438,11 @@ impl ContentHandler for StoreMessageHandler {
         let store_is_free = are_store_and_program_free(&build_free_input(message));
 
         let payment_type = get_payment_type(&cost_content);
-        if !store_is_free && payment_type != PaymentType::Credit {
+        if store_is_free {
+            return Ok(());
+        }
+
+        if is_credit_only_required(message.time) && payment_type != PaymentType::Credit {
             return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
         }
 
@@ -453,8 +457,7 @@ impl ContentHandler for StoreMessageHandler {
                 if let Some(byte_size) = ipfs_size {
                     let storage_mib = rust_decimal::Decimal::from(byte_size as i64)
                         / rust_decimal::Decimal::from(MIB);
-                    if store_is_free
-                        && payment_type == PaymentType::Hold
+                    if payment_type == PaymentType::Hold
                         && storage_mib
                             <= rust_decimal::Decimal::from(
                                 self.max_unauthenticated_upload_file_size,
@@ -498,10 +501,6 @@ impl ContentHandler for StoreMessageHandler {
             }
         }
 
-        if is_credit_only_required(message.time) && payment_type != PaymentType::Credit {
-            return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
-        }
-
         // Default: no IPFS file or feature disabled — skip the pre-check.
         // The full balance check during process() still runs once content has
         // been fetched and its size is known.
@@ -524,6 +523,14 @@ impl ContentHandler for StoreMessageHandler {
 
         let payment_type = get_payment_type(&cost_content);
         let store_is_free = are_store_and_program_free(&build_free_input(message));
+
+        if store_is_free {
+            return Ok(Some(costs));
+        }
+
+        if is_credit_only_required(message.time) && payment_type != PaymentType::Credit {
+            return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
+        }
 
         let mut storage_mib = calculate_storage_size(client, &cost_content)
             .await
@@ -552,7 +559,7 @@ impl ContentHandler for StoreMessageHandler {
                 errors: vec![format!("Cost calc failed: {e}")],
             })?;
         }
-        if store_is_free && payment_type == PaymentType::Hold {
+        if payment_type == PaymentType::Hold {
             if let Some(s) = storage_mib {
                 if s <= rust_decimal::Decimal::from(self.max_unauthenticated_upload_file_size)
                     / rust_decimal::Decimal::from(MIB)
@@ -560,13 +567,6 @@ impl ContentHandler for StoreMessageHandler {
                     return Ok(Some(costs));
                 }
             }
-        }
-
-        if !store_is_free && payment_type != PaymentType::Credit {
-            return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
-        }
-        if is_credit_only_required(message.time) && payment_type != PaymentType::Credit {
-            return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
         }
 
         let validation = validate_balance_for_payment(
