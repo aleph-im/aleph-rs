@@ -1,9 +1,18 @@
 use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_sdk::credit::PriceSource;
+use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use url::Url;
+
+use crate::common::resolve_address;
+
+/// Clap adapter for `resolve_address`. Accepts a hex address (`0x...`), a
+/// local account name, or an alias from the account store.
+fn parse_address(s: &str) -> Result<Address, String> {
+    resolve_address(s).map_err(|e| e.to_string())
+}
 
 /// Clap adapter for [`PriceSource::from_str`]. Exposed as a named function so
 /// it can be referenced from `value_parser = parse_price_source` attributes.
@@ -497,13 +506,15 @@ pub struct MessageFilterCli {
     #[arg(long, value_delimiter = ',')]
     pub refs: Option<Vec<String>>,
 
-    /// Addresses. CSV or repeat the flag.
-    #[arg(long, value_delimiter = ',')]
-    pub addresses: Option<Vec<String>>,
+    /// Sender addresses. Hex (`0x...`), local account name, or alias.
+    /// CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',', value_parser = parse_address)]
+    pub addresses: Option<Vec<Address>>,
 
-    /// Content owners. CSV or repeat the flag.
-    #[arg(long, value_delimiter = ',')]
-    pub owners: Option<Vec<String>>,
+    /// Content owners. Hex (`0x...`), local account name, or alias.
+    /// CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',', value_parser = parse_address)]
+    pub owners: Option<Vec<Address>>,
 
     /// Tags. CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
@@ -564,8 +575,8 @@ impl From<MessageFilterCli> for MessageFilter {
             content_keys: c.content_keys,
             content_hashes: c.content_hashes,
             refs: c.refs,
-            addresses: c.addresses.map(|v| v.into_iter().map(Into::into).collect()),
-            owners: c.owners.map(|v| v.into_iter().map(Into::into).collect()),
+            addresses: c.addresses,
+            owners: c.owners,
             tags: c.tags,
             hashes: c.hashes,
             channels: c.channels,
@@ -584,9 +595,10 @@ impl From<MessageFilterCli> for MessageFilter {
 // ---------- CLI filter for posts ----------
 #[derive(Debug, Clone, Args)]
 pub struct PostFilterCli {
-    /// Filter by sender address(es). CSV or repeat the flag.
-    #[arg(long, value_delimiter = ',')]
-    pub addresses: Option<Vec<String>>,
+    /// Filter by sender address(es). Hex (`0x...`), local account name, or
+    /// alias. CSV or repeat the flag.
+    #[arg(long, value_delimiter = ',', value_parser = parse_address)]
+    pub addresses: Option<Vec<Address>>,
 
     /// Filter by item hash(es). CSV or repeat the flag.
     #[arg(long, value_delimiter = ',')]
@@ -633,7 +645,7 @@ pub struct PostFilterCli {
 impl From<PostFilterCli> for PostFilter {
     fn from(c: PostFilterCli) -> Self {
         PostFilter {
-            addresses: c.addresses.map(|v| v.into_iter().map(Into::into).collect()),
+            addresses: c.addresses,
             hashes: c.hashes,
             refs: c.refs,
             post_types: c.post_types,
@@ -2194,5 +2206,51 @@ mod credit_transfer_args_tests {
     #[test]
     fn post_list_rejects_malformed_hashes_cleanly() {
         assert_value_validation_err(&["aleph", "post", "list", "--hashes", "not-a-hash"]);
+    }
+
+    /// Hex addresses bypass the account store, so this test does not need any
+    /// store fixture. It pins the contract: `--addresses` / `--owners` accept
+    /// hex strings without touching disk.
+    #[test]
+    fn message_list_accepts_hex_addresses() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "message",
+            "list",
+            "--addresses",
+            "0xABCD1234,0xEF560000",
+            "--owners",
+            "0xDEADBEEF",
+        ])
+        .expect("clap parse");
+        match cli.command {
+            Commands::Message {
+                command: MessageCommand::List(args),
+            } => {
+                let addresses = args.filter.addresses.unwrap();
+                assert_eq!(addresses.len(), 2);
+                assert_eq!(addresses[0].to_string(), "0xABCD1234");
+                let owners = args.filter.owners.unwrap();
+                assert_eq!(owners.len(), 1);
+                assert_eq!(owners[0].to_string(), "0xDEADBEEF");
+            }
+            _ => panic!("expected message list"),
+        }
+    }
+
+    #[test]
+    fn post_list_accepts_hex_addresses() {
+        let cli =
+            Cli::try_parse_from(["aleph", "post", "list", "--addresses", "0xABCD1234"]).unwrap();
+        match cli.command {
+            Commands::Post {
+                command: PostCommand::List(args),
+            } => {
+                let addresses = args.filter.addresses.unwrap();
+                assert_eq!(addresses.len(), 1);
+                assert_eq!(addresses[0].to_string(), "0xABCD1234");
+            }
+            _ => panic!("expected post list"),
+        }
     }
 }
