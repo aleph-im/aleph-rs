@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::defaults::{DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_UNAUTHENTICATED_UPLOAD_FILE_SIZE};
+use super::defaults::{
+    DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_UNAUTHENTICATED_UPLOAD_FILE_SIZE,
+    DEFAULT_MAX_UPLOAD_CAR_SIZE,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -451,6 +454,7 @@ pub struct IpfsSettings {
     pub peers: Vec<String>,
     pub max_upload_file_size: u64,
     pub max_unauthenticated_upload_file_size: u64,
+    pub max_upload_car_size: u64,
     pub pinning: IpfsPinningSettings,
     pub stat_timeout: u64,
 }
@@ -469,6 +473,7 @@ impl Default for IpfsSettings {
             ],
             max_upload_file_size: DEFAULT_MAX_FILE_SIZE,
             max_unauthenticated_upload_file_size: DEFAULT_MAX_UNAUTHENTICATED_UPLOAD_FILE_SIZE,
+            max_upload_car_size: DEFAULT_MAX_UPLOAD_CAR_SIZE,
             pinning: IpfsPinningSettings::default(),
             stat_timeout: 30,
         }

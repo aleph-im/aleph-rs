@@ -13,15 +13,18 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::AlephResult;
-use crate::chains::chain_data_service::PendingChainTx;
+use crate::chains::chain_data_service::{ChainDataService, PendingChainTx};
 use crate::db::DbPool;
 use crate::db::accessors::chains::get_chain_tx;
-use crate::db::accessors::pending_txs::{delete_pending_tx, get_pending_txs};
+use crate::db::accessors::pending_txs::{claim_pending_txs, delete_pending_tx};
 use crate::db::models::pending_txs::PendingTxDb;
+use crate::handlers::message_handler::MessagePublisher;
 use crate::jobs::job_utils::MqWatcher;
 use crate::toolkit::timestamp::utc_now;
 use crate::types::chain_sync::ChainSyncProtocol;
 use crate::types::message_status::MessageOrigin;
+
+const PENDING_TX_LEASE_SECONDS: i64 = 300;
 
 /// Abstraction over `ChainDataService.get_tx_messages`. Each implementer
 /// turns a pending chain transaction into the list of message-dicts it
@@ -54,6 +57,110 @@ pub trait PendingMessagePublisher: Send + Sync {
         check_message: bool,
         origin: MessageOrigin,
     ) -> AlephResult<()>;
+}
+
+#[async_trait]
+impl TxMessageProvider for ChainDataService {
+    async fn get_tx_messages(
+        &self,
+        tx: &PendingChainTx,
+        seen_ids: &mut HashSet<String>,
+    ) -> AlephResult<Vec<Value>> {
+        let decoded = self.get_tx_messages_from_tx(&tx.to_chain_tx_db()).await?;
+        let mut out = Vec::with_capacity(decoded.len());
+        for message in decoded {
+            if !seen_ids.insert(message.item_hash.clone()) {
+                continue;
+            }
+            out.push(serde_json::to_value(message)?);
+        }
+        Ok(out)
+    }
+}
+
+/// DB-aware adapter that lets `ChainDataService` persist off-chain archive
+/// file rows and tx pins while decoding pending transactions.
+pub struct DbTxMessageProvider {
+    pool: DbPool,
+    service: Arc<ChainDataService>,
+}
+
+impl DbTxMessageProvider {
+    pub fn new(pool: DbPool, service: Arc<ChainDataService>) -> Self {
+        Self { pool, service }
+    }
+}
+
+#[async_trait]
+impl TxMessageProvider for DbTxMessageProvider {
+    async fn get_tx_messages(
+        &self,
+        tx: &PendingChainTx,
+        seen_ids: &mut HashSet<String>,
+    ) -> AlephResult<Vec<Value>> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
+        let decoded = self
+            .service
+            .get_tx_messages(&**client, &tx.to_chain_tx_db())
+            .await?;
+        let mut out = Vec::with_capacity(decoded.len());
+        for message in decoded {
+            if !seen_ids.insert(message.item_hash.clone()) {
+                continue;
+            }
+            out.push(serde_json::to_value(message)?);
+        }
+        Ok(out)
+    }
+}
+
+/// DB-backed adapter from the pending-tx job to [`MessagePublisher`].
+///
+/// The job only has decoded JSON messages; this wrapper acquires a database
+/// client and delegates the pyaleph-compatible insert/status/confirmation
+/// logic to [`MessagePublisher::add_pending_message`].
+pub struct DbPendingMessagePublisher {
+    pool: DbPool,
+    publisher: Arc<MessagePublisher>,
+}
+
+impl DbPendingMessagePublisher {
+    pub fn new(pool: DbPool, publisher: Arc<MessagePublisher>) -> Self {
+        Self { pool, publisher }
+    }
+}
+
+#[async_trait]
+impl PendingMessagePublisher for DbPendingMessagePublisher {
+    async fn add_pending_message(
+        &self,
+        message_dict: &Value,
+        reception_time: DateTime<Utc>,
+        tx_hash: Option<&str>,
+        check_message: bool,
+        origin: MessageOrigin,
+    ) -> AlephResult<()> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
+        self.publisher
+            .add_pending_message(
+                &**client,
+                message_dict,
+                reception_time,
+                tx_hash.map(str::to_string),
+                check_message,
+                Some(origin),
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 /// Knobs accepted by [`run`]. Mirrors the relevant subset of
@@ -118,20 +225,20 @@ pub async fn handle_pending_tx(
     if messages.is_empty() {
         tracing::debug!("TX contains no message");
         return Ok(());
-    }
-
-    let check_message = pending_chain_tx.protocol != ChainSyncProtocol::SmartContract;
-    let reception_time = utc_now();
-    for message_dict in &messages {
-        publisher
-            .add_pending_message(
-                message_dict,
-                reception_time,
-                Some(&pending_chain_tx.hash),
-                check_message,
-                MessageOrigin::Onchain,
-            )
-            .await?;
+    } else {
+        let check_message = pending_chain_tx.protocol != ChainSyncProtocol::SmartContract;
+        let reception_time = utc_now();
+        for message_dict in &messages {
+            publisher
+                .add_pending_message(
+                    message_dict,
+                    reception_time,
+                    Some(&pending_chain_tx.hash),
+                    check_message,
+                    MessageOrigin::Onchain,
+                )
+                .await?;
+        }
     }
 
     // Bogus or handled: drop the pending row.
@@ -154,7 +261,9 @@ pub async fn process_one_batch(
         .get()
         .await
         .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
-    let pendings = get_pending_txs(&**client, max_concurrency as i64 * 100).await?;
+    let now = utc_now();
+    let lease_until = now + chrono::Duration::seconds(PENDING_TX_LEASE_SECONDS);
+    let pendings = claim_pending_txs(&**client, now, lease_until, max_concurrency as i64).await?;
     drop(client);
 
     if pendings.is_empty() {

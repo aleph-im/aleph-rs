@@ -69,18 +69,19 @@ pub enum BaseMessageError {
 }
 
 /// Mirrors `item_type_from_hash` in `aleph.utils`:
-/// - 64-char hex string => `Storage`
-/// - non-empty otherwise => `Ipfs`
-/// - empty => error
+/// - CIDv0 (`Qm` and 44-46 chars) => `Ipfs`
+/// - CIDv1 (`bafy` and 59 chars) => `Ipfs`
+/// - 64-char string => `Storage`
+/// - anything else => error
 pub fn item_type_from_hash(hash: &str) -> Result<ItemType, BaseMessageError> {
-    if hash.is_empty() {
-        return Err(BaseMessageError::UnknownHashType(hash.to_string()));
-    }
-    let is_hex_hash = hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit());
-    if is_hex_hash {
+    if hash.starts_with("Qm") && (44..=46).contains(&hash.len()) {
+        Ok(ItemType::Ipfs)
+    } else if hash.starts_with("bafy") && hash.len() == 59 {
+        Ok(ItemType::Ipfs)
+    } else if hash.len() == 64 {
         Ok(ItemType::Storage)
     } else {
-        Ok(ItemType::Ipfs)
+        Err(BaseMessageError::UnknownHashType(hash.to_string()))
     }
 }
 
@@ -162,6 +163,11 @@ mod tests {
             item_type_from_hash("QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8").unwrap(),
             ItemType::Ipfs
         );
+    }
+
+    #[test]
+    fn test_item_type_from_hash_rejects_user_ref() {
+        assert!(item_type_from_hash("profile-pic").is_err());
     }
 
     #[test]

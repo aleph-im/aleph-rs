@@ -102,7 +102,14 @@ async fn main() -> AlephResult<()> {
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => {
             tracing::info!("starting aleph-ccn v{}", aleph_ccn::VERSION);
-            aleph_ccn::run(cfg).await?;
+            aleph_ccn::run_with_options(
+                cfg,
+                aleph_ccn::RuntimeOptions {
+                    no_commit: cli.no_commit,
+                    no_jobs: cli.no_jobs,
+                },
+            )
+            .await?;
         }
         Command::Migrate => {
             let pool = aleph_ccn::db::connect(&cfg.postgres).await?;

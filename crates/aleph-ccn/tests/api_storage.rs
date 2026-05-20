@@ -154,10 +154,20 @@ async fn storage_by_message_hash_unknown_returns_404() {
 
 #[tokio::test]
 #[ignore = "requires docker; run with --ignored"]
-async fn storage_by_ref_unknown_returns_404() {
+async fn storage_by_ref_user_defined_without_address_returns_400() {
     let pg = start_postgres().await;
     let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
     let (status, _) = get(app, "/api/v0/storage/by-ref/some-ref").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "requires docker; run with --ignored"]
+async fn storage_by_ref_hash_unknown_returns_404() {
+    let pg = start_postgres().await;
+    let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
+    let hash = "0".repeat(64);
+    let (status, _) = get(app, &format!("/api/v0/storage/by-ref/{hash}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 

@@ -5,3 +5,6 @@ pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
 /// 25 MiB — default upload limit for anonymous users.
 pub const DEFAULT_MAX_UNAUTHENTICATED_UPLOAD_FILE_SIZE: u64 = 25 * 1024 * 1024;
+
+/// 4 GiB — default CAR upload limit for authenticated directory imports.
+pub const DEFAULT_MAX_UPLOAD_CAR_SIZE: u64 = 4 * 1024 * 1024 * 1024;

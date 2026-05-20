@@ -94,12 +94,8 @@ fn content_time(message: &MessageDb) -> chrono::DateTime<chrono::Utc> {
 /// Mirror Python's `ItemHash(ref)` recognition rules, which `make_file_tag`
 /// uses to decide whether a ref is an actual hash or a user tag.
 ///
-/// `crate::schemas::base_messages::item_type_from_hash` is intentionally
-/// permissive (any non-empty, non-64-hex string is treated as IPFS so that
-/// downstream code can defer the strict check). Python's `ItemHash.__new__`
-/// is strict: only CIDv0 (`Qm` + 44-46 chars), CIDv1 (`bafy` + 59 chars)
-/// and 64-char strings are accepted. We need the strict rules here so a
-/// plain user tag like `"myref"` is not silently treated as a hash.
+/// This follows pyaleph's strict hash recognition so a plain user tag like
+/// `"myref"` is not silently treated as a hash.
 fn ref_is_item_hash(r: &str) -> bool {
     (r.starts_with("Qm") && (44..=46).contains(&r.len()))
         || (r.starts_with("bafy") && r.len() == 59)
@@ -439,13 +435,10 @@ impl ContentHandler for StoreMessageHandler {
     ) -> Result<(), MessageProcessingException> {
         let cost_content = CostContent::from_value(&message.content)
             .unwrap_or_else(|| CostContent::new(CostContentKind::Store, &message.content));
-
-        if are_store_and_program_free(&build_free_input(message)) {
-            return Ok(());
-        }
+        let store_is_free = are_store_and_program_free(&build_free_input(message));
 
         let payment_type = get_payment_type(&cost_content);
-        if is_credit_only_required(message.time) && payment_type != PaymentType::Credit {
+        if !store_is_free && payment_type != PaymentType::Credit {
             return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
         }
 
@@ -460,7 +453,8 @@ impl ContentHandler for StoreMessageHandler {
                 if let Some(byte_size) = ipfs_size {
                     let storage_mib = rust_decimal::Decimal::from(byte_size as i64)
                         / rust_decimal::Decimal::from(MIB);
-                    if payment_type == PaymentType::Hold
+                    if store_is_free
+                        && payment_type == PaymentType::Hold
                         && storage_mib
                             <= rust_decimal::Decimal::from(
                                 self.max_unauthenticated_upload_file_size,
@@ -472,9 +466,12 @@ impl ContentHandler for StoreMessageHandler {
                     // Build a CostEstimationStoreContent JSON value and price it.
                     let mut estimation = message.content.clone();
                     if let Some(obj) = estimation.as_object_mut() {
+                        let estimated_size_mib = byte_size.div_ceil(MIB);
                         obj.insert(
                             "estimated_size_mib".into(),
-                            serde_json::Value::Number(serde_json::Number::from(byte_size as i64)),
+                            serde_json::Value::Number(serde_json::Number::from(
+                                estimated_size_mib,
+                            )),
                         );
                     }
                     let est_content = CostContent::new(CostContentKind::Store, &estimation);
@@ -501,8 +498,13 @@ impl ContentHandler for StoreMessageHandler {
             }
         }
 
-        // Default: no IPFS file or feature disabled — skip the pre-check
-        // (the full balance check during process() still runs).
+        if is_credit_only_required(message.time) && payment_type != PaymentType::Credit {
+            return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
+        }
+
+        // Default: no IPFS file or feature disabled — skip the pre-check.
+        // The full balance check during process() still runs once content has
+        // been fetched and its size is known.
         Ok(())
     }
 
@@ -513,28 +515,44 @@ impl ContentHandler for StoreMessageHandler {
     ) -> Result<Option<Vec<AccountCostsDb>>, MessageProcessingException> {
         let cost_content = CostContent::from_value(&message.content)
             .unwrap_or_else(|| CostContent::new(CostContentKind::Store, &message.content));
-        let (message_cost, costs) =
+        let (mut message_cost, mut costs) =
             get_total_and_detailed_costs(client, &cost_content, &message.item_hash)
                 .await
                 .map_err(|e| MessageProcessingException::InternalError {
                     errors: vec![format!("Cost calc failed: {e}")],
                 })?;
 
-        if are_store_and_program_free(&build_free_input(message)) {
-            return Ok(Some(costs));
-        }
-
         let payment_type = get_payment_type(&cost_content);
-        if is_credit_only_required(message.time) && payment_type != PaymentType::Credit {
-            return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
-        }
+        let store_is_free = are_store_and_program_free(&build_free_input(message));
 
-        let storage_mib = calculate_storage_size(client, &cost_content)
+        let mut storage_mib = calculate_storage_size(client, &cost_content)
             .await
             .map_err(|e| MessageProcessingException::InternalError {
                 errors: vec![format!("Storage size calc failed: {e}")],
             })?;
-        if payment_type == PaymentType::Hold {
+        if storage_mib.is_none() && message.size > 0 {
+            let estimated_size_mib = (message.size as u64).div_ceil(MIB);
+            storage_mib = Some(rust_decimal::Decimal::from(message.size as i64)
+                / rust_decimal::Decimal::from(MIB));
+            let mut estimation = message.content.clone();
+            if let Some(obj) = estimation.as_object_mut() {
+                obj.insert(
+                    "estimated_size_mib".into(),
+                    serde_json::Value::Number(serde_json::Number::from(estimated_size_mib)),
+                );
+            }
+            let est_content = CostContent::new(CostContentKind::Store, &estimation);
+            (message_cost, costs) = get_total_and_detailed_costs(
+                client,
+                &est_content,
+                &message.item_hash,
+            )
+            .await
+            .map_err(|e| MessageProcessingException::InternalError {
+                errors: vec![format!("Cost calc failed: {e}")],
+            })?;
+        }
+        if store_is_free && payment_type == PaymentType::Hold {
             if let Some(s) = storage_mib {
                 if s <= rust_decimal::Decimal::from(self.max_unauthenticated_upload_file_size)
                     / rust_decimal::Decimal::from(MIB)
@@ -542,6 +560,13 @@ impl ContentHandler for StoreMessageHandler {
                     return Ok(Some(costs));
                 }
             }
+        }
+
+        if !store_is_free && payment_type != PaymentType::Credit {
+            return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
+        }
+        if is_credit_only_required(message.time) && payment_type != PaymentType::Credit {
+            return Err(MessageProcessingException::InvalidPaymentMethod { errors: Vec::new() });
         }
 
         let validation = validate_balance_for_payment(

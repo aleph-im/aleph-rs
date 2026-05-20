@@ -11,7 +11,9 @@ struct VersionResponse {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/version", get(handle))
+    Router::new()
+        .route("/version", get(handle))
+        .route("/api/v0/version", get(handle))
 }
 
 async fn handle() -> Json<VersionResponse> {
@@ -44,7 +46,7 @@ mod tests {
     async fn version_endpoint_returns_version_payload() {
         let state = dummy_state();
         let app = axum::Router::new().merge(routes()).with_state(state);
-        let resp = app
+        let resp = app.clone()
             .oneshot(
                 Request::builder()
                     .uri("/version")
@@ -57,5 +59,16 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["version"], crate::VERSION);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/version")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
     }
 }

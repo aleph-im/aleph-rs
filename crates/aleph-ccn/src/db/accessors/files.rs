@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use tokio_postgres::GenericClient;
 
 use crate::AlephResult;
-use crate::db::models::files::{FilePinDb, FilePinType, FileTagDb, StoredFileDb};
+use crate::db::models::files::{
+    FilePinDb, FilePinType, FileTagDb, StoredFileDb, try_file_type_from_text,
+};
 use crate::types::files::{FileTag, FileType};
 use crate::types::sort_order::SortOrder;
 
@@ -71,7 +73,7 @@ pub async fn get_unpinned_files(client: &impl GenericClient) -> AlephResult<Vec<
                LEFT JOIN file_pins fp ON f.hash = fp.file_hash \
                WHERE fp.id IS NULL";
     let rows = client.query(sql, &[]).await?;
-    Ok(rows.iter().map(StoredFileDb::from_row).collect())
+    rows.iter().map(StoredFileDb::try_from_row).collect()
 }
 
 /// Upsert a `tx`-type file pin.
@@ -267,7 +269,7 @@ pub async fn get_message_file_pin(
         cols = FILE_PIN_COLS
     );
     let row = client.query_opt(&sql, &[&item_hash]).await?;
-    Ok(row.as_ref().map(FilePinDb::from_row))
+    row.as_ref().map(FilePinDb::try_from_row).transpose()
 }
 
 /// `(nb_files, total_size)` for an owner, mirroring `get_address_files_stats`.
@@ -370,19 +372,18 @@ pub async fn get_address_files_for_api(
     let rows = client.query(&sql, &param_refs).await?;
     let out: Vec<AddressFileRow> = rows
         .iter()
-        .map(|r| {
+        .map(|r| -> AlephResult<AddressFileRow> {
             let type_s: String = r.get("type");
-            let ft = serde_json::from_value::<FileType>(serde_json::Value::String(type_s))
-                .expect("valid FileType");
-            AddressFileRow {
+            let ft = try_file_type_from_text(&type_s)?;
+            Ok(AddressFileRow {
                 file_hash: r.get("file_hash"),
                 created: r.get("created"),
                 item_hash: r.get("item_hash"),
                 size: r.get("size"),
                 r#type: ft,
-            }
+            })
         })
-        .collect();
+        .collect::<AlephResult<_>>()?;
     Ok(out)
 }
 
@@ -413,7 +414,7 @@ pub async fn get_file(
             &[&file_hash],
         )
         .await?;
-    Ok(row.as_ref().map(StoredFileDb::from_row))
+    row.as_ref().map(StoredFileDb::try_from_row).transpose()
 }
 
 /// Delete a file row by hash.

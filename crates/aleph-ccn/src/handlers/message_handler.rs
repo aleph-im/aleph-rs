@@ -272,20 +272,36 @@ impl MessagePublisher {
         };
         let _mt = parsed.message_type();
 
-        // 2. Build the pending message row from the raw dict.
-        let mut pending = PendingMessageDb::from_message_dict(
-            message_dict,
+        // 2. Build the pending message row from the parsed schema so inferred
+        //    item_type, parsed time, and inline content are preserved.
+        let fetched = matches!(parsed.item_type(), ItemType::Inline);
+        let mut pending = match PendingMessageDb::from_parsed(
+            &parsed,
             reception_time,
-            false,
+            fetched,
             tx_hash.clone(),
             check_message,
             origin,
-        );
+        ) {
+            Ok(pending) => pending,
+            Err(e) => {
+                let exception = MessageProcessingException::InvalidMessageFormat {
+                    errors: vec![format!("content serialization failed: {e}")],
+                };
+                let _ = reject_new_pending_message(
+                    client,
+                    message_dict,
+                    &exception,
+                    tx_hash.as_deref(),
+                )
+                .await;
+                return Ok(None);
+            }
+        };
 
         // 3. Load fetched content: inline payloads are immediately fetched;
         //    storage/IPFS payloads require a separate fetch pass. Mirrors
         //    `BaseMessageHandler.load_fetched_content`.
-        pending.fetched = matches!(pending.item_type, ItemType::Inline);
 
         // 4. Inspect the existing message status.
         let existing_status = get_message_status(client, &pending.item_hash).await?;
@@ -719,11 +735,11 @@ impl MessageHandler {
         if let Some(existing) = existing {
             Self::confirm_existing_message(client, &existing, pending).await?;
             let item_hash = existing.item_hash.clone();
-            let message_value = serde_json::to_value(&existing.content).unwrap_or_default();
             // Mirror Python: `confirm_existing_message` returns a
             // `ProcessedMessage(message=existing, is_confirmation=True)`
             // without an explicit `origin` — the confirmation outcome is
             // independent of where the duplicate came from.
+            let message_value = existing.to_api_value(&[], false);
             let pm = ProcessedMessage::new(item_hash, message_value, true);
             return Ok(ProcessOutcome::Processed(pm));
         }
@@ -760,7 +776,7 @@ impl MessageHandler {
             .process(client, std::slice::from_ref(&message))
             .await?;
 
-        let message_value = serde_json::to_value(&message.content).unwrap_or_default();
+        let message_value = message.to_api_value(&[], false);
         let pm = ProcessedMessage::new(message.item_hash.clone(), message_value, false)
             .with_origin(parse_origin(pending.origin.as_deref()));
         Ok(ProcessOutcome::Processed(pm))

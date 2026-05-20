@@ -11,7 +11,6 @@ use tokio_postgres::types::ToSql;
 use aleph_types::chain::Chain;
 use aleph_types::message::MessageType;
 
-use crate::AlephError;
 use crate::AlephResult;
 use crate::db::accessors::address_stats::escape_like_pattern;
 use crate::db::accessors::cost::delete_costs_for_message;
@@ -73,7 +72,7 @@ pub async fn get_message_by_item_hash(
         cols = MESSAGE_COLS
     );
     let row = client.query_opt(&sql, &[&item_hash]).await?;
-    Ok(row.as_ref().map(MessageDb::from_row))
+    row.as_ref().map(MessageDb::try_from_row).transpose()
 }
 
 /// Whether a message row exists.
@@ -370,7 +369,7 @@ pub async fn get_matching_messages(
 ) -> AlephResult<Vec<MessageDb>> {
     let q = make_matching_messages_query(filters);
     let rows = client.query(&q.sql, &q.param_refs()).await?;
-    Ok(rows.iter().map(MessageDb::from_row).collect())
+    rows.iter().map(MessageDb::try_from_row).collect()
 }
 
 /// Count rows matching `filters`. Mirrors `count_matching_messages`.
@@ -594,7 +593,7 @@ pub async fn get_unconfirmed_messages(
         cols = MESSAGE_COLS
     );
     let rows = client.query(&sql, &[&limit, &offset]).await?;
-    Ok(rows.iter().map(MessageDb::from_row).collect())
+    rows.iter().map(MessageDb::try_from_row).collect()
 }
 
 /// Upsert a `MessageDb` row, keeping the lower `time` on conflict.
@@ -680,7 +679,7 @@ pub async fn get_message_status(
             &[&item_hash],
         )
         .await?;
-    Ok(row.as_ref().map(MessageStatusDb::from_row))
+    row.as_ref().map(MessageStatusDb::try_from_row).transpose()
 }
 
 /// Fetch a rejected-message row, if any.
@@ -693,7 +692,7 @@ pub async fn get_rejected_message(
         cols = REJECTED_COLS
     );
     let row = client.query_opt(&sql, &[&item_hash]).await?;
-    Ok(row.as_ref().map(RejectedMessageDb::from_row))
+    row.as_ref().map(RejectedMessageDb::try_from_row).transpose()
 }
 
 /// Upsert a message-status row, keeping the lower `reception_time` and
@@ -792,7 +791,7 @@ pub async fn get_forgotten_message(
         cols = FORGOTTEN_COLS
     );
     let row = client.query_opt(&sql, &[&item_hash]).await?;
-    Ok(row.as_ref().map(ForgottenMessageDb::from_row))
+    row.as_ref().map(ForgottenMessageDb::try_from_row).transpose()
 }
 
 /// Mark a processed message as forgotten.

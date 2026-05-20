@@ -9,10 +9,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::files::{FileTag, FileType};
+use crate::{AlephError, AlephResult};
 
 fn file_type_from_text(s: &str) -> FileType {
+    try_file_type_from_text(s).unwrap_or_else(|_| panic!("unknown FileType in DB: {s}"))
+}
+
+pub(crate) fn try_file_type_from_text(s: &str) -> AlephResult<FileType> {
     serde_json::from_value::<FileType>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown FileType in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown FileType in DB: {s}")))
 }
 
 /// Polymorphic identity for a file pin. Mirrors Python `FilePinType`.
@@ -74,12 +79,16 @@ pub struct StoredFileDb {
 
 impl StoredFileDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid StoredFileDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let type_s: String = row.get("type");
-        Self {
+        Ok(Self {
             hash: row.get("hash"),
             size: row.get("size"),
-            r#type: file_type_from_text(&type_s),
-        }
+            r#type: try_file_type_from_text(&type_s)?,
+        })
     }
 }
 
@@ -127,18 +136,24 @@ pub struct FilePinDb {
 
 impl FilePinDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid FilePinDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let type_s: String = row.get("type");
-        Self {
+        let pin_type = FilePinType::try_from(type_s.as_str())
+            .map_err(|e| AlephError::InvalidMessage(format!("{e} in DB")))?;
+        Ok(Self {
             id: row.get("id"),
             file_hash: row.get("file_hash"),
             created: row.get("created"),
-            r#type: FilePinType::try_from(type_s.as_str()).expect("valid FilePinType"),
+            r#type: pin_type,
             owner: row.get("owner"),
             item_hash: row.get("item_hash"),
             r#ref: row.get("ref"),
             tx_hash: row.try_get("tx_hash").ok().flatten(),
             delete_by: row.try_get("delete_by").ok().flatten(),
-        }
+        })
     }
 
     /// Constructor matching Python's `TxFilePinDb(...)`.
@@ -242,6 +257,11 @@ mod tests {
             assert_eq!(back, variant);
         }
         assert!(FilePinType::try_from("nope").is_err());
+    }
+
+    #[test]
+    fn invalid_file_type_returns_error() {
+        assert!(try_file_type_from_text("nope").is_err());
     }
 
     #[test]

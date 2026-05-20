@@ -13,7 +13,9 @@ use aleph_types::chain::Chain;
 use crate::AlephResult;
 use crate::chains::chain_data_service::{PendingChainTx, PendingTxPublisher};
 use crate::db::DbPool;
-use crate::db::accessors::chains::{IndexerMultiRange, update_indexer_multirange};
+use crate::db::accessors::chains::{
+    IndexerMultiRange, get_last_height, update_indexer_multirange, upsert_chain_sync_status,
+};
 use crate::toolkit::range::{MultiRange, Range};
 use crate::toolkit::timestamp::timestamp_to_datetime;
 use crate::types::chain_sync::{ChainEventType, ChainSyncProtocol};
@@ -199,17 +201,19 @@ impl AlephIndexerReader {
     }
 
     /// Project a single indexer event into a `PendingChainTx`.
-    pub fn message_event_to_tx(&self, ev: &MessageEvent) -> PendingChainTx {
+    pub fn message_event_to_tx(&self, ev: &MessageEvent) -> Option<PendingChainTx> {
+        let msg_type = ev.r#type.as_deref()?.to_string();
+        let content_str = ev.content.as_deref()?.to_string();
         let dt = timestamp_to_datetime(ev.timestamp / 1000.0);
         let content = serde_json::json!({
             "transaction": ev.transaction,
             "address": ev.address,
             "height": ev.height,
             "timestamp": ev.timestamp,
-            "type": ev.r#type,
-            "content": ev.content,
+            "type": msg_type,
+            "content": content_str,
         });
-        PendingChainTx {
+        Some(PendingChainTx {
             hash: ev.transaction.clone(),
             chain: self.chain.clone(),
             height: ev.height,
@@ -218,29 +222,22 @@ impl AlephIndexerReader {
             protocol: ChainSyncProtocol::SmartContract,
             protocol_version: 1,
             content,
-        }
+        })
     }
 
     /// Project a sync indexer event into a `PendingChainTx`.
-    pub fn sync_event_to_tx(&self, ev: &SyncEvent) -> PendingChainTx {
+    pub fn sync_event_to_tx(&self, ev: &SyncEvent) -> Option<PendingChainTx> {
         let dt = timestamp_to_datetime(ev.timestamp / 1000.0);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&ev.message).unwrap_or(serde_json::Value::Null);
-        let protocol_str = parsed
-            .get("protocol")
-            .and_then(|v| v.as_str())
-            .unwrap_or("aleph");
+        let parsed: serde_json::Value = serde_json::from_str(&ev.message).ok()?;
+        let protocol_str = parsed.get("protocol").and_then(|v| v.as_str())?;
         let protocol = match protocol_str {
             "aleph" => ChainSyncProtocol::OnChainSync,
             "aleph-offchain" => ChainSyncProtocol::OffChainSync,
-            _ => ChainSyncProtocol::OnChainSync,
+            _ => return None,
         };
-        let version = parsed.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-        let content = parsed
-            .get("content")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        PendingChainTx {
+        let version = parsed.get("version").and_then(|v| v.as_u64())? as u32;
+        let content = parsed.get("content").cloned()?;
+        Some(PendingChainTx {
             hash: ev.transaction.clone(),
             chain: self.chain.clone(),
             height: ev.height,
@@ -249,7 +246,7 @@ impl AlephIndexerReader {
             protocol,
             protocol_version: version,
             content,
-        }
+        })
     }
 
     /// Pull all new events for the configured smart contract and persist
@@ -294,7 +291,13 @@ impl AlephIndexerReader {
             match event_type {
                 ChainEventType::Message => {
                     for ev in &data.message_events {
-                        let tx = self.message_event_to_tx(ev);
+                        let Some(tx) = self.message_event_to_tx(ev) else {
+                            tracing::warn!(
+                                transaction = %ev.transaction,
+                                "skipping malformed smart-contract indexer event"
+                            );
+                            continue;
+                        };
                         last_dt = Some(tx.datetime);
                         last_block = tx.height.max(last_block);
                         publisher.publish(&tx).await?;
@@ -303,7 +306,13 @@ impl AlephIndexerReader {
                 }
                 ChainEventType::Sync => {
                     for ev in &data.sync_events {
-                        let tx = self.sync_event_to_tx(ev);
+                        let Some(tx) = self.sync_event_to_tx(ev) else {
+                            tracing::warn!(
+                                transaction = %ev.transaction,
+                                "skipping malformed sync indexer event"
+                            );
+                            continue;
+                        };
                         last_dt = Some(tx.datetime);
                         last_block = tx.height.max(last_block);
                         publisher.publish(&tx).await?;
@@ -315,6 +324,10 @@ impl AlephIndexerReader {
             // Persist range progress.
             if let Some(end_dt) = last_dt {
                 let start_dt = timestamp_to_datetime(0.0);
+                let client = pool
+                    .get()
+                    .await
+                    .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
                 if let Ok(range) = Range::new(start_dt, end_dt, true, true) {
                     let mut mr: MultiRange<DateTime<Utc>> = MultiRange::default();
                     mr.add_range(range);
@@ -323,12 +336,16 @@ impl AlephIndexerReader {
                         event_type,
                         datetime_multirange: mr,
                     };
-                    let client = pool
-                        .get()
-                        .await
-                        .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
                     update_indexer_multirange(&**client, &imr).await?;
                 }
+                upsert_chain_sync_status(
+                    &**client,
+                    self.chain.clone(),
+                    event_type,
+                    last_block.min(i32::MAX as u64) as i32,
+                    Utc::now(),
+                )
+                .await?;
             }
 
             if (nb as u32) < limit {
@@ -350,8 +367,20 @@ impl AlephIndexerReader {
         event_type: ChainEventType,
     ) -> AlephResult<()> {
         loop {
+            let start_height = match pool.get().await {
+                Ok(client) => get_last_height(&**client, self.chain.clone(), event_type)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|h| h.max(0) as u64 + 1)
+                    .unwrap_or(0),
+                Err(e) => {
+                    tracing::warn!(error = %e, "indexer run: could not read last height");
+                    0
+                }
+            };
             if let Err(e) = self
-                .fetch_new_events(&pool, &publisher, &indexer_url, event_type, 0)
+                .fetch_new_events(&pool, &publisher, &indexer_url, event_type, start_height)
                 .await
             {
                 tracing::warn!(error = %e, "indexer run: fetch_new_events failed");
@@ -507,7 +536,7 @@ mod tests {
             r#type: Some("STORE_IPFS".into()),
             content: Some("QmHash".into()),
         };
-        let tx = reader.message_event_to_tx(&ev);
+        let tx = reader.message_event_to_tx(&ev).unwrap();
         assert_eq!(tx.protocol, ChainSyncProtocol::SmartContract);
         assert_eq!(tx.chain, Chain::Ethereum);
         assert_eq!(tx.height, 10);
@@ -523,9 +552,22 @@ mod tests {
             timestamp: 1700000000000.0,
             message: "{\"protocol\":\"aleph-offchain\",\"version\":1,\"content\":\"QmCID\"}".into(),
         };
-        let tx = reader.sync_event_to_tx(&ev);
+        let tx = reader.sync_event_to_tx(&ev).unwrap();
         assert_eq!(tx.protocol, ChainSyncProtocol::OffChainSync);
         assert_eq!(tx.protocol_version, 1);
         assert_eq!(tx.content, serde_json::Value::String("QmCID".into()));
+    }
+
+    #[test]
+    fn sync_event_to_tx_rejects_unknown_protocol() {
+        let reader = AlephIndexerReader::new(Chain::Bsc);
+        let ev = SyncEvent {
+            transaction: "0xtx".into(),
+            address: "0xemit".into(),
+            height: 7,
+            timestamp: 1700000000000.0,
+            message: "{\"protocol\":\"unknown\",\"version\":1,\"content\":{}}".into(),
+        };
+        assert!(reader.sync_event_to_tx(&ev).is_none());
     }
 }

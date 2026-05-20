@@ -74,7 +74,12 @@ fn raw_params_from_map(map: HashMap<String, String>) -> serde_json::Value {
     // everything else stays a `String`.
     let mut out = Map::new();
     for (k, v) in map {
-        if let Ok(n) = v.parse::<i64>() {
+        let is_bool_field = matches!(k.as_str(), "excludeContent" | "exclude_content");
+        if is_bool_field && v.eq_ignore_ascii_case("true") {
+            out.insert(k, serde_json::Value::Bool(true));
+        } else if is_bool_field && v.eq_ignore_ascii_case("false") {
+            out.insert(k, serde_json::Value::Bool(false));
+        } else if let Ok(n) = v.parse::<i64>() {
             out.insert(k, serde_json::Value::Number(n.into()));
         } else if let Ok(n) = v.parse::<f64>()
             && let Some(num) = serde_json::Number::from_f64(n)
@@ -167,40 +172,7 @@ fn message_to_dict(
     confirmations: &[(String, String, i64)],
     exclude_content: bool,
 ) -> Value {
-    let mut out = Map::new();
-    out.insert("item_hash".into(), json!(m.item_hash));
-    out.insert("type".into(), serde_json::to_value(m.r#type).unwrap());
-    out.insert("chain".into(), serde_json::to_value(&m.chain).unwrap());
-    out.insert("sender".into(), json!(m.sender));
-    out.insert(
-        "signature".into(),
-        match &m.signature {
-            Some(s) => json!(s),
-            None => Value::Null,
-        },
-    );
-    out.insert(
-        "item_type".into(),
-        serde_json::to_value(m.item_type).unwrap(),
-    );
-    if let Some(c) = &m.item_content {
-        out.insert("item_content".into(), json!(c));
-    } else {
-        out.insert("item_content".into(), Value::Null);
-    }
-    if !exclude_content {
-        out.insert("content".into(), m.content.clone());
-    }
-    out.insert("time".into(), json!(datetime_to_timestamp(m.time)));
-    out.insert("channel".into(), serde_json::to_value(&m.channel).unwrap());
-    out.insert("size".into(), json!(m.size));
-    let confs: Vec<Value> = confirmations
-        .iter()
-        .map(|(chain, hash, height)| json!({"chain": chain, "hash": hash, "height": height}))
-        .collect();
-    out.insert("confirmed".into(), json!(!confs.is_empty()));
-    out.insert("confirmations".into(), Value::Array(confs));
-    Value::Object(out)
+    m.to_api_value(confirmations, exclude_content)
 }
 
 /// Fetch on-chain confirmations for a list of item hashes in one query.
@@ -380,10 +352,7 @@ async fn view_message_content(
     let status_db = get_message_status(&**client, &item_hash)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("Message {item_hash} not found")))?;
-    if status_db.status != MessageStatus::Processed
-        && status_db.status != MessageStatus::Removing
-        && status_db.status != MessageStatus::Removed
-    {
+    if status_db.status != MessageStatus::Processed {
         return Err(WebError::Unprocessable(format!(
             "Message {item_hash} is not processed (status: {:?})",
             status_db.status
@@ -393,10 +362,10 @@ async fn view_message_content(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("Message {item_hash} not found")))?;
     let mut content = msg.content.clone();
-    if msg.r#type == aleph_types::message::MessageType::Post {
-        if let Some(inner) = content.get("content").cloned() {
-            content = inner;
-        }
+    if msg.r#type == aleph_types::message::MessageType::Post
+        && let Some(inner) = content.get("content").cloned()
+    {
+        content = inner;
     }
     Ok(json_text_response(StatusCode::OK, content.to_string()))
 }

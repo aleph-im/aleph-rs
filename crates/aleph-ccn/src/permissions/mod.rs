@@ -9,6 +9,10 @@ use async_trait::async_trait;
 use aleph_types::message::MessageType;
 use serde_json::Value;
 
+use crate::db::DbPool;
+
+const SECURITY_AGGREGATE_KEY: &str = "security";
+
 /// Minimal view over a message required for permission checks.
 pub trait MessageForAuth {
     fn sender(&self) -> &str;
@@ -38,6 +42,163 @@ pub trait AuthorityLookup: Send + Sync {
         &self,
         item_hash: &str,
     ) -> Option<Box<dyn MessageForAuth + Send + Sync>>;
+}
+
+/// Database-backed authority lookup used by the production message pipeline.
+///
+/// Pyaleph resolves delegated permissions from the owner's `security`
+/// aggregate and loads referenced messages for POST `amend` authorization.
+#[derive(Clone)]
+pub struct DbAuthorityLookup {
+    pool: DbPool,
+}
+
+impl DbAuthorityLookup {
+    pub fn new(pool: DbPool) -> Self {
+        Self { pool }
+    }
+}
+
+struct OwnedMessageForAuth {
+    sender: String,
+    chain: String,
+    channel: Option<String>,
+    message_type: MessageType,
+    content_address: String,
+    content_type: Option<String>,
+    content_key: Option<String>,
+    content_ref: Option<String>,
+}
+
+impl OwnedMessageForAuth {
+    fn from_message(message: crate::db::models::messages::MessageDb) -> Self {
+        let chain = serde_json::to_value(&message.chain)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let channel = message
+            .channel
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok())
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+        let content_address = message
+            .content
+            .get("address")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| message.sender.clone());
+        let content_type = message
+            .content
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let content_key = message
+            .content
+            .get("key")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let content_ref = match message.content.get("ref") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Object(obj)) => obj
+                .get("item_hash")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            _ => None,
+        };
+        Self {
+            sender: message.sender,
+            chain,
+            channel,
+            message_type: message.r#type,
+            content_address,
+            content_type,
+            content_key,
+            content_ref,
+        }
+    }
+}
+
+impl MessageForAuth for OwnedMessageForAuth {
+    fn sender(&self) -> &str {
+        &self.sender
+    }
+
+    fn chain(&self) -> &str {
+        &self.chain
+    }
+
+    fn channel(&self) -> Option<&str> {
+        self.channel.as_deref()
+    }
+
+    fn message_type(&self) -> MessageType {
+        self.message_type
+    }
+
+    fn content_address(&self) -> &str {
+        &self.content_address
+    }
+
+    fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+
+    fn content_key(&self) -> Option<&str> {
+        self.content_key.as_deref()
+    }
+
+    fn content_ref(&self) -> Option<&str> {
+        self.content_ref.as_deref()
+    }
+}
+
+#[async_trait]
+impl AuthorityLookup for DbAuthorityLookup {
+    async fn get_security_aggregate(&self, owner_address: &str) -> Option<Value> {
+        let client = match self.pool.get().await {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!("authority lookup pool acquire failed: {e}");
+                return None;
+            }
+        };
+        match crate::db::accessors::aggregates::get_aggregate_by_key(
+            &**client,
+            owner_address,
+            SECURITY_AGGREGATE_KEY,
+            true,
+        )
+        .await
+        {
+            Ok(Some(aggregate)) => Some(aggregate.content),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("authority lookup security aggregate failed: {e}");
+                None
+            }
+        }
+    }
+
+    async fn get_message_by_item_hash(
+        &self,
+        item_hash: &str,
+    ) -> Option<Box<dyn MessageForAuth + Send + Sync>> {
+        let client = match self.pool.get().await {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!("authority lookup pool acquire failed: {e}");
+                return None;
+            }
+        };
+        match crate::db::accessors::messages::get_message_by_item_hash(&**client, item_hash).await {
+            Ok(Some(message)) => Some(Box::new(OwnedMessageForAuth::from_message(message))),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("authority lookup message fetch failed: {e}");
+                None
+            }
+        }
+    }
 }
 
 /// Direct delegation check (Python `_check_delegated_authorization`).

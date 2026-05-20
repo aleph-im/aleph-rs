@@ -29,8 +29,10 @@ use super::chain_data_service::{PendingChainTx, PendingTxPublisher};
 use super::common::verification_buffer;
 use crate::AlephResult;
 use crate::config::Settings;
+use crate::db::DbPool;
+use crate::db::accessors::chains::{get_last_height, upsert_chain_sync_status};
 use crate::toolkit::timestamp::timestamp_to_datetime;
-use crate::types::chain_sync::ChainSyncProtocol;
+use crate::types::chain_sync::{ChainEventType, ChainSyncProtocol};
 use aleph_types::chain::Chain;
 
 const DEFAULT_DAPP_URL: &str = "aleph.im";
@@ -367,6 +369,7 @@ pub fn make_tezos_query(sync_contract: &str, event_type: &str, limit: u32, skip:
 
 /// Reader-only Tezos connector polling the Tezos indexer.
 pub struct TezosConnector {
+    pool: Option<DbPool>,
     http: reqwest::Client,
     pending_tx_publisher: Arc<PendingTxPublisher>,
 }
@@ -374,12 +377,18 @@ pub struct TezosConnector {
 impl TezosConnector {
     pub fn new(pending_tx_publisher: Arc<PendingTxPublisher>) -> Self {
         Self {
+            pool: None,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("reqwest client"),
             pending_tx_publisher,
         }
+    }
+
+    pub fn with_db(mut self, pool: DbPool) -> Self {
+        self.pool = Some(pool);
+        self
     }
 
     /// Convert one indexer event into a [`PendingChainTx`].
@@ -420,9 +429,10 @@ impl TezosConnector {
         &self,
         indexer_url: &str,
         sync_contract: &str,
+        skip: u32,
     ) -> AlephResult<Vec<PendingChainTx>> {
         let events = self
-            .fetch_events(indexer_url, sync_contract, 100, 0)
+            .fetch_events(indexer_url, sync_contract, 100, skip)
             .await?;
         let mut out = Vec::with_capacity(events.len());
         for ev in &events {
@@ -440,8 +450,42 @@ impl ChainReader for TezosConnector {
         let indexer_url = cfg.tezos.indexer_url.clone();
         let sync_contract = cfg.tezos.sync_contract.clone();
         loop {
-            if let Err(e) = self.poll_once(&indexer_url, &sync_contract).await {
-                tracing::warn!(error = %e, "Tezos fetcher: poll failed");
+            let skip = if let Some(pool) = &self.pool {
+                match pool.get().await {
+                    Ok(client) => get_last_height(&**client, Chain::Tezos, ChainEventType::Message)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|h| h.max(0) as u32)
+                        .unwrap_or(0),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Tezos fetcher: could not read sync cursor");
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+            match self.poll_once(&indexer_url, &sync_contract, skip).await {
+                Ok(txs) => {
+                    if let Some(pool) = &self.pool
+                        && !txs.is_empty()
+                    {
+                        let client = pool.get().await.map_err(|e| {
+                            crate::AlephError::Pool(format!("pool acquire: {e}"))
+                        })?;
+                        let next_skip = skip.saturating_add(txs.len() as u32);
+                        upsert_chain_sync_status(
+                            &**client,
+                            Chain::Tezos,
+                            ChainEventType::Message,
+                            next_skip.min(i32::MAX as u32) as i32,
+                            chrono::Utc::now(),
+                        )
+                        .await?;
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "Tezos fetcher: poll failed"),
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
@@ -524,7 +568,7 @@ mod tests {
 
         let publisher = Arc::new(PendingTxPublisher::new(Box::new(TracingPendingTxSink)));
         let connector = TezosConnector::new(publisher);
-        let txs = connector.poll_once(&mock.uri(), "KT1Foo").await.unwrap();
+        let txs = connector.poll_once(&mock.uri(), "KT1Foo", 0).await.unwrap();
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0].hash, "ophash1");
         assert_eq!(txs[0].chain, Chain::Tezos);

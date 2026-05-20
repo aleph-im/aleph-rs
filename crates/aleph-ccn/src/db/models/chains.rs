@@ -10,20 +10,34 @@ use aleph_types::chain::Chain;
 use crate::toolkit::range::Range;
 use crate::toolkit::timestamp::timestamp_to_datetime;
 use crate::types::chain_sync::{ChainEventType, ChainSyncProtocol};
+use crate::{AlephError, AlephResult};
 
 fn chain_from_text(s: &str) -> Chain {
+    try_chain_from_text(s).unwrap_or_else(|_| panic!("unknown Chain in DB: {s}"))
+}
+
+fn try_chain_from_text(s: &str) -> AlephResult<Chain> {
     serde_json::from_value::<Chain>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown Chain in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown Chain in DB: {s}")))
 }
 
 fn event_type_from_text(s: &str) -> ChainEventType {
+    try_event_type_from_text(s).unwrap_or_else(|_| panic!("unknown ChainEventType in DB: {s}"))
+}
+
+fn try_event_type_from_text(s: &str) -> AlephResult<ChainEventType> {
     serde_json::from_value::<ChainEventType>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown ChainEventType in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown ChainEventType in DB: {s}")))
 }
 
 fn sync_protocol_from_text(s: &str) -> ChainSyncProtocol {
-    serde_json::from_value::<ChainSyncProtocol>(serde_json::Value::String(s.to_string()))
+    try_sync_protocol_from_text(s)
         .unwrap_or_else(|_| panic!("unknown ChainSyncProtocol in DB: {s}"))
+}
+
+fn try_sync_protocol_from_text(s: &str) -> AlephResult<ChainSyncProtocol> {
+    serde_json::from_value::<ChainSyncProtocol>(serde_json::Value::String(s.to_string()))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown ChainSyncProtocol in DB: {s}")))
 }
 
 /// Row of the `chains_sync_status` table.
@@ -37,14 +51,18 @@ pub struct ChainSyncStatusDb {
 
 impl ChainSyncStatusDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid ChainSyncStatusDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let chain_s: String = row.get("chain");
         let type_s: String = row.get("type");
-        Self {
-            chain: chain_from_text(&chain_s),
-            r#type: event_type_from_text(&type_s),
+        Ok(Self {
+            chain: try_chain_from_text(&chain_s)?,
+            r#type: try_event_type_from_text(&type_s)?,
             height: row.get("height"),
             last_update: row.get("last_update"),
-        }
+        })
     }
 }
 
@@ -62,17 +80,21 @@ pub struct IndexerSyncStatusDb {
 
 impl IndexerSyncStatusDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid IndexerSyncStatusDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let chain_s: String = row.get("chain");
         let event_s: String = row.get("event_type");
-        Self {
-            chain: chain_from_text(&chain_s),
-            event_type: event_type_from_text(&event_s),
+        Ok(Self {
+            chain: try_chain_from_text(&chain_s)?,
+            event_type: try_event_type_from_text(&event_s)?,
             start_block_datetime: row.get("start_block_datetime"),
             end_block_datetime: row.get("end_block_datetime"),
             start_included: row.get("start_included"),
             end_included: row.get("end_included"),
             last_updated: row.get("last_updated"),
-        }
+        })
     }
 
     /// Convert this row to its [`Range`] representation. Mirrors Python's
@@ -103,18 +125,22 @@ pub struct ChainTxDb {
 
 impl ChainTxDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid ChainTxDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let chain_s: String = row.get("chain");
         let protocol_s: String = row.get("protocol");
-        Self {
+        Ok(Self {
             hash: row.get("hash"),
-            chain: chain_from_text(&chain_s),
+            chain: try_chain_from_text(&chain_s)?,
             height: row.get("height"),
             datetime: row.get("datetime"),
             publisher: row.get("publisher"),
-            protocol: sync_protocol_from_text(&protocol_s),
+            protocol: try_sync_protocol_from_text(&protocol_s)?,
             protocol_version: row.get("protocol_version"),
             content: row.get("content"),
-        }
+        })
     }
 
     /// Build a `ChainTxDb` from a raw dict-like payload. Mirrors Python
@@ -204,6 +230,13 @@ mod tests {
         assert_eq!(r.upper, later);
         assert!(r.lower_inc);
         assert!(!r.upper_inc);
+    }
+
+    #[test]
+    fn invalid_db_enums_return_errors() {
+        assert!(try_chain_from_text("NOPE").is_err());
+        assert!(try_event_type_from_text("NOPE").is_err());
+        assert!(try_sync_protocol_from_text("NOPE").is_err());
     }
 
     #[test]

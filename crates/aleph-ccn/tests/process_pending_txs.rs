@@ -12,13 +12,13 @@
 mod common;
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use aleph_ccn::chains::chain_data_service::PendingChainTx;
+use aleph_ccn::chains::chain_data_service::{ChainDataService, PendingChainTx};
 use aleph_ccn::db::accessors::pending_txs::get_pending_txs;
 use aleph_ccn::jobs::process_pending_txs::{
     PendingMessagePublisher, TxMessageProvider, handle_pending_tx,
@@ -27,7 +27,7 @@ use aleph_ccn::types::chain_sync::ChainSyncProtocol;
 use aleph_ccn::types::message_status::MessageOrigin;
 use aleph_types::chain::Chain;
 
-use common::{start_postgres};
+use common::start_postgres;
 
 struct ListProvider {
     messages: Vec<Value>,
@@ -84,6 +84,56 @@ fn sample_chain_tx() -> PendingChainTx {
         protocol_version: 1,
         content: Value::String("test-data-pending-tx-messages".into()),
     }
+}
+
+#[tokio::test]
+async fn chain_data_service_provider_decodes_and_deduplicates_on_item_hash() {
+    let mut chain_tx = sample_chain_tx();
+    chain_tx.content = json!({
+        "messages": [
+            {
+                "item_hash": "deadbeef0001",
+                "sender": "0xabc",
+                "chain": "ETH",
+                "type": "POST",
+                "signature": "0xsig",
+                "time": 1_700_000_000.0,
+                "item_content": "{}",
+                "item_type": "inline"
+            },
+            {
+                "item_hash": "deadbeef0001",
+                "sender": "0xabc",
+                "chain": "ETH",
+                "type": "POST",
+                "signature": "0xsig",
+                "time": 1_700_000_001.0,
+                "item_content": "{}",
+                "item_type": "inline"
+            },
+            {
+                "item_hash": "deadbeef0002",
+                "sender": "0xdef",
+                "chain": "ETH",
+                "type": "POST",
+                "signature": "0xsig2",
+                "time": 1_700_000_002.0,
+                "item_content": "{}",
+                "item_type": "inline"
+            }
+        ]
+    });
+
+    let provider = ChainDataService::new();
+    let mut seen = HashSet::new();
+    let messages = TxMessageProvider::get_tx_messages(&provider, &chain_tx, &mut seen)
+        .await
+        .unwrap();
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["item_hash"], "deadbeef0001");
+    assert_eq!(messages[1]["item_hash"], "deadbeef0002");
+    assert_eq!(seen.len(), 2);
 }
 
 async fn seed_pending_tx(pool: &aleph_ccn::db::DbPool, chain_tx: &PendingChainTx) {

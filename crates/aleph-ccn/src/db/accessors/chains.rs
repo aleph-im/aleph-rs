@@ -133,7 +133,7 @@ pub async fn get_indexer_multirange(
         .await?;
     let mut multirange: MultiRange<DateTime<Utc>> = MultiRange::default();
     for row in rows.iter() {
-        let r = IndexerSyncStatusDb::from_row(row);
+        let r = IndexerSyncStatusDb::try_from_row(row)?;
         multirange.add_range(r.to_range());
     }
     Ok(IndexerMultiRange {
@@ -216,7 +216,7 @@ pub async fn get_chain_tx(
             &[&hash],
         )
         .await?;
-    Ok(row.as_ref().map(ChainTxDb::from_row))
+    row.as_ref().map(ChainTxDb::try_from_row).transpose()
 }
 
 /// Fetch chain sync status for a `(chain, type)` pair.
@@ -232,7 +232,7 @@ pub async fn get_chain_sync_status(
             &[&chain_to_str(&chain), &event_type_to_str(sync_type)],
         )
         .await?;
-    Ok(row.as_ref().map(ChainSyncStatusDb::from_row))
+    row.as_ref().map(ChainSyncStatusDb::try_from_row).transpose()
 }
 
 /// Helper used by tests / callers wanting to round-trip a raw JSON payload.

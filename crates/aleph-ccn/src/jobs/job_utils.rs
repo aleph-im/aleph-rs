@@ -148,32 +148,51 @@ impl MqWatcher {
         let notify = Arc::new(Notify::new());
         let notify_clone = notify.clone();
         let task = tokio::spawn(async move {
-            let consumer = channel
-                .basic_consume(
-                    &queue,
-                    &format!("watcher-{}", routing_key),
-                    BasicConsumeOptions {
-                        no_ack: true,
-                        ..Default::default()
-                    },
-                    FieldTable::default(),
-                )
-                .await;
-            let mut consumer = match consumer {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("MqWatcher consumer setup failed: {e}");
-                    return;
-                }
-            };
-            while let Some(delivery) = consumer.next().await {
-                match delivery {
-                    Ok(_) => notify_clone.notify_one(),
+            let mut retry_delay = Duration::from_secs(1);
+            loop {
+                let consumer = channel
+                    .basic_consume(
+                        &queue,
+                        &format!("watcher-{}", routing_key),
+                        BasicConsumeOptions {
+                            no_ack: true,
+                            ..Default::default()
+                        },
+                        FieldTable::default(),
+                    )
+                    .await;
+
+                let mut consumer = match consumer {
+                    Ok(c) => {
+                        retry_delay = Duration::from_secs(1);
+                        c
+                    }
                     Err(e) => {
-                        tracing::warn!("MqWatcher delivery error: {e}");
-                        break;
+                        tracing::error!(
+                            "MqWatcher consumer setup failed; retrying in {:?}: {e}",
+                            retry_delay
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+                        continue;
+                    }
+                };
+
+                while let Some(delivery) = consumer.next().await {
+                    match delivery {
+                        Ok(_) => notify_clone.notify_one(),
+                        Err(e) => {
+                            tracing::warn!(
+                                "MqWatcher delivery error; recreating consumer in {:?}: {e}",
+                                retry_delay
+                            );
+                            break;
+                        }
                     }
                 }
+
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
             }
         });
         Ok(Self {
@@ -245,7 +264,11 @@ pub async fn make_pending_message_queue(
     routing_key: &str,
 ) -> AlephResult<String> {
     declare_topic_exchange(channel, pending_message_exchange).await?;
-    let queue_name = "pending_message_queue".to_string();
+    let suffix: String = routing_key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let queue_name = format!("pending-message-queue-{suffix}");
     channel
         .queue_declare(
             &queue_name,

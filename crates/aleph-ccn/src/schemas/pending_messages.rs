@@ -287,6 +287,17 @@ impl BasePendingMessage {
             BasePendingMessage::Store(m) => &m.sender,
         }
     }
+
+    pub fn item_type(&self) -> ItemType {
+        match self {
+            BasePendingMessage::Aggregate(m) => m.item_type,
+            BasePendingMessage::Forget(m) => m.item_type,
+            BasePendingMessage::Instance(m) => m.item_type,
+            BasePendingMessage::Post(m) => m.item_type,
+            BasePendingMessage::Program(m) => m.item_type,
+            BasePendingMessage::Store(m) => m.item_type,
+        }
+    }
 }
 
 fn get_str_field(

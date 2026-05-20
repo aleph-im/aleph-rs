@@ -7,7 +7,7 @@ use tokio_postgres::GenericClient;
 use aleph_types::chain::Chain;
 use aleph_types::message::item_type::ItemType;
 
-use crate::AlephResult;
+use crate::{AlephError, AlephResult};
 use crate::db::models::posts::PostDb;
 use crate::toolkit::timestamp::{DatetimeOrTimestamp, coerce_to_datetime};
 use crate::types::channel::Channel;
@@ -129,15 +129,17 @@ fn map_merged(row: &tokio_postgres::Row) -> MergedPost {
     }
 }
 
-fn map_merged_v0(row: &tokio_postgres::Row) -> MergedPostV0 {
+fn try_map_merged_v0(row: &tokio_postgres::Row) -> AlephResult<MergedPostV0> {
     let channel: Option<String> = row.get("channel");
     let chain_s: String = row.get("chain");
     let chain = serde_json::from_value::<Chain>(serde_json::Value::String(chain_s.clone()))
-        .unwrap_or_else(|_| panic!("unknown Chain in DB: {chain_s}"));
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown Chain in DB: {chain_s}")))?;
     let item_type_s: String = row.get("item_type");
-    let item_type = serde_json::from_value::<ItemType>(serde_json::Value::String(item_type_s))
-        .expect("valid ItemType");
-    MergedPostV0 {
+    let item_type = serde_json::from_value::<ItemType>(serde_json::Value::String(
+        item_type_s.clone(),
+    ))
+    .map_err(|_| AlephError::InvalidMessage(format!("unknown ItemType in DB: {item_type_s}")))?;
+    Ok(MergedPostV0 {
         chain,
         item_hash: row.get("item_hash"),
         content: row.get("content"),
@@ -155,7 +157,7 @@ fn map_merged_v0(row: &tokio_postgres::Row) -> MergedPostV0 {
         size: row.get("size"),
         last_updated: row.get("last_updated"),
         tags: row.get("tags"),
-    }
+    })
 }
 
 /// Build the filter SQL fragment + params for a posts query. The fragment is
@@ -457,7 +459,7 @@ pub async fn get_matching_posts_legacy(
         .map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
         .collect();
     let rows = client.query(&sql, &param_refs).await?;
-    Ok(rows.iter().map(map_merged_v0).collect())
+    rows.iter().map(try_map_merged_v0).collect()
 }
 
 /// Count posts matching the given filters. Mirrors `count_matching_posts`.

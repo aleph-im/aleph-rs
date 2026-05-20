@@ -11,6 +11,8 @@ use http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
+use aleph_ccn::db::accessors::messages::upsert_message_status;
+use aleph_ccn::types::message_status::MessageStatus;
 use common::fixtures::{fixture_messages, fixture_messages_with_status};
 use common::{insert_processed_message, make_app_state, start_postgres};
 
@@ -202,6 +204,45 @@ async fn message_content_endpoint() {
     assert_eq!(status, StatusCode::OK);
     let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["title"].as_str(), Some("My first blog post"));
+}
+
+#[tokio::test]
+async fn message_content_endpoint_rejects_removing_messages() {
+    let pg = start_postgres().await;
+    let msg = fixture_messages()[0].clone();
+    insert_processed_message(&pg.pool, msg.clone()).await.unwrap();
+    let client = pg.pool.get().await.unwrap();
+    upsert_message_status(
+        &**client,
+        &msg.item_hash,
+        MessageStatus::Removing,
+        msg.reception_time,
+        None,
+    )
+    .await
+    .unwrap();
+    drop(client);
+
+    let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
+    let uri = format!("/api/v0/messages/{}/content", msg.item_hash);
+    let (status, _) = get(app, &uri).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let client = pg.pool.get().await.unwrap();
+    upsert_message_status(
+        &**client,
+        &msg.item_hash,
+        MessageStatus::Removed,
+        msg.reception_time,
+        None,
+    )
+    .await
+    .unwrap();
+    drop(client);
+
+    let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
+    let (status, _) = get(app, &uri).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -448,4 +489,15 @@ async fn list_messages_filter_by_tags_no_match_in_default_fixture() {
     let msgs = v["messages"].as_array().unwrap();
     // The seeded fixture has no `tags` content, so the filter must return 0.
     assert_eq!(msgs.len(), 0);
+}
+
+#[tokio::test]
+async fn list_messages_string_filters_accept_boolean_words() {
+    let pg = start_postgres().await;
+    seed(&pg.pool).await;
+    let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
+    let (status, body) = get(app, &format!("{MESSAGES_URI}?tags=true")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert!(v["messages"].as_array().unwrap().is_empty());
 }

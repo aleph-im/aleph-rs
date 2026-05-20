@@ -1,6 +1,7 @@
 //! `pending_txs` accessors. Mirrors `aleph/db/accessors/pending_txs.py`.
 
 use aleph_types::chain::Chain;
+use chrono::{DateTime, Utc};
 use tokio_postgres::GenericClient;
 
 use crate::AlephResult;
@@ -29,6 +30,37 @@ pub async fn get_pending_txs(
                JOIN chain_txs ct ON pt.tx_hash = ct.hash \
                ORDER BY ct.datetime ASC LIMIT $1";
     let rows = client.query(sql, &[&limit]).await?;
+    Ok(rows.iter().map(PendingTxDb::from_row).collect())
+}
+
+/// Atomically lease pending txs for processing.
+///
+/// Claimed rows are hidden from other workers until `lease_until`, while failed
+/// processing becomes retryable after that timestamp. Mirrors the pending
+/// message claim pattern with `FOR UPDATE SKIP LOCKED`.
+pub async fn claim_pending_txs(
+    client: &impl GenericClient,
+    current_time: DateTime<Utc>,
+    lease_until: DateTime<Utc>,
+    limit: i64,
+) -> AlephResult<Vec<PendingTxDb>> {
+    let sql = "WITH claimed AS (
+                   SELECT pt.tx_hash
+                   FROM pending_txs pt
+                   JOIN chain_txs ct ON pt.tx_hash = ct.hash
+                   WHERE pt.next_attempt <= $1
+                   ORDER BY ct.datetime ASC
+                   LIMIT $3
+                   FOR UPDATE SKIP LOCKED
+               )
+               UPDATE pending_txs pt
+               SET next_attempt = $2
+               FROM claimed
+               WHERE pt.tx_hash = claimed.tx_hash
+               RETURNING pt.tx_hash";
+    let rows = client
+        .query(sql, &[&current_time, &lease_until, &limit])
+        .await?;
     Ok(rows.iter().map(PendingTxDb::from_row).collect())
 }
 

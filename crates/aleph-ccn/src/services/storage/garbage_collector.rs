@@ -233,6 +233,35 @@ pub async fn garbage_collector_task<F>(
     }
 }
 
+/// Cancellable runtime loop used by the Rust node entrypoint. Same cadence as
+/// [`garbage_collector_task`], but wakes promptly when the shared shutdown
+/// token fires.
+pub async fn run(
+    gc: GarbageCollector,
+    garbage_collector_period_hours: u64,
+    cancel: crate::jobs::job_utils::CancelToken,
+) -> AlephResult<()> {
+    let interval = Duration::from_secs(garbage_collector_period_hours.saturating_mul(3600));
+    loop {
+        tracing::info!("Next garbage collector run in {:?}", interval);
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = cancel.cancelled() => return Ok(()),
+        }
+
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        tracing::info!("Starting garbage collection...");
+        match gc.collect(Utc::now()).await {
+            Ok(()) => tracing::info!("Garbage collector ran successfully."),
+            Err(err) => {
+                tracing::error!("An unexpected error occurred during garbage collection: {err}")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

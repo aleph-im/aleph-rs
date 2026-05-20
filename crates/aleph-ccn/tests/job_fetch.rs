@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::json;
 
 use aleph_ccn::db::accessors::pending_messages::{
@@ -167,6 +167,38 @@ async fn set_pending_message_fetched_updates_row() {
     let content: serde_json::Value = row.get(1);
     assert!(fetched);
     assert_eq!(content, json!({"updated": true}));
+}
+
+#[tokio::test]
+async fn set_pending_message_fetched_clears_fetch_lease() {
+    let pg = start_postgres().await;
+    let item_hash = "9".repeat(64);
+    let mut p = pending_post(&item_hash);
+    p.fetched = false;
+    p.next_attempt = Utc::now() + Duration::minutes(5);
+    insert_pending_row(&pg.pool, &mut p).await.unwrap();
+
+    let client = pg.pool.get().await.unwrap();
+    let before = get_next_pending_messages(&**client, Utc::now(), 10, 0, Some(true), None)
+        .await
+        .unwrap();
+    assert!(before.iter().all(|row| row.item_hash != item_hash));
+
+    set_pending_message_fetched(&**client, p.id, &json!({"updated": true}))
+        .await
+        .unwrap();
+
+    let after = get_next_pending_messages(
+        &**client,
+        Utc::now() + Duration::seconds(5),
+        10,
+        0,
+        Some(true),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(after.iter().any(|row| row.item_hash == item_hash));
 }
 
 #[tokio::test]

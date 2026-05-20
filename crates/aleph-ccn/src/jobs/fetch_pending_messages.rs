@@ -17,7 +17,7 @@ use lapin::{BasicProperties, Channel};
 use crate::AlephResult;
 use crate::db::DbPool;
 use crate::db::accessors::pending_messages::{
-    get_next_pending_messages, set_pending_message_fetched,
+    claim_next_pending_messages, set_pending_message_fetched,
 };
 use crate::db::models::messages::MessageDb;
 use crate::db::models::pending_messages::PendingMessageDb;
@@ -198,11 +198,13 @@ async fn claim_candidates(
         .await
         .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
     let exclude: Vec<String> = busy_hashes.iter().cloned().collect();
-    let rows = get_next_pending_messages(
+    let now = utc_now();
+    let lease_until = now + chrono::Duration::seconds(300);
+    let rows = claim_next_pending_messages(
         &**client,
-        utc_now(),
+        now,
+        lease_until,
         slots as i64,
-        0,
         Some(false),
         if exclude.is_empty() {
             None

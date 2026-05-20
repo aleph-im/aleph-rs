@@ -16,8 +16,10 @@ use crate::AlephResult;
 use crate::chains::signature_verifier::SignatureVerifier;
 use crate::config::Settings;
 use crate::db::DbPool;
+use crate::handlers::message_handler::MessagePublisher;
 use crate::services::cache::local::LocalCache;
 use crate::services::ipfs::IpfsService;
+use crate::services::p2p::protocol::AlephP2PClient;
 use crate::services::storage::engine::StorageEngine;
 
 /// Capacity of the in-process WS-broadcast channel. Each `/api/ws0/messages`
@@ -33,7 +35,9 @@ pub struct AppState {
     pub config: Arc<Settings>,
     pub node_cache: Arc<LocalCache>,
     pub signature_verifier: Arc<SignatureVerifier>,
+    pub message_publisher: Arc<MessagePublisher>,
     pub ipfs_service: Option<Arc<IpfsService>>,
+    pub p2p_client: Option<Arc<dyn AlephP2PClient>>,
     pub storage_engine: Option<Arc<dyn StorageEngine>>,
     /// In-process broadcast channel used by `/api/ws0/messages` to fan out
     /// freshly-processed messages to every connected WS client. The runtime
@@ -51,12 +55,15 @@ impl AppState {
     /// Build a bare AppState from a pool + config. Optional services default to None.
     pub fn new(pool: DbPool, config: Arc<Settings>) -> Self {
         let (tx, _) = tokio::sync::broadcast::channel(MESSAGE_BROADCAST_CAPACITY);
+        let pending_exchange = config.rabbitmq.pending_message_exchange.clone();
         Self {
             pool,
             config,
             node_cache: Arc::new(LocalCache::new()),
             signature_verifier: Arc::new(SignatureVerifier::new()),
+            message_publisher: Arc::new(MessagePublisher::without_channel(pending_exchange)),
             ipfs_service: None,
+            p2p_client: None,
             storage_engine: None,
             message_broadcast: tx,
             ws_messages_active: Arc::new(std::sync::atomic::AtomicU32::new(0)),

@@ -62,9 +62,7 @@ async fn costs_empty_db() {
     assert_eq!(f("total_cost_credit"), 0.0);
     assert!(v["filters"]["address"].is_null());
     assert!(v["filters"]["item_hash"].is_null());
-    // payment_type defaults to None in this implementation; the Python suite
-    // expected "credit" as the implicit default, which is no longer the case.
-    assert!(v["filters"]["payment_type"].is_null() || v["filters"]["payment_type"] == "credit");
+    assert_eq!(v["filters"]["payment_type"].as_str(), Some("credit"));
     assert!(v.get("resources").is_none() || v["resources"].is_null());
 }
 
@@ -108,8 +106,7 @@ async fn costs_invalid_payment_type() {
     let pg = start_postgres().await;
     let app = aleph_ccn::web::build_router(make_app_state(pg.pool.clone()));
     let (status, _) = get(app, &format!("{COSTS_URI}?payment_type=bogus")).await;
-    // Either OK with default or 422; both are accepted by spec.
-    assert!(status == StatusCode::OK || status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]

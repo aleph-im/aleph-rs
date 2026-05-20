@@ -15,25 +15,43 @@ use aleph_types::message::execution::base::Encoding;
 use aleph_types::message::execution::volume::VolumePersistence;
 
 use crate::types::vms::{CpuArchitecture, VmType, VmVersion};
+use crate::{AlephError, AlephResult};
 
 fn vm_type_from_text(s: &str) -> VmType {
+    try_vm_type_from_text(s).unwrap_or_else(|_| panic!("unknown VmType in DB: {s}"))
+}
+
+fn try_vm_type_from_text(s: &str) -> AlephResult<VmType> {
     serde_json::from_value::<VmType>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown VmType in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown VmType in DB: {s}")))
 }
 
 fn encoding_from_text(s: &str) -> Encoding {
+    try_encoding_from_text(s).unwrap_or_else(|_| panic!("unknown Encoding in DB: {s}"))
+}
+
+fn try_encoding_from_text(s: &str) -> AlephResult<Encoding> {
     serde_json::from_value::<Encoding>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown Encoding in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown Encoding in DB: {s}")))
 }
 
 fn persistence_from_text(s: &str) -> VolumePersistence {
-    serde_json::from_value::<VolumePersistence>(serde_json::Value::String(s.to_string()))
+    try_persistence_from_text(s)
         .unwrap_or_else(|_| panic!("unknown VolumePersistence in DB: {s}"))
 }
 
+fn try_persistence_from_text(s: &str) -> AlephResult<VolumePersistence> {
+    serde_json::from_value::<VolumePersistence>(serde_json::Value::String(s.to_string()))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown VolumePersistence in DB: {s}")))
+}
+
 fn cpu_arch_from_text(s: &str) -> CpuArchitecture {
+    try_cpu_arch_from_text(s).unwrap_or_else(|_| panic!("unknown CpuArchitecture in DB: {s}"))
+}
+
+fn try_cpu_arch_from_text(s: &str) -> AlephResult<CpuArchitecture> {
     serde_json::from_value::<CpuArchitecture>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown CpuArchitecture in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown CpuArchitecture in DB: {s}")))
 }
 
 /// Machine type, as known to `aleph_message`. Mirrors
@@ -228,11 +246,21 @@ pub struct MachineVolumeDb {
 
 impl MachineVolumeDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid MachineVolumeDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let type_s: String = row.get("type");
         let persistence: Option<String> = row.try_get("persistence").ok().flatten();
-        Self {
+        let kind = MachineVolumeKind::try_from(type_s.as_str())
+            .map_err(|e| AlephError::InvalidMessage(format!("{e} in DB")))?;
+        let persistence = persistence
+            .as_deref()
+            .map(try_persistence_from_text)
+            .transpose()?;
+        Ok(Self {
             id: row.get("id"),
-            kind: MachineVolumeKind::try_from(type_s.as_str()).expect("valid MachineVolumeKind"),
+            kind,
             vm_hash: row.get("vm_hash"),
             comment: row.get("comment"),
             mount: row.get("mount"),
@@ -241,9 +269,9 @@ impl MachineVolumeDb {
             use_latest: row.try_get("use_latest").ok().flatten(),
             parent_ref: row.try_get("parent_ref").ok().flatten(),
             parent_use_latest: row.try_get("parent_use_latest").ok().flatten(),
-            persistence: persistence.as_deref().map(persistence_from_text),
+            persistence,
             name: row.try_get("name").ok().flatten(),
-        }
+        })
     }
 }
 
@@ -285,13 +313,26 @@ pub struct VmBaseDb {
 
 impl VmBaseDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid VmBaseDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let type_s: String = row.get("type");
         let cpu_arch: Option<String> = row.get("cpu_architecture");
         let program_type: Option<String> = row.try_get("program_type").ok().flatten();
-        Self {
+        let cpu_architecture = cpu_arch
+            .as_deref()
+            .map(try_cpu_arch_from_text)
+            .transpose()?;
+        let program_type = program_type
+            .as_deref()
+            .map(MachineType::try_from)
+            .transpose()
+            .map_err(|e| AlephError::InvalidMessage(format!("{e} in DB")))?;
+        Ok(Self {
             item_hash: row.get("item_hash"),
             owner: row.get("owner"),
-            r#type: vm_type_from_text(&type_s),
+            r#type: try_vm_type_from_text(&type_s)?,
             allow_amend: row.get("allow_amend"),
             metadata: row.get("metadata"),
             variables: row.get("variables"),
@@ -307,7 +348,7 @@ impl VmBaseDb {
             resources_vcpus: row.get("resources_vcpus"),
             resources_memory: row.get("resources_memory"),
             resources_seconds: row.get("resources_seconds"),
-            cpu_architecture: cpu_arch.as_deref().map(cpu_arch_from_text),
+            cpu_architecture,
             cpu_vendor: row.get("cpu_vendor"),
             node_owner: row.get("node_owner"),
             node_address_regex: row.get("node_address_regex"),
@@ -315,12 +356,10 @@ impl VmBaseDb {
             replaces: row.get("replaces"),
             created: row.get("created"),
             authorized_keys: row.get("authorized_keys"),
-            program_type: program_type
-                .as_deref()
-                .map(|s| MachineType::try_from(s).expect("valid MachineType")),
+            program_type,
             http_trigger: row.try_get("http_trigger").ok().flatten(),
             persistent: row.try_get("persistent").ok().flatten(),
-        }
+        })
     }
 }
 
@@ -371,6 +410,16 @@ mod tests {
             let s = v.as_value_str();
             assert_eq!(MachineVolumeKind::try_from(s).unwrap(), v);
         }
+        assert!(MachineVolumeKind::try_from("nope").is_err());
+    }
+
+    #[test]
+    fn invalid_db_enums_return_errors() {
+        assert!(try_vm_type_from_text("nope").is_err());
+        assert!(try_encoding_from_text("nope").is_err());
+        assert!(try_persistence_from_text("nope").is_err());
+        assert!(try_cpu_arch_from_text("nope").is_err());
+        assert!(MachineType::try_from("nope").is_err());
         assert!(MachineVolumeKind::try_from("nope").is_err());
     }
 

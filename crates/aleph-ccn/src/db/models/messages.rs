@@ -5,7 +5,7 @@
 //! Mirrors `src/aleph/db/models/messages.py`.
 
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use aleph_types::chain::Chain;
 use aleph_types::message::MessageType;
@@ -14,27 +14,44 @@ use aleph_types::message::item_type::ItemType;
 use crate::toolkit::timestamp::{timestamp_to_datetime, utc_now};
 use crate::types::channel::Channel;
 use crate::types::message_status::{ErrorCode, MessageStatus};
+use crate::{AlephError, AlephResult};
 
 use super::pending_messages::PendingMessageDb;
 
 fn chain_from_text(s: &str) -> Chain {
+    try_chain_from_text(s).unwrap_or_else(|_| panic!("unknown Chain in DB: {s}"))
+}
+
+fn try_chain_from_text(s: &str) -> AlephResult<Chain> {
     serde_json::from_value::<Chain>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown Chain in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown Chain in DB: {s}")))
 }
 
 fn message_type_from_text(s: &str) -> MessageType {
+    try_message_type_from_text(s).unwrap_or_else(|_| panic!("unknown MessageType in DB: {s}"))
+}
+
+fn try_message_type_from_text(s: &str) -> AlephResult<MessageType> {
     serde_json::from_value::<MessageType>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown MessageType in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown MessageType in DB: {s}")))
 }
 
 fn item_type_from_text(s: &str) -> ItemType {
+    try_item_type_from_text(s).unwrap_or_else(|_| panic!("unknown ItemType in DB: {s}"))
+}
+
+fn try_item_type_from_text(s: &str) -> AlephResult<ItemType> {
     serde_json::from_value::<ItemType>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown ItemType in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown ItemType in DB: {s}")))
 }
 
 fn status_from_text(s: &str) -> MessageStatus {
+    try_status_from_text(s).unwrap_or_else(|_| panic!("unknown MessageStatus in DB: {s}"))
+}
+
+fn try_status_from_text(s: &str) -> AlephResult<MessageStatus> {
     serde_json::from_value::<MessageStatus>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown MessageStatus in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown MessageStatus in DB: {s}")))
 }
 
 /// Column names that exist on the `messages` table but are NOT part of the
@@ -113,12 +130,16 @@ pub struct MessageStatusDb {
 
 impl MessageStatusDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid MessageStatusDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let status_s: String = row.get("status");
-        Self {
+        Ok(Self {
             item_hash: row.get("item_hash"),
-            status: status_from_text(&status_s),
+            status: try_status_from_text(&status_s)?,
             reception_time: row.get("reception_time"),
-        }
+        })
     }
 }
 
@@ -169,27 +190,80 @@ pub struct MessageDb {
 }
 
 impl MessageDb {
+    /// Format a message row into the public API JSON shape used by
+    /// `/api/v0/messages` and websocket broadcasts.
+    pub fn to_api_value(
+        &self,
+        confirmations: &[(String, String, i64)],
+        exclude_content: bool,
+    ) -> Value {
+        let mut out = Map::new();
+        out.insert("item_hash".into(), json!(self.item_hash));
+        out.insert("type".into(), serde_json::to_value(self.r#type).unwrap());
+        out.insert("chain".into(), serde_json::to_value(&self.chain).unwrap());
+        out.insert("sender".into(), json!(self.sender));
+        out.insert(
+            "signature".into(),
+            match &self.signature {
+                Some(s) => json!(s),
+                None => Value::Null,
+            },
+        );
+        out.insert(
+            "item_type".into(),
+            serde_json::to_value(self.item_type).unwrap(),
+        );
+        out.insert(
+            "item_content".into(),
+            self.item_content
+                .as_ref()
+                .map(|c| json!(c))
+                .unwrap_or(Value::Null),
+        );
+        if !exclude_content {
+            out.insert("content".into(), self.content.clone());
+        }
+        let time = self.time.timestamp() as f64
+            + (self.time.timestamp_subsec_nanos() as f64) / 1_000_000_000.0;
+        out.insert("time".into(), json!(time));
+        out.insert("channel".into(), serde_json::to_value(&self.channel).unwrap());
+        out.insert("size".into(), json!(self.size));
+        let confs: Vec<Value> = confirmations
+            .iter()
+            .map(|(chain, hash, height)| json!({"chain": chain, "hash": hash, "height": height}))
+            .collect();
+        out.insert("confirmed".into(), json!(!confs.is_empty()));
+        out.insert("confirmations".into(), Value::Array(confs));
+        Value::Object(out)
+    }
+
     /// Build a [`MessageDb`] from a database row.
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid MessageDb row")
+    }
+
+    /// Fallible row decoder for production DB reads. Bad persisted enum/text
+    /// values should return an error to the caller, not panic the worker.
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let type_s: String = row.get("type");
         let chain_s: String = row.get("chain");
         let item_type_s: String = row.get("item_type");
         let status_s: String = row.get("status");
         let channel: Option<String> = row.get("channel");
 
-        Self {
+        Ok(Self {
             item_hash: row.get("item_hash"),
-            r#type: message_type_from_text(&type_s),
-            chain: chain_from_text(&chain_s),
+            r#type: try_message_type_from_text(&type_s)?,
+            chain: try_chain_from_text(&chain_s)?,
             sender: row.get("sender"),
             signature: row.get("signature"),
-            item_type: item_type_from_text(&item_type_s),
+            item_type: try_item_type_from_text(&item_type_s)?,
             item_content: row.get("item_content"),
             content: row.get("content"),
             time: row.get("time"),
             channel: channel.map(Channel::from),
             size: row.get("size"),
-            status_value: status_from_text(&status_s),
+            status_value: try_status_from_text(&status_s)?,
             reception_time: row.get("reception_time"),
             owner: row.get("owner"),
             content_type: row.get("content_type"),
@@ -200,7 +274,7 @@ impl MessageDb {
             payment_type: row.get("payment_type"),
             content_item_hash: row.get("content_item_hash"),
             tags: row.get("tags"),
-        }
+        })
     }
 
     /// Coerce content fields the way Python's `_coerce_content` does. Fills
@@ -450,21 +524,25 @@ pub struct ForgottenMessageDb {
 
 impl ForgottenMessageDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid ForgottenMessageDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let type_s: String = row.get("type");
         let chain_s: String = row.get("chain");
         let item_type_s: String = row.get("item_type");
         let channel: Option<String> = row.get("channel");
-        Self {
+        Ok(Self {
             item_hash: row.get("item_hash"),
-            r#type: message_type_from_text(&type_s),
-            chain: chain_from_text(&chain_s),
+            r#type: try_message_type_from_text(&type_s)?,
+            chain: try_chain_from_text(&chain_s)?,
             sender: row.get("sender"),
             signature: row.get("signature"),
-            item_type: item_type_from_text(&item_type_s),
+            item_type: try_item_type_from_text(&item_type_s)?,
             time: row.get("time"),
             channel: channel.map(Channel::from),
             forgotten_by: row.get("forgotten_by"),
-        }
+        })
     }
 }
 
@@ -497,17 +575,21 @@ pub struct RejectedMessageDb {
 
 impl RejectedMessageDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid RejectedMessageDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let code: i32 = row.get("error_code");
-        let error_code =
-            ErrorCode::try_from(code).unwrap_or_else(|_| panic!("unknown ErrorCode: {code}"));
-        Self {
+        let error_code = ErrorCode::try_from(code)
+            .map_err(|_| AlephError::InvalidMessage(format!("unknown ErrorCode in DB: {code}")))?;
+        Ok(Self {
             item_hash: row.get("item_hash"),
             message: row.get("message"),
             error_code,
             details: row.get("details"),
             traceback: row.get("traceback"),
             tx_hash: row.get("tx_hash"),
-        }
+        })
     }
 }
 
@@ -611,6 +693,14 @@ mod tests {
         let c = json!({"tags": ["a"]});
         assert!(extract_tags_from_str("INVALID", &c).is_none());
         assert_eq!(extract_tags_from_str("STORE", &c), Some(vec!["a".into()]));
+    }
+
+    #[test]
+    fn invalid_db_enums_return_errors() {
+        assert!(try_chain_from_text("NOPE").is_err());
+        assert!(try_message_type_from_text("NOPE").is_err());
+        assert!(try_item_type_from_text("NOPE").is_err());
+        assert!(try_status_from_text("NOPE").is_err());
     }
 
     #[test]

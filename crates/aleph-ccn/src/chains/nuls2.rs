@@ -21,8 +21,9 @@ use super::nuls_aleph_sdk::{
 use crate::AlephResult;
 use crate::config::Settings;
 use crate::db::DbPool;
+use crate::db::accessors::chains::{get_last_height, upsert_chain_sync_status};
 use crate::toolkit::timestamp::timestamp_to_datetime;
-use crate::types::chain_sync::ChainSyncProtocol;
+use crate::types::chain_sync::{ChainEventType, ChainSyncProtocol};
 use aleph_types::chain::Chain;
 
 const MESSAGE_TEMPLATE_PREFIX: &[u8] = b"\x18NULS Signed Message:\n";
@@ -201,20 +202,14 @@ impl Nuls2Connector {
             .first()
             .map(|c| c.address.clone())
             .unwrap_or_default();
-        let protocol_str = parsed
-            .get("protocol")
-            .and_then(|v| v.as_str())
-            .unwrap_or("aleph");
+        let protocol_str = parsed.get("protocol").and_then(|v| v.as_str())?;
         let protocol = match protocol_str {
             "aleph" => ChainSyncProtocol::OnChainSync,
             "aleph-offchain" => ChainSyncProtocol::OffChainSync,
-            _ => ChainSyncProtocol::OnChainSync,
+            _ => return None,
         };
-        let version = parsed.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-        let content = parsed
-            .get("content")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
+        let version = parsed.get("version").and_then(|v| v.as_u64())? as u32;
+        let content = parsed.get("content").cloned()?;
         Some(PendingChainTx {
             hash: tx.hash.clone(),
             chain: Chain::Nuls2,
@@ -296,7 +291,18 @@ impl ChainReader for Nuls2Connector {
             .clone()
             .ok_or_else(|| crate::AlephError::Config("nuls2.sync_address required".into()))?;
         let remark = cfg.nuls2.remark.clone();
-        let mut last_height: u64 = 0;
+        let mut last_height: u64 = if let Some(pool) = &self.pool {
+            let client = pool
+                .get()
+                .await
+                .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
+            get_last_height(&**client, Chain::Nuls2, ChainEventType::Sync)
+                .await?
+                .map(|h| h.max(0) as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
         loop {
             match self
                 .poll_once(&explorer, &sync_addr, Some(&remark), last_height)
@@ -305,6 +311,19 @@ impl ChainReader for Nuls2Connector {
                 Ok(txs) => {
                     if let Some(max) = txs.iter().map(|t| t.height).max() {
                         last_height = max;
+                        if let Some(pool) = &self.pool {
+                            let client = pool.get().await.map_err(|e| {
+                                crate::AlephError::Pool(format!("pool acquire: {e}"))
+                            })?;
+                            upsert_chain_sync_status(
+                                &**client,
+                                Chain::Nuls2,
+                                ChainEventType::Sync,
+                                last_height.min(i32::MAX as u64) as i32,
+                                chrono::Utc::now(),
+                            )
+                            .await?;
+                        }
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "NULS2 fetcher: poll failed"),
@@ -321,75 +340,9 @@ impl ChainWriter for Nuls2Connector {
             tracing::info!("NULS2 packing disabled (config.nuls2.packing_node = false)");
             return Ok(());
         }
-        let _pk = cfg.nuls2.private_key.as_deref().ok_or_else(|| {
-            crate::AlephError::Config("nuls2.packing_node requires nuls2.private_key".into())
-        })?;
-        let _sync_address = cfg.nuls2.sync_address.as_deref().ok_or_else(|| {
-            crate::AlephError::Config("nuls2.packing_node requires nuls2.sync_address".into())
-        })?;
-        let commit_delay = Duration::from_secs(cfg.nuls2.commit_delay);
-        let max_unconfirmed = cfg.aleph.jobs.max_unconfirmed_messages as usize;
-
-        loop {
-            // Drain unconfirmed messages.
-            let messages = match self.collect_unconfirmed(max_unconfirmed).await {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!(error = %e, "NULS2 packer: collect unconfirmed failed");
-                    tokio::time::sleep(commit_delay).await;
-                    continue;
-                }
-            };
-            if messages.is_empty() {
-                tokio::time::sleep(commit_delay).await;
-                continue;
-            }
-            tracing::info!(count = messages.len(), "NULS2 packer: preparing batch");
-
-            // Prepare the payload through the chain data service.
-            let pool = match &self.pool {
-                Some(p) => p,
-                None => {
-                    tracing::error!("NULS2 packer: missing DbPool");
-                    tokio::time::sleep(commit_delay).await;
-                    continue;
-                }
-            };
-            let payload = {
-                let client = match pool.get().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "NULS2 packer: pool acquire failed");
-                        tokio::time::sleep(commit_delay).await;
-                        continue;
-                    }
-                };
-                match self
-                    .chain_data_service
-                    .prepare_sync_event_payload(&**client, messages)
-                    .await
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "NULS2 packer: prepare payload failed");
-                        tokio::time::sleep(commit_delay).await;
-                        continue;
-                    }
-                }
-            };
-
-            // Actual transfer + signing is delegated to the NULS2 API server;
-            // we POST a `broadcastTx` JSON-RPC call carrying the encoded
-            // payload. The signed-tx construction is intentionally minimal
-            // because pyaleph relies on the `nuls2` SDK that ships with
-            // Python — porting that wholesale is out of scope for this slice.
-            tracing::info!(
-                payload_bytes = payload.len(),
-                "NULS2 packer: payload prepared (broadcast left to NULS2 SDK port)"
-            );
-
-            tokio::time::sleep(commit_delay).await;
-        }
+        Err(crate::AlephError::Config(
+            "nuls2.packing_node is unsupported: NULS2 is a legacy stopped chain; disable nuls2.packing_node".into(),
+        ))
     }
 }
 
@@ -465,6 +418,19 @@ mod tests {
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].hash, "tx1");
+    }
+
+    #[tokio::test]
+    async fn nuls2_packer_enabled_fails_fast_as_unsupported() {
+        let publisher = Arc::new(PendingTxPublisher::new(Box::new(TracingPendingTxSink)));
+        let cds = Arc::new(ChainDataService::new());
+        let connector = Nuls2Connector::new(publisher, cds);
+        let mut cfg = Settings::default();
+        cfg.nuls2.packing_node = true;
+
+        let err = connector.packer(&cfg).await.unwrap_err();
+        assert!(err.to_string().contains("unsupported"));
+        assert!(err.to_string().contains("legacy stopped chain"));
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -24,6 +25,10 @@ use crate::web::controllers::error::{WebError, WebResult};
 use crate::web::controllers::utils::{get_db, json_text_response, validate_cursor_pagination};
 
 const DEFAULT_LIMIT: i64 = 1000;
+
+fn aggregate_datetime_isoformat(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -128,8 +133,9 @@ async fn address_aggregate(
                 info.insert(
                     row.key,
                     json!({
-                        "created": row.created.to_rfc3339(),
-                        "last_updated": row.last_updated.to_rfc3339(),
+                        "created": aggregate_datetime_isoformat(row.created),
+                        "creation_datetime": aggregate_datetime_isoformat(row.created),
+                        "last_updated": aggregate_datetime_isoformat(row.last_updated),
                         "original_item_hash": row.original_item_hash,
                         "last_update_item_hash": row.last_update_item_hash,
                     }),

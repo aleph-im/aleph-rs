@@ -34,7 +34,7 @@ pub async fn get_instance(
     let row = client
         .query_opt(&sql, &[&item_hash, &vm_type_value(VmType::Instance)])
         .await?;
-    Ok(row.as_ref().map(VmBaseDb::from_row))
+    row.as_ref().map(VmBaseDb::try_from_row).transpose()
 }
 
 /// Fetch a VM-program row, if it exists. Mirrors `get_program`.
@@ -49,7 +49,7 @@ pub async fn get_program(
     let row = client
         .query_opt(&sql, &[&item_hash, &vm_type_value(VmType::Program)])
         .await?;
-    Ok(row.as_ref().map(VmBaseDb::from_row))
+    row.as_ref().map(VmBaseDb::try_from_row).transpose()
 }
 
 /// Whether amending the VM identified by `vm_hash` is allowed. Mirrors
@@ -130,7 +130,7 @@ pub async fn get_vms_dependent_volumes(
             .join(", ")
     );
     let row = client.query_opt(&sql, &[&volume_hash]).await?;
-    Ok(row.as_ref().map(VmBaseDb::from_row))
+    row.as_ref().map(VmBaseDb::try_from_row).transpose()
 }
 
 /// Upsert one row in `vm_versions`. Mirrors `upsert_vm_version`.

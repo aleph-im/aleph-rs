@@ -94,6 +94,33 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    pub const ALL: &'static [ErrorCode] = &[
+        ErrorCode::InternalError,
+        ErrorCode::InvalidFormat,
+        ErrorCode::InvalidSignature,
+        ErrorCode::PermissionDenied,
+        ErrorCode::ContentUnavailable,
+        ErrorCode::FileUnavailable,
+        ErrorCode::BalanceInsufficient,
+        ErrorCode::CreditInsufficient,
+        ErrorCode::PostAmendNoTarget,
+        ErrorCode::PostAmendTargetNotFound,
+        ErrorCode::PostAmendAmend,
+        ErrorCode::StoreRefNotFound,
+        ErrorCode::StoreUpdateUpdate,
+        ErrorCode::InvalidPaymentMethod,
+        ErrorCode::VmRefNotFound,
+        ErrorCode::VmVolumeNotFound,
+        ErrorCode::VmAmendNotAllowed,
+        ErrorCode::VmUpdateUpdate,
+        ErrorCode::VmVolumeTooSmall,
+        ErrorCode::ForgetNoTarget,
+        ErrorCode::ForgetTargetNotFound,
+        ErrorCode::ForgetForget,
+        ErrorCode::ForgetNotAllowed,
+        ErrorCode::ForgottenDuplicate,
+    ];
+
     pub const fn as_i32(self) -> i32 {
         self as i32
     }

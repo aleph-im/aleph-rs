@@ -21,6 +21,8 @@ pub enum WebError {
     NotFound(String),
     /// 410 Gone (FORGOTTEN/REMOVED).
     Gone(String),
+    /// 504 Gateway Timeout.
+    GatewayTimeout(String),
     /// 413 Payload Too Large.
     PayloadTooLarge(String),
     /// 422 Unprocessable Entity — pydantic-style validation error.
@@ -38,6 +40,7 @@ impl WebError {
             WebError::Forbidden(_) => StatusCode::FORBIDDEN,
             WebError::NotFound(_) => StatusCode::NOT_FOUND,
             WebError::Gone(_) => StatusCode::GONE,
+            WebError::GatewayTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             WebError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             WebError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             WebError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -52,6 +55,7 @@ impl WebError {
             | WebError::Forbidden(s)
             | WebError::NotFound(s)
             | WebError::Gone(s)
+            | WebError::GatewayTimeout(s)
             | WebError::PayloadTooLarge(s)
             | WebError::Unprocessable(s)
             | WebError::Internal(s) => s.clone(),

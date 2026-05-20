@@ -35,10 +35,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/ws0/status", get(status_ws))
 }
 
-async fn index(State(state): State<AppState>) -> WebResult<Response> {
-    let m = get_metrics(&state).await?;
-    let body = serde_json::to_string(&m).expect("metrics serializable");
-    Ok(json_text_response(StatusCode::OK, body))
+async fn index(State(_state): State<AppState>) -> WebResult<Response> {
+    Ok(json_text_response(StatusCode::OK, "aleph-ccn".to_string()))
 }
 
 /// Hold a status websocket open, sending an updated metrics payload every

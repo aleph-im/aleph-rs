@@ -11,8 +11,11 @@
 
 use std::sync::Arc;
 
+use futures_util::StreamExt as _;
+use lapin::options::{BasicConsumeOptions, QueueBindOptions, QueueDeclareOptions};
+use lapin::types::FieldTable;
 use serde_json::Value;
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 
 use crate::AlephError;
 use crate::AlephResult;
@@ -20,6 +23,8 @@ use crate::config::Settings;
 use crate::handlers::message_handler::MessagePublisher;
 use crate::services::ipfs::IpfsService;
 use crate::services::ipfs::pubsub::{IpfsPubsubHandler, incoming_channel as incoming_ipfs_channel};
+use crate::services::p2p::protocol::{AlephP2PClient, HttpP2pClient, SeenHashes};
+use crate::toolkit::rabbitmq::{declare_sub_exchange, make_mq_conn};
 
 /// Decode a single pubsub frame: URL-decode + JSON-decode. Mirrors
 /// `aleph.network.decode_pubsub_message` (`urllib.parse.unquote` +
@@ -76,6 +81,29 @@ struct PublisherHandler {
     origin: crate::types::message_status::MessageOrigin,
 }
 
+async fn add_pending_from_pubsub(
+    publisher: &MessagePublisher,
+    pool: &deadpool_postgres::Pool,
+    message_dict: &Value,
+    origin: crate::types::message_status::MessageOrigin,
+) -> AlephResult<()> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| AlephError::Pool(format!("{e}")))?;
+    let _ = publisher
+        .add_pending_message(
+            &**client,
+            message_dict,
+            chrono::Utc::now(),
+            None,
+            true,
+            Some(origin),
+        )
+        .await?;
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl IpfsPubsubHandler for PublisherHandler {
     async fn handle(&self, frame: Value) -> AlephResult<()> {
@@ -87,24 +115,131 @@ impl IpfsPubsubHandler for PublisherHandler {
             _ => return Ok(()),
         };
         let message_dict = decode_pubsub_message(payload.as_bytes())?;
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| AlephError::Pool(format!("{e}")))?;
-        let _ = self
-            .publisher
-            .add_pending_message(
-                &**client,
-                &message_dict,
-                chrono::Utc::now(),
-                None,
-                true,
-                Some(self.origin),
-            )
-            .await?;
-        Ok(())
+        add_pending_from_pubsub(&self.publisher, &self.pool, &message_dict, self.origin).await
     }
+}
+
+async fn incoming_p2p_channel(
+    config: Arc<Settings>,
+    publisher: Arc<MessagePublisher>,
+    pool: deadpool_postgres::Pool,
+) -> AlephResult<()> {
+    let seen_hashes = Arc::new(SeenHashes::new(200_000));
+    loop {
+        if let Err(e) = run_p2p_channel_once(
+            config.clone(),
+            publisher.clone(),
+            pool.clone(),
+            seen_hashes.clone(),
+        )
+        .await
+        {
+            tracing::error!("Exception in P2P pubsub, reconnecting in 100 ms... ({e})");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn run_p2p_channel_once(
+    config: Arc<Settings>,
+    publisher: Arc<MessagePublisher>,
+    pool: deadpool_postgres::Pool,
+    seen_hashes: Arc<SeenHashes>,
+) -> AlephResult<()> {
+    let p2p_client = HttpP2pClient::new(&config.p2p, Some(config.rabbitmq.clone()), "aleph-ccn");
+    p2p_client.subscribe(&config.aleph.queue_topic).await?;
+
+    let conn = make_mq_conn(&config.p2p, &config.rabbitmq).await?;
+    let channel = conn
+        .create_channel()
+        .await
+        .map_err(|e| AlephError::P2p(format!("rabbitmq create channel failed: {e}")))?;
+    declare_sub_exchange(&channel, &config.rabbitmq).await?;
+
+    let queue = channel
+        .queue_declare(
+            "",
+            QueueDeclareOptions {
+                durable: false,
+                exclusive: true,
+                auto_delete: true,
+                ..Default::default()
+            },
+            FieldTable::default(),
+        )
+        .await
+        .map_err(|e| AlephError::P2p(format!("p2p queue_declare failed: {e}")))?;
+    let queue_name = queue.name().as_str().to_string();
+    let binding = format!("*.{}.*", config.aleph.queue_topic);
+    channel
+        .queue_bind(
+            &queue_name,
+            &config.rabbitmq.sub_exchange,
+            &binding,
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(|e| AlephError::P2p(format!("p2p queue_bind failed: {e}")))?;
+
+    let consumer = channel
+        .basic_consume(
+            &queue_name,
+            "aleph-ccn-p2p-listener",
+            BasicConsumeOptions {
+                no_ack: true,
+                ..Default::default()
+            },
+            FieldTable::default(),
+        )
+        .await
+        .map_err(|e| AlephError::P2p(format!("p2p consume failed: {e}")))?;
+    let mut consumer = consumer;
+
+    while let Some(delivery) = consumer.next().await {
+        let delivery = delivery.map_err(|e| AlephError::P2p(format!("p2p delivery: {e}")))?;
+        let routing_key = delivery.routing_key.as_str();
+        let parts: Vec<&str> = routing_key.split('.').collect();
+        if parts.len() != 3 {
+            tracing::warn!(routing_key, "Received P2P message with invalid routing key");
+            continue;
+        }
+
+        let message_dict = match decode_pubsub_message(&delivery.data) {
+            Ok(message) => message,
+            Err(e) => {
+                tracing::warn!(routing_key, "Received invalid P2P message: {e}");
+                continue;
+            }
+        };
+        if let Some(seen_key) = p2p_dedupe_key(&message_dict) {
+            if seen_hashes.contains(&seen_key) {
+                continue;
+            }
+            seen_hashes.record(seen_key);
+        }
+
+        if let Err(e) = add_pending_from_pubsub(
+            &publisher,
+            &pool,
+            &message_dict,
+            crate::types::message_status::MessageOrigin::P2p,
+        )
+        .await
+        {
+            tracing::warn!(routing_key, "Failed to add P2P pending message: {e}");
+        }
+    }
+
+    Err(AlephError::P2p("p2p consumer ended".into()))
+}
+
+fn p2p_dedupe_key(message: &Value) -> Option<(String, String, String)> {
+    Some((
+        serde_json::to_string(message.get("sender")?).ok()?,
+        serde_json::to_string(message.get("item_hash")?).ok()?,
+        serde_json::to_string(message.get("signature")?).ok()?,
+    ))
 }
 
 /// Spawn the pubsub listener loops. Mirrors `aleph.network.listener_tasks`.
@@ -116,12 +251,19 @@ pub async fn listener_tasks(
     config: &Settings,
     publisher: Arc<MessagePublisher>,
     pool: deadpool_postgres::Pool,
-    ipfs_service: Arc<IpfsService>,
-) -> Vec<JoinHandle<()>> {
-    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    ipfs_service: Option<Arc<IpfsService>>,
+) -> AlephResult<JoinSet<AlephResult<()>>> {
+    let mut handles = JoinSet::new();
+
+    let p2p_config = Arc::new(config.clone());
+    let p2p_publisher = publisher.clone();
+    let p2p_pool = pool.clone();
+    handles.spawn(async move {
+        incoming_p2p_channel(p2p_config, p2p_publisher, p2p_pool).await
+    });
 
     // IPFS pubsub channel (optional).
-    if config.ipfs.enabled {
+    if config.ipfs.enabled && let Some(ipfs_service) = ipfs_service {
         let topic = config.aleph.queue_topic.clone();
         let handler: Arc<dyn IpfsPubsubHandler> = Arc::new(PublisherHandler {
             publisher: publisher.clone(),
@@ -129,18 +271,13 @@ pub async fn listener_tasks(
             origin: crate::types::message_status::MessageOrigin::Ipfs,
         });
         let ipfs = ipfs_service.clone();
-        handles.push(tokio::spawn(async move {
+        handles.spawn(async move {
             incoming_ipfs_channel(ipfs, topic, handler).await;
-        }));
+            Ok(())
+        });
     }
 
-    // P2P pubsub channel via libp2p / RabbitMQ. We don't ship a P2P pubsub
-    // consumer in this crate's services tree (the lapin-based consumer lives
-    // in a sibling crate), so we wire only the IPFS path here. The P2P
-    // listener gets attached by the binary entry-point via its own
-    // bootstrapping. The shape of `Vec<JoinHandle>` is preserved so the
-    // calling site can `.extend` with additional handles.
-    handles
+    Ok(handles)
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use lapin::options::BasicPublishOptions;
 use lapin::{BasicProperties, Channel};
+use tokio::sync::broadcast;
 
 use crate::AlephResult;
 use crate::db::DbPool;
@@ -67,12 +68,18 @@ pub struct HandlerRunner {
 pub struct OutcomePublisher {
     pub channel: Channel,
     pub exchange: String,
+    pub broadcast: Option<broadcast::Sender<serde_json::Value>>,
 }
 
 impl OutcomePublisher {
     /// Publish an outcome unless it originated from the on-chain protocol
     /// (matches Python `if result.origin != MessageOrigin.ONCHAIN`).
     pub async fn publish(&self, result: &AnyMessageProcessingResult) -> AlephResult<()> {
+        if let AnyMessageProcessingResult::Processed(processed) = result {
+            if let Some(sender) = &self.broadcast {
+                let _ = sender.send(processed.message.clone());
+            }
+        }
         if result.origin() == Some(MessageOrigin::Onchain) {
             return Ok(());
         }

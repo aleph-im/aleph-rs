@@ -17,6 +17,7 @@ use aleph_ccn::db::accessors::messages::{
 };
 use aleph_ccn::db::accessors::pending_messages::get_pending_messages;
 use aleph_ccn::handlers::message_handler::MessagePublisher;
+use aleph_types::message::item_type::ItemType;
 use aleph_ccn::types::message_status::{MessageOrigin, MessageStatus};
 
 use common::{start_postgres};
@@ -75,6 +76,47 @@ async fn add_pending_message_inserts_new_message() {
     let rows = get_pending_messages(&**client, item_hash).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].signature.as_deref(), Some("0xsig-new"));
+}
+
+#[tokio::test]
+async fn add_pending_message_uses_parsed_item_type_and_time() {
+    let fixture = start_postgres().await;
+    let client = fixture.pool.get().await.unwrap();
+
+    let item_hash = "a".repeat(64);
+    let wire = json!({
+        "item_hash": item_hash,
+        "type": "STORE",
+        "chain": "ETH",
+        "sender": "0xdeF61fAadE93a8aaE303D083Ead5BF7a25E55a23",
+        "signature": "0xsig-storage",
+        "time": "2024-01-02T03:04:05Z",
+        "channel": "TEST_CHANNEL",
+    });
+
+    let pub_ = publisher();
+    let result = pub_
+        .add_pending_message(
+            &**client,
+            &wire,
+            Utc::now(),
+            None,
+            true,
+            Some(MessageOrigin::P2p),
+        )
+        .await
+        .unwrap();
+
+    let pending = result.expect("insert should return the row");
+    assert_eq!(pending.item_type, ItemType::Storage);
+    assert!(!pending.fetched, "storage content must be fetched later");
+    assert_eq!(pending.time.to_rfc3339(), "2024-01-02T03:04:05+00:00");
+
+    let rows = get_pending_messages(&**client, &item_hash).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].item_type, ItemType::Storage);
+    assert!(!rows[0].fetched);
+    assert_eq!(rows[0].time.to_rfc3339(), "2024-01-02T03:04:05+00:00");
 }
 
 /// Same (sender, item_hash, signature) twice: the second call resolves to

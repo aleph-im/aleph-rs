@@ -30,9 +30,9 @@ pub async fn connect(cfg: &PostgresSettings) -> AlephResult<DbPool> {
 
     let mgr_cfg = ManagerConfig {
         recycling_method: if cfg.pool_pre_ping {
-            RecyclingMethod::Fast
-        } else {
             RecyclingMethod::Verified
+        } else {
+            RecyclingMethod::Fast
         },
     };
     let mgr = Manager::from_config(pg_cfg, NoTls, mgr_cfg);

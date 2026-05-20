@@ -12,24 +12,29 @@ use std::time::Duration;
 
 use alloy_rpc_types_eth::Log;
 use alloy_sol_types::SolEvent;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use lapin::{BasicProperties, Channel, options::BasicPublishOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_postgres::GenericClient;
 
-use crate::AlephResult;
+use crate::{AlephError, AlephResult};
+use crate::db::accessors::files::{upsert_file, upsert_tx_file_pin};
 use crate::db::models::messages::MessageDb;
 use crate::services::ipfs::IpfsService;
-use crate::toolkit::timestamp::timestamp_to_datetime;
+use crate::storage::StorageService;
+use crate::toolkit::timestamp::{timestamp_to_datetime, utc_now};
 use crate::types::chain_sync::ChainSyncProtocol;
-
+use crate::types::channel::Channel as AlephChannel;
+use crate::types::files::FileType;
 use aleph_types::chain::Chain;
+use aleph_types::message::item_type::ItemType;
 
-/// Threshold above which `prepare_sync_event_payload` uploads the payload to
-/// IPFS rather than emitting it inline. Mirrors pyaleph's behavior — Python
-/// always uploads via IPFS, but the protocol explicitly supports both forms
-/// and our Rust port keeps the inline path for tiny batches.
+/// Historical threshold used by the previous inline fallback. Kept for tests
+/// that build large payloads; production sync event preparation now mirrors
+/// pyaleph and always emits `OFF_CHAIN_SYNC`.
 pub const PAYLOAD_INLINE_LIMIT_BYTES: usize = 50 * 1024;
 
 /// Payload format pyaleph emits on-chain (or as the "on-chain content" of an
@@ -41,12 +46,15 @@ pub struct OnChainMessage {
     pub chain: Chain,
     #[serde(rename = "type")]
     pub message_type: String,
-    pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
     pub time: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<AlephChannel>,
 }
 
 impl OnChainMessage {
@@ -64,10 +72,11 @@ impl OnChainMessage {
             sender: msg.sender.clone(),
             chain: msg.chain.clone(),
             message_type: msg.r#type.to_string(),
-            signature: msg.signature.clone().unwrap_or_default(),
+            signature: msg.signature.clone(),
             time,
             item_content: msg.item_content.clone(),
             item_type,
+            channel: msg.channel.clone(),
         }
     }
 }
@@ -103,15 +112,29 @@ alloy_sol_types::sol! {
 /// Mirrors `ChainDataService.prepare_sync_event_payload` / `get_tx_messages`.
 pub struct ChainDataService {
     ipfs: Option<Arc<IpfsService>>,
+    storage: Option<Arc<StorageService>>,
 }
 
 impl ChainDataService {
     pub fn new() -> Self {
-        Self { ipfs: None }
+        Self {
+            ipfs: None,
+            storage: None,
+        }
     }
 
     pub fn with_ipfs(ipfs: Arc<IpfsService>) -> Self {
-        Self { ipfs: Some(ipfs) }
+        Self {
+            ipfs: Some(ipfs),
+            storage: None,
+        }
+    }
+
+    pub fn with_storage(storage: Arc<StorageService>) -> Self {
+        Self {
+            ipfs: Some(storage.ipfs_service.clone()),
+            storage: Some(storage),
+        }
     }
 
     /// Packs the messages into an `OnChainSyncEventPayload`.
@@ -135,13 +158,11 @@ impl ChainDataService {
     /// Builds the JSON payload that the chain writer will emit via
     /// `doEmit(content)`.
     ///
-    /// Small batches (<= [`PAYLOAD_INLINE_LIMIT_BYTES`]) are inlined as an
-    /// "OnChain" payload; larger batches are uploaded to IPFS and replaced by
-    /// an "OffChain" envelope referencing the resulting CID. Mirrors
-    /// `ChainDataService.prepare_sync_event_payload`.
+    /// Pyaleph always stores the archive off-chain and emits an `OffChain`
+    /// envelope referencing the resulting CID.
     pub async fn prepare_sync_event_payload(
         &self,
-        _client: &(impl GenericClient + Sync),
+        client: &(impl GenericClient + Sync),
         messages: Vec<MessageDb>,
     ) -> AlephResult<String> {
         let on_chain_messages: Vec<OnChainMessage> = messages
@@ -149,28 +170,40 @@ impl ChainDataService {
             .map(OnChainMessage::from_message_db)
             .collect();
         let archive = self.build_on_chain_payload(on_chain_messages);
-        let inline = serde_json::to_string(&archive)?;
+        let (cid, size) = if let Some(storage) = &self.storage {
+            if !storage.ipfs_enabled {
+                return Err(AlephError::Ipfs(
+                    "cannot prepare chain sync payload when IPFS is disabled".into(),
+                ));
+            }
+            let archive_bytes = serde_json::to_vec(&archive)?;
+            let size = archive_bytes.len() as i64;
+            let cid = storage
+                .add_file(client, &archive_bytes, ItemType::Ipfs)
+                .await?;
+            (cid, size)
+        } else {
+            self.upload_sync_archive(archive).await?
+        };
+        upsert_file(client, &cid, size, FileType::File).await?;
+        let off = self.build_off_chain_payload(cid);
+        Ok(serde_json::to_string(&off)?)
+    }
 
-        if inline.len() <= PAYLOAD_INLINE_LIMIT_BYTES {
-            return Ok(inline);
-        }
-
-        let archive_json = serde_json::to_value(&archive)?;
+    async fn upload_sync_archive(
+        &self,
+        archive: OnChainSyncEventPayload,
+    ) -> AlephResult<(String, i64)> {
+        let archive_json = serde_json::to_value(archive)?;
+        let size = serde_json::to_vec(&archive_json)?.len() as i64;
         match &self.ipfs {
             Some(ipfs) => {
-                let cid = ipfs.add_json(&archive_json).await?;
-                let off = self.build_off_chain_payload(cid);
-                Ok(serde_json::to_string(&off)?)
+                let cid = ipfs.add_bytes(Bytes::from(serde_json::to_vec(&archive_json)?), 0).await?;
+                Ok((cid, size))
             }
-            None => {
-                // Without IPFS available the only safe behavior is to emit the
-                // inline form (logging the oversized payload).
-                tracing::warn!(
-                    payload_size = inline.len(),
-                    "prepare_sync_event_payload: oversized payload but no IPFS service available; emitting inline"
-                );
-                Ok(inline)
-            }
+            None => Err(AlephError::Ipfs(
+                "cannot prepare chain sync payload without IPFS service".into(),
+            )),
         }
     }
 
@@ -192,16 +225,23 @@ impl ChainDataService {
                     return Ok(None);
                 }
             };
-            let protocol = parsed
+            let Some(protocol) = parsed
                 .get("protocol")
                 .and_then(|v| v.as_str())
                 .and_then(|s| {
                     serde_json::from_value::<ChainSyncProtocol>(Value::String(s.to_string())).ok()
-                })
-                .unwrap_or(ChainSyncProtocol::OnChainSync);
-            let protocol_version =
-                parsed.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-            let content = parsed.get("content").cloned().unwrap_or(Value::Null);
+                }) else {
+                    tracing::warn!(?log.transaction_hash, "SyncEvent has unknown or missing protocol");
+                    return Ok(None);
+                };
+            let Some(protocol_version) = parsed.get("version").and_then(|v| v.as_u64()) else {
+                tracing::warn!(?log.transaction_hash, "SyncEvent has missing or invalid version");
+                return Ok(None);
+            };
+            let Some(content) = parsed.get("content").cloned() else {
+                tracing::warn!(?log.transaction_hash, "SyncEvent has missing content");
+                return Ok(None);
+            };
 
             let height = log.block_number.unwrap_or_default();
             let hash = log
@@ -216,7 +256,7 @@ impl ChainDataService {
                 datetime,
                 publisher: format!("{:#x}", addr),
                 protocol,
-                protocol_version,
+                protocol_version: protocol_version as u32,
                 content,
             }));
         }
@@ -258,87 +298,190 @@ impl ChainDataService {
     /// Mirrors `ChainDataService.get_tx_messages`.
     pub async fn get_tx_messages(
         &self,
-        _client: &(impl GenericClient + Sync),
+        client: &(impl GenericClient + Sync),
         tx: &crate::db::models::chains::ChainTxDb,
     ) -> AlephResult<Vec<OnChainMessage>> {
+        if tx.protocol == ChainSyncProtocol::OffChainSync {
+            let (messages, file_hash, size) = self.get_off_chain_messages(tx).await?;
+            if self.ipfs_enabled() {
+                upsert_file(client, &file_hash, size, FileType::File).await?;
+                upsert_tx_file_pin(client, &file_hash, &tx.hash, utc_now()).await?;
+                if let Err(e) = self.pin_off_chain_archive(&file_hash).await {
+                    tracing::warn!(file_hash = %file_hash, error = %e, "could not pin off-chain sync archive");
+                }
+            }
+            return Ok(messages);
+        }
+
+        self.get_tx_messages_from_tx(tx).await
+    }
+
+    /// Resolves the message payload(s) carried by a chain transaction without
+    /// requiring a DB client. The client parameter on [`Self::get_tx_messages`]
+    /// is kept for API compatibility with the Python-shaped call sites.
+    pub async fn get_tx_messages_from_tx(
+        &self,
+        tx: &crate::db::models::chains::ChainTxDb,
+    ) -> AlephResult<Vec<OnChainMessage>> {
+        if tx.protocol_version != 1 {
+            return Err(crate::AlephError::Chain(format!(
+                "unknown protocol/version object in tx {}/{}: {:?} v{}",
+                tx.chain, tx.hash, tx.protocol, tx.protocol_version
+            )));
+        }
+
         match tx.protocol {
             ChainSyncProtocol::OnChainSync => {
                 let messages = tx
                     .content
                     .get("messages")
                     .cloned()
-                    .unwrap_or_else(|| Value::Array(vec![]));
+                    .ok_or_else(|| {
+                        crate::AlephError::Chain(format!(
+                            "got bad data in tx {}/{}: missing messages",
+                            tx.chain, tx.hash
+                        ))
+                    })?;
                 let parsed: Vec<OnChainMessage> = serde_json::from_value(messages)
                     .map_err(|e| crate::AlephError::Chain(format!("bad on-chain content: {e}")))?;
                 Ok(parsed)
             }
             ChainSyncProtocol::OffChainSync => {
-                let cid = tx.content.as_str().ok_or_else(|| {
-                    crate::AlephError::Chain("off-chain content is not a string CID".into())
-                })?;
-                let ipfs = self.ipfs.as_ref().ok_or_else(|| {
-                    crate::AlephError::Chain("IPFS service not configured".into())
-                })?;
-                let body = ipfs
-                    .get_json(cid, Duration::from_secs(60), 1)
-                    .await?
-                    .ok_or_else(|| {
-                        crate::AlephError::Chain(format!("could not fetch CID {cid}"))
-                    })?;
-                let messages_val = body
-                    .get("content")
-                    .and_then(|c| c.get("messages"))
-                    .cloned()
-                    .unwrap_or_else(|| Value::Array(vec![]));
-                let parsed: Vec<OnChainMessage> = serde_json::from_value(messages_val)
-                    .map_err(|e| crate::AlephError::Chain(format!("bad off-chain content: {e}")))?;
+                let (parsed, _, _) = self.get_off_chain_messages(tx).await?;
                 Ok(parsed)
             }
             ChainSyncProtocol::SmartContract => {
-                let address = tx
-                    .content
-                    .get("address")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let msg_type = tx
-                    .content
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let content_str = tx
-                    .content
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let timestamp_secs = tx.datetime.timestamp() as f64
-                    + (tx.datetime.timestamp_subsec_nanos() as f64) / 1e9;
-
-                let (out_type, item_content) = if msg_type == "STORE_IPFS" {
-                    let store_content = serde_json::json!({
-                        "address": address,
-                        "time": timestamp_secs,
-                        "item_type": "ipfs",
-                        "item_hash": content_str,
-                    });
-                    ("STORE".to_string(), serde_json::to_string(&store_content)?)
-                } else {
-                    (msg_type.to_string(), content_str.to_string())
-                };
-
-                let item_hash = sha256_hex(item_content.as_bytes());
-                let msg = OnChainMessage {
-                    item_hash,
-                    sender: address.to_string(),
-                    chain: tx.chain.clone(),
-                    message_type: out_type,
-                    signature: String::new(),
-                    time: timestamp_secs,
-                    item_content: Some(item_content),
-                    item_type: Some("inline".to_string()),
-                };
-                Ok(vec![msg])
+                Ok(vec![smart_contract_message_from_tx(tx)?])
             }
         }
+    }
+
+    async fn get_off_chain_messages(
+        &self,
+        tx: &crate::db::models::chains::ChainTxDb,
+    ) -> AlephResult<(Vec<OnChainMessage>, String, i64)> {
+        let cid = tx.content.as_str().ok_or_else(|| {
+            crate::AlephError::Chain("off-chain content is not a string CID".into())
+        })?;
+        if let Some(storage) = &self.storage {
+            let content = storage
+                .get_json(cid, ItemType::Ipfs, Duration::from_secs(60), 1)
+                .await?;
+            return parse_off_chain_archive(tx, cid, content.value, content.raw_value.len() as i64);
+        }
+        let ipfs = self
+            .ipfs
+            .as_ref()
+            .ok_or_else(|| crate::AlephError::Chain("IPFS service not configured".into()))?;
+        let raw = ipfs
+            .get_ipfs_content(cid, Duration::from_secs(60), 1)
+            .await?
+            .ok_or_else(|| crate::AlephError::Chain(format!("could not fetch CID {cid}")))?;
+        let body: Value = serde_json::from_slice(&raw)
+            .map_err(|e| crate::AlephError::Chain(format!("bad off-chain JSON: {e}")))?;
+        parse_off_chain_archive(tx, cid, body, raw.len() as i64)
+    }
+
+    async fn pin_off_chain_archive(&self, cid: &str) -> AlephResult<()> {
+        if let Some(storage) = &self.storage {
+            return storage.pin_hash(cid, Duration::from_secs(120), 1).await;
+        }
+        if let Some(ipfs) = &self.ipfs {
+            return ipfs.pin_add(cid, Duration::from_secs(120), 1).await;
+        }
+        Ok(())
+    }
+
+    fn ipfs_enabled(&self) -> bool {
+        self.storage
+            .as_ref()
+            .map(|storage| storage.ipfs_enabled)
+            .unwrap_or_else(|| self.ipfs.is_some())
+    }
+}
+
+fn parse_off_chain_archive(
+    tx: &crate::db::models::chains::ChainTxDb,
+    cid: &str,
+    body: Value,
+    size: i64,
+) -> AlephResult<(Vec<OnChainMessage>, String, i64)> {
+        let messages_val = body
+            .get("content")
+            .and_then(|c| c.get("messages"))
+            .cloned()
+            .ok_or_else(|| {
+                crate::AlephError::Chain(format!(
+                    "got bad off-chain data in tx {}/{}: missing content.messages",
+                    tx.chain, tx.hash
+                ))
+            })?;
+        let parsed: Vec<OnChainMessage> = serde_json::from_value(messages_val)
+            .map_err(|e| crate::AlephError::Chain(format!("bad off-chain content: {e}")))?;
+        Ok((parsed, cid.to_string(), size))
+}
+
+fn smart_contract_message_from_tx(
+    tx: &crate::db::models::chains::ChainTxDb,
+) -> AlephResult<OnChainMessage> {
+    let address = required_smart_contract_str(tx, "address")?;
+    let msg_type = required_smart_contract_str(tx, "type")?;
+    let content_str = required_smart_contract_str(tx, "content")?;
+    let timestamp_secs =
+        tx.datetime.timestamp() as f64 + (tx.datetime.timestamp_subsec_nanos() as f64) / 1e9;
+
+    let (out_type, item_content) = if msg_type == "STORE_IPFS" {
+        let content_time = tx
+            .content
+            .get("timestamp")
+            .and_then(|v| v.as_f64())
+            .map(timestamp_number_to_seconds)
+            .unwrap_or(timestamp_secs);
+        let store_content = serde_json::json!({
+            "address": address,
+            "time": content_time,
+            "item_type": "ipfs",
+            "item_hash": content_str,
+        });
+        ("STORE".to_string(), serde_json::to_string(&store_content)?)
+    } else {
+        (msg_type.to_string(), content_str.to_string())
+    };
+
+    Ok(OnChainMessage {
+        item_hash: sha256_hex(item_content.as_bytes()),
+        sender: address.to_string(),
+        chain: tx.chain.clone(),
+        message_type: out_type,
+        signature: None,
+        time: timestamp_secs,
+        item_content: Some(item_content),
+        item_type: Some("inline".to_string()),
+        channel: None,
+    })
+}
+
+fn required_smart_contract_str<'a>(
+    tx: &'a crate::db::models::chains::ChainTxDb,
+    key: &str,
+) -> AlephResult<&'a str> {
+    tx.content
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            crate::AlephError::Chain(format!(
+                "incompatible smart-contract tx content for {}/{}: missing {key}",
+                tx.chain, tx.hash
+            ))
+        })
+}
+
+fn timestamp_number_to_seconds(value: f64) -> f64 {
+    if value > 10_000_000_000.0 {
+        value / 1000.0
+    } else {
+        value
     }
 }
 
@@ -428,14 +571,62 @@ impl DbPendingTxSink {
 #[async_trait::async_trait]
 impl PendingTxSink for DbPendingTxSink {
     async fn publish(&self, tx: &PendingChainTx) -> AlephResult<()> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
             .map_err(|e| crate::AlephError::Internal(anyhow::anyhow!(e)))?;
         let chain_tx = tx.to_chain_tx_db();
-        crate::db::accessors::chains::upsert_chain_tx(&**client, &chain_tx).await?;
-        crate::db::accessors::pending_txs::upsert_pending_tx(&**client, &tx.hash).await?;
+        let transaction = (&mut **client).transaction().await?;
+        crate::db::accessors::chains::upsert_chain_tx(&transaction, &chain_tx).await?;
+        crate::db::accessors::pending_txs::upsert_pending_tx(&transaction, &tx.hash).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+
+/// Production sink variant: persist first, then wake the pending-tx workers
+/// through RabbitMQ. This matches pyaleph's commit-before-publish ordering.
+pub struct MqPendingTxSink {
+    db: DbPendingTxSink,
+    channel: Channel,
+    exchange: String,
+}
+
+impl MqPendingTxSink {
+    pub fn new(pool: crate::db::DbPool, channel: Channel, exchange: String) -> Self {
+        Self {
+            db: DbPendingTxSink::new(pool),
+            channel,
+            exchange,
+        }
+    }
+
+    fn routing_key(tx: &PendingChainTx) -> String {
+        let chain = serde_json::to_value(&tx.chain)
+            .ok()
+            .and_then(|v| v.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| tx.chain.to_string());
+        format!("{chain}.{}.{}", tx.publisher, tx.hash)
+    }
+}
+
+#[async_trait::async_trait]
+impl PendingTxSink for MqPendingTxSink {
+    async fn publish(&self, tx: &PendingChainTx) -> AlephResult<()> {
+        self.db.publish(tx).await?;
+        self.channel
+            .basic_publish(
+                &self.exchange,
+                &Self::routing_key(tx),
+                BasicPublishOptions::default(),
+                tx.hash.as_bytes(),
+                BasicProperties::default(),
+            )
+            .await
+            .map_err(|e| crate::AlephError::P2p(format!("publish failed: {e}")))?
+            .await
+            .map_err(|e| crate::AlephError::P2p(format!("publish confirm failed: {e}")))?;
         Ok(())
     }
 }
@@ -469,10 +660,11 @@ mod tests {
             sender: "0xabc".into(),
             chain: Chain::Ethereum,
             message_type: "POST".into(),
-            signature: "0xsig".into(),
+            signature: Some("0xsig".into()),
             time: 1700000000.0,
             item_content: Some("{}".into()),
             item_type: Some("inline".into()),
+            channel: Some(AlephChannel::from("TEST".to_string())),
         }
     }
 
@@ -507,6 +699,25 @@ mod tests {
             content: json!({}),
         };
         publisher.publish(&tx).await.unwrap();
+    }
+
+    #[test]
+    fn pending_tx_mq_routing_key_matches_pyaleph_shape() {
+        let tx = PendingChainTx {
+            hash: "0xabc".into(),
+            chain: Chain::Bsc,
+            height: 10,
+            datetime: timestamp_to_datetime(1700000000.0),
+            publisher: "0xpublisher".into(),
+            protocol: ChainSyncProtocol::SmartContract,
+            protocol_version: 1,
+            content: json!({}),
+        };
+
+        assert_eq!(
+            MqPendingTxSink::routing_key(&tx),
+            "BSC.0xpublisher.0xabc"
+        );
     }
 
     // --- prepare_sync_event_payload -------------------------------------
@@ -562,26 +773,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_payload_inline_for_small_batch() {
+    async fn prepare_payload_fails_without_ipfs() {
         let svc = ChainDataService::new();
-        let pool = dummy_pool().await;
-        // We don't actually get a client — we just need *something* matching
-        // the `GenericClient` bound. So pass a fake via internal helper.
-        // Bypass: call build_on_chain_payload directly, then compare.
-        let messages = vec![small_message()];
-        let on_chain: Vec<OnChainMessage> = messages
-            .iter()
-            .map(OnChainMessage::from_message_db)
-            .collect();
-        let payload = svc.build_on_chain_payload(on_chain);
-        let serialized = serde_json::to_string(&payload).unwrap();
-        assert!(serialized.contains("\"protocol\":\"aleph\""));
-        assert!(serialized.len() <= PAYLOAD_INLINE_LIMIT_BYTES);
-        drop(pool);
+        let archive = svc.build_on_chain_payload(vec![OnChainMessage::from_message_db(
+            &small_message(),
+        )]);
+        let err = svc
+            .upload_sync_archive(archive)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("without IPFS service"));
     }
 
     #[tokio::test]
-    async fn prepare_payload_uploads_to_ipfs_when_large() {
+    async fn prepare_payload_uploads_to_ipfs_even_when_small() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -591,6 +796,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_string("{\"Hash\":\"QmFakeCidFromTest\"}"),
             )
+            .expect(1)
             .mount(&mock)
             .await;
 
@@ -601,29 +807,18 @@ mod tests {
         };
         let ipfs = IpfsService::new(&settings).unwrap();
         let svc = ChainDataService::with_ipfs(Arc::new(ipfs));
-
-        // Build a giant in-memory payload so it gets routed to IPFS.
-        let big_content = "x".repeat(PAYLOAD_INLINE_LIMIT_BYTES + 16);
-        let mut msg = small_message();
-        msg.item_content = Some(big_content);
-
-        // Emulate prepare_sync_event_payload without a real DB client.
+        let msg = small_message();
         let on_chain: Vec<OnChainMessage> = vec![OnChainMessage::from_message_db(&msg)];
         let archive = svc.build_on_chain_payload(on_chain);
         let inline = serde_json::to_string(&archive).unwrap();
-        assert!(inline.len() > PAYLOAD_INLINE_LIMIT_BYTES);
+        assert!(inline.len() <= PAYLOAD_INLINE_LIMIT_BYTES);
 
-        let cid = svc
-            .ipfs
-            .as_ref()
-            .unwrap()
-            .add_json(&serde_json::to_value(&archive).unwrap())
-            .await
-            .unwrap();
+        let (cid, size) = svc.upload_sync_archive(archive).await.unwrap();
         let off = svc.build_off_chain_payload(cid);
         let serialized = serde_json::to_string(&off).unwrap();
         assert!(serialized.contains("\"protocol\":\"aleph-offchain\""));
         assert!(serialized.contains("QmFakeCidFromTest"));
+        assert!(size > 0);
     }
 
     // --- parse_log -------------------------------------------------------
@@ -762,9 +957,7 @@ mod tests {
                 "timestamp": now.timestamp_millis(),
             }),
         };
-        let messages = svc
-            .get_tx_messages_smart_contract_branch_for_test(&tx)
-            .unwrap();
+        let messages = svc.get_tx_messages_from_tx(&tx).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].message_type, "STORE");
         assert_eq!(messages[0].sender, "tz1abc");
@@ -772,6 +965,44 @@ mod tests {
             serde_json::from_str(messages[0].item_content.as_ref().unwrap()).unwrap();
         assert_eq!(inner["item_type"], "ipfs");
         assert_eq!(inner["item_hash"], "QmHash");
+        assert_eq!(inner["time"], json!(now.timestamp_millis() as f64 / 1000.0));
+    }
+
+    #[tokio::test]
+    async fn get_tx_messages_rejects_unsupported_protocol_version() {
+        let svc = ChainDataService::new();
+        let tx = ChainTxDb {
+            hash: "0xunsupported".into(),
+            chain: Chain::Ethereum,
+            height: 1,
+            datetime: Utc::now(),
+            publisher: "0xpub".into(),
+            protocol: ChainSyncProtocol::OnChainSync,
+            protocol_version: 2,
+            content: json!({"messages": []}),
+        };
+
+        assert!(svc.get_tx_messages_from_tx(&tx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_tx_messages_rejects_malformed_smart_contract_content() {
+        let svc = ChainDataService::new();
+        let tx = ChainTxDb {
+            hash: "0xbad".into(),
+            chain: Chain::Ethereum,
+            height: 1,
+            datetime: Utc::now(),
+            publisher: "0xpub".into(),
+            protocol: ChainSyncProtocol::SmartContract,
+            protocol_version: 1,
+            content: json!({
+                "address": "0xabc",
+                "type": "POST"
+            }),
+        };
+
+        assert!(svc.get_tx_messages_from_tx(&tx).await.is_err());
     }
 
     #[tokio::test]
@@ -827,6 +1058,61 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].item_hash, "abc");
     }
+
+    #[tokio::test]
+    async fn get_tx_messages_off_chain_reads_local_storage_before_ipfs() {
+        use crate::services::cache::local::LocalCache;
+        use crate::services::storage::engine::StorageEngine;
+        use crate::services::storage::in_memory::InMemoryStorageEngine;
+
+        let archive = json!({
+            "protocol": "aleph",
+            "version": 1,
+            "content": {
+                "messages": [{
+                    "item_hash": "from-local-storage",
+                    "sender": "0xabc",
+                    "chain": "ETH",
+                    "type": "POST",
+                    "signature": "0xsig",
+                    "time": 1700000000.0,
+                    "item_content": "{}",
+                    "item_type": "inline",
+                }],
+            },
+        });
+        let cid = "QmLocalArchive";
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        engine
+            .write(cid, archive.to_string().as_bytes())
+            .await
+            .unwrap();
+        let ipfs = Arc::new(IpfsService::new(&crate::config::IpfsSettings::default()).unwrap());
+        let cache = Arc::new(LocalCache::new());
+        let storage = Arc::new(
+            StorageService::new(engine, ipfs, cache)
+                .with_ipfs_enabled(false)
+                .with_http_p2p_enabled(false),
+        );
+        let svc = ChainDataService::with_storage(storage);
+
+        let tx = ChainTxDb {
+            hash: "0xt".into(),
+            chain: Chain::Ethereum,
+            height: 1,
+            datetime: Utc::now(),
+            publisher: "0xp".into(),
+            protocol: ChainSyncProtocol::OffChainSync,
+            protocol_version: 1,
+            content: Value::String(cid.into()),
+        };
+        let messages = svc
+            .get_tx_messages_off_chain_branch_for_test(&tx)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].item_hash, "from-local-storage");
+    }
 }
 
 #[cfg(test)]
@@ -852,46 +1138,7 @@ impl ChainDataService {
         &self,
         tx: &crate::db::models::chains::ChainTxDb,
     ) -> AlephResult<Vec<OnChainMessage>> {
-        let address = tx
-            .content
-            .get("address")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let msg_type = tx
-            .content
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let content_str = tx
-            .content
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let timestamp_secs =
-            tx.datetime.timestamp() as f64 + (tx.datetime.timestamp_subsec_nanos() as f64) / 1e9;
-
-        let (out_type, item_content) = if msg_type == "STORE_IPFS" {
-            let store_content = serde_json::json!({
-                "address": address,
-                "time": timestamp_secs,
-                "item_type": "ipfs",
-                "item_hash": content_str,
-            });
-            ("STORE".to_string(), serde_json::to_string(&store_content)?)
-        } else {
-            (msg_type.to_string(), content_str.to_string())
-        };
-
-        Ok(vec![OnChainMessage {
-            item_hash: sha256_hex(item_content.as_bytes()),
-            sender: address.to_string(),
-            chain: tx.chain.clone(),
-            message_type: out_type,
-            signature: String::new(),
-            time: timestamp_secs,
-            item_content: Some(item_content),
-            item_type: Some("inline".to_string()),
-        }])
+        Ok(vec![smart_contract_message_from_tx(tx)?])
     }
 
     /// Test helper exercising the off-chain (IPFS) branch without DB access.
@@ -899,24 +1146,8 @@ impl ChainDataService {
         &self,
         tx: &crate::db::models::chains::ChainTxDb,
     ) -> AlephResult<Vec<OnChainMessage>> {
-        let cid = tx.content.as_str().ok_or_else(|| {
-            crate::AlephError::Chain("off-chain content is not a string CID".into())
-        })?;
-        let ipfs = self
-            .ipfs
-            .as_ref()
-            .ok_or_else(|| crate::AlephError::Chain("IPFS service not configured".into()))?;
-        let body = ipfs
-            .get_json(cid, Duration::from_secs(60), 1)
-            .await?
-            .ok_or_else(|| crate::AlephError::Chain(format!("could not fetch CID {cid}")))?;
-        let messages_val = body
-            .get("content")
-            .and_then(|c| c.get("messages"))
-            .cloned()
-            .unwrap_or_else(|| Value::Array(vec![]));
-        let parsed: Vec<OnChainMessage> = serde_json::from_value(messages_val)
-            .map_err(|e| crate::AlephError::Chain(format!("bad off-chain content: {e}")))?;
-        Ok(parsed)
+        self.get_off_chain_messages(tx)
+            .await
+            .map(|(messages, _, _)| messages)
     }
 }

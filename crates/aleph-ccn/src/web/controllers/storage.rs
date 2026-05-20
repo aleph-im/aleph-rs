@@ -4,28 +4,31 @@
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::multipart::Field;
 use axum::extract::{FromRequest, Multipart, Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use axum::routing::{get, post};
+use aleph_types::message::item_type::ItemType;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use bytes::Bytes;
 use serde_json::{Value, json};
 
-use crate::db::accessors::balances::get_total_balance;
-use crate::db::accessors::cost::get_total_cost_for_address;
 use crate::db::accessors::files::{
-    count_file_pins, get_file, get_file_tag, get_message_file_pin, upsert_file,
+    count_file_pins, get_file, get_file_tag, get_message_file_pin, insert_grace_period_file_pin,
+    upsert_file,
 };
-use crate::db::accessors::pending_messages::insert_pending_message;
-use crate::db::models::pending_messages::PendingMessageDb;
 use crate::schemas::pending_messages::parse_message as parse_pending_message;
+use crate::services::cost::{
+    CostContent, CostContentKind, get_payment_type, get_total_and_detailed_costs,
+};
+use crate::services::cost_validation::{BalanceValidation, validate_balance_for_payment};
 use crate::services::ipfs::IpfsService;
 use crate::types::files::{FileTag, FileType};
 use crate::web::AppState;
 use crate::web::controllers::error::{WebError, WebResult};
-use crate::web::controllers::utils::{get_db, json_text_response};
+use crate::web::controllers::utils::{broadcast_and_process_message, get_db, json_text_response};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -70,6 +73,7 @@ async fn add_ipfs_json(State(state): State<AppState>, body: Bytes) -> WebResult<
         .map_err(|e| WebError::Internal(format!("ipfs: {e}")))?;
     let client = get_db(&state).await?;
     upsert_file(&**client, &hash, body.len() as i64, FileType::File).await?;
+    insert_upload_grace_pin(&**client, &state, &hash).await?;
     let resp = json!({ "status": "success", "hash": hash });
     Ok(json_text_response(StatusCode::OK, resp.to_string()))
 }
@@ -89,8 +93,20 @@ async fn add_storage_json(State(state): State<AppState>, body: Bytes) -> WebResu
         .map_err(|e| WebError::Internal(format!("storage: {e}")))?;
     let client = get_db(&state).await?;
     upsert_file(&**client, &hash, canonical.len() as i64, FileType::File).await?;
+    insert_upload_grace_pin(&**client, &state, &hash).await?;
     let resp = json!({ "status": "success", "hash": hash });
     Ok(json_text_response(StatusCode::OK, resp.to_string()))
+}
+
+async fn insert_upload_grace_pin(
+    client: &impl tokio_postgres::GenericClient,
+    state: &AppState,
+    hash: &str,
+) -> WebResult<()> {
+    let now = crate::toolkit::timestamp::utc_now();
+    let delete_by = now + chrono::Duration::hours(state.config.storage.grace_period as i64);
+    insert_grace_period_file_pin(client, hash, now, delete_by, None, None, None).await?;
+    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -98,6 +114,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+async fn read_multipart_field_limited(mut field: Field<'_>, limit: usize) -> WebResult<Vec<u8>> {
+    let mut out = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| WebError::BadRequest(format!("Multipart error: {e}")))?
+    {
+        let next_len = out.len().saturating_add(chunk.len());
+        if next_len > limit {
+            return Err(WebError::PayloadTooLarge(format!(
+                "size {next_len} exceeds upload limit {limit}"
+            )));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -142,11 +176,7 @@ async fn storage_add_file(
             {
                 match field.name() {
                     Some("file") => {
-                        let data = field
-                            .bytes()
-                            .await
-                            .map_err(|e| WebError::PayloadTooLarge(e.to_string()))?
-                            .to_vec();
+                        let data = read_multipart_field_limited(field, max_file_size).await?;
                         file_bytes = Some(data);
                     }
                     Some("metadata") => {
@@ -203,8 +233,9 @@ async fn storage_add_file(
 
     // Auth + balance check, if metadata was attached. Mirrors pyaleph's
     // `_verify_message_signature` + `_verify_user_balance`.
+    let has_metadata = parsed_metadata.is_some();
     if let Some(meta) = parsed_metadata.as_ref() {
-        verify_store_metadata(&state, meta, &hash, file_bytes.len(), max_unauth).await?;
+        verify_store_metadata(&state, meta, Some(&hash), file_bytes.len(), max_unauth).await?;
     }
 
     engine
@@ -214,48 +245,39 @@ async fn storage_add_file(
 
     let client = get_db(&state).await?;
     upsert_file(&**client, &hash, file_bytes.len() as i64, FileType::File).await?;
+    if !has_metadata {
+        insert_upload_grace_pin(&**client, &state, &hash).await?;
+    }
 
-    let mut response = json!({
+    let response = json!({
         "status": "success",
         "name": hash,
         "hash": hash,
     });
 
-    // Broadcast the STORE message: insert it as a pending row so the processor
-    // picks it up. Mirrors pyaleph's `broadcast_and_process_message` final step
-    // (the actual RabbitMQ fan-out is wired up by the message handler service).
+    let mut status_code = StatusCode::OK;
     if let Some(meta) = parsed_metadata {
-        let pending_db = PendingMessageDb::from_message_dict(
-            &meta.message_dict,
-            chrono::Utc::now(),
-            false,
-            None,
-            true,
-            Some(crate::types::message_status::MessageOrigin::P2p),
-        );
-        if let Err(e) = insert_pending_message(&**client, &pending_db).await {
-            tracing::warn!(?e, "storage_add_file: failed to insert pending STORE message");
-            response["metadata_error"] = json!(format!("{e}"));
-        } else {
-            response["message_status"] = json!(if meta.sync { "pending" } else { "submitted" });
-        }
+        let (broadcast_status_code, _) =
+            broadcast_and_process_message(&state, &**client, &meta.message_dict, meta.sync)
+                .await?;
+        status_code = broadcast_status_code;
     }
 
-    Ok(json_text_response(StatusCode::OK, response.to_string()))
+    Ok(json_text_response(status_code, response.to_string()))
 }
 
 /// Parsed `metadata` part of a STORE upload. Mirrors pyaleph's
 /// `StorageMetadata` schema.
-struct StoreMetadata {
+pub(crate) struct StoreMetadata {
     /// The raw JSON dict of the STORE message, kept around so we can insert it
     /// into `pending_messages`.
-    message_dict: Value,
+    pub(crate) message_dict: Value,
     /// Whether the client wants synchronous broadcast.
-    sync: bool,
+    pub(crate) sync: bool,
 }
 
 impl StoreMetadata {
-    fn from_value(v: Value) -> WebResult<Self> {
+    pub(crate) fn from_value(v: Value) -> WebResult<Self> {
         let obj = v
             .as_object()
             .ok_or_else(|| WebError::Unprocessable("metadata must be an object".into()))?;
@@ -268,18 +290,24 @@ impl StoreMetadata {
             sync,
         })
     }
+
+    pub(crate) fn from_bytes(raw: &[u8]) -> WebResult<Self> {
+        let value: Value = serde_json::from_slice(raw)
+            .map_err(|e| WebError::Unprocessable(format!("Could not decode metadata: {e}")))?;
+        Self::from_value(value)
+    }
 }
 
 /// Verify the signature on `meta.message` and that the sender can afford the
 /// upload at `file_size`. Mirrors `_verify_message_signature` +
 /// `_verify_user_balance` from pyaleph.
-async fn verify_store_metadata(
+pub(crate) async fn verify_store_metadata(
     state: &AppState,
     meta: &StoreMetadata,
-    file_hash: &str,
+    expected_file_hash: Option<&str>,
     file_size: usize,
     max_unauthenticated_upload_file_size: usize,
-) -> WebResult<()> {
+) -> WebResult<String> {
     // 1. Parse + validate the wire payload as a STORE PendingMessage.
     let parsed = parse_pending_message(meta.message_dict.clone())
         .map_err(|e| WebError::Unprocessable(format!("Invalid STORE metadata: {e}")))?;
@@ -294,11 +322,22 @@ async fn verify_store_metadata(
     let content = pending_store.content.as_ref().ok_or_else(|| {
         WebError::Unprocessable("Store message content needed".into())
     })?;
-    // 2. The content's `item_hash` must match the uploaded file hash.
+    // 2. The content's `item_hash` must match the uploaded file hash when it
+    //    is already known. IPFS uploads only know the final CID after pinning,
+    //    so callers can defer this check and use the returned hash.
     let content_item_hash = content.file_hash().to_string();
-    if content_item_hash != file_hash {
+    if let Some(file_hash) = expected_file_hash
+        && content_item_hash != file_hash
+    {
         return Err(WebError::Unprocessable(format!(
             "File hash does not match ({file_hash} != {content_item_hash})"
+        )));
+    }
+    let content_item_type = crate::schemas::base_messages::item_type_from_hash(&content_item_hash)
+        .map_err(|e| WebError::Unprocessable(format!("Invalid STORE file hash: {e}")))?;
+    if content_item_type != ItemType::Storage && content_item_type != ItemType::Ipfs {
+        return Err(WebError::Unprocessable(format!(
+            "Unsupported STORE item type: {content_item_type:?}"
         )));
     }
     // 3. Signature verification — delegates to the chain dispatcher.
@@ -324,25 +363,34 @@ async fn verify_store_metadata(
     let estimated_size_mib = file_size.div_ceil(mib) as i64;
     if (estimated_size_mib as usize) * mib > max_unauthenticated_upload_file_size {
         let client = get_db(state).await?;
-        let address = pending_store.sender.as_str();
-        let current_balance = get_total_balance(&**client, address, false)
-            .await
-            .map_err(WebError::from)?;
-        let current_cost = get_total_cost_for_address(&**client, address, None)
-            .await
-            .map_err(WebError::from)?;
-        // We don't have a fully-spec'd cost engine plug-in here — use the
-        // simple "balance must cover existing cost + estimated storage cost"
-        // gate. The cost computation lives in `services::cost`; here we err on
-        // the side of pyaleph's behaviour and let the message processor do the
-        // exact validation. We still reject obvious shortfalls.
-        if current_balance < current_cost {
-            return Err(WebError::PaymentRequired(format!(
-                "Address {address} balance ({current_balance}) below current cost ({current_cost})"
-            )));
+        let mut cost_content_value = serde_json::to_value(content)
+            .map_err(|e| WebError::Internal(format!("store content serialization: {e}")))?;
+        let cost_content_obj = cost_content_value
+            .as_object_mut()
+            .ok_or_else(|| WebError::Unprocessable("Invalid store message content".into()))?;
+        cost_content_obj.insert(
+            "address".into(),
+            Value::String(pending_store.sender.to_string()),
+        );
+        cost_content_obj.insert(
+            "estimated_size_mib".into(),
+            Value::Number(serde_json::Number::from(estimated_size_mib)),
+        );
+        let cost_content = CostContent::new(CostContentKind::Store, &cost_content_value);
+        let payment_type = get_payment_type(&cost_content);
+        let (message_cost, _) =
+            get_total_and_detailed_costs(&**client, &cost_content, "").await.map_err(|e| {
+                WebError::Internal(format!("storage cost estimation failed: {e}"))
+            })?;
+        let validation =
+            validate_balance_for_payment(&**client, &pending_store.sender, message_cost, payment_type)
+                .await
+                .map_err(WebError::from)?;
+        if let BalanceValidation::Invalid(exception) = validation {
+            return Err(WebError::PaymentRequired(exception.to_string()));
         }
     }
-    Ok(())
+    Ok(content_item_hash)
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +493,6 @@ async fn get_raw_hash(
     };
     drop(client);
 
-    let bytes = read_hash_content(&state, &file_hash, engine_kind).await?;
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
@@ -453,9 +500,42 @@ async fn get_raw_hash(
     if !is_directory {
         builder = builder.header(header::CONTENT_LENGTH, size.to_string());
     }
+    let body = raw_hash_body(&state, &file_hash, engine_kind, is_directory).await?;
     builder
-        .body(Body::from(bytes))
+        .body(body)
         .map_err(|e| WebError::Internal(e.to_string()))
+}
+
+async fn raw_hash_body(
+    state: &AppState,
+    file_hash: &str,
+    engine_kind: &str,
+    is_directory: bool,
+) -> WebResult<Body> {
+    if engine_kind == "storage" {
+        let engine = state
+            .storage_engine
+            .clone()
+            .ok_or_else(|| WebError::NotFound(format!("No file found for hash {file_hash}")))?;
+        let stream = engine
+            .read_iterator(file_hash, 64 * 1024)
+            .await
+            .map_err(|e| WebError::Internal(format!("storage: {e}")))?
+            .ok_or_else(|| WebError::NotFound(format!("No file found for hash {file_hash}")))?;
+        return Ok(Body::from_stream(stream));
+    }
+
+    let ipfs = state
+        .ipfs_service
+        .clone()
+        .ok_or_else(|| WebError::NotFound(format!("No file found for hash {file_hash}")))?;
+    let stream = if is_directory {
+        ipfs.get_ipfs_directory_iterator(file_hash).await
+    } else {
+        ipfs.get_ipfs_content_iterator(file_hash).await
+    }
+    .map_err(|e| WebError::NotFound(format!("ipfs: {e}")))?;
+    Ok(Body::from_stream(stream))
 }
 
 async fn get_file_metadata_by_message_hash(
@@ -484,6 +564,11 @@ async fn get_file_metadata_by_ref(
     State(state): State<AppState>,
     Path(reference): Path<String>,
 ) -> WebResult<Response> {
+    if item_type_for_hash(&reference).is_err() {
+        return Err(WebError::BadRequest(
+            "address is required for user-defined ref".into(),
+        ));
+    }
     metadata_by_ref(&state, &reference, None).await
 }
 
@@ -491,7 +576,12 @@ async fn get_file_metadata_by_ref_addr(
     State(state): State<AppState>,
     Path((address, reference)): Path<(String, String)>,
 ) -> WebResult<Response> {
-    metadata_by_ref(&state, &reference, Some(&address)).await
+    let address = if item_type_for_hash(&reference).is_ok() {
+        None
+    } else {
+        Some(address.as_str())
+    };
+    metadata_by_ref(&state, &reference, address).await
 }
 
 async fn metadata_by_ref(

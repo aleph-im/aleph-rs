@@ -5,6 +5,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::{AlephError, AlephResult};
+
 /// Where a peer was discovered / what protocol announces it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PeerType {
@@ -59,15 +61,23 @@ impl PeerDb {
     /// Build a [`PeerDb`] from a database row. `peer_type` and `source` are
     /// stored as text by the Python `ChoiceType(PeerType)` mapping.
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid PeerDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let peer_type_s: String = row.get("peer_type");
         let source_s: String = row.get("source");
-        Self {
+        let peer_type = PeerType::try_from(peer_type_s.as_str())
+            .map_err(|e| AlephError::InvalidMessage(format!("{e} in DB")))?;
+        let source = PeerType::try_from(source_s.as_str())
+            .map_err(|e| AlephError::InvalidMessage(format!("{e} in DB")))?;
+        Ok(Self {
             peer_id: row.get("peer_id"),
-            peer_type: PeerType::try_from(peer_type_s.as_str()).expect("valid PeerType"),
+            peer_type,
             address: row.get("address"),
-            source: PeerType::try_from(source_s.as_str()).expect("valid PeerType"),
+            source,
             last_seen: row.get("last_seen"),
-        }
+        })
     }
 }
 
@@ -84,6 +94,11 @@ mod tests {
             let back: PeerType = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
+        assert!(PeerType::try_from("nope").is_err());
+    }
+
+    #[test]
+    fn invalid_peer_type_returns_error() {
         assert!(PeerType::try_from("nope").is_err());
     }
 

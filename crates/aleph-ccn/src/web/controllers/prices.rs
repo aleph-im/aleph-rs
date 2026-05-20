@@ -68,12 +68,14 @@ fn payment_type_label(p: PaymentType) -> &'static str {
     }
 }
 
-fn parse_payment_type(s: Option<&str>) -> Option<PaymentType> {
-    match s? {
-        "hold" => Some(PaymentType::Hold),
-        "superfluid" => Some(PaymentType::Superfluid),
-        "credit" => Some(PaymentType::Credit),
-        _ => None,
+fn parse_payment_type(s: Option<&str>) -> WebResult<PaymentType> {
+    match s.unwrap_or("credit") {
+        "hold" => Ok(PaymentType::Hold),
+        "superfluid" => Ok(PaymentType::Superfluid),
+        "credit" => Ok(PaymentType::Credit),
+        other => Err(WebError::Unprocessable(format!(
+            "Invalid payment_type: {other}"
+        ))),
     }
 }
 
@@ -433,7 +435,7 @@ async fn get_costs(
 ) -> WebResult<Response> {
     let address = raw.get("address").cloned();
     let item_hash = raw.get("item_hash").cloned();
-    let payment_type = parse_payment_type(raw.get("payment_type").map(|s| s.as_str()));
+    let payment_type = parse_payment_type(raw.get("payment_type").map(|s| s.as_str()))?;
     let include_details = raw
         .get("include_details")
         .and_then(|s| s.parse::<i32>().ok())
@@ -475,7 +477,7 @@ async fn get_costs(
         &**client,
         address.as_deref(),
         item_hash.as_deref(),
-        payment_type,
+        Some(payment_type),
     )
     .await?;
     let total_consumed =
@@ -491,7 +493,7 @@ async fn get_costs(
     let filters_v = json!({
         "address": address,
         "item_hash": item_hash,
-        "payment_type": payment_type.map(payment_type_label),
+        "payment_type": payment_type_label(payment_type),
     });
     let mut body = json!({
         "summary": summary_v,
@@ -503,7 +505,7 @@ async fn get_costs(
             &**client,
             address.as_deref(),
             item_hash.as_deref(),
-            payment_type,
+            Some(payment_type),
             page,
             pagination,
         )
@@ -554,7 +556,7 @@ async fn get_costs(
             &**client,
             address.as_deref(),
             item_hash.as_deref(),
-            payment_type,
+            Some(payment_type),
         )
         .await?;
         body["resources"] = Value::Array(formatted);
@@ -606,5 +608,13 @@ mod tests {
         let errs = body["errors"].as_array().unwrap();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0]["item_hash"], "h");
+    }
+
+    #[test]
+    fn costs_payment_type_parser_matches_pyaleph_default_and_validation() {
+        assert_eq!(parse_payment_type(None).unwrap(), PaymentType::Credit);
+        assert_eq!(parse_payment_type(Some("credit")).unwrap(), PaymentType::Credit);
+        assert_eq!(parse_payment_type(Some("hold")).unwrap(), PaymentType::Hold);
+        assert!(parse_payment_type(Some("bogus")).is_err());
     }
 }

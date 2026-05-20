@@ -5,6 +5,7 @@
 use rust_decimal::Decimal;
 
 use crate::types::cost::CostType;
+use crate::{AlephError, AlephResult};
 
 /// Payment type stored as text. Mirrors `aleph_message.models.PaymentType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,24 +62,29 @@ pub struct AccountCostsDb {
 impl AccountCostsDb {
     /// Build an [`AccountCostsDb`] from a database row.
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid AccountCostsDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let type_s: String = row.get("type");
         let payment_s: String = row.get("payment_type");
         let cost_type =
             serde_json::from_value::<CostType>(serde_json::Value::String(type_s.clone()))
-                .unwrap_or_else(|_| panic!("unknown CostType in DB: {type_s}"));
-        Self {
+                .map_err(|_| AlephError::InvalidMessage(format!("unknown CostType in DB: {type_s}")))?;
+        let payment_type = PaymentType::try_from(payment_s.as_str())
+            .map_err(|e| AlephError::InvalidMessage(format!("{e} in DB")))?;
+        Ok(Self {
             id: row.get("id"),
             owner: row.get("owner"),
             item_hash: row.get("item_hash"),
             r#type: cost_type,
             name: row.get("name"),
             r#ref: row.get("ref"),
-            payment_type: PaymentType::try_from(payment_s.as_str())
-                .expect("valid PaymentType in DB"),
+            payment_type,
             cost_hold: row.get("cost_hold"),
             cost_stream: row.get("cost_stream"),
             cost_credit: row.get("cost_credit"),
-        }
+        })
     }
 }
 
@@ -99,6 +105,11 @@ mod tests {
                 variant
             );
         }
+        assert!(PaymentType::try_from("nope").is_err());
+    }
+
+    #[test]
+    fn invalid_payment_type_returns_error() {
         assert!(PaymentType::try_from("nope").is_err());
     }
 

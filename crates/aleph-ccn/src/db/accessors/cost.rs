@@ -89,7 +89,7 @@ pub async fn get_message_costs(
         cols = ACCOUNT_COST_COLS
     );
     let rows = client.query(&sql, &[&item_hash]).await?;
-    Ok(rows.iter().map(AccountCostsDb::from_row).collect())
+    rows.iter().map(AccountCostsDb::try_from_row).collect()
 }
 
 const DB_SIZED_COST_TYPES: &[&str] = &[
@@ -120,15 +120,15 @@ pub async fn get_message_costs_with_file_sizes(
                LEFT JOIN files sf ON sf.hash = fp.file_hash \
                WHERE ac.item_hash = $1";
     let rows = client.query(sql, &[&item_hash, &sized_types]).await?;
-    Ok(rows
+    rows
         .iter()
         .map(|r| {
-            (
-                AccountCostsDb::from_row(r),
+            Ok((
+                AccountCostsDb::try_from_row(r)?,
                 r.try_get::<_, Option<i64>>("file_size").ok().flatten(),
-            )
+            ))
         })
-        .collect())
+        .collect::<AlephResult<_>>()
 }
 
 /// Upsert one or more account-cost rows. Mirrors

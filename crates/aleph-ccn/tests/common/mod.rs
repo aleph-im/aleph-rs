@@ -35,13 +35,14 @@ use aleph_ccn::db::models::messages::MessageDb;
 use aleph_ccn::db::models::pending_messages::PendingMessageDb;
 use aleph_ccn::handlers::message_handler::{HandlersConfig, MessageHandler};
 use aleph_ccn::permissions::{AuthorityLookup, MessageForAuth};
+use aleph_ccn::services::p2p::protocol::{Identify, MockP2pClient};
 use aleph_ccn::services::storage::engine::StorageEngine;
 use aleph_ccn::toolkit::constants::{
     DEFAULT_PRICE_AGGREGATE, DEFAULT_SETTINGS_AGGREGATE, PRICE_AGGREGATE_KEY,
     PRICE_AGGREGATE_OWNER, SETTINGS_AGGREGATE_KEY, SETTINGS_AGGREGATE_OWNER,
 };
 use aleph_ccn::types::files::FileType;
-use aleph_ccn::types::message_status::{MessageOrigin, MessageStatus};
+use aleph_ccn::types::message_status::MessageStatus;
 use aleph_ccn::web::AppState;
 
 pub mod fixtures;
@@ -322,6 +323,9 @@ pub fn make_app_state(pool: DbPool) -> AppState {
     let settings = Arc::new(Settings::default());
     let state = AppState::new(pool, settings);
     AppState {
+        p2p_client: Some(Arc::new(MockP2pClient::new(Identify {
+            peer_id: "QmTestPeer".into(),
+        }))),
         storage_engine: Some(Arc::new(InMemoryStorageEngine::new()) as Arc<dyn StorageEngine>),
         ..state
     }
@@ -694,12 +698,6 @@ pub async fn insert_pending_row(
     Ok(())
 }
 
-/// Re-export so tests can `use common::MessageOrigin`.
-pub use aleph_ccn::types::message_status::MessageOrigin as ReExportedMessageOrigin;
-// Silence unused-warning when MessageOrigin only re-exported.
-#[allow(dead_code)]
-fn _use_message_origin(_: MessageOrigin) {}
-
 // ---------------------------------------------------------------------------
 // Marker for tests that need docker. Use as `if skip_if_no_docker() { return; }`
 // ---------------------------------------------------------------------------
@@ -713,4 +711,3 @@ pub fn docker_available() -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
-

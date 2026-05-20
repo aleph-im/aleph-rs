@@ -7,9 +7,15 @@ use rust_decimal::Decimal;
 
 use aleph_types::chain::Chain;
 
+use crate::{AlephError, AlephResult};
+
 fn chain_from_text(s: &str) -> Chain {
+    try_chain_from_text(s).unwrap_or_else(|_| panic!("unknown Chain in DB: {s}"))
+}
+
+fn try_chain_from_text(s: &str) -> AlephResult<Chain> {
     serde_json::from_value::<Chain>(serde_json::Value::String(s.to_string()))
-        .unwrap_or_else(|_| panic!("unknown Chain in DB: {s}"))
+        .map_err(|_| AlephError::InvalidMessage(format!("unknown Chain in DB: {s}")))
 }
 
 /// Row of the `balances` table. Mirrors `AlephBalanceDb`.
@@ -26,16 +32,20 @@ pub struct AlephBalanceDb {
 
 impl AlephBalanceDb {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
+        Self::try_from_row(row).expect("valid AlephBalanceDb row")
+    }
+
+    pub fn try_from_row(row: &tokio_postgres::Row) -> AlephResult<Self> {
         let chain_s: String = row.get("chain");
-        Self {
+        Ok(Self {
             id: row.get("id"),
             address: row.get("address"),
-            chain: chain_from_text(&chain_s),
+            chain: try_chain_from_text(&chain_s)?,
             dapp: row.get("dapp"),
             eth_height: row.get("eth_height"),
             balance: row.get("balance"),
             last_update: row.get("last_update"),
-        }
+        })
     }
 }
 
@@ -129,6 +139,11 @@ mod tests {
         };
         assert_eq!(b.chain, Chain::Ethereum);
         assert_eq!(b.eth_height, 1000);
+    }
+
+    #[test]
+    fn invalid_chain_returns_error() {
+        assert!(try_chain_from_text("NOPE").is_err());
     }
 
     #[test]

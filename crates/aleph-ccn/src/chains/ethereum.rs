@@ -474,8 +474,27 @@ impl ChainWriter for EthereumConnector {
                 .with_chain_id(chain_id)
                 .with_gas_price((gas_price * 11) / 10);
 
-            // Sign + send.
-            let pending_tx = match self.provider.send_transaction(tx).await {
+            let gas_limit = match self.provider.estimate_gas(tx.clone()).await {
+                Ok(gas) => gas,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ETH packer: estimate_gas failed");
+                    Self::sleep(commit_delay).await;
+                    continue;
+                }
+            };
+
+            let signed_tx = match tx.with_gas_limit(gas_limit).build(&wallet).await {
+                Ok(envelope) => envelope,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ETH packer: local signing failed");
+                    Self::sleep(commit_delay).await;
+                    continue;
+                }
+            };
+
+            // pyaleph signs locally with the configured private key and
+            // broadcasts the raw transaction.
+            let pending_tx = match self.provider.send_tx_envelope(signed_tx).await {
                 Ok(pending) => pending,
                 Err(e) => {
                     tracing::warn!(error = %e, "ETH packer: broadcast failed");
@@ -515,7 +534,6 @@ impl ChainWriter for EthereumConnector {
                 Ok(Err(e)) => tracing::warn!(error = %e, "ETH packer: receipt error"),
                 Err(_) => tracing::warn!(%tx_hash, "ETH packer: receipt timed out"),
             }
-            let _ = &wallet;
 
             Self::sleep(commit_delay).await;
         }
@@ -554,5 +572,35 @@ mod tests {
         };
         let v = EthereumVerifier::default();
         assert!(v.verify_signature(&msg).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn packer_transaction_is_locally_signed() {
+        let signer: PrivateKeySigner =
+            "0x59c6995e998f97a5a0044966f094538b28132d1b90e7d6f7b8e3f4ec8e3f5f6b"
+                .parse()
+                .unwrap();
+        let from_addr = signer.address();
+        let wallet = EthereumWallet::from(signer);
+        let contract_address: EvmAddress = "0x0000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+
+        let calldata: Bytes = doEmitCall {
+            content: "{\"protocol\":\"aleph-offchain\",\"version\":1,\"content\":\"cid\"}".into(),
+        }
+        .abi_encode()
+        .into();
+        let tx = TransactionRequest::default()
+            .with_from(from_addr)
+            .with_to(contract_address)
+            .with_input(calldata)
+            .with_nonce(7)
+            .with_chain_id(31337)
+            .with_gas_price(1_000_000_000)
+            .with_gas_limit(100_000);
+
+        let envelope = tx.build(&wallet).await.unwrap();
+        assert_ne!(*envelope.tx_hash(), alloy_primitives::B256::ZERO);
     }
 }

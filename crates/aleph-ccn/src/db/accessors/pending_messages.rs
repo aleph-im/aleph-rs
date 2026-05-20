@@ -104,14 +104,14 @@ pub async fn get_next_pending_message(
     sql.push_str(" ORDER BY next_attempt ASC OFFSET ");
     params.push(Box::new(offset));
     sql.push_str(&format!("${}", params.len()));
-    sql.push_str(" LIMIT 1");
+    sql.push_str(" LIMIT 1 FOR UPDATE SKIP LOCKED");
 
     let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
         .iter()
         .map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
         .collect();
     let row = client.query_opt(&sql, &param_refs).await?;
-    Ok(row.as_ref().map(PendingMessageDb::from_row))
+    row.as_ref().map(PendingMessageDb::try_from_row).transpose()
 }
 
 /// Return up to `limit` pending messages ready to process.
@@ -145,13 +145,74 @@ pub async fn get_next_pending_messages(
     sql.push_str(" LIMIT ");
     params.push(Box::new(limit));
     sql.push_str(&format!("${}", params.len()));
+    sql.push_str(" FOR UPDATE SKIP LOCKED");
 
     let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
         .iter()
         .map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
         .collect();
     let rows = client.query(&sql, &param_refs).await?;
-    Ok(rows.iter().map(PendingMessageDb::from_row).collect())
+    rows.iter().map(PendingMessageDb::try_from_row).collect()
+}
+
+/// Atomically claim up to `limit` pending messages by pushing their
+/// `next_attempt` into the future. This prevents other workers from fetching
+/// the same non-inline content concurrently while still allowing recovery if
+/// the worker crashes before it marks the row as fetched.
+pub async fn claim_next_pending_messages(
+    client: &impl GenericClient,
+    current_time: DateTime<Utc>,
+    lease_until: DateTime<Utc>,
+    limit: i64,
+    fetched: Option<bool>,
+    exclude_item_hashes: Option<&[String]>,
+) -> AlephResult<Vec<PendingMessageDb>> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut where_sql = String::from("next_attempt <= $1");
+    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
+        vec![Box::new(current_time)];
+
+    if let Some(f) = fetched {
+        params.push(Box::new(f));
+        where_sql.push_str(&format!(" AND fetched = ${}", params.len()));
+    }
+    if let Some(hashes) = exclude_item_hashes {
+        if !hashes.is_empty() {
+            params.push(Box::new(hashes.to_vec()));
+            where_sql.push_str(&format!(" AND item_hash <> ALL(${})", params.len()));
+        }
+    }
+
+    params.push(Box::new(limit));
+    let limit_param = params.len();
+    params.push(Box::new(lease_until));
+    let lease_param = params.len();
+
+    let sql = format!(
+        "WITH claimed AS (\
+             SELECT id FROM pending_messages \
+             WHERE {where_sql} \
+             ORDER BY next_attempt ASC \
+             LIMIT ${limit_param} \
+             FOR UPDATE SKIP LOCKED\
+         ) \
+         UPDATE pending_messages pm \
+         SET next_attempt = ${lease_param} \
+         FROM claimed \
+         WHERE pm.id = claimed.id \
+         RETURNING {cols}",
+        cols = PENDING_MESSAGE_COLS
+    );
+
+    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+        .iter()
+        .map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    let rows = client.query(&sql, &param_refs).await?;
+    rows.iter().map(PendingMessageDb::try_from_row).collect()
 }
 
 /// All pending messages with a given item hash, ordered by `time` ascending.
@@ -165,7 +226,7 @@ pub async fn get_pending_messages(
         cols = PENDING_MESSAGE_COLS
     );
     let rows = client.query(&sql, &[&item_hash]).await?;
-    Ok(rows.iter().map(PendingMessageDb::from_row).collect())
+    rows.iter().map(PendingMessageDb::try_from_row).collect()
 }
 
 /// Fetch a pending message by its primary-key id.
@@ -178,7 +239,7 @@ pub async fn get_pending_message(
         cols = PENDING_MESSAGE_COLS
     );
     let row = client.query_opt(&sql, &[&pending_message_id]).await?;
-    Ok(row.as_ref().map(PendingMessageDb::from_row))
+    row.as_ref().map(PendingMessageDb::try_from_row).transpose()
 }
 
 /// Count pending messages, optionally filtered by chain (via chain_txs).
@@ -219,7 +280,8 @@ pub async fn set_pending_message_fetched(
 ) -> AlephResult<()> {
     client
         .execute(
-            "UPDATE pending_messages SET fetched = TRUE, content = $1, retries = 0 \
+            "UPDATE pending_messages \
+             SET fetched = TRUE, content = $1, retries = 0, next_attempt = NOW() \
              WHERE id = $2",
             &[content, &pending_message_id],
         )

@@ -5,6 +5,7 @@
 //! Python class verbatim, although Rust uses `snake_case` and `cat` returns
 //! `Bytes` instead of `Optional[bytes]`.
 
+use std::path::Path;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -498,6 +499,74 @@ impl IpfsService {
         self.add_bytes(data, 0).await
     }
 
+    /// Add a file from disk using a streaming multipart part.
+    pub async fn add_file_path(&self, path: &Path, cid_version: u8) -> AlephResult<String> {
+        self.add_path_inner(path, cid_version, true, "application/octet-stream")
+            .await
+    }
+
+    /// Stream a CAR file into kubo `/api/v0/dag/import` and return imported
+    /// root CIDs. Mirrors Python `IpfsService.dag_import`.
+    pub async fn dag_import(&self, car: Bytes, pin_roots: bool) -> AlephResult<Vec<String>> {
+        let part = reqwest::multipart::Part::bytes(car.to_vec())
+            .file_name("upload.car")
+            .mime_str("application/vnd.ipld.car")
+            .map_err(|e| AlephError::Ipfs(format!("dag/import multipart: {e}")))?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let pin_roots_s = if pin_roots { "true" } else { "false" };
+        let resp = self
+            .pinning_client
+            .post(self.pinning_url("dag/import"))
+            .query(&[
+                ("pin-roots", pin_roots_s),
+                ("silent", "false"),
+                ("stats", "false"),
+            ])
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| AlephError::Ipfs(format!("dag/import: {e}")))?;
+        ensure_ok(&resp).await?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| AlephError::Ipfs(format!("dag/import body: {e}")))?;
+        parse_dag_import_response(&body)
+    }
+
+    /// Stream a CAR file path into kubo `/api/v0/dag/import`.
+    pub async fn dag_import_path(
+        &self,
+        car_path: &Path,
+        pin_roots: bool,
+    ) -> AlephResult<Vec<String>> {
+        let part = reqwest::multipart::Part::file(car_path)
+            .await
+            .map_err(|e| AlephError::Ipfs(format!("dag/import open file: {e}")))?
+            .mime_str("application/vnd.ipld.car")
+            .map_err(|e| AlephError::Ipfs(format!("dag/import multipart: {e}")))?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let pin_roots_s = if pin_roots { "true" } else { "false" };
+        let resp = self
+            .pinning_client
+            .post(self.pinning_url("dag/import"))
+            .query(&[
+                ("pin-roots", pin_roots_s),
+                ("silent", "false"),
+                ("stats", "false"),
+            ])
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| AlephError::Ipfs(format!("dag/import: {e}")))?;
+        ensure_ok(&resp).await?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| AlephError::Ipfs(format!("dag/import body: {e}")))?;
+        parse_dag_import_response(&body)
+    }
+
     async fn add_bytes_inner(
         &self,
         value: Vec<u8>,
@@ -522,6 +591,38 @@ impl IpfsService {
             .map_err(|e| AlephError::Ipfs(format!("add: {e}")))?;
         ensure_ok(&resp).await?;
         // Kubo /add returns NDJSON; the last entry has the root hash.
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| AlephError::Ipfs(format!("add text: {e}")))?;
+        parse_add_response(&body)
+    }
+
+    async fn add_path_inner(
+        &self,
+        path: &Path,
+        cid_version: u8,
+        pin: bool,
+        mime: &str,
+    ) -> AlephResult<String> {
+        let url = self.pinning_url("add");
+        let part = reqwest::multipart::Part::file(path)
+            .await
+            .map_err(|e| AlephError::Ipfs(format!("add open file: {e}")))?
+            .mime_str(mime)
+            .map_err(|e| AlephError::Ipfs(format!("multipart: {e}")))?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let cid_version_s = cid_version.to_string();
+        let pin_s = if pin { "true" } else { "false" };
+        let resp = self
+            .pinning_client
+            .post(&url)
+            .query(&[("cid-version", cid_version_s.as_str()), ("pin", pin_s)])
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| AlephError::Ipfs(format!("add: {e}")))?;
+        ensure_ok(&resp).await?;
         let body = resp
             .text()
             .await
@@ -743,6 +844,48 @@ fn parse_add_response(body: &str) -> AlephResult<String> {
     Ok(entry.hash)
 }
 
+fn parse_dag_import_response(body: &[u8]) -> AlephResult<Vec<String>> {
+    let mut roots = Vec::new();
+    for line in body.split(|b| *b == b'\n') {
+        let line = trim_ascii(line);
+        if line.is_empty() {
+            continue;
+        }
+        let entry: Value = serde_json::from_slice(line)
+            .map_err(|e| AlephError::Ipfs(format!("dag/import malformed NDJSON line: {e}")))?;
+        let Some(root) = entry.get("Root") else {
+            continue;
+        };
+        if let Some(pin_err) = root.get("PinErrorMsg").and_then(Value::as_str)
+            && !pin_err.is_empty()
+        {
+            return Err(AlephError::Ipfs(format!("kubo pin error: {pin_err}")));
+        }
+        let cid = root
+            .get("Cid")
+            .and_then(|v| v.get("/"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AlephError::Ipfs(format!("dag/import malformed Root entry: {root}"))
+            })?;
+        roots.push(cid.to_string());
+    }
+    Ok(roots)
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|i| i + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
+}
+
 async fn ensure_ok(resp: &reqwest::Response) -> AlephResult<()> {
     if !resp.status().is_success() {
         return Err(AlephError::Ipfs(format!(
@@ -788,6 +931,23 @@ mod tests {
         assert!(parse_add_response("").is_err());
     }
 
+    #[test]
+    fn parse_dag_import_response_extracts_roots() {
+        let body = br#"
+{"Root":{"Cid":{"/":"bafyroot"},"PinErrorMsg":""}}
+{"Stats":{"BlockCount":1}}
+"#;
+        let roots = parse_dag_import_response(body).unwrap();
+        assert_eq!(roots, vec!["bafyroot"]);
+    }
+
+    #[test]
+    fn parse_dag_import_response_rejects_pin_error() {
+        let body = br#"{"Root":{"Cid":{"/":"bafyroot"},"PinErrorMsg":"bad pin"}}"#;
+        let err = parse_dag_import_response(body).unwrap_err();
+        assert!(err.to_string().contains("bad pin"));
+    }
+
     #[tokio::test]
     async fn add_bytes_posts_multipart_with_query() {
         let server = MockServer::start().await;
@@ -808,6 +968,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_file_path_posts_streamed_file_with_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v0/add"))
+            .and(query_param("cid-version", "0"))
+            .and(query_param("pin", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{\"Name\":\"file\",\"Hash\":\"QmFile1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"Size\":\"5\"}\n",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upload.bin");
+        tokio::fs::write(&path, b"hello").await.unwrap();
+        let s = service_for(&server);
+        let cid = s.add_file_path(&path, 0).await.unwrap();
+        assert_eq!(cid, "QmFile1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    }
+
+    #[tokio::test]
     async fn add_json_pins_and_returns_hash() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -823,6 +1005,48 @@ mod tests {
         let s = service_for(&server);
         let cid = s.add_json(&json!({"hello": "world"})).await.unwrap();
         assert_eq!(cid, "QmJsonaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    }
+
+    #[tokio::test]
+    async fn dag_import_posts_multipart_with_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v0/dag/import"))
+            .and(query_param("pin-roots", "true"))
+            .and(query_param("silent", "false"))
+            .and(query_param("stats", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{\"Root\":{\"Cid\":{\"/\":\"bafyroot\"},\"PinErrorMsg\":\"\"}}\n",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let s = service_for(&server);
+        let roots = s.dag_import(Bytes::from_static(b"car"), true).await.unwrap();
+        assert_eq!(roots, vec!["bafyroot"]);
+    }
+
+    #[tokio::test]
+    async fn dag_import_path_posts_streamed_file_with_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v0/dag/import"))
+            .and(query_param("pin-roots", "true"))
+            .and(query_param("silent", "false"))
+            .and(query_param("stats", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{\"Root\":{\"Cid\":{\"/\":\"bafyroot\"},\"PinErrorMsg\":\"\"}}\n",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upload.car");
+        tokio::fs::write(&path, b"car").await.unwrap();
+        let s = service_for(&server);
+        let roots = s.dag_import_path(&path, true).await.unwrap();
+        assert_eq!(roots, vec!["bafyroot"]);
     }
 
     #[tokio::test]

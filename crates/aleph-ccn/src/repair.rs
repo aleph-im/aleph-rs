@@ -18,6 +18,46 @@ use crate::db::accessors::files::upsert_file;
 use crate::db::models::files::StoredFileDb;
 use crate::storage::StorageService;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreditLot {
+    credit_ref: String,
+    credit_index: i32,
+    amount_remaining: i64,
+    expiration_date: Option<DateTime<Utc>>,
+    message_timestamp: DateTime<Utc>,
+}
+
+fn rebuild_credit_lots_from_history(rows: Vec<CreditLot>) -> Vec<CreditLot> {
+    let mut lots: Vec<CreditLot> = Vec::new();
+    for row in rows {
+        if row.amount_remaining > 0 {
+            lots.push(row);
+        } else {
+            let mut remaining = -row.amount_remaining;
+            for lot in lots.iter_mut() {
+                if remaining <= 0 {
+                    break;
+                }
+                if lot.amount_remaining <= 0 {
+                    continue;
+                }
+                if let Some(exp) = lot.expiration_date
+                    && exp <= row.message_timestamp
+                {
+                    continue;
+                }
+                let take = lot.amount_remaining.min(remaining);
+                lot.amount_remaining -= take;
+                remaining -= take;
+            }
+        }
+    }
+
+    lots.into_iter()
+        .filter(|lot| lot.amount_remaining > 0)
+        .collect()
+}
+
 /// Fetch all `files` rows whose `size < 0`.
 async fn list_files_with_negative_size(
     client: &impl GenericClient,
@@ -108,52 +148,18 @@ async fn rebuild_credit_lots_for_address(
                ORDER BY message_timestamp ASC, credit_ref ASC, credit_index ASC";
     let rows = client.query(sql, &[&address]).await?;
 
-    struct Lot {
-        credit_ref: String,
-        credit_index: i32,
-        amount_remaining: i64,
-        expiration_date: Option<DateTime<Utc>>,
-        message_timestamp: DateTime<Utc>,
-    }
+    let history = rows
+        .into_iter()
+        .map(|row| CreditLot {
+            credit_ref: row.get("credit_ref"),
+            credit_index: row.get("credit_index"),
+            amount_remaining: row.get("amount"),
+            expiration_date: row.get("expiration_date"),
+            message_timestamp: row.get("message_timestamp"),
+        })
+        .collect();
 
-    let mut lots: Vec<Lot> = Vec::new();
-    for row in rows {
-        let amount: i64 = row.get("amount");
-        let expiration_date: Option<DateTime<Utc>> = row.get("expiration_date");
-        let message_timestamp: DateTime<Utc> = row.get("message_timestamp");
-        let credit_ref: String = row.get("credit_ref");
-        let credit_index: i32 = row.get("credit_index");
-
-        if amount > 0 {
-            lots.push(Lot {
-                credit_ref,
-                credit_index,
-                amount_remaining: amount,
-                expiration_date,
-                message_timestamp,
-            });
-        } else {
-            let mut remaining = -amount;
-            for lot in lots.iter_mut() {
-                if remaining <= 0 {
-                    break;
-                }
-                if lot.amount_remaining <= 0 {
-                    continue;
-                }
-                if let Some(exp) = lot.expiration_date
-                    && exp <= message_timestamp
-                {
-                    continue;
-                }
-                let take = lot.amount_remaining.min(remaining);
-                lot.amount_remaining -= take;
-                remaining -= take;
-            }
-        }
-    }
-
-    for lot in lots.into_iter().filter(|l| l.amount_remaining > 0) {
+    for lot in rebuild_credit_lots_from_history(history) {
         client
             .execute(
                 "INSERT INTO credit_balances(address, credit_ref, credit_index, amount_remaining, \
@@ -192,11 +198,18 @@ pub async fn repair_credit_balances(pool: &Pool) -> AlephResult<()> {
     );
 
     for (i, address) in addresses.iter().enumerate() {
-        let client = pool
+        let mut client = pool
             .get()
             .await
             .map_err(|e| AlephError::Internal(anyhow::anyhow!(e)))?;
-        rebuild_credit_lots_for_address(&**client, address).await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| AlephError::Internal(anyhow::anyhow!(e)))?;
+        rebuild_credit_lots_for_address(&*tx, address).await?;
+        tx.commit()
+            .await
+            .map_err(|e| AlephError::Internal(anyhow::anyhow!(e)))?;
         if (i + 1) % 500 == 0 {
             tracing::info!("Repaired {} / {}", i + 1, addresses.len());
         }
@@ -218,4 +231,49 @@ pub async fn repair_node(
     tracing::info!("Repairing credit balances");
     repair_credit_balances(pool).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn lot(
+        credit_ref: &str,
+        credit_index: i32,
+        amount_remaining: i64,
+        expiration_date: Option<DateTime<Utc>>,
+        message_timestamp: DateTime<Utc>,
+    ) -> CreditLot {
+        CreditLot {
+            credit_ref: credit_ref.to_string(),
+            credit_index,
+            amount_remaining,
+            expiration_date,
+            message_timestamp,
+        }
+    }
+
+    #[test]
+    fn rebuild_credit_lots_consumes_oldest_lots_valid_at_expense_time() {
+        let t0 = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2025, 1, 4, 0, 0, 0).unwrap();
+
+        let rebuilt = rebuild_credit_lots_from_history(vec![
+            lot("expired", 0, 40, Some(t1), t0),
+            lot("grant-a", 0, 100, None, t0),
+            lot("grant-b", 0, 50, Some(t3), t1),
+            lot("expense", 0, -120, None, t2),
+        ]);
+
+        assert_eq!(
+            rebuilt,
+            vec![
+                lot("expired", 0, 40, Some(t1), t0),
+                lot("grant-b", 0, 30, Some(t3), t1),
+            ]
+        );
+    }
 }
