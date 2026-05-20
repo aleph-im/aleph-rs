@@ -486,9 +486,17 @@ async fn handle_update(
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
+    // Resolve the effective owner: the address whose program we're updating
+    // and whose name the new STORE will be signed in. When --on-behalf-of is
+    // set this differs from the signing account (delegated authoring).
+    let owner_address = match &args.on_behalf_of {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
+
     // 1. Fetch the existing program message and verify ownership / amend flag.
     let program = fetch_program_message(aleph_client, &args.item_hash).await?;
-    if &program.sender != account.address() {
+    if program.sender != owner_address {
         bail!(
             "you are not the owner of program {} (sender: {})",
             args.item_hash,
@@ -534,6 +542,9 @@ async fn handle_update(
     let mut store_builder = StoreBuilder::new(&account, file_hash.clone(), storage_engine)
         .reference_hash(original_code_ref)
         .payment(Payment::credits());
+    if args.on_behalf_of.is_some() {
+        store_builder = store_builder.on_behalf_of(owner_address);
+    }
     if let Some(ch) = &args.channel {
         store_builder = store_builder.channel(Channel::from(ch.clone()));
     }

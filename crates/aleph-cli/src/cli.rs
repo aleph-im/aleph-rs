@@ -2076,6 +2076,10 @@ pub struct ProgramUpdateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
+    /// Sign on behalf of another address (requires authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
