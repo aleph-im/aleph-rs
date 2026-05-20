@@ -9,18 +9,25 @@
 
 mod common;
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bytes::Bytes;
 use chrono::Utc;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use aleph_ccn::db::accessors::messages::{
     get_message_status, upsert_confirmation, upsert_message_status,
 };
 use aleph_ccn::db::accessors::pending_messages::get_pending_messages;
 use aleph_ccn::handlers::message_handler::MessagePublisher;
+use aleph_ccn::services::storage::engine::StorageEngine;
+use aleph_ccn::services::storage::in_memory::InMemoryStorageEngine;
 use aleph_types::message::item_type::ItemType;
 use aleph_ccn::types::message_status::{MessageOrigin, MessageStatus};
 
-use common::{start_postgres};
+use common::start_postgres;
 
 fn make_wire_message(item_hash: &str, signature: &str) -> serde_json::Value {
     let inline_content = json!({
@@ -44,6 +51,35 @@ fn make_wire_message(item_hash: &str, signature: &str) -> serde_json::Value {
 
 fn publisher() -> MessagePublisher {
     MessagePublisher::without_channel("test-exchange".into())
+}
+
+fn publisher_with_storage(storage: Arc<dyn StorageEngine>) -> MessagePublisher {
+    MessagePublisher::without_channel("test-exchange".into()).with_storage_engine(storage)
+}
+
+fn make_inline_store_wire(file_hash: &str) -> serde_json::Value {
+    let inline_content = json!({
+        "address": "0xdeF61fAadE93a8aaE303D083Ead5BF7a25E55a23",
+        "time": 1_652_085_236.777_f64,
+        "item_type": "storage",
+        "item_hash": file_hash,
+        "mime_type": "text/plain",
+    });
+    let item_content = serde_json::to_string(&inline_content).unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(item_content.as_bytes());
+    let item_hash = format!("{:x}", hasher.finalize());
+    json!({
+        "item_hash": item_hash,
+        "type": "STORE",
+        "chain": "ETH",
+        "sender": "0xdeF61fAadE93a8aaE303D083Ead5BF7a25E55a23",
+        "signature": "0xsig-store",
+        "item_type": "inline",
+        "item_content": item_content,
+        "time": 1_652_085_236.777_f64,
+        "channel": "TEST_CHANNEL",
+    })
 }
 
 /// Valid new message: insert + flag for publishing.
@@ -117,6 +153,66 @@ async fn add_pending_message_uses_parsed_item_type_and_time() {
     assert_eq!(rows[0].item_type, ItemType::Storage);
     assert!(!rows[0].fetched);
     assert_eq!(rows[0].time.to_rfc3339(), "2024-01-02T03:04:05+00:00");
+}
+
+#[tokio::test]
+async fn inline_store_missing_related_file_is_queued_for_fetch() {
+    let fixture = start_postgres().await;
+    let client = fixture.pool.get().await.unwrap();
+    let file_hash = "b".repeat(64);
+    let wire = make_inline_store_wire(&file_hash);
+
+    let storage = Arc::new(InMemoryStorageEngine::new()) as Arc<dyn StorageEngine>;
+    let pub_ = publisher_with_storage(storage);
+    let pending = pub_
+        .add_pending_message(
+            &**client,
+            &wire,
+            Utc::now(),
+            None,
+            true,
+            Some(MessageOrigin::P2p),
+        )
+        .await
+        .unwrap()
+        .expect("insert should return the row");
+
+    assert_eq!(pending.item_type, ItemType::Inline);
+    assert!(!pending.fetched);
+    let rows = get_pending_messages(&**client, &pending.item_hash)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].fetched);
+}
+
+#[tokio::test]
+async fn inline_store_present_related_file_can_process_immediately() {
+    let fixture = start_postgres().await;
+    let client = fixture.pool.get().await.unwrap();
+    let file_hash = "c".repeat(64);
+    let wire = make_inline_store_wire(&file_hash);
+    let storage = Arc::new(InMemoryStorageEngine::with_files(HashMap::from([(
+        file_hash,
+        Bytes::from_static(b"stored file"),
+    )]))) as Arc<dyn StorageEngine>;
+
+    let pub_ = publisher_with_storage(storage);
+    let pending = pub_
+        .add_pending_message(
+            &**client,
+            &wire,
+            Utc::now(),
+            None,
+            true,
+            Some(MessageOrigin::P2p),
+        )
+        .await
+        .unwrap()
+        .expect("insert should return the row");
+
+    assert_eq!(pending.item_type, ItemType::Inline);
+    assert!(pending.fetched);
 }
 
 /// Same (sender, item_hash, signature) twice: the second call resolves to

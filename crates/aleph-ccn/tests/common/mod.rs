@@ -321,12 +321,19 @@ async fn start_via_embedded() -> PgFixture {
 /// Build an `AppState` against a live pool. Mirrors `ccn_test_aiohttp_app`.
 pub fn make_app_state(pool: DbPool) -> AppState {
     let settings = Arc::new(Settings::default());
+    let storage_engine = Arc::new(InMemoryStorageEngine::new()) as Arc<dyn StorageEngine>;
     let state = AppState::new(pool, settings);
     AppState {
         p2p_client: Some(Arc::new(MockP2pClient::new(Identify {
             peer_id: "QmTestPeer".into(),
         }))),
-        storage_engine: Some(Arc::new(InMemoryStorageEngine::new()) as Arc<dyn StorageEngine>),
+        message_publisher: Arc::new(
+            aleph_ccn::handlers::message_handler::MessagePublisher::without_channel(
+                state.config.rabbitmq.pending_message_exchange.clone(),
+            )
+            .with_storage_engine(storage_engine.clone()),
+        ),
+        storage_engine: Some(storage_engine),
         ..state
     }
 }

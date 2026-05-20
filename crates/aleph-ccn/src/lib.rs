@@ -234,10 +234,13 @@ pub async fn run_with_options(
         "process.#".to_string(),
     )?);
 
-    let message_publisher = Arc::new(handlers::message_handler::MessagePublisher::new(
-        pending_message_channel.clone(),
-        cfg.rabbitmq.pending_message_exchange.clone(),
-    ));
+    let message_publisher = Arc::new(
+        handlers::message_handler::MessagePublisher::new(
+            pending_message_channel.clone(),
+            cfg.rabbitmq.pending_message_exchange.clone(),
+        )
+        .with_storage_engine(job_storage_engine.clone()),
+    );
     state.message_publisher = message_publisher.clone();
     let message_handler = Arc::new(handlers::message_handler::MessageHandler::new(
         Arc::new(chains::signature_verifier::SignatureVerifier::new()),

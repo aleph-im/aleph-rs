@@ -170,6 +170,7 @@ impl<'a> crate::chains::abc::PendingMessageView for PendingMessageVerifierView<'
 pub struct MessagePublisher {
     pub pending_exchange: String,
     pub channel: Option<Channel>,
+    pub storage_engine: Option<Arc<dyn StorageEngine>>,
 }
 
 impl MessagePublisher {
@@ -177,6 +178,7 @@ impl MessagePublisher {
         Self {
             channel: Some(channel),
             pending_exchange,
+            storage_engine: None,
         }
     }
 
@@ -187,7 +189,36 @@ impl MessagePublisher {
         Self {
             channel: None,
             pending_exchange,
+            storage_engine: None,
         }
+    }
+
+    /// Attach the storage engine used to decide whether inline STORE messages
+    /// have already fetched their related file content.
+    pub fn with_storage_engine(mut self, storage_engine: Arc<dyn StorageEngine>) -> Self {
+        self.storage_engine = Some(storage_engine);
+        self
+    }
+
+    async fn initial_fetched(&self, pending: &PendingMessageDb) -> AlephResult<bool> {
+        if pending.item_type != ItemType::Inline {
+            return Ok(false);
+        }
+        if pending.r#type != MessageType::Store {
+            return Ok(true);
+        }
+        let Some(storage_engine) = self.storage_engine.as_ref() else {
+            return Ok(true);
+        };
+        let Some(file_hash) = pending
+            .content
+            .as_ref()
+            .and_then(|content| content.get("item_hash"))
+            .and_then(|v| v.as_str())
+        else {
+            return Ok(false);
+        };
+        storage_engine.exists(file_hash).await
     }
 
     /// Publish a process/fetch job for an already-persisted pending message.
@@ -274,11 +305,10 @@ impl MessagePublisher {
 
         // 2. Build the pending message row from the parsed schema so inferred
         //    item_type, parsed time, and inline content are preserved.
-        let fetched = matches!(parsed.item_type(), ItemType::Inline);
         let mut pending = match PendingMessageDb::from_parsed(
             &parsed,
             reception_time,
-            fetched,
+            false,
             tx_hash.clone(),
             check_message,
             origin,
@@ -298,9 +328,11 @@ impl MessagePublisher {
                 return Ok(None);
             }
         };
+        pending.fetched = self.initial_fetched(&pending).await?;
 
-        // 3. Load fetched content: inline payloads are immediately fetched;
-        //    storage/IPFS payloads require a separate fetch pass. Mirrors
+        // 3. Load fetched content: inline payloads are immediately fetched,
+        //    except STORE messages whose related file content is not present
+        //    yet; storage/IPFS payloads require a separate fetch pass. Mirrors
         //    `BaseMessageHandler.load_fetched_content`.
 
         // 4. Inspect the existing message status.
