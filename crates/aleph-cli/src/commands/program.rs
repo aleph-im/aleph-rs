@@ -10,8 +10,8 @@ use crate::common::{
 };
 use crate::program::archive::prepare_archive;
 use aleph_sdk::client::{
-    AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageFilter,
-    MessageWithStatus, hash_file,
+    AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageError,
+    MessageFilter, MessageWithStatus, hash_file,
 };
 use aleph_sdk::messages::{ForgetBuilder, ProgramBuilder, StoreBuilder};
 use aleph_sdk::verify::Hasher;
@@ -501,13 +501,16 @@ async fn handle_delete(
         );
     }
 
-    let forget = build_forget_for_program(
-        &account,
-        &program,
-        args.keep_code,
-        &args.reason,
-        None, // no --channel flag on delete; pending messages inherit the default
-    )?;
+    let program_forget = build_forget_for_program(&account, &program, &args.reason, None)?;
+
+    let code_ref = if args.keep_code {
+        None
+    } else {
+        let MessageContentEnum::Program(content) = program.content() else {
+            bail!("expected PROGRAM message, got {:?}", program.message_type);
+        };
+        Some(content.code.reference.clone())
+    };
 
     let action_summary = if args.keep_code {
         format!("Forget program {} (keep code)?", args.item_hash)
@@ -518,7 +521,88 @@ async fn handle_delete(
         bail!("aborted");
     }
 
-    submit_or_preview(aleph_client, ccn_url, &forget, dry_run, json).await?;
+    // pyaleph rejects a single FORGET that targets a PROGRAM and the STORE it
+    // still references (error code 503: "not allowed"). Forget them in two
+    // steps - program first, then code STORE - to match aleph-client (Python).
+    submit_or_preview(aleph_client, ccn_url, &program_forget, dry_run, json).await?;
+
+    if let Some(code_ref) = code_ref {
+        if dry_run {
+            // Skip the existence check: in dry-run we just want to show the
+            // envelope that would be sent.
+            let store_forget = build_forget_for_code_store(
+                &account,
+                &code_ref,
+                &format!("Deletion of program {}", args.item_hash),
+                None,
+            )?;
+            submit_or_preview(aleph_client, ccn_url, &store_forget, dry_run, json).await?;
+        } else {
+            forget_code_store(aleph_client, ccn_url, &account, &args.item_hash, &code_ref, json)
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch the STORE referenced by `code.ref`, check ownership, and submit a
+/// FORGET for it. Missing / already-forgotten STOREs are skipped with a note,
+/// matching the Python CLI - the program FORGET has already been submitted so
+/// we don't want to fail loudly on the cleanup step.
+async fn forget_code_store<A: Account>(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    account: &A,
+    program_hash: &ItemHash,
+    code_ref: &ItemHash,
+    json: bool,
+) -> Result<()> {
+    let with_status = match aleph_client.get_message(code_ref).await {
+        Ok(s) => s,
+        Err(MessageError::NotFound(_)) => {
+            if !json {
+                eprintln!("Code STORE {code_ref} not found; skipping.");
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e).with_context(|| format!("failed to fetch code STORE {code_ref}")),
+    };
+    let store = match with_status {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Forgotten { .. } | MessageWithStatus::Removed { .. } => {
+            if !json {
+                eprintln!("Code STORE {code_ref} already forgotten; skipping.");
+            }
+            return Ok(());
+        }
+        MessageWithStatus::Pending { .. } => {
+            bail!("code STORE {code_ref} is still pending; wait for it to be processed")
+        }
+        MessageWithStatus::Rejected { .. } => {
+            if !json {
+                eprintln!("Code STORE {code_ref} was rejected by the network; skipping.");
+            }
+            return Ok(());
+        }
+    };
+    if &store.sender != account.address() {
+        if !json {
+            eprintln!(
+                "Code STORE {code_ref} is owned by {}; skipping.",
+                store.sender
+            );
+        }
+        return Ok(());
+    }
+    let store_forget = build_forget_for_code_store(
+        account,
+        code_ref,
+        &format!("Deletion of program {program_hash}"),
+        None,
+    )?;
+    submit_or_preview(aleph_client, ccn_url, &store_forget, false, json).await?;
     Ok(())
 }
 
@@ -560,27 +644,32 @@ async fn fetch_program_message(
     Ok(message)
 }
 
-/// Build the FORGET that targets a program (and optionally its code STORE).
-///
-/// Pure helper, easy to unit-test against a fixture: takes the already-fetched
-/// PROGRAM message and produces a signed `PendingMessage` whose `hashes`
-/// payload contains the program hash plus, unless `keep_code` is set, the
-/// program's `code.ref` STORE hash.
+/// Build the FORGET targeting a PROGRAM message.
 fn build_forget_for_program<A: Account>(
     account: &A,
     program: &Message,
-    keep_code: bool,
     reason: &str,
     channel: Option<Channel>,
 ) -> Result<PendingMessage> {
-    let MessageContentEnum::Program(program_content) = program.content() else {
+    if program.message_type != MessageType::Program {
         bail!("expected PROGRAM message, got {:?}", program.message_type);
-    };
-    let mut hashes = vec![program.item_hash.clone()];
-    if !keep_code {
-        hashes.push(program_content.code.reference.clone());
     }
-    let mut builder = ForgetBuilder::new(account, hashes).reason(reason);
+    let mut builder =
+        ForgetBuilder::new(account, vec![program.item_hash.clone()]).reason(reason);
+    if let Some(ch) = channel {
+        builder = builder.channel(ch);
+    }
+    Ok(builder.build()?)
+}
+
+/// Build the FORGET targeting the STORE message that holds a program's code.
+fn build_forget_for_code_store<A: Account>(
+    account: &A,
+    code_ref: &ItemHash,
+    reason: &str,
+    channel: Option<Channel>,
+) -> Result<PendingMessage> {
+    let mut builder = ForgetBuilder::new(account, vec![code_ref.clone()]).reason(reason);
     if let Some(ch) = channel {
         builder = builder.channel(ch);
     }
@@ -721,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn build_forget_includes_code_by_default() {
+    fn build_forget_for_program_targets_only_the_program_hash() {
         let raw = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../fixtures/messages/program/program.json"
@@ -729,43 +818,38 @@ mod tests {
         let program: Message = serde_json::from_str(raw).unwrap();
         let account = TestAccount::new();
         let pending =
-            build_forget_for_program(&account, &program, false, "User deletion", None).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
-        let hashes = value["hashes"].as_array().unwrap();
-        assert_eq!(hashes.len(), 2);
-        let hashes_str: Vec<String> = hashes
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-        assert!(
-            hashes_str
-                .iter()
-                .any(|h| h == &program.item_hash.to_string())
-        );
-        let MessageContentEnum::Program(content) = program.content() else {
-            unreachable!()
-        };
-        assert!(
-            hashes_str
-                .iter()
-                .any(|h| h == &content.code.reference.to_string())
-        );
-        assert_eq!(value["reason"], "User deletion");
-    }
-
-    #[test]
-    fn build_forget_keeps_code_when_flag_set() {
-        let raw = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/messages/program/program.json"
-        ));
-        let program: Message = serde_json::from_str(raw).unwrap();
-        let account = TestAccount::new();
-        let pending =
-            build_forget_for_program(&account, &program, true, "User deletion", None).unwrap();
+            build_forget_for_program(&account, &program, "User deletion", None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
         let hashes = value["hashes"].as_array().unwrap();
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].as_str().unwrap(), program.item_hash.to_string());
+        assert_eq!(value["reason"], "User deletion");
+    }
+
+    #[test]
+    fn build_forget_for_code_store_targets_only_the_store_hash() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/messages/program/program.json"
+        ));
+        let program: Message = serde_json::from_str(raw).unwrap();
+        let MessageContentEnum::Program(content) = program.content() else {
+            unreachable!()
+        };
+        let account = TestAccount::new();
+        let pending = build_forget_for_code_store(
+            &account,
+            &content.code.reference,
+            "Deletion of program ...",
+            None,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        let hashes = value["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(
+            hashes[0].as_str().unwrap(),
+            content.code.reference.to_string()
+        );
     }
 }
