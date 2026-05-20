@@ -5,8 +5,8 @@ use crate::cli::{
     WebsiteUpdateArgs,
 };
 use crate::common::{
-    confirm_tty, format_epoch_for_tty, now_secs_f64, resolve_account, resolve_address_or_active,
-    submit_or_preview,
+    confirm_tty, format_epoch_for_tty, now_secs_f64, resolve_account, resolve_address,
+    resolve_address_or_active, submit_or_preview,
 };
 use aleph_sdk::aggregate_models::domains::DomainsAggregate;
 use aleph_sdk::aggregate_models::websites::{
@@ -276,15 +276,19 @@ async fn upload_folder_and_store(
     account: &crate::account::CliAccount,
     path: &std::path::Path,
     channel: &str,
+    on_behalf_of: Option<&aleph_types::chain::Address>,
     dry_run: bool,
 ) -> anyhow::Result<(String, String)> {
     let opts = aleph_sdk::ipfs::UploadFolderOptions::default();
     let entries = aleph_sdk::ipfs::collect_folder_files(path, opts.follow_symlinks)?;
     let file_hash = aleph_sdk::folder_hash::hash_folder_root(&entries, &opts)?;
     let cid_str = file_hash.to_string();
-    let pending_store = StoreBuilder::new(account, file_hash, StorageEngine::Ipfs)
-        .channel(Channel::from(channel.to_string()))
-        .build()?;
+    let mut builder = StoreBuilder::new(account, file_hash, StorageEngine::Ipfs)
+        .channel(Channel::from(channel.to_string()));
+    if let Some(owner) = on_behalf_of {
+        builder = builder.on_behalf_of(owner.clone());
+    }
+    let pending_store = builder.build()?;
     let store_hash = pending_store.item_hash.to_string();
     if !dry_run {
         aleph_client
@@ -330,12 +334,16 @@ async fn handle_website_deploy(
     //    written by this deploy carry the same `updated_at`.
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
+    let owner_address = match args.on_behalf_of.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
     let now = now_secs_f64();
 
-    // 5. Refuse if name already exists and is non-null.
-    let existing = aleph_client
-        .get_websites_aggregate(account.address())
-        .await?;
+    // 5. Refuse if name already exists and is non-null. Look up under the
+    //    *owner* address (the one the entry will be written to), not the
+    //    signer's, so `--on-behalf-of` writes target the right aggregate.
+    let existing = aleph_client.get_websites_aggregate(&owner_address).await?;
     if let Some(Some(_)) = existing.get(&args.name) {
         return Err(anyhow::anyhow!(
             "website '{}' already exists; use 'aleph website update' to publish a new version",
@@ -359,7 +367,9 @@ async fn handle_website_deploy(
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        upload_folder_and_store(aleph_client, &account, &args.path, &channel, dry_run).await?
+        let owner = (args.on_behalf_of.is_some()).then_some(&owner_address);
+        upload_folder_and_store(aleph_client, &account, &args.path, &channel, owner, dry_run)
+            .await?
     };
 
     // 7. Build the websites aggregate entry and submit the partial update.
@@ -387,9 +397,12 @@ async fn handle_website_deploy(
 
     let mut content = serde_json::Map::new();
     content.insert(args.name.clone(), serde_json::to_value(&entry)?);
-    let pending_agg = AggregateBuilder::new(&account, WEBSITES_AGGREGATE_KEY, content)
-        .channel(Channel::from(channel.clone()))
-        .build()?;
+    let mut agg_builder = AggregateBuilder::new(&account, WEBSITES_AGGREGATE_KEY, content)
+        .channel(Channel::from(channel.clone()));
+    if args.on_behalf_of.is_some() {
+        agg_builder = agg_builder.on_behalf_of(owner_address.clone());
+    }
+    let pending_agg = agg_builder.build()?;
     // Inner submission passes `false` for the `json` flag (see the STORE
     // call above) and is skipped in dry-run for the same single-document
     // reason. If the aggregate write fails after the STORE has already been
@@ -436,9 +449,12 @@ async fn handle_website_deploy(
             content.insert(d.clone(), serde_json::to_value(&entry)?);
             domains_attached.push(d.clone());
         }
-        let pending = AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content)
-            .channel(Channel::from(channel.clone()))
-            .build()?;
+        let mut dom_builder = AggregateBuilder::new(&account, DOMAINS_AGGREGATE_KEY, content)
+            .channel(Channel::from(channel.clone()));
+        if args.on_behalf_of.is_some() {
+            dom_builder = dom_builder.on_behalf_of(owner_address.clone());
+        }
+        let pending = dom_builder.build()?;
         if !dry_run
             && let Err(e) = submit_or_preview(aleph_client, ccn_url, &pending, dry_run, false).await
         {
@@ -556,7 +572,7 @@ async fn handle_website_update(
             .unwrap_or_default();
         (cid, vid.clone())
     } else {
-        upload_folder_and_store(aleph_client, &account, &args.path, &channel, dry_run).await?
+        upload_folder_and_store(aleph_client, &account, &args.path, &channel, None, dry_run).await?
     };
 
     // 5. Idempotent short-circuit: nothing changed → no aggregate write.

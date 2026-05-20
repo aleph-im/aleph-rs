@@ -2451,6 +2451,11 @@ pub struct WebsiteDeployArgs {
     pub volume_id: Option<String>,
     #[arg(long)]
     pub channel: Option<String>,
+    /// Sign on behalf of another address (requires an authorization from that
+    /// address). The STORE message and the `websites` / `domains` aggregate
+    /// entries are written under the owner, not the signer.
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
