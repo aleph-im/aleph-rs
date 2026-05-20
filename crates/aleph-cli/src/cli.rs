@@ -1979,6 +1979,9 @@ pub enum ProgramCommand {
     Unpersist(ProgramPersistArgs),
     /// Fetch logs from one CRN running this program.
     Logs(ProgramLogsArgs),
+    /// Show full information about a single program (creation time,
+    /// ownership, per-ref freshness for code / runtime / data / volumes).
+    Show(ProgramShowArgs),
 }
 
 #[derive(Args)]
@@ -2107,6 +2110,12 @@ pub struct ProgramListArgs {
     /// Defaults to the current default account.
     #[arg(long)]
     pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ProgramShowArgs {
+    /// Item hash of the program to inspect.
+    pub item_hash: ItemHash,
 }
 
 #[derive(Args)]
