@@ -3,7 +3,6 @@ use std::net::Ipv6Addr;
 use std::process::Command;
 
 use aleph_sdk::crn::{ExecutionInfo, fetch_executions};
-use aleph_sdk::crns_list::{DEFAULT_CRN_LIST_URL, fetch_crns_list};
 use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
 use aleph_types::item_hash::ItemHash;
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,9 +11,6 @@ use url::Url;
 use crate::cli::InstanceSshArgs;
 
 pub async fn handle_ssh(scheduler_url: Url, args: InstanceSshArgs) -> Result<()> {
-    // One client for every HTTP call in this command. The CRN, scheduler, and
-    // crns-list endpoints are on different hosts so the connection pool isn't
-    // shared, but we still avoid re-initializing TLS state for each request.
     let http = reqwest::Client::new();
 
     let (vm_id, crn_url) = match (
@@ -33,7 +29,7 @@ pub async fn handle_ssh(scheduler_url: Url, args: InstanceSshArgs) -> Result<()>
         }
         (None, _) => {
             let (hash, entry) = resolve_vm(&scheduler_url, &args.vm_id).await?;
-            let url = crn_url_from_entry(&http, &hash, &entry).await?;
+            let url = crn_url_from_entry(&scheduler_url, &hash, &entry).await?;
             (hash, url)
         }
     };
@@ -103,11 +99,10 @@ fn pick_unique_match(input: &str, mut matches: Vec<VmEntry>) -> Result<(ItemHash
 
 /// Translate a `VmEntry` to the URL of the CRN it's allocated to. Refuses any
 /// status other than `dispatched` / `duplicated`.
-async fn crn_url_from_entry(
-    http: &reqwest::Client,
-    vm_id: &ItemHash,
-    entry: &VmEntry,
-) -> Result<Url> {
+///
+/// Looks the CRN up via the scheduler's `/api/v1/nodes/<hash>` endpoint
+/// rather than the third-party crns-list aggregator.
+async fn crn_url_from_entry(scheduler_url: &Url, vm_id: &ItemHash, entry: &VmEntry) -> Result<Url> {
     // `duplicated` means the VM is allocated on multiple CRNs because of a
     // re-scheduling race; the `allocated_node` still points to the canonical
     // placement, so we follow it.
@@ -123,22 +118,26 @@ async fn crn_url_from_entry(
         ),
     };
 
-    let list_url = Url::parse(DEFAULT_CRN_LIST_URL).expect("DEFAULT_CRN_LIST_URL is a valid URL");
-    let crns = fetch_crns_list(http, &list_url, true)
+    let scheduler = SchedulerClient::new(scheduler_url.clone());
+    let node = scheduler
+        .get_node(allocated_node)
         .await
-        .context("fetching the public CRN list")?;
-    let crn = crns
-        .crns
-        .iter()
-        .find(|c| c.hash == allocated_node)
+        .with_context(|| format!("looking up node {allocated_node} in the scheduler"))?
         .ok_or_else(|| {
             anyhow!(
-                "instance {vm_id} is allocated to node {allocated_node}, but that CRN is not in \
-                 the public CRN list (it may be inactive). Pass `--crn-url` to override."
+                "instance {vm_id} is allocated to node {allocated_node}, but the scheduler has \
+                 no record of that node. Pass `--crn-url` to override."
             )
         })?;
+    let address = node.address.as_deref().ok_or_else(|| {
+        anyhow!(
+            "scheduler knows node {allocated_node} (status: {}) but has no reachable address \
+             for it. Pass `--crn-url` to override.",
+            node.status.as_deref().unwrap_or("unknown")
+        )
+    })?;
 
-    Url::parse(&crn.address).with_context(|| format!("invalid CRN address `{}`", crn.address))
+    Url::parse(address).with_context(|| format!("invalid CRN address `{address}`"))
 }
 
 /// Pick the SSH target IPv6 out of the CRN's executions map.

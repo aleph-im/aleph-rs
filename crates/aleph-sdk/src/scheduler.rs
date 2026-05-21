@@ -31,6 +31,20 @@ pub struct VmEntry {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// One node entry as returned by `/api/v1/nodes/{node_hash}` and the list
+/// endpoint. `address` is the CRN's HTTP base URL; it's `None` when the
+/// scheduler hasn't (yet) discovered the node's reachable endpoint.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NodeEntry {
+    pub node_hash: String,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulerError {
     #[error("HTTP error: {0}")]
@@ -156,6 +170,29 @@ impl SchedulerClient {
             page += 1;
         }
         Ok(all)
+    }
+
+    /// Fetch one node by its hash. Returns `Ok(None)` on HTTP 404.
+    pub async fn get_node(&self, node_hash: &str) -> Result<Option<NodeEntry>, SchedulerError> {
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/nodes/{node_hash}"))
+            .map_err(|e| SchedulerError::InvalidResponse(format!("URL join error: {e}")))?;
+
+        let response = self.http.get(url).send().await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(SchedulerError::Status { status, body });
+        }
+        let entry = response
+            .json::<NodeEntry>()
+            .await
+            .map_err(|e| SchedulerError::InvalidResponse(format!("decode failed: {e}")))?;
+        Ok(Some(entry))
     }
 
     /// Fetch one VM by hash. Returns `Ok(None)` on HTTP 404.
@@ -386,6 +423,45 @@ mod tests {
         let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
         let vms = client.find_vms_by_hash_prefix("deadbeef").await.unwrap();
         assert!(vms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_node_returns_entry_on_200() {
+        let server = MockServer::start().await;
+        let hash = "bb0aa1a9fc7566286c0db32cd5c660066017430390ca779da4d3a241fa07c337";
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{hash}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_hash": hash,
+                "name": "Confident VMs 4",
+                "address": "https://computevm4.example.io/",
+                "status": "Healthy",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let entry = client.get_node(hash).await.unwrap().expect("Some(entry)");
+        assert_eq!(entry.node_hash, hash);
+        assert_eq!(
+            entry.address.as_deref(),
+            Some("https://computevm4.example.io/")
+        );
+        assert_eq!(entry.status.as_deref(), Some("Healthy"));
+    }
+
+    #[tokio::test]
+    async fn get_node_returns_none_on_404() {
+        let server = MockServer::start().await;
+        let hash = "0000000000000000000000000000000000000000000000000000000000000001";
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{hash}")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        assert!(client.get_node(hash).await.unwrap().is_none());
     }
 
     #[tokio::test]
