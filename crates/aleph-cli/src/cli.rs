@@ -1456,14 +1456,10 @@ pub struct FileListArgs {
     #[arg(long)]
     pub address: Option<String>,
 
-    /// Maximum number of files to return per page. Pass `0` to remove the
-    /// limit (server-side).
+    /// Maximum number of files to display. Walks the server's cursor
+    /// pagination behind the scenes; safe for large values.
     #[arg(long, default_value = "25")]
     pub count: u32,
-
-    /// 1-indexed page offset.
-    #[arg(long, default_value = "1")]
-    pub page: u32,
 
     /// Sort order by creation time.
     #[arg(long, value_enum, default_value = "desc")]

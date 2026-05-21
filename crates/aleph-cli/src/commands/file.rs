@@ -7,7 +7,7 @@ use crate::common::{
     submit_or_preview,
 };
 use aleph_sdk::client::{
-    AccountFilesResponse, AlephAccountClient, AlephClient, AlephStorageClient, hash_file,
+    AccountFile, AlephAccountClient, AlephClient, AlephStorageClient, hash_file,
 };
 use aleph_sdk::messages::StoreBuilder;
 use aleph_sdk::verify::Hasher;
@@ -17,6 +17,7 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
 use aleph_types::message::{FileRef, StorageEngine};
 use anyhow::{Context, Result, bail};
+use futures_util::{StreamExt, TryStreamExt};
 use url::Url;
 
 use super::message::{ForgetTargets, forget_targets};
@@ -392,14 +393,20 @@ async fn handle_file_list(
         SortOrderCli::Desc => -1,
     };
 
-    let response = aleph_client
-        .get_account_files(&address, args.count, args.page, sort_order)
+    let files: Vec<AccountFile> = aleph_client
+        .get_account_files_iterator(&address, None, Some(sort_order))
+        .take(args.count as usize)
+        .try_collect()
         .await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        println!("{}", serde_json::to_string_pretty(&files)?);
     } else {
-        print!("{}", format_files_table(&response));
+        // Fetch the address-wide total separately. Cursor pages carry their
+        // own copy of `total_size`, but the iterator hides them; one extra
+        // round-trip keeps the surface clean.
+        let total_size = aleph_client.get_total_storage_size(&address).await?;
+        print!("{}", format_files_table(&files, total_size));
     }
     Ok(())
 }
@@ -432,7 +439,13 @@ fn size_in_mb(size: memsizes::Bytes) -> f64 {
     size.count() as f64 / (1024.0 * 1024.0)
 }
 
-fn format_files_table(response: &AccountFilesResponse) -> String {
+fn format_created(ts: &aleph_types::timestamp::Timestamp) -> String {
+    ts.to_datetime()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| "-".into())
+}
+
+fn format_files_table(files: &[AccountFile], account_total_size: memsizes::Bytes) -> String {
     use std::fmt::Write;
 
     const FILE_HASH_HEADER: &str = "FILE_HASH";
@@ -441,16 +454,14 @@ fn format_files_table(response: &AccountFilesResponse) -> String {
     const CREATED_HEADER: &str = "CREATED";
     const ITEM_HASH_HEADER: &str = "ITEM_HASH";
 
-    let file_hash_w = response
-        .files
+    let file_hash_w = files
         .iter()
         .map(|f| f.file_hash.len())
         .chain(std::iter::once(FILE_HASH_HEADER.len()))
         .max()
         .unwrap_or(FILE_HASH_HEADER.len());
 
-    let size_strings: Vec<String> = response
-        .files
+    let size_strings: Vec<String> = files
         .iter()
         .map(|f| format!("{:.4}", size_in_mb(f.size)))
         .collect();
@@ -461,8 +472,7 @@ fn format_files_table(response: &AccountFilesResponse) -> String {
         .max()
         .unwrap_or(SIZE_HEADER.len());
 
-    let type_w = response
-        .files
+    let type_w = files
         .iter()
         .map(|f| f.storage_engine.len())
         .chain(std::iter::once(TYPE_HEADER.len()))
@@ -488,15 +498,14 @@ fn format_files_table(response: &AccountFilesResponse) -> String {
     )
     .expect("writing to String cannot fail");
 
-    for (file, size_str) in response.files.iter().zip(size_strings.iter()) {
-        let created = file.created.format("%Y-%m-%d %H:%M:%S").to_string();
+    for (file, size_str) in files.iter().zip(size_strings.iter()) {
         writeln!(
             out,
             "{:<file_hash_w$}  {:>size_w$}  {:<type_w$}  {:<created_w$}  {}",
             file.file_hash,
             size_str,
             file.storage_engine,
-            created,
+            format_created(&file.created),
             file.item_hash,
             file_hash_w = file_hash_w,
             size_w = size_w,
@@ -506,23 +515,14 @@ fn format_files_table(response: &AccountFilesResponse) -> String {
         .expect("writing to String cannot fail");
     }
 
-    if response.files.is_empty() {
+    if files.is_empty() {
         writeln!(out, "(no files)").expect("writing to String cannot fail");
     } else {
-        let total_mb = size_in_mb(response.total_size);
-        let page = if response.pagination_per_page == 0 {
-            "1/1".to_string()
-        } else {
-            let total_pages = (response.pagination_total as f64
-                / response.pagination_per_page as f64)
-                .ceil() as u64;
-            let total_pages = total_pages.max(1);
-            format!("{}/{}", response.pagination_page, total_pages)
-        };
         writeln!(
             out,
-            "\nTotal: {} file(s), ~ {:.4} MB (page {})",
-            response.pagination_total, total_mb, page,
+            "\nShown: {} file(s). Account total: ~ {:.4} MB.",
+            files.len(),
+            size_in_mb(account_total_size),
         )
         .expect("writing to String cannot fail");
     }
@@ -555,44 +555,37 @@ mod tests {
         assert!(err.to_string().contains("empty folder"));
     }
 
-    use aleph_sdk::client::AccountFile;
+    use aleph_types::timestamp::Timestamp;
     use chrono::{TimeZone, Utc};
     use memsizes::Bytes;
 
-    fn sample_response() -> AccountFilesResponse {
-        AccountFilesResponse {
-            address: "0xabc".into(),
-            files: vec![
-                AccountFile {
-                    file_hash: "QmYzN9wJgkRfTDopwzCG7VkrcU8xKZxxJzAv4dQk2tSx9".into(),
-                    size: Bytes::from(13_000_000),
-                    storage_engine: "ipfs".into(),
-                    created: Utc.with_ymd_and_hms(2025, 4, 12, 9, 21, 3).unwrap(),
-                    item_hash: "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
-                        .parse()
-                        .unwrap(),
-                },
-                AccountFile {
-                    file_hash: "abc123def456000000000000000000000000000000000000000000000000aabb"
-                        .into(),
-                    size: Bytes::from(3200),
-                    storage_engine: "storage".into(),
-                    created: Utc.with_ymd_and_hms(2025, 4, 10, 14, 8, 0).unwrap(),
-                    item_hash: "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
-                        .parse()
-                        .unwrap(),
-                },
-            ],
-            total_size: Bytes::from(13_003_200),
-            pagination_page: 1,
-            pagination_total: 2,
-            pagination_per_page: 25,
-        }
+    fn sample_files() -> Vec<AccountFile> {
+        vec![
+            AccountFile {
+                file_hash: "QmYzN9wJgkRfTDopwzCG7VkrcU8xKZxxJzAv4dQk2tSx9".into(),
+                size: Bytes::from(13_000_000),
+                storage_engine: "ipfs".into(),
+                created: Timestamp::from(Utc.with_ymd_and_hms(2025, 4, 12, 9, 21, 3).unwrap()),
+                item_hash: "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
+                    .parse()
+                    .unwrap(),
+            },
+            AccountFile {
+                file_hash: "abc123def456000000000000000000000000000000000000000000000000aabb"
+                    .into(),
+                size: Bytes::from(3200),
+                storage_engine: "storage".into(),
+                created: Timestamp::from(Utc.with_ymd_and_hms(2025, 4, 10, 14, 8, 0).unwrap()),
+                item_hash: "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+                    .parse()
+                    .unwrap(),
+            },
+        ]
     }
 
     #[test]
     fn format_files_table_includes_headers_and_rows() {
-        let out = format_files_table(&sample_response());
+        let out = format_files_table(&sample_files(), Bytes::from(13_003_200));
         let mut lines = out.lines();
         let header = lines.next().expect("header");
         assert!(header.contains("FILE_HASH"));
@@ -611,35 +604,17 @@ mod tests {
         assert!(row2.contains("storage"));
         assert!(row2.contains("0.0031")); // 3200 / 1024^2
 
-        assert!(out.contains("Total: 2 file(s)"));
-        assert!(out.contains("page 1/1"));
+        assert!(out.contains("Shown: 2 file(s)"));
+        assert!(out.contains("Account total: ~ 12.4008 MB"));
     }
 
     #[test]
     fn format_files_table_empty_says_no_files() {
-        let empty = AccountFilesResponse {
-            address: "0xabc".into(),
-            files: vec![],
-            total_size: Bytes::from(0),
-            pagination_page: 1,
-            pagination_total: 0,
-            pagination_per_page: 25,
-        };
-        let out = format_files_table(&empty);
+        let out = format_files_table(&[], Bytes::from(0));
         assert!(out.contains("FILE_HASH"));
         assert!(out.contains("(no files)"));
-        // No Total line for the empty case.
-        assert!(!out.contains("Total:"));
-    }
-
-    #[test]
-    fn format_files_table_paginates_total_pages() {
-        let mut r = sample_response();
-        r.pagination_total = 75;
-        r.pagination_per_page = 25;
-        r.pagination_page = 2;
-        let out = format_files_table(&r);
-        assert!(out.contains("page 2/3"));
+        // No "Shown:" line for the empty case.
+        assert!(!out.contains("Shown:"));
     }
 
     #[test]
