@@ -440,6 +440,15 @@ async fn handle_file_delete(
     }
     let message_hashes = resolve_file_to_store_messages(aleph_client, &owner, &args.hashes).await?;
 
+    // Deliberately *don't* propagate `on_behalf_of` to the FORGET envelope.
+    // `--on-behalf-of` only scopes the STORE lookup above (multiple users
+    // can pin the same file content_hash; we want the owner's pin, not
+    // anyone else's). The FORGET itself ships with `content.address =
+    // sender`: the network checks delegate authorization against the
+    // owner of the hashes inside, so spelling it out on the envelope is
+    // unnecessary - and pinning content.address to a single owner would
+    // cause the FORGET to be rejected when the hash list spans pins from
+    // multiple owners.
     forget_targets(
         aleph_client,
         ccn_url,
@@ -449,7 +458,7 @@ async fn handle_file_delete(
             aggregates: Vec::new(),
             reason: args.reason,
             channel: args.channel,
-            on_behalf_of: args.on_behalf_of,
+            on_behalf_of: None,
             yes: args.yes,
             confirm_label: "STORE message",
             signing: args.signing,
