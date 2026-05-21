@@ -1294,18 +1294,24 @@ pub struct AliasRemoveArgs {
 
 #[derive(Subcommand)]
 pub enum FileCommand {
-    /// Forget one or more STORE messages, releasing their file pins
+    /// Delete files by hash, releasing the matching STORE pins
     #[command(long_about = "\
-Forget STORE messages by item hash, releasing the underlying file pins. \
-Thin wrapper around `aleph message forget` for STORE messages.
+Delete files by their content hash (IPFS CID or native hex). Each hash is \
+resolved to the STORE message that pins the file for the owner, and that \
+message is forgotten - releasing the pin.
 
-Forget is irreversible. You can only forget messages your own address \
-owns (or that you have an authorization to forget on behalf of).
+Use `aleph message forget` instead when you need to forget a specific \
+STORE *message* by its item hash (e.g. to remove a duplicate pin while \
+keeping the file alive via the others).
+
+Forget is irreversible. You can only delete files owned by your own \
+address (or that you have an authorization to forget on behalf of).
 
 Examples:
-  aleph file delete abc123...
-  aleph file delete abc123... def456... --reason \"superseded\"
-  aleph file delete abc123... -y")]
+  aleph file delete Qmabc...                          # IPFS CID
+  aleph file delete 9675a23e...                       # native hex
+  aleph file delete Qmabc... QmDef... --reason \"superseded\"
+  aleph file delete Qmabc... -y --on-behalf-of 0x...")]
     Delete(FileDeleteArgs),
     /// Download a file by hash, message hash, or ref
     Download(FileDownloadArgs),
@@ -1468,8 +1474,9 @@ pub struct FileListArgs {
 
 #[derive(Args)]
 pub struct FileDeleteArgs {
-    /// Item hashes of the STORE messages to forget. Each hash tombstones a
-    /// single message and releases its file pin.
+    /// File hashes to delete (IPFS CID or native hex). Each hash is resolved
+    /// to the owner's STORE message and forgotten, releasing the file pin.
+    /// To forget a specific STORE *message* by hash, use `aleph message forget`.
     pub hashes: Vec<ItemHash>,
 
     /// Reason for forgetting.

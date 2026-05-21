@@ -7,17 +7,20 @@ use crate::common::{
     submit_or_preview,
 };
 use aleph_sdk::client::{
-    AccountFile, AlephAccountClient, AlephClient, AlephStorageClient, hash_file,
+    AccountFile, AlephAccountClient, AlephClient, AlephMessageClient, AlephStorageClient,
+    MessageFilter, hash_file,
 };
 use aleph_sdk::messages::StoreBuilder;
 use aleph_sdk::verify::Hasher;
 use aleph_types::account::Account;
+use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
-use aleph_types::message::{FileRef, StorageEngine};
+use aleph_types::message::{FileRef, MessageContentEnum, MessageType, StorageEngine};
 use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt};
+use std::collections::HashMap;
 use url::Url;
 
 use super::message::{ForgetTargets, forget_targets};
@@ -417,12 +420,32 @@ async fn handle_file_delete(
     json: bool,
     args: FileDeleteArgs,
 ) -> Result<()> {
+    if args.hashes.is_empty() {
+        bail!("at least one file hash is required");
+    }
+    // The owner of the STORE messages we're forgetting: --on-behalf-of when
+    // set, otherwise the signing account. The eventual FORGET message is
+    // submitted with the same on-behalf-of semantics, so the resolution
+    // address has to match what the network will check ownership against.
+    let owner = match args.on_behalf_of.as_deref() {
+        Some(addr) => resolve_address(addr)?,
+        None => resolve_account(&args.signing.identity)?.address().clone(),
+    };
+
+    if !json {
+        eprintln!(
+            "Resolving {} file hash(es) to STORE message hash(es)...",
+            args.hashes.len()
+        );
+    }
+    let message_hashes = resolve_file_to_store_messages(aleph_client, &owner, &args.hashes).await?;
+
     forget_targets(
         aleph_client,
         ccn_url,
         json,
         ForgetTargets {
-            hashes: args.hashes,
+            hashes: message_hashes,
             aggregates: Vec::new(),
             reason: args.reason,
             channel: args.channel,
@@ -433,6 +456,62 @@ async fn handle_file_delete(
         },
     )
     .await
+}
+
+/// Look up the STORE message that pins each `file_hash` for `owner`, and
+/// return the list of matching message hashes (one per pin).
+///
+/// In practice there is one STORE message per (sender, file_hash), but if a
+/// caller pinned the same content multiple times (e.g. with different refs)
+/// all of those messages are returned so the FORGET releases every pin.
+async fn resolve_file_to_store_messages(
+    aleph_client: &AlephClient,
+    owner: &Address,
+    file_hashes: &[ItemHash],
+) -> Result<Vec<ItemHash>> {
+    let filter = MessageFilter {
+        message_type: Some(MessageType::Store),
+        addresses: Some(vec![owner.clone()]),
+        content_hashes: Some(file_hashes.to_vec()),
+        ..Default::default()
+    };
+
+    // Defensive cap: usually one match per file_hash, but a re-pin with a
+    // different ref could produce duplicates. 4x leaves plenty of slack.
+    let cap = (file_hashes.len() * 4).max(64);
+    let messages = aleph_client
+        .get_messages_iterator(filter, None)
+        .take(cap)
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    let mut by_file: HashMap<ItemHash, Vec<ItemHash>> = HashMap::new();
+    for m in messages {
+        if let MessageContentEnum::Store(store) = m.content() {
+            by_file
+                .entry(store.file_hash())
+                .or_default()
+                .push(m.item_hash.clone());
+        }
+    }
+
+    let mut resolved = Vec::new();
+    let mut missing = Vec::new();
+    for fh in file_hashes {
+        match by_file.get(fh) {
+            Some(hs) => resolved.extend(hs.iter().cloned()),
+            None => missing.push(fh.to_string()),
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "no STORE message owned by {owner} found for file hash(es): {}\n\
+             Hint: `aleph file list` shows the pins for an address, and \
+             `aleph message forget` accepts STORE message hashes directly.",
+            missing.join(", "),
+        );
+    }
+    Ok(resolved)
 }
 
 fn size_in_mb(size: memsizes::Bytes) -> f64 {
