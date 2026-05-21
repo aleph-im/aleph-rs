@@ -485,6 +485,30 @@ pub fn resolve_network(
     resolve_network_with_store(&store, network_override)
 }
 
+/// Resolve the Aleph VM scheduler base URL for a network.
+///
+/// Reads `NetworkEntry.scheduler_url`. Falls back to
+/// `config::store::BUILTIN_SCHEDULER_URL` when the field is absent (older
+/// configs predate this field) so all instance subcommands keep working
+/// without requiring a config migration.
+pub fn resolve_scheduler_url_with_store(
+    store: &ConfigStore,
+    network_override: Option<&str>,
+) -> Result<Url> {
+    let net = resolve_network_with_store(store, network_override)?;
+    let raw = net
+        .scheduler_url
+        .as_deref()
+        .unwrap_or(crate::config::store::BUILTIN_SCHEDULER_URL);
+    Url::parse(raw).map_err(|e| anyhow!("invalid scheduler_url for network '{}': {e}", net.name))
+}
+
+/// Resolve the scheduler URL using the user-global config store.
+pub fn resolve_scheduler_url(network_override: Option<&str>) -> Result<Url> {
+    let store = ConfigStore::open().map_err(|e| anyhow!("failed to open config store: {e}"))?;
+    resolve_scheduler_url_with_store(&store, network_override)
+}
+
 /// Resolve a signing account from CLI args.
 ///
 /// Resolution order:

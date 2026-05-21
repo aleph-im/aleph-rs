@@ -11,9 +11,7 @@ use url::Url;
 
 use crate::cli::InstanceSshArgs;
 
-const SCHEDULER_BASE_URL: &str = "https://scheduler.api.aleph.cloud";
-
-pub async fn handle_ssh(args: InstanceSshArgs) -> Result<()> {
+pub async fn handle_ssh(scheduler_url: Url, args: InstanceSshArgs) -> Result<()> {
     let (vm_id, crn_url) = match (
         args.crn_url.as_deref(),
         ItemHash::try_from(args.vm_id.as_str()),
@@ -25,11 +23,11 @@ pub async fn handle_ssh(args: InstanceSshArgs) -> Result<()> {
         (Some(url), Err(_)) => {
             // Prefix requires the scheduler to expand, but --crn-url still wins
             // over the scheduler's allocation.
-            let (hash, _) = resolve_vm(&args.vm_id).await?;
+            let (hash, _) = resolve_vm(&scheduler_url, &args.vm_id).await?;
             (hash, Url::parse(url).context("invalid --crn-url")?)
         }
         (None, _) => {
-            let (hash, entry) = resolve_vm(&args.vm_id).await?;
+            let (hash, entry) = resolve_vm(&scheduler_url, &args.vm_id).await?;
             let url = crn_url_from_entry(&hash, &entry).await?;
             (hash, url)
         }
@@ -58,10 +56,8 @@ pub async fn handle_ssh(args: InstanceSshArgs) -> Result<()> {
 /// Resolve `input` to a VM by exact hash or scheduler-side prefix match.
 /// The returned `VmEntry` lets the caller skip a second scheduler round-trip
 /// when looking up the CRN URL.
-async fn resolve_vm(input: &str) -> Result<(ItemHash, VmEntry)> {
-    let scheduler = SchedulerClient::new(
-        Url::parse(SCHEDULER_BASE_URL).expect("SCHEDULER_BASE_URL is a valid URL"),
-    );
+async fn resolve_vm(scheduler_url: &Url, input: &str) -> Result<(ItemHash, VmEntry)> {
+    let scheduler = SchedulerClient::new(scheduler_url.clone());
 
     if let Ok(hash) = ItemHash::try_from(input) {
         let entry = scheduler

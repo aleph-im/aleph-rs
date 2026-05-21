@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub const BUILTIN_CCN_NAME: &str = "official";
 pub const BUILTIN_CCN_URL: &str = "https://api.aleph.im";
 pub const BUILTIN_NETWORK_NAME: &str = "mainnet";
+pub const BUILTIN_SCHEDULER_URL: &str = "https://scheduler.api.aleph.cloud";
 
 /// One named CCN endpoint inside a network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +25,10 @@ pub struct NetworkEntry {
     pub ccns: Vec<CcnEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ethereum: Option<EthereumConfig>,
+    /// Aleph VM scheduler base URL for this network. When `None`, callers
+    /// fall back to `BUILTIN_SCHEDULER_URL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_url: Option<String>,
 }
 
 /// Partial update for a network's Ethereum config. Any `Some` field overwrites
@@ -186,6 +191,7 @@ impl ConfigStore {
             default_ccn: None,
             ccns: Vec::new(),
             ethereum: None,
+            scheduler_url: None,
         });
         if manifest.default_network.is_none() {
             manifest.default_network = Some(name.to_string());
@@ -348,6 +354,7 @@ impl ConfigStore {
                 url: BUILTIN_CCN_URL.to_string(),
             }],
             ethereum: Some(EthereumConfig::mainnet_defaults()),
+            scheduler_url: Some(BUILTIN_SCHEDULER_URL.to_string()),
         });
         if manifest.default_network.is_none() {
             manifest.default_network = Some(BUILTIN_NETWORK_NAME.to_string());
@@ -379,6 +386,7 @@ mod tests {
                     url: "https://api.aleph.im".to_string(),
                 }],
                 ethereum: None,
+                scheduler_url: None,
             }],
         };
         let serialized = toml::to_string_pretty(&manifest).unwrap();
@@ -406,6 +414,7 @@ mod tests {
                     url: "https://api.aleph.im".to_string(),
                 }],
                 ethereum: Some(EthereumConfig::mainnet_defaults()),
+                scheduler_url: None,
             }],
         };
         let serialized = toml::to_string_pretty(&manifest).unwrap();
