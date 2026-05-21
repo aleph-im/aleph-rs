@@ -3,7 +3,9 @@ use crate::cli::{
     parse_size_to_mib,
 };
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
-use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter};
+use aleph_sdk::client::{
+    AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter, MessageWithStatus,
+};
 use aleph_sdk::messages::InstanceBuilder;
 use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
 use aleph_types::account::Account;
@@ -1021,6 +1023,44 @@ async fn handle_instance_price(
     Ok(())
 }
 
+/// Fetch an INSTANCE message by item hash and assert it is currently usable
+/// (processed or in the process of being removed). Returns a clean error for
+/// pending / forgotten / rejected statuses or for non-INSTANCE hashes.
+async fn fetch_instance_message(
+    aleph_client: &AlephClient,
+    item_hash: &ItemHash,
+) -> Result<Message> {
+    let with_status = aleph_client
+        .get_message(item_hash)
+        .await
+        .with_context(|| format!("failed to fetch instance {item_hash}"))?;
+    let message = match with_status {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Removed { .. } => {
+            bail!("instance {item_hash} has been removed")
+        }
+        MessageWithStatus::Pending { .. } => {
+            bail!(
+                "instance {item_hash} is still pending; wait for it to be processed before deleting"
+            )
+        }
+        MessageWithStatus::Forgotten { .. } => {
+            bail!("instance {item_hash} has already been forgotten")
+        }
+        MessageWithStatus::Rejected { .. } => {
+            bail!("instance {item_hash} was rejected by the network")
+        }
+    };
+    if message.message_type != MessageType::Instance {
+        bail!(
+            "item {item_hash} is not an INSTANCE message (got {:?})",
+            message.message_type
+        );
+    }
+    Ok(message)
+}
+
 async fn handle_instance_delete(
     _aleph_client: &AlephClient,
     _ccn_url: &Url,
@@ -1339,6 +1379,21 @@ mod tests {
             row.node_hash.as_deref(),
             Some("dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04")
         );
+    }
+
+    const INSTANCE_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/messages/instance/instance-gpu-payg.json"
+    ));
+
+    fn fixture_message() -> Message {
+        serde_json::from_str(INSTANCE_FIXTURE).expect("parse fixture")
+    }
+
+    #[test]
+    fn fixture_loads_as_instance_message() {
+        let msg = fixture_message();
+        assert_eq!(msg.message_type, MessageType::Instance);
     }
 
     fn sample_row(
