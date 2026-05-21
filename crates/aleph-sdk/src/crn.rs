@@ -38,6 +38,26 @@ pub enum LogType {
     System,
 }
 
+/// Networking info for a running VM, returned by `/about/executions/list`.
+///
+/// `ipv6` is a CIDR like `"fc00:1:2:3:1:abcd:1234:5670/124"` — the prefix
+/// assigned to the VM's interface, not the address you `ssh` to directly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionNetworking {
+    #[serde(default)]
+    pub ipv4: Option<String>,
+    #[serde(default)]
+    pub ipv6: Option<String>,
+}
+
+/// A running VM execution on a CRN, as returned by `/about/executions/list`.
+/// Only the fields used by aleph-cli are modeled.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionInfo {
+    #[serde(default)]
+    pub networking: Option<ExecutionNetworking>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CrnError {
     #[error(transparent)]
@@ -324,6 +344,25 @@ impl CrnClient {
             }
         })
     }
+}
+
+/// Fetch the list of running VM executions from a CRN's
+/// `/about/executions/list` endpoint. Unauthenticated.
+///
+/// Keys of the returned map are VM item hashes (hex-encoded).
+pub async fn fetch_executions(
+    http: &reqwest::Client,
+    crn_url: &Url,
+) -> Result<HashMap<String, ExecutionInfo>, CrnError> {
+    let mut url = crn_url.clone();
+    url.set_path("/about/executions/list");
+    let resp = http.get(url).send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(CrnError::Api { status, body });
+    }
+    Ok(resp.json().await?)
 }
 
 fn build_signed_pubkey_header(

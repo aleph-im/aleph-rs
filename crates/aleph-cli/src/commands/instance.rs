@@ -403,6 +403,7 @@ pub async fn handle_instance_command(
         InstanceCommand::Reboot(args) => crn::handle_operation(json, args, "reboot").await?,
         InstanceCommand::Erase(args) => crn::handle_operation(json, args, "erase").await?,
         InstanceCommand::Logs(args) => crn::handle_logs(json, args).await?,
+        InstanceCommand::Ssh(args) => super::instance_ssh::handle_ssh(args).await?,
     }
     Ok(())
 }
