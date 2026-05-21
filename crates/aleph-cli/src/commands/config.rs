@@ -59,20 +59,25 @@ fn handle_network_add(store: &ConfigStore, args: NetworkAddArgs, json: bool) -> 
         // a complete ethereum block even if the user only overrode one field.
         store.update_network_ethereum(&args.name, &patch)?;
     }
-    let ethereum = store.get_network(&args.name)?.ethereum;
+    if let Some(url) = args.scheduler_url.as_deref() {
+        store.set_network_scheduler_url(&args.name, Some(url))?;
+    }
+    let entry = store.get_network(&args.name)?;
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "name": args.name,
-                "ethereum": ethereum,
+                "ethereum": entry.ethereum,
+                "scheduler_url": entry.scheduler_url,
             }))?
         );
     } else {
         eprintln!("Network '{}' added.", args.name);
-        if let Some(eth) = &ethereum {
+        if let Some(eth) = &entry.ethereum {
             render_ethereum_block_human(eth);
         }
+        render_scheduler_url_human(entry.scheduler_url.as_deref());
     }
     Ok(())
 }
@@ -85,27 +90,36 @@ fn handle_network_set(
 ) -> Result<()> {
     let name = resolve_target_network(store, args.network.as_deref(), cli_network)?;
     let patch = args.ethereum.to_patch();
-    if patch.is_empty() {
+    if patch.is_empty() && args.scheduler_url.is_none() {
         return Err(anyhow::anyhow!(
-            "nothing to update — pass at least one of --rpc-url, --credit-contract, --aleph-token, --usdc-token, --price-source, --explorer-tx-base"
+            "nothing to update — pass at least one of --scheduler-url, --rpc-url, --credit-contract, --aleph-token, --usdc-token, --price-source, --explorer-tx-base"
         ));
     }
-    store.update_network_ethereum(&name, &patch)?;
-    let ethereum = store
-        .get_network(&name)?
-        .ethereum
-        .expect("update_network_ethereum always leaves Some");
+    if !patch.is_empty() {
+        store.update_network_ethereum(&name, &patch)?;
+    }
+    if let Some(raw) = args.scheduler_url.as_deref() {
+        // Empty string is the documented way to clear and fall back to the
+        // builtin default.
+        let value = if raw.is_empty() { None } else { Some(raw) };
+        store.set_network_scheduler_url(&name, value)?;
+    }
+    let entry = store.get_network(&name)?;
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "network": name,
-                "ethereum": ethereum,
+                "ethereum": entry.ethereum,
+                "scheduler_url": entry.scheduler_url,
             }))?
         );
     } else {
         eprintln!("Network '{name}' updated.");
-        render_ethereum_block_human(&ethereum);
+        if let Some(eth) = &entry.ethereum {
+            render_ethereum_block_human(eth);
+        }
+        render_scheduler_url_human(entry.scheduler_url.as_deref());
     }
     Ok(())
 }
@@ -126,6 +140,16 @@ fn resolve_target_network(
     // Validate existence early so errors are consistent with other commands.
     store.get_network(&name)?;
     Ok(name)
+}
+
+fn render_scheduler_url_human(configured: Option<&str>) {
+    match configured {
+        Some(url) => eprintln!("Scheduler:   {url}"),
+        None => eprintln!(
+            "Scheduler:   {} (default)",
+            crate::config::store::BUILTIN_SCHEDULER_URL
+        ),
+    }
 }
 
 fn render_ethereum_block_human(eth: &EthereumConfig) {
@@ -227,6 +251,7 @@ fn handle_network_show(
             "default_ccn": net.default_ccn,
             "ccns": net.ccns,
             "ethereum": net.ethereum,
+            "scheduler_url": net.scheduler_url,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -246,6 +271,7 @@ fn handle_network_show(
                 eprintln!("  {} {:<16} {}", marker, c.name, c.url);
             }
         }
+        render_scheduler_url_human(net.scheduler_url.as_deref());
         if let Some(eth) = &net.ethereum {
             render_ethereum_block_human(eth);
         }

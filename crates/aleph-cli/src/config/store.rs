@@ -219,6 +219,27 @@ impl ConfigStore {
         self.save_manifest(&manifest)
     }
 
+    /// Set or clear the scheduler URL for a network. `Some(url)` validates the
+    /// URL (http/https scheme required, matching CCN URLs) and writes it;
+    /// `None` removes the field so callers fall back to the builtin default.
+    pub fn set_network_scheduler_url(
+        &self,
+        network: &str,
+        url: Option<&str>,
+    ) -> Result<(), ConfigError> {
+        if let Some(u) = url {
+            Self::validate_url(u)?;
+        }
+        let mut manifest = self.load_manifest()?;
+        let net = manifest
+            .networks
+            .iter_mut()
+            .find(|n| n.name == network)
+            .ok_or_else(|| ConfigError::NetworkNotFound(network.to_string()))?;
+        net.scheduler_url = url.map(|s| s.to_string());
+        self.save_manifest(&manifest)
+    }
+
     pub fn get_network(&self, name: &str) -> Result<NetworkEntry, ConfigError> {
         self.load_manifest()?
             .networks
@@ -800,6 +821,59 @@ mod tests {
         };
         let err = store.update_network_ethereum("nope", &patch).unwrap_err();
         assert!(matches!(err, ConfigError::NetworkNotFound(_)));
+    }
+
+    #[test]
+    fn set_network_scheduler_url_sets_and_clears() {
+        let (_dir, store) = temp_store();
+        store.add_network("testnet").unwrap();
+        assert!(
+            store
+                .get_network("testnet")
+                .unwrap()
+                .scheduler_url
+                .is_none()
+        );
+
+        store
+            .set_network_scheduler_url("testnet", Some("https://scheduler.test"))
+            .unwrap();
+        assert_eq!(
+            store
+                .get_network("testnet")
+                .unwrap()
+                .scheduler_url
+                .as_deref(),
+            Some("https://scheduler.test")
+        );
+
+        store.set_network_scheduler_url("testnet", None).unwrap();
+        assert!(
+            store
+                .get_network("testnet")
+                .unwrap()
+                .scheduler_url
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn set_network_scheduler_url_unknown_network_errors() {
+        let (_dir, store) = temp_store();
+        let err = store
+            .set_network_scheduler_url("nope", Some("https://scheduler.test"))
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::NetworkNotFound(_)));
+    }
+
+    #[test]
+    fn set_network_scheduler_url_rejects_bad_scheme() {
+        let (_dir, store) = temp_store();
+        store.add_network("testnet").unwrap();
+        let err = store
+            .set_network_scheduler_url("testnet", Some("ftp://scheduler.test"))
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidUrl(_, _)));
     }
 
     #[test]

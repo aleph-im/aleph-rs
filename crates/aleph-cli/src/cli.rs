@@ -1926,6 +1926,11 @@ pub struct NetworkAddArgs {
     /// Name for this network.
     pub name: String,
 
+    /// Aleph VM scheduler base URL for this network. Falls back to the
+    /// builtin default (`https://scheduler.api.aleph.cloud`) when unset.
+    #[arg(long)]
+    pub scheduler_url: Option<String>,
+
     #[command(flatten)]
     pub ethereum: NetworkEthereumArgs,
 }
@@ -1957,6 +1962,11 @@ pub struct NetworkSetArgs {
     /// Name of the network to update (defaults to the current network).
     #[arg(long)]
     pub network: Option<String>,
+
+    /// Aleph VM scheduler base URL. Pass an empty string to clear and fall
+    /// back to the builtin default.
+    #[arg(long)]
+    pub scheduler_url: Option<String>,
 
     #[command(flatten)]
     pub ethereum: NetworkEthereumArgs,
