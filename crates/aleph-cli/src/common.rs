@@ -769,6 +769,34 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_url_resolves_to_seeded_default() {
+        // Mirrors the fresh-config path: `ConfigStore::open()` calls
+        // `ensure_builtin()`, which seeds mainnet via `add_network`. That
+        // helper populates `scheduler_url` with `BUILTIN_SCHEDULER_URL`, so
+        // `aleph instance list` against a brand-new config must succeed
+        // without the user ever running `aleph config network` commands.
+        let (_dir, store) = store_with_fixture();
+        let url = resolve_scheduler_url_with_store(&store, None).unwrap();
+        assert_eq!(
+            url.as_str(),
+            crate::config::store::BUILTIN_SCHEDULER_URL
+                .trim_end_matches('/')
+                .to_string()
+                + "/"
+        );
+    }
+
+    #[test]
+    fn scheduler_url_honors_explicit_override_value() {
+        let (_dir, store) = store_with_fixture();
+        store
+            .set_network_scheduler_url("testnet", "https://scheduler.test/")
+            .unwrap();
+        let url = resolve_scheduler_url_with_store(&store, Some("testnet")).unwrap();
+        assert_eq!(url.as_str(), "https://scheduler.test/");
+    }
+
+    #[test]
     fn ccn_url_form_skips_network_check() {
         let (_dir, store) = store_with_fixture();
         // A value containing "://" is treated as a raw URL; no network or
