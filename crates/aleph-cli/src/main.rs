@@ -133,6 +133,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::instance::handle_instance_command(
                 &aleph_client,
                 &ccn_url,
+                cli.network.as_deref(),
                 json,
                 instance_command,
             )

@@ -244,10 +244,9 @@ async fn enrich_with_fallback(
     }
 }
 
-const SCHEDULER_BASE_URL: &str = "https://scheduler.api.aleph.cloud";
-
 async fn handle_instance_list(
     aleph_client: &AlephClient,
+    scheduler_url: Url,
     json: bool,
     args: InstanceListArgs,
 ) -> Result<()> {
@@ -268,9 +267,7 @@ async fn handle_instance_list(
 
     let mut rows = fetch_instance_rows(aleph_client, &address).await?;
 
-    let scheduler = SchedulerClient::new(
-        Url::parse(SCHEDULER_BASE_URL).expect("SCHEDULER_BASE_URL is a valid URL"),
-    );
+    let scheduler = SchedulerClient::new(scheduler_url);
     let mut scheduler_map = fetch_scheduler_map(&scheduler, &address).await;
     enrich_with_fallback(&scheduler, &rows, &mut scheduler_map).await;
     merge_scheduler_into_rows(&mut rows, &scheduler_map);
@@ -384,6 +381,7 @@ fn render_rows(rows: &[InstanceRow], json: bool) -> Result<()> {
 pub async fn handle_instance_command(
     aleph_client: &AlephClient,
     ccn_url: &Url,
+    network_override: Option<&str>,
     json: bool,
     command: InstanceCommand,
 ) -> Result<()> {
@@ -396,13 +394,18 @@ pub async fn handle_instance_command(
             handle_instance_price(aleph_client, json, args).await?;
         }
         InstanceCommand::List(args) => {
-            handle_instance_list(aleph_client, json, args).await?;
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            handle_instance_list(aleph_client, scheduler_url, json, args).await?;
         }
         InstanceCommand::Start(args) => crn::handle_start(json, args).await?,
         InstanceCommand::Stop(args) => crn::handle_operation(json, args, "stop").await?,
         InstanceCommand::Reboot(args) => crn::handle_operation(json, args, "reboot").await?,
         InstanceCommand::Erase(args) => crn::handle_operation(json, args, "erase").await?,
         InstanceCommand::Logs(args) => crn::handle_logs(json, args).await?,
+        InstanceCommand::Ssh(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            super::instance_ssh::handle_ssh(scheduler_url, args).await?;
+        }
     }
     Ok(())
 }

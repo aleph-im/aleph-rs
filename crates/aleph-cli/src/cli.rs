@@ -1510,6 +1510,23 @@ Examples:
     Price(InstancePriceArgs),
     /// Reboot a VM instance
     Reboot(CrnArgs),
+    /// SSH into a dispatched VM instance
+    #[command(long_about = "\
+Open an SSH session to a dispatched VM instance.
+
+The instance must already be dispatched: the scheduler is queried to find
+which CRN owns it, then the CRN's `/about/executions/list` endpoint is
+consulted to discover the VM's IPv6 address. SSH is then exec'd with that
+target.
+
+Pass `--crn-url` to skip scheduler discovery. Extra arguments after `--`
+are forwarded verbatim to `ssh` (e.g. to run a remote command).
+
+Examples:
+  aleph instance ssh <vm-hash>
+  aleph instance ssh <vm-hash> --user ubuntu --identity ~/.ssh/id_ed25519
+  aleph instance ssh <vm-hash> -- uptime")]
+    Ssh(InstanceSshArgs),
     /// Start (allocate) a VM instance on the CRN
     Start(CrnStartArgs),
     /// Stop a running VM instance
@@ -1755,6 +1772,35 @@ pub struct CrnStartArgs {
     pub signing: SigningArgs,
 }
 
+#[derive(Args)]
+pub struct InstanceSshArgs {
+    /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
+    /// shown by `aleph instance list`); the scheduler matches it server-side.
+    pub vm_id: String,
+
+    /// CRN endpoint URL. If omitted, the dispatched CRN is discovered via
+    /// the scheduler and the public CRN list.
+    #[arg(long)]
+    pub crn_url: Option<String>,
+
+    /// SSH user to connect as.
+    #[arg(long, default_value = "root")]
+    pub user: String,
+
+    /// SSH port.
+    #[arg(long, default_value_t = 22)]
+    pub port: u16,
+
+    /// Path to an SSH private key (forwarded to `ssh -i`).
+    #[arg(long)]
+    pub identity: Option<std::path::PathBuf>,
+
+    /// Extra arguments forwarded verbatim to `ssh` (after the host).
+    /// Use a leading `--` to separate them from aleph-cli flags.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub ssh_args: Vec<String>,
+}
+
 #[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Manage named CCN endpoints inside the current network
@@ -1836,7 +1882,8 @@ pub struct CcnRemoveArgs {
 
 #[derive(Subcommand)]
 pub enum NetworkCommand {
-    /// Register a new (empty) network, optionally with Ethereum settlement config
+    /// Register a new (empty) network, optionally with a scheduler URL and
+    /// Ethereum settlement config
     Add(NetworkAddArgs),
     /// List all registered networks
     List,
@@ -1846,7 +1893,7 @@ pub enum NetworkCommand {
     Show(NetworkShowArgs),
     /// Set the default (current) network
     Use(NetworkUseArgs),
-    /// Update a network's Ethereum settlement config in place
+    /// Update a network's scheduler URL or Ethereum settlement config in place
     Set(NetworkSetArgs),
 }
 
@@ -1880,6 +1927,11 @@ pub struct NetworkAddArgs {
     /// Name for this network.
     pub name: String,
 
+    /// Aleph VM scheduler base URL. Defaults to the mainnet scheduler when
+    /// not set explicitly; override later with `aleph config network set`.
+    #[arg(long)]
+    pub scheduler_url: Option<String>,
+
     #[command(flatten)]
     pub ethereum: NetworkEthereumArgs,
 }
@@ -1911,6 +1963,10 @@ pub struct NetworkSetArgs {
     /// Name of the network to update (defaults to the current network).
     #[arg(long)]
     pub network: Option<String>,
+
+    /// Aleph VM scheduler base URL.
+    #[arg(long)]
+    pub scheduler_url: Option<String>,
 
     #[command(flatten)]
     pub ethereum: NetworkEthereumArgs,

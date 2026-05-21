@@ -485,6 +485,22 @@ pub fn resolve_network(
     resolve_network_with_store(&store, network_override)
 }
 
+/// Resolve the Aleph VM scheduler base URL for a network.
+pub fn resolve_scheduler_url_with_store(
+    store: &ConfigStore,
+    network_override: Option<&str>,
+) -> Result<Url> {
+    let net = resolve_network_with_store(store, network_override)?;
+    Url::parse(&net.scheduler_url)
+        .map_err(|e| anyhow!("invalid scheduler_url for network '{}': {e}", net.name))
+}
+
+/// Resolve the scheduler URL using the user-global config store.
+pub fn resolve_scheduler_url(network_override: Option<&str>) -> Result<Url> {
+    let store = ConfigStore::open().map_err(|e| anyhow!("failed to open config store: {e}"))?;
+    resolve_scheduler_url_with_store(&store, network_override)
+}
+
 /// Resolve a signing account from CLI args.
 ///
 /// Resolution order:
@@ -750,6 +766,34 @@ mod tests {
             .add_ccn("testnet", "local", "http://localhost:4024")
             .unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn scheduler_url_resolves_to_seeded_default() {
+        // Mirrors the fresh-config path: `ConfigStore::open()` calls
+        // `ensure_builtin()`, which seeds mainnet via `add_network`. That
+        // helper populates `scheduler_url` with `BUILTIN_SCHEDULER_URL`, so
+        // `aleph instance list` against a brand-new config must succeed
+        // without the user ever running `aleph config network` commands.
+        let (_dir, store) = store_with_fixture();
+        let url = resolve_scheduler_url_with_store(&store, None).unwrap();
+        assert_eq!(
+            url.as_str(),
+            crate::config::store::BUILTIN_SCHEDULER_URL
+                .trim_end_matches('/')
+                .to_string()
+                + "/"
+        );
+    }
+
+    #[test]
+    fn scheduler_url_honors_explicit_override_value() {
+        let (_dir, store) = store_with_fixture();
+        store
+            .set_network_scheduler_url("testnet", "https://scheduler.test/")
+            .unwrap();
+        let url = resolve_scheduler_url_with_store(&store, Some("testnet")).unwrap();
+        assert_eq!(url.as_str(), "https://scheduler.test/");
     }
 
     #[test]
