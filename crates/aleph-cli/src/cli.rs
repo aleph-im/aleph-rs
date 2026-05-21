@@ -1294,8 +1294,23 @@ pub struct AliasRemoveArgs {
 
 #[derive(Subcommand)]
 pub enum FileCommand {
+    /// Forget one or more STORE messages, releasing their file pins
+    #[command(long_about = "\
+Forget STORE messages by item hash, releasing the underlying file pins. \
+Thin wrapper around `aleph message forget` for STORE messages.
+
+Forget is irreversible. You can only forget messages your own address \
+owns (or that you have an authorization to forget on behalf of).
+
+Examples:
+  aleph file delete abc123...
+  aleph file delete abc123... def456... --reason \"superseded\"
+  aleph file delete abc123... -y")]
+    Delete(FileDeleteArgs),
     /// Download a file by hash, message hash, or ref
     Download(FileDownloadArgs),
+    /// List the files stored by an address
+    List(FileListArgs),
     /// Pin an existing file by creating a STORE message for a known item hash
     Pin(FilePinArgs),
     /// Upload a file and create a STORE message
@@ -1432,6 +1447,53 @@ pub struct FileDownloadArgs {
     /// Write file contents to stdout instead of saving to a file.
     #[arg(long)]
     pub stdout: bool,
+}
+
+#[derive(Args)]
+pub struct FileListArgs {
+    /// Address to query. Accepts a hex address (`0x…`), a local account
+    /// name, or an alias. Defaults to the current default account.
+    #[arg(long)]
+    pub address: Option<String>,
+
+    /// Maximum number of files to return per page. Pass `0` to remove the
+    /// limit (server-side).
+    #[arg(long, default_value = "25")]
+    pub count: u32,
+
+    /// 1-indexed page offset.
+    #[arg(long, default_value = "1")]
+    pub page: u32,
+
+    /// Sort order by creation time.
+    #[arg(long, value_enum, default_value = "desc")]
+    pub sort_order: SortOrderCli,
+}
+
+#[derive(Args)]
+pub struct FileDeleteArgs {
+    /// Item hashes of the STORE messages to forget. Each hash tombstones a
+    /// single message and releases its file pin.
+    pub hashes: Vec<ItemHash>,
+
+    /// Reason for forgetting.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    /// Skip the confirmation prompt and submit immediately.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
 
 #[derive(Subcommand)]
