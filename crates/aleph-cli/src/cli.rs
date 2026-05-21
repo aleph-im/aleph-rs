@@ -1882,7 +1882,8 @@ pub struct CcnRemoveArgs {
 
 #[derive(Subcommand)]
 pub enum NetworkCommand {
-    /// Register a new (empty) network, optionally with Ethereum settlement config
+    /// Register a new (empty) network, optionally with a scheduler URL and
+    /// Ethereum settlement config
     Add(NetworkAddArgs),
     /// List all registered networks
     List,
@@ -1892,7 +1893,7 @@ pub enum NetworkCommand {
     Show(NetworkShowArgs),
     /// Set the default (current) network
     Use(NetworkUseArgs),
-    /// Update a network's Ethereum settlement config in place
+    /// Update a network's scheduler URL or Ethereum settlement config in place
     Set(NetworkSetArgs),
 }
 

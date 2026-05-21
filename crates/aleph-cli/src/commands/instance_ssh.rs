@@ -12,6 +12,11 @@ use url::Url;
 use crate::cli::InstanceSshArgs;
 
 pub async fn handle_ssh(scheduler_url: Url, args: InstanceSshArgs) -> Result<()> {
+    // One client for every HTTP call in this command. The CRN, scheduler, and
+    // crns-list endpoints are on different hosts so the connection pool isn't
+    // shared, but we still avoid re-initializing TLS state for each request.
+    let http = reqwest::Client::new();
+
     let (vm_id, crn_url) = match (
         args.crn_url.as_deref(),
         ItemHash::try_from(args.vm_id.as_str()),
@@ -28,12 +33,11 @@ pub async fn handle_ssh(scheduler_url: Url, args: InstanceSshArgs) -> Result<()>
         }
         (None, _) => {
             let (hash, entry) = resolve_vm(&scheduler_url, &args.vm_id).await?;
-            let url = crn_url_from_entry(&hash, &entry).await?;
+            let url = crn_url_from_entry(&http, &hash, &entry).await?;
             (hash, url)
         }
     };
 
-    let http = reqwest::Client::new();
     let executions = fetch_executions(&http, &crn_url)
         .await
         .with_context(|| format!("fetching executions from CRN {crn_url}"))?;
@@ -99,7 +103,11 @@ fn pick_unique_match(input: &str, mut matches: Vec<VmEntry>) -> Result<(ItemHash
 
 /// Translate a `VmEntry` to the URL of the CRN it's allocated to. Refuses any
 /// status other than `dispatched` / `duplicated`.
-async fn crn_url_from_entry(vm_id: &ItemHash, entry: &VmEntry) -> Result<Url> {
+async fn crn_url_from_entry(
+    http: &reqwest::Client,
+    vm_id: &ItemHash,
+    entry: &VmEntry,
+) -> Result<Url> {
     // `duplicated` means the VM is allocated on multiple CRNs because of a
     // re-scheduling race; the `allocated_node` still points to the canonical
     // placement, so we follow it.
@@ -116,8 +124,7 @@ async fn crn_url_from_entry(vm_id: &ItemHash, entry: &VmEntry) -> Result<Url> {
     };
 
     let list_url = Url::parse(DEFAULT_CRN_LIST_URL).expect("DEFAULT_CRN_LIST_URL is a valid URL");
-    let http = reqwest::Client::new();
-    let crns = fetch_crns_list(&http, &list_url, true)
+    let crns = fetch_crns_list(http, &list_url, true)
         .await
         .context("fetching the public CRN list")?;
     let crn = crns
