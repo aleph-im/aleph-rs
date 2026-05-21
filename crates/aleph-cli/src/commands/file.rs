@@ -469,9 +469,14 @@ async fn resolve_file_to_store_messages(
     owner: &Address,
     file_hashes: &[ItemHash],
 ) -> Result<Vec<ItemHash>> {
+    // Filter by `owners` (content owner), not `addresses` (sender): for
+    // files uploaded with `--on-behalf-of`, the sender is the user's signing
+    // account while the owner is the on-behalf-of address. The network
+    // checks forget ownership against the content owner too, so this is
+    // the right field for the lookup.
     let filter = MessageFilter {
         message_type: Some(MessageType::Store),
-        addresses: Some(vec![owner.clone()]),
+        owners: Some(vec![owner.clone()]),
         content_hashes: Some(file_hashes.to_vec()),
         ..Default::default()
     };
@@ -505,7 +510,7 @@ async fn resolve_file_to_store_messages(
     }
     if !missing.is_empty() {
         bail!(
-            "no STORE message owned by {owner} found for file hash(es): {}\n\
+            "no STORE message with owner {owner} found for file hash(es): {}\n\
              Hint: `aleph file list` shows the pins for an address, and \
              `aleph message forget` accepts STORE message hashes directly.",
             missing.join(", "),
