@@ -60,7 +60,7 @@ fn handle_network_add(store: &ConfigStore, args: NetworkAddArgs, json: bool) -> 
         store.update_network_ethereum(&args.name, &patch)?;
     }
     if let Some(url) = args.scheduler_url.as_deref() {
-        store.set_network_scheduler_url(&args.name, Some(url))?;
+        store.set_network_scheduler_url(&args.name, url)?;
     }
     let entry = store.get_network(&args.name)?;
     if json {
@@ -77,7 +77,7 @@ fn handle_network_add(store: &ConfigStore, args: NetworkAddArgs, json: bool) -> 
         if let Some(eth) = &entry.ethereum {
             render_ethereum_block_human(eth);
         }
-        render_scheduler_url_human(entry.scheduler_url.as_deref());
+        render_scheduler_url_human(&entry.scheduler_url);
     }
     Ok(())
 }
@@ -98,11 +98,8 @@ fn handle_network_set(
     if !patch.is_empty() {
         store.update_network_ethereum(&name, &patch)?;
     }
-    if let Some(raw) = args.scheduler_url.as_deref() {
-        // Empty string is the documented way to clear and fall back to the
-        // builtin default.
-        let value = if raw.is_empty() { None } else { Some(raw) };
-        store.set_network_scheduler_url(&name, value)?;
+    if let Some(url) = args.scheduler_url.as_deref() {
+        store.set_network_scheduler_url(&name, url)?;
     }
     let entry = store.get_network(&name)?;
     if json {
@@ -119,7 +116,7 @@ fn handle_network_set(
         if let Some(eth) = &entry.ethereum {
             render_ethereum_block_human(eth);
         }
-        render_scheduler_url_human(entry.scheduler_url.as_deref());
+        render_scheduler_url_human(&entry.scheduler_url);
     }
     Ok(())
 }
@@ -142,14 +139,8 @@ fn resolve_target_network(
     Ok(name)
 }
 
-fn render_scheduler_url_human(configured: Option<&str>) {
-    match configured {
-        Some(url) => eprintln!("Scheduler:   {url}"),
-        None => eprintln!(
-            "Scheduler:   {} (default)",
-            crate::config::store::BUILTIN_SCHEDULER_URL
-        ),
-    }
+fn render_scheduler_url_human(url: &str) {
+    eprintln!("Scheduler:   {url}");
 }
 
 fn render_ethereum_block_human(eth: &EthereumConfig) {
@@ -271,7 +262,7 @@ fn handle_network_show(
                 eprintln!("  {} {:<16} {}", marker, c.name, c.url);
             }
         }
-        render_scheduler_url_human(net.scheduler_url.as_deref());
+        render_scheduler_url_human(&net.scheduler_url);
         if let Some(eth) = &net.ethereum {
             render_ethereum_block_human(eth);
         }

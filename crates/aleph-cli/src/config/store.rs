@@ -25,10 +25,10 @@ pub struct NetworkEntry {
     pub ccns: Vec<CcnEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ethereum: Option<EthereumConfig>,
-    /// Aleph VM scheduler base URL for this network. When `None`, callers
-    /// fall back to `BUILTIN_SCHEDULER_URL`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scheduler_url: Option<String>,
+    /// Aleph VM scheduler base URL for this network. Always written to disk;
+    /// `add_network` seeds it from `BUILTIN_SCHEDULER_URL` when the caller
+    /// doesn't override it via `set_network_scheduler_url`.
+    pub scheduler_url: String,
 }
 
 /// Partial update for a network's Ethereum config. Any `Some` field overwrites
@@ -191,7 +191,7 @@ impl ConfigStore {
             default_ccn: None,
             ccns: Vec::new(),
             ethereum: None,
-            scheduler_url: None,
+            scheduler_url: BUILTIN_SCHEDULER_URL.to_string(),
         });
         if manifest.default_network.is_none() {
             manifest.default_network = Some(name.to_string());
@@ -219,24 +219,17 @@ impl ConfigStore {
         self.save_manifest(&manifest)
     }
 
-    /// Set or clear the scheduler URL for a network. `Some(url)` validates the
-    /// URL (http/https scheme required, matching CCN URLs) and writes it;
-    /// `None` removes the field so callers fall back to the builtin default.
-    pub fn set_network_scheduler_url(
-        &self,
-        network: &str,
-        url: Option<&str>,
-    ) -> Result<(), ConfigError> {
-        if let Some(u) = url {
-            Self::validate_url(u)?;
-        }
+    /// Set the scheduler URL for a network. Validates the URL (http/https
+    /// scheme required, matching CCN URLs) and writes it verbatim.
+    pub fn set_network_scheduler_url(&self, network: &str, url: &str) -> Result<(), ConfigError> {
+        Self::validate_url(url)?;
         let mut manifest = self.load_manifest()?;
         let net = manifest
             .networks
             .iter_mut()
             .find(|n| n.name == network)
             .ok_or_else(|| ConfigError::NetworkNotFound(network.to_string()))?;
-        net.scheduler_url = url.map(|s| s.to_string());
+        net.scheduler_url = url.to_string();
         self.save_manifest(&manifest)
     }
 
@@ -375,7 +368,7 @@ impl ConfigStore {
                 url: BUILTIN_CCN_URL.to_string(),
             }],
             ethereum: Some(EthereumConfig::mainnet_defaults()),
-            scheduler_url: Some(BUILTIN_SCHEDULER_URL.to_string()),
+            scheduler_url: BUILTIN_SCHEDULER_URL.to_string(),
         });
         if manifest.default_network.is_none() {
             manifest.default_network = Some(BUILTIN_NETWORK_NAME.to_string());
@@ -407,7 +400,7 @@ mod tests {
                     url: "https://api.aleph.im".to_string(),
                 }],
                 ethereum: None,
-                scheduler_url: None,
+                scheduler_url: BUILTIN_SCHEDULER_URL.to_string(),
             }],
         };
         let serialized = toml::to_string_pretty(&manifest).unwrap();
@@ -421,6 +414,10 @@ mod tests {
         assert_eq!(deserialized.networks[0].name, "mainnet");
         assert_eq!(deserialized.networks[0].ccns[0].url, "https://api.aleph.im");
         assert!(deserialized.networks[0].ethereum.is_none());
+        assert_eq!(
+            deserialized.networks[0].scheduler_url,
+            BUILTIN_SCHEDULER_URL
+        );
     }
 
     #[test]
@@ -435,7 +432,7 @@ mod tests {
                     url: "https://api.aleph.im".to_string(),
                 }],
                 ethereum: Some(EthereumConfig::mainnet_defaults()),
-                scheduler_url: None,
+                scheduler_url: BUILTIN_SCHEDULER_URL.to_string(),
             }],
         };
         let serialized = toml::to_string_pretty(&manifest).unwrap();
@@ -824,36 +821,25 @@ mod tests {
     }
 
     #[test]
-    fn set_network_scheduler_url_sets_and_clears() {
+    fn add_network_seeds_builtin_scheduler_url() {
         let (_dir, store) = temp_store();
         store.add_network("testnet").unwrap();
-        assert!(
-            store
-                .get_network("testnet")
-                .unwrap()
-                .scheduler_url
-                .is_none()
+        assert_eq!(
+            store.get_network("testnet").unwrap().scheduler_url,
+            BUILTIN_SCHEDULER_URL
         );
+    }
 
+    #[test]
+    fn set_network_scheduler_url_overrides_default() {
+        let (_dir, store) = temp_store();
+        store.add_network("testnet").unwrap();
         store
-            .set_network_scheduler_url("testnet", Some("https://scheduler.test"))
+            .set_network_scheduler_url("testnet", "https://scheduler.test")
             .unwrap();
         assert_eq!(
-            store
-                .get_network("testnet")
-                .unwrap()
-                .scheduler_url
-                .as_deref(),
-            Some("https://scheduler.test")
-        );
-
-        store.set_network_scheduler_url("testnet", None).unwrap();
-        assert!(
-            store
-                .get_network("testnet")
-                .unwrap()
-                .scheduler_url
-                .is_none()
+            store.get_network("testnet").unwrap().scheduler_url,
+            "https://scheduler.test"
         );
     }
 
@@ -861,7 +847,7 @@ mod tests {
     fn set_network_scheduler_url_unknown_network_errors() {
         let (_dir, store) = temp_store();
         let err = store
-            .set_network_scheduler_url("nope", Some("https://scheduler.test"))
+            .set_network_scheduler_url("nope", "https://scheduler.test")
             .unwrap_err();
         assert!(matches!(err, ConfigError::NetworkNotFound(_)));
     }
@@ -871,7 +857,7 @@ mod tests {
         let (_dir, store) = temp_store();
         store.add_network("testnet").unwrap();
         let err = store
-            .set_network_scheduler_url("testnet", Some("ftp://scheduler.test"))
+            .set_network_scheduler_url("testnet", "ftp://scheduler.test")
             .unwrap_err();
         assert!(matches!(err, ConfigError::InvalidUrl(_, _)));
     }
