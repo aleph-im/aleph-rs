@@ -1307,19 +1307,18 @@ pub trait AlephAccountClient {
         address: &Address,
     ) -> impl Future<Output = Result<Bytes, MessageError>> + Send;
 
-    /// Returns a paginated list of the files stored by the address, along with
-    /// the per-account totals.
+    /// Returns a cursor-walking stream over the files stored by `address`.
     ///
-    /// Pages are 1-indexed to match the server. `pagination` caps the number
-    /// of files per page (0 = unlimited, matching pyaleph). `sort_order` is
-    /// `-1` for newest first (server default) or `1` for oldest first.
-    fn get_account_files(
+    /// `pagination` caps the items per round-trip (defaults to the SDK's
+    /// cursor default, capped at the server's max). `sort_order` is `-1`
+    /// for newest first (server default) or `1` for oldest first; `None`
+    /// uses the server default.
+    fn get_account_files_iterator(
         &self,
         address: &Address,
-        pagination: u32,
-        page: u32,
-        sort_order: i8,
-    ) -> impl Future<Output = Result<AccountFilesResponse, MessageError>> + Send;
+        pagination: Option<u32>,
+        sort_order: Option<i8>,
+    ) -> impl Stream<Item = Result<AccountFile, MessageError>> + Send + '_;
 
     /// Gets the price of a VM in Aleph tokens using the holder tier, i.e. the minimum amount
     /// of Aleph tokens that the user needs to hold in his account.
@@ -2660,26 +2659,41 @@ pub struct CreditHistoryResponse {
 }
 
 /// One row of `/api/v0/addresses/{address}/files`.
+///
+/// `created` is a Unix-epoch timestamp (the cursor-mode shape used by the
+/// iterator). The non-cursor mode of the endpoint serializes `created` as
+/// an ISO string instead, but the SDK only ever reads cursor mode.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AccountFile {
     pub file_hash: String,
     pub size: Bytes,
-    /// Storage backend: `"storage"` (Aleph native) or `"ipfs"`.
+    /// Server-side storage backend tag (e.g. `"file"`, `"dir"`).
     #[serde(rename = "type")]
     pub storage_engine: String,
-    pub created: DateTime<Utc>,
+    pub created: aleph_types::timestamp::Timestamp,
     pub item_hash: ItemHash,
 }
 
-/// Paginated response from `/api/v0/addresses/{address}/files`.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct AccountFilesResponse {
-    pub address: String,
-    pub files: Vec<AccountFile>,
-    pub total_size: Bytes,
-    pub pagination_page: u32,
-    pub pagination_total: u64,
-    pub pagination_per_page: u32,
+/// One cursor-mode page of `/api/v0/addresses/{address}/files`. Private:
+/// callers either walk the iterator or hit `get_total_storage_size` for the
+/// address-wide total.
+///
+/// `total_size` is read as `f64` because pyaleph emits it as a float in
+/// cursor mode (e.g. `78051738.0`); the wrapper rounds to the nearest byte.
+#[derive(Debug, Deserialize)]
+struct AccountFilesCursorResponse {
+    #[serde(default)]
+    files: Vec<AccountFile>,
+    #[serde(default)]
+    total_size: f64,
+    #[serde(default)]
+    next_cursor: Option<String>,
+}
+
+impl AccountFilesCursorResponse {
+    fn total_size_bytes(&self) -> Bytes {
+        Bytes::from(self.total_size.round().max(0.0) as u64)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2710,72 +2724,40 @@ impl AlephAccountClient for AlephClient {
     }
 
     async fn get_total_storage_size(&self, address: &Address) -> Result<Bytes, MessageError> {
-        let url = self
-            .ccn_url
-            .join(&format!("/api/v0/addresses/{}/files", address))
-            .unwrap_or_else(|e| panic!("invalid url: {e}"));
-
-        let response = self.http_client.get(url).send().await?;
-        // The endpoint returns a 404 if the address has no files.
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(Bytes::from(0));
-        }
-        // Otherwise, process errors then deserialize the response.
-        let response = response
-            .error_for_status()
-            .map_err(reqwest_middleware::Error::from)?;
-        let get_balance_response: AccountFilesResponse = response
-            .json()
-            .await
-            .map_err(reqwest_middleware::Error::from)?;
-
-        Ok(get_balance_response.total_size)
+        // Cursor mode with the smallest possible page still carries the
+        // address-wide `total_size`. Costs us one cheap row over the wire.
+        let page = self
+            .get_account_files_cursor(address, None, 1, None)
+            .await?;
+        Ok(page.total_size_bytes())
     }
 
-    async fn get_account_files(
+    fn get_account_files_iterator(
         &self,
         address: &Address,
-        pagination: u32,
-        page: u32,
-        sort_order: i8,
-    ) -> Result<AccountFilesResponse, MessageError> {
-        let url = self
-            .ccn_url
-            .join(&format!("/api/v0/addresses/{}/files", address))
-            .unwrap_or_else(|e| panic!("invalid url: {e}"));
-
-        let response = self
-            .http_client
-            .get(url)
-            .query(&[
-                ("pagination", pagination.to_string()),
-                ("page", page.to_string()),
-                ("sort_order", sort_order.to_string()),
-            ])
-            .send()
-            .await?;
-
-        // pyaleph returns 404 when the address has no files. Surface an empty
-        // page so callers don't have to special-case the status code.
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(AccountFilesResponse {
-                address: address.to_string(),
-                files: Vec::new(),
-                total_size: Bytes::from(0),
-                pagination_page: page,
-                pagination_total: 0,
-                pagination_per_page: pagination,
-            });
+        pagination: Option<u32>,
+        sort_order: Option<i8>,
+    ) -> impl Stream<Item = Result<AccountFile, MessageError>> + Send + '_ {
+        let pagination = pagination
+            .unwrap_or(CURSOR_DEFAULT_PAGINATION)
+            .min(CURSOR_MAX_PAGINATION);
+        let address = address.clone();
+        async_stream::try_stream! {
+            let mut cursor: Option<String> = None;
+            loop {
+                let response = self
+                    .get_account_files_cursor(&address, cursor.as_deref(), pagination, sort_order)
+                    .await?;
+                let next = response.next_cursor.clone();
+                for file in response.files {
+                    yield file;
+                }
+                cursor = match next {
+                    Some(c) => Some(c),
+                    None => break,
+                };
+            }
         }
-
-        let response = response
-            .error_for_status()
-            .map_err(reqwest_middleware::Error::from)?;
-        let files: AccountFilesResponse = response
-            .json()
-            .await
-            .map_err(reqwest_middleware::Error::from)?;
-        Ok(files)
     }
 
     async fn get_vm_price(&self, item_hash: &ItemHash) -> Result<f64, MessageError> {
@@ -2841,6 +2823,53 @@ impl AlephAccountClient for AlephClient {
             .await
             .map_err(reqwest_middleware::Error::from)?;
         Ok(history)
+    }
+}
+
+impl AlephClient {
+    /// Fetch one cursor-mode page of `/api/v0/addresses/{address}/files`.
+    ///
+    /// Passing any value for `cursor` (including an empty string on the
+    /// first request) activates the server's cursor mode. Returns an empty
+    /// page when the address has no files (the endpoint responds with 404
+    /// in that case).
+    async fn get_account_files_cursor(
+        &self,
+        address: &Address,
+        cursor: Option<&str>,
+        pagination: u32,
+        sort_order: Option<i8>,
+    ) -> Result<AccountFilesCursorResponse, MessageError> {
+        let url = self
+            .ccn_url
+            .join(&format!("/api/v0/addresses/{}/files", address))
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let mut req = self
+            .http_client
+            .get(url)
+            .query(&[("cursor", cursor.unwrap_or(""))])
+            .query(&[("pagination", &pagination.to_string())]);
+        if let Some(order) = sort_order {
+            req = req.query(&[("sort_order", &order.to_string())]);
+        }
+
+        let response = req.send().await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(AccountFilesCursorResponse {
+                files: Vec::new(),
+                total_size: 0.0,
+                next_cursor: None,
+            });
+        }
+        let response = response
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+        let page: AccountFilesCursorResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(page)
     }
 }
 
@@ -4426,70 +4455,96 @@ mod credit_history_serde_tests {
 #[cfg(test)]
 mod account_files_tests {
     use super::*;
+    use futures_util::TryStreamExt;
     use serde_json::json;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
-    fn account_files_response_deserializes() {
+    fn account_file_deserializes_cursor_mode() {
+        // Cursor-mode rows ship `created` as a unix-epoch float.
         let body = json!({
-            "address": "0xabc",
-            "files": [{
-                "file_hash": "Qmabc",
-                "size": 1234,
-                "type": "file",
-                "created": "2025-04-12T09:21:03.569706Z",
-                "item_hash": "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
-            }],
-            "total_size": 1234,
-            "pagination_page": 1,
-            "pagination_total": 1,
-            "pagination_per_page": 25,
+            "file_hash": "Qmabc",
+            "size": 1234,
+            "type": "file",
+            "created": 1779373210.7274384,
+            "item_hash": "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
         });
-        let r: AccountFilesResponse = serde_json::from_value(body).unwrap();
-        assert_eq!(r.files.len(), 1);
-        assert_eq!(r.files[0].file_hash, "Qmabc");
-        assert_eq!(r.files[0].storage_engine, "file");
-        assert_eq!(r.pagination_total, 1);
+        let f: AccountFile = serde_json::from_value(body).unwrap();
+        assert_eq!(f.file_hash, "Qmabc");
+        assert_eq!(f.size.count(), 1234);
+        assert_eq!(f.storage_engine, "file");
+        assert!((f.created.as_f64() - 1779373210.7274384).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cursor_response_accepts_float_total_size() {
+        // pyaleph emits total_size as a float in cursor mode.
+        let body = json!({
+            "files": [],
+            "total_size": 78051738.0,
+            "next_cursor": null,
+        });
+        let r: AccountFilesCursorResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(r.total_size_bytes().count(), 78_051_738);
     }
 
     #[tokio::test]
-    async fn get_account_files_passes_query_params_and_parses_body() {
+    async fn iterator_walks_cursor_until_exhausted() {
         let server = MockServer::start().await;
         let address = "0x0B8ee617A08AC051a8A3b430ACf7233a462A0187";
 
+        // First page: 2 rows + next_cursor=ABC
         Mock::given(method("GET"))
             .and(path(format!("/api/v0/addresses/{address}/files")))
-            .and(query_param("pagination", "10"))
-            .and(query_param("page", "2"))
-            .and(query_param("sort_order", "-1"))
+            .and(query_param("cursor", ""))
+            .and(query_param("pagination", "2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "address": address,
-                "files": [{
-                    "file_hash": "Qmabc",
-                    "size": 4096,
-                    "type": "file",
-                    "created": "2025-04-12T09:21:03.569706Z",
-                    "item_hash": "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
-                }],
-                "total_size": 4096,
-                "pagination_page": 2,
-                "pagination_total": 11,
-                "pagination_per_page": 10,
+                "files": [
+                    {"file_hash": "Qm1", "size": 100, "type": "file",
+                     "created": 1.0,
+                     "item_hash": "0000000000000000000000000000000000000000000000000000000000000001"},
+                    {"file_hash": "Qm2", "size": 200, "type": "file",
+                     "created": 2.0,
+                     "item_hash": "0000000000000000000000000000000000000000000000000000000000000002"},
+                ],
+                "total_size": 600.0,
+                "next_cursor": "ABC",
+            })))
+            .mount(&server)
+            .await;
+
+        // Second page: 1 row, no next_cursor.
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/addresses/{address}/files")))
+            .and(query_param("cursor", "ABC"))
+            .and(query_param("pagination", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "files": [
+                    {"file_hash": "Qm3", "size": 300, "type": "file",
+                     "created": 3.0,
+                     "item_hash": "0000000000000000000000000000000000000000000000000000000000000003"},
+                ],
+                "total_size": 600.0,
+                "next_cursor": null,
             })))
             .mount(&server)
             .await;
 
         let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
         let addr = Address::from(address.to_string());
-        let r = client.get_account_files(&addr, 10, 2, -1).await.unwrap();
-        assert_eq!(r.files.len(), 1);
-        assert_eq!(r.pagination_page, 2);
-        assert_eq!(r.pagination_total, 11);
+        let files: Vec<AccountFile> = client
+            .get_account_files_iterator(&addr, Some(2), None)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].file_hash, "Qm1");
+        assert_eq!(files[2].file_hash, "Qm3");
     }
 
     #[tokio::test]
-    async fn get_account_files_returns_empty_page_on_404() {
+    async fn iterator_returns_empty_stream_on_404() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(
@@ -4501,11 +4556,52 @@ mod account_files_tests {
 
         let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
         let addr = Address::from("0x0000000000000000000000000000000000000001".to_string());
-        let r = client.get_account_files(&addr, 25, 1, -1).await.unwrap();
-        assert!(r.files.is_empty());
-        assert_eq!(r.total_size.count(), 0);
-        assert_eq!(r.pagination_total, 0);
-        assert_eq!(r.pagination_page, 1);
-        assert_eq!(r.pagination_per_page, 25);
+        let files: Vec<AccountFile> = client
+            .get_account_files_iterator(&addr, Some(25), None)
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_total_storage_size_reads_float_total_via_cursor() {
+        let server = MockServer::start().await;
+        let address = "0x0B8ee617A08AC051a8A3b430ACf7233a462A0187";
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/addresses/{address}/files")))
+            .and(query_param("cursor", ""))
+            .and(query_param("pagination", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "files": [],
+                "total_size": 78_051_738.0,
+                "next_cursor": null,
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let addr = Address::from(address.to_string());
+        let total = client.get_total_storage_size(&addr).await.unwrap();
+        assert_eq!(total.count(), 78_051_738);
+    }
+
+    #[tokio::test]
+    async fn get_total_storage_size_returns_zero_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v0/addresses/0x0000000000000000000000000000000000000001/files",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let addr = Address::from("0x0000000000000000000000000000000000000001".to_string());
+        assert_eq!(
+            client.get_total_storage_size(&addr).await.unwrap().count(),
+            0
+        );
     }
 }
