@@ -1775,16 +1775,8 @@ pub struct CrnStartArgs {
 #[derive(Args)]
 pub struct InstanceSshArgs {
     /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
-    /// shown by `aleph instance list`); the scheduler is consulted to expand
-    /// it against the address's instances.
+    /// shown by `aleph instance list`); the scheduler matches it server-side.
     pub vm_id: String,
-
-    /// Address whose instances to search when `<VM_ID>` is a prefix.
-    /// Accepts a hex address (`0x…`) or a local account/alias name.
-    /// Defaults to the current default account; ignored when a full hash
-    /// is given.
-    #[arg(long)]
-    pub address: Option<String>,
 
     /// CRN endpoint URL. If omitted, the dispatched CRN is discovered via
     /// the scheduler and the public CRN list.

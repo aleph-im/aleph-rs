@@ -112,6 +112,52 @@ impl SchedulerClient {
         Ok(all)
     }
 
+    /// Find every VM whose hash starts with `prefix`. The scheduler's
+    /// `/api/v1/vms?vm_hash=<prefix>` endpoint matches prefixes server-side,
+    /// so this is O(matches) on the wire regardless of how many VMs exist
+    /// (~9k as of writing). Paginates defensively for short prefixes.
+    pub async fn find_vms_by_hash_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<VmEntry>, SchedulerError> {
+        let url = self
+            .base_url
+            .join("/api/v1/vms")
+            .map_err(|e| SchedulerError::InvalidResponse(format!("URL join error: {e}")))?;
+
+        let mut all = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let response = self
+                .http
+                .get(url.clone())
+                .query(&[
+                    ("vm_hash", prefix.to_string()),
+                    ("page_size", PAGE_SIZE.to_string()),
+                    ("page", page.to_string()),
+                ])
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(SchedulerError::Status { status, body });
+            }
+            let envelope: PageEnvelope = response
+                .json()
+                .await
+                .map_err(|e| SchedulerError::InvalidResponse(format!("decode failed: {e}")))?;
+            let items_returned = envelope.items.len();
+            let total = envelope.pagination.total_items;
+            all.extend(envelope.items);
+            if all.len() as u32 >= total || items_returned == 0 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all)
+    }
+
     /// Fetch one VM by hash. Returns `Ok(None)` on HTTP 404.
     pub async fn get_vm(&self, vm_hash: &ItemHash) -> Result<Option<VmEntry>, SchedulerError> {
         let url = self
@@ -309,6 +355,36 @@ mod tests {
         // second call would 404 and the JSON decode would fail. Receiving an
         // empty Vec here proves we broke out cleanly.
         let vms = client.list_vms_by_owner(&addr).await.unwrap();
+        assert!(vms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_vms_by_hash_prefix_returns_matches() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param("vm_hash", "4e7d"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_page(2, 1, 200, 2)))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let vms = client.find_vms_by_hash_prefix("4e7d").await.unwrap();
+        assert_eq!(vms.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn find_vms_by_hash_prefix_empty_on_no_match() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param("vm_hash", "deadbeef"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_page(0, 1, 200, 0)))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let vms = client.find_vms_by_hash_prefix("deadbeef").await.unwrap();
         assert!(vms.is_empty());
     }
 

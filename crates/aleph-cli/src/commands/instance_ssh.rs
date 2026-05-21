@@ -5,14 +5,11 @@ use std::process::Command;
 use aleph_sdk::crn::{ExecutionInfo, fetch_executions};
 use aleph_sdk::crns_list::{DEFAULT_CRN_LIST_URL, fetch_crns_list};
 use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
-use aleph_types::account::Account;
-use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
 use anyhow::{Context, Result, anyhow, bail};
 use url::Url;
 
 use crate::cli::InstanceSshArgs;
-use crate::common::{resolve_account, resolve_address};
 
 const SCHEDULER_BASE_URL: &str = "https://scheduler.api.aleph.cloud";
 
@@ -28,11 +25,11 @@ pub async fn handle_ssh(args: InstanceSshArgs) -> Result<()> {
         (Some(url), Err(_)) => {
             // Prefix requires the scheduler to expand, but --crn-url still wins
             // over the scheduler's allocation.
-            let (hash, _) = resolve_vm(&args.vm_id, args.address.as_deref()).await?;
+            let (hash, _) = resolve_vm(&args.vm_id).await?;
             (hash, Url::parse(url).context("invalid --crn-url")?)
         }
         (None, _) => {
-            let (hash, entry) = resolve_vm(&args.vm_id, args.address.as_deref()).await?;
+            let (hash, entry) = resolve_vm(&args.vm_id).await?;
             let url = crn_url_from_entry(&hash, &entry).await?;
             (hash, url)
         }
@@ -58,10 +55,10 @@ pub async fn handle_ssh(args: InstanceSshArgs) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Resolve `input` to a VM, either by exact hash or by unique prefix match
-/// against the address's scheduler-known instances. The returned `VmEntry`
-/// lets the caller skip a second scheduler round-trip for CRN discovery.
-async fn resolve_vm(input: &str, address_arg: Option<&str>) -> Result<(ItemHash, VmEntry)> {
+/// Resolve `input` to a VM by exact hash or scheduler-side prefix match.
+/// The returned `VmEntry` lets the caller skip a second scheduler round-trip
+/// when looking up the CRN URL.
+async fn resolve_vm(input: &str) -> Result<(ItemHash, VmEntry)> {
     let scheduler = SchedulerClient::new(
         Url::parse(SCHEDULER_BASE_URL).expect("SCHEDULER_BASE_URL is a valid URL"),
     );
@@ -75,52 +72,29 @@ async fn resolve_vm(input: &str, address_arg: Option<&str>) -> Result<(ItemHash,
         return Ok((hash, entry));
     }
 
-    let address = resolve_lookup_address(address_arg)?;
-    let vms = scheduler
-        .list_vms_by_owner(&address)
+    let matches = scheduler
+        .find_vms_by_hash_prefix(input)
         .await
-        .with_context(|| format!("listing instances of {address} for prefix resolution"))?;
-    let entry = match_prefix(input, &address, &vms)?;
-    let hash = entry.vm_hash.clone();
-    Ok((hash, entry))
+        .with_context(|| format!("looking up VMs matching prefix `{input}` in the scheduler"))?;
+    pick_unique_match(input, matches)
 }
 
-fn resolve_lookup_address(address_arg: Option<&str>) -> Result<Address> {
-    match address_arg {
-        Some(value) => resolve_address(value),
-        None => {
-            let identity = crate::cli::IdentityArgs {
-                account: None,
-                private_key: None,
-                chain: None,
-            };
-            let account = resolve_account(&identity)?;
-            Ok(account.address().clone())
-        }
-    }
-}
-
-/// Find the unique `VmEntry` whose `vm_hash` starts with `input`. Errors on
-/// zero or multiple matches; the multi-match error lists candidates so the
-/// user can pick a longer prefix.
-fn match_prefix(input: &str, address: &Address, vms: &[VmEntry]) -> Result<VmEntry> {
-    let matches: Vec<&VmEntry> = vms
-        .iter()
-        .filter(|v| v.vm_hash.to_string().starts_with(input))
-        .collect();
-    match matches.as_slice() {
-        [] => bail!(
-            "no instance matching `{input}` for address {address}. \
-             Run `aleph instance list --address {address}` to see available hashes, \
+fn pick_unique_match(input: &str, mut matches: Vec<VmEntry>) -> Result<(ItemHash, VmEntry)> {
+    match matches.len() {
+        0 => bail!(
+            "no instance matches `{input}`. Run `aleph instance list` to see available hashes, \
              or pass a full hash."
         ),
-        [entry] => Ok((*entry).clone()),
-        many => {
-            let mut hashes: Vec<String> = many.iter().map(|v| v.vm_hash.to_string()).collect();
+        1 => {
+            let entry = matches.pop().unwrap();
+            let hash = entry.vm_hash.clone();
+            Ok((hash, entry))
+        }
+        n => {
+            let mut hashes: Vec<String> = matches.iter().map(|v| v.vm_hash.to_string()).collect();
             hashes.sort();
             bail!(
-                "prefix `{input}` is ambiguous, matches {} instances:\n  {}",
-                many.len(),
+                "prefix `{input}` is ambiguous, matches {n} instances:\n  {}",
                 hashes.join("\n  ")
             )
         }
@@ -250,36 +224,28 @@ mod tests {
         }
     }
 
-    fn fake_address() -> Address {
-        Address::from("0x0000000000000000000000000000000000000001".to_string())
-    }
-
     #[test]
-    fn prefix_matches_single() {
-        let vms = vec![
-            vm_entry("4e7df823423f0000000000000000000000000000000000000000000000000001"),
-            vm_entry("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        ];
-        let entry = match_prefix("4e7df823423f", &fake_address(), &vms).unwrap();
-        assert!(entry.vm_hash.to_string().starts_with("4e7df823423f"));
-    }
-
-    #[test]
-    fn prefix_no_match_errors() {
-        let vms = vec![vm_entry(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    fn pick_unique_match_single() {
+        let entries = vec![vm_entry(
+            "4e7df823423f0000000000000000000000000000000000000000000000000001",
         )];
-        let err = match_prefix("dead", &fake_address(), &vms).unwrap_err();
-        assert!(err.to_string().contains("no instance matching `dead`"));
+        let (hash, _) = pick_unique_match("4e7df", entries).unwrap();
+        assert!(hash.to_string().starts_with("4e7df"));
     }
 
     #[test]
-    fn prefix_ambiguous_lists_candidates() {
-        let vms = vec![
+    fn pick_unique_match_empty() {
+        let err = pick_unique_match("dead", vec![]).unwrap_err();
+        assert!(err.to_string().contains("no instance matches `dead`"));
+    }
+
+    #[test]
+    fn pick_unique_match_ambiguous() {
+        let entries = vec![
             vm_entry("4e7df823423f0000000000000000000000000000000000000000000000000001"),
             vm_entry("4e7df823423f0000000000000000000000000000000000000000000000000002"),
         ];
-        let err = match_prefix("4e7df", &fake_address(), &vms).unwrap_err();
+        let err = pick_unique_match("4e7df", entries).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ambiguous"));
         assert!(msg.contains("matches 2 instances"));
