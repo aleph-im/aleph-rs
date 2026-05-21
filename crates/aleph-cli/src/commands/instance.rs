@@ -1,5 +1,6 @@
 use crate::cli::{
-    InstanceCommand, InstanceCreateArgs, InstanceListArgs, InstancePriceArgs, parse_size_to_mib,
+    InstanceCommand, InstanceCreateArgs, InstanceDeleteArgs, InstanceListArgs, InstancePriceArgs,
+    parse_size_to_mib,
 };
 use crate::common::{resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter};
@@ -391,6 +392,9 @@ pub async fn handle_instance_command(
     match command {
         InstanceCommand::Create(args) => {
             handle_instance_create(aleph_client, ccn_url, json, args).await?;
+        }
+        InstanceCommand::Delete(args) => {
+            handle_instance_delete(aleph_client, ccn_url, json, args).await?;
         }
         InstanceCommand::Price(args) => {
             handle_instance_price(aleph_client, json, args).await?;
@@ -1015,6 +1019,15 @@ async fn handle_instance_price(
     }
 
     Ok(())
+}
+
+async fn handle_instance_delete(
+    _aleph_client: &AlephClient,
+    _ccn_url: &Url,
+    _json: bool,
+    _args: InstanceDeleteArgs,
+) -> Result<()> {
+    bail!("handle_instance_delete not implemented yet")
 }
 
 #[cfg(test)]

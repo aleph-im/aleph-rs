@@ -1474,6 +1474,24 @@ Examples:
 
   aleph instance create -i web   # interactive prompts for everything else")]
     Create(InstanceCreateArgs),
+    /// Forget an INSTANCE message (send a FORGET).
+    #[command(long_about = "\
+Send a FORGET message for an INSTANCE you own. The message becomes \
+tombstoned and the network treats the instance as deleted.
+
+This command does ONLY the FORGET. It does NOT:
+  - erase the VM on the CRN  (run `aleph instance erase` first)
+  - remove port forwards     (run `aleph instance port-forwarder delete`)
+  - stop a streaming flow    (Superfluid flow stays open on PAYG)
+
+Run those subcommands separately if you need that cleanup.
+
+Examples:
+  aleph instance delete a41f...0564
+  aleph instance delete a41f...0564 --reason \"decommission\"
+  aleph instance delete a41f...0564 --dry-run --json
+")]
+    Delete(InstanceDeleteArgs),
     /// Erase a VM instance's data on the CRN
     Erase(CrnArgs),
     /// List instances belonging to an account.
@@ -1522,6 +1540,23 @@ pub struct InstanceListArgs {
     /// Defaults to the address of the current default account.
     #[arg(long)]
     pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct InstanceDeleteArgs {
+    /// VM instance item hash to forget.
+    pub vm_id: ItemHash,
+
+    /// Reason recorded on the FORGET message.
+    #[arg(long, default_value = "User deletion")]
+    pub reason: String,
+
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
 
 #[derive(Args)]
@@ -2519,4 +2554,70 @@ pub struct WebsiteDeleteArgs {
     pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[cfg(test)]
+mod instance_delete_args_tests {
+    use super::*;
+
+    const HASH: &str = "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564";
+
+    #[test]
+    fn parses_minimal_invocation() {
+        let cli = Cli::try_parse_from(["aleph", "instance", "delete", HASH]).expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command: InstanceCommand::Delete(args),
+            } => {
+                assert_eq!(args.vm_id.to_string(), HASH);
+                assert_eq!(args.reason, "User deletion");
+                assert!(!args.yes);
+                assert!(!args.signing.dry_run);
+            }
+            _ => panic!("expected instance delete"),
+        }
+    }
+
+    #[test]
+    fn accepts_reason_and_yes() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "delete",
+            HASH,
+            "--reason",
+            "decommission",
+            "-y",
+        ])
+        .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command: InstanceCommand::Delete(args),
+            } => {
+                assert_eq!(args.reason, "decommission");
+                assert!(args.yes);
+            }
+            _ => panic!("expected instance delete"),
+        }
+    }
+
+    #[test]
+    fn rejects_missing_vm_id() {
+        let result = Cli::try_parse_from(["aleph", "instance", "delete"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_dry_run_flag() {
+        let cli = Cli::try_parse_from(["aleph", "instance", "delete", HASH, "--dry-run"])
+            .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command: InstanceCommand::Delete(args),
+            } => {
+                assert!(args.signing.dry_run);
+            }
+            _ => panic!("expected instance delete"),
+        }
+    }
 }
