@@ -1,8 +1,8 @@
 //! `aleph website` commands. See docs/superpowers/specs/2026-04-27-frontend-pages-design.md.
 
 use crate::cli::{
-    WebsiteCommand, WebsiteDeleteArgs, WebsiteDeployArgs, WebsiteListArgs, WebsiteShowArgs,
-    WebsiteUpdateArgs,
+    PaymentTypeCli, WebsiteCommand, WebsiteDeleteArgs, WebsiteDeployArgs, WebsiteListArgs,
+    WebsiteShowArgs, WebsiteUpdateArgs,
 };
 use crate::common::{
     confirm_tty, format_epoch_for_tty, now_secs_f64, resolve_account, resolve_address,
@@ -20,8 +20,30 @@ use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageContentEnum;
 use aleph_types::message::StorageEngine;
+use aleph_types::message::execution::base::Payment;
 use serde::Serialize;
 use url::Url;
+
+/// Resolve a CLI `--payment-type` choice (absent ⇒ credit) to a [`Payment`]
+/// suitable for the STORE message. Defaults to credit because holder-tier
+/// storage is being phased out; users still pass `--payment-type hold`
+/// explicitly when they want it.
+fn resolve_payment(choice: Option<PaymentTypeCli>) -> Payment {
+    match choice.unwrap_or(PaymentTypeCli::Credit) {
+        PaymentTypeCli::Hold => Payment::hold(),
+        PaymentTypeCli::Credit => Payment::credits(),
+    }
+}
+
+/// String form of a payment choice used by the `websites` aggregate's
+/// `WebsitePayment.kind` field, which is a free-form `String` in the SDK
+/// (see `aggregate_models::websites::WebsitePayment`).
+fn payment_kind_str(choice: Option<PaymentTypeCli>) -> &'static str {
+    match choice.unwrap_or(PaymentTypeCli::Credit) {
+        PaymentTypeCli::Hold => "hold",
+        PaymentTypeCli::Credit => "credit",
+    }
+}
 
 pub async fn handle_website_command(
     aleph_client: &AlephClient,
@@ -276,6 +298,7 @@ async fn upload_folder_and_store(
     account: &crate::account::CliAccount,
     path: &std::path::Path,
     channel: &str,
+    payment: Payment,
     on_behalf_of: Option<&aleph_types::chain::Address>,
     dry_run: bool,
 ) -> anyhow::Result<(String, String)> {
@@ -284,7 +307,8 @@ async fn upload_folder_and_store(
     let file_hash = aleph_sdk::folder_hash::hash_folder_root(&entries, &opts)?;
     let cid_str = file_hash.to_string();
     let mut builder = StoreBuilder::new(account, file_hash, StorageEngine::Ipfs)
-        .channel(Channel::from(channel.to_string()));
+        .channel(Channel::from(channel.to_string()))
+        .payment(payment);
     if let Some(owner) = on_behalf_of {
         builder = builder.on_behalf_of(owner.clone());
     }
@@ -357,6 +381,7 @@ async fn handle_website_deploy(
         .unwrap_or_else(|| WEBSITE_CHANNEL.to_string());
 
     // 6. Either reuse the supplied volume or upload + STORE.
+    let store_payment = resolve_payment(args.payment_type);
     let (ipfs_cid, volume_id) = if let Some(vid) = args.volume_id.as_ref() {
         // Best-effort: surface the underlying IPFS CID for the user. If the
         // STORE message can't be fetched (not yet processed, network error,
@@ -368,8 +393,16 @@ async fn handle_website_deploy(
         (cid, vid.clone())
     } else {
         let owner = (args.on_behalf_of.is_some()).then_some(&owner_address);
-        upload_folder_and_store(aleph_client, &account, &args.path, &channel, owner, dry_run)
-            .await?
+        upload_folder_and_store(
+            aleph_client,
+            &account,
+            &args.path,
+            &channel,
+            store_payment,
+            owner,
+            dry_run,
+        )
+        .await?
     };
 
     // 7. Build the websites aggregate entry and submit the partial update.
@@ -378,7 +411,7 @@ async fn handle_website_deploy(
             .payment_chain
             .clone()
             .unwrap_or_else(|| account.chain().to_string()),
-        kind: args.payment_type.clone(),
+        kind: payment_kind_str(args.payment_type).to_string(),
     };
     let entry = WebsiteEntry {
         metadata: WebsiteMetadata {
@@ -567,7 +600,10 @@ async fn handle_website_update(
         .clone()
         .unwrap_or_else(|| WEBSITE_CHANNEL.to_string());
 
-    // 4. Either reuse the supplied volume or upload + STORE.
+    // 4. Either reuse the supplied volume or upload + STORE. The new STORE
+    //    picks up `--payment-type` (default credit); the existing aggregate
+    //    `WebsitePayment` is left intact (see step 6).
+    let store_payment = resolve_payment(args.payment_type);
     let (ipfs_cid, new_volume_id) = if let Some(vid) = args.volume_id.as_ref() {
         // Best-effort CID resolution - same semantics as deploy.
         let cid = resolve_store_ipfs_cid(aleph_client, vid)
@@ -576,8 +612,16 @@ async fn handle_website_update(
         (cid, vid.clone())
     } else {
         let owner = (args.on_behalf_of.is_some()).then_some(&owner_address);
-        upload_folder_and_store(aleph_client, &account, &args.path, &channel, owner, dry_run)
-            .await?
+        upload_folder_and_store(
+            aleph_client,
+            &account,
+            &args.path,
+            &channel,
+            store_payment,
+            owner,
+            dry_run,
+        )
+        .await?
     };
 
     // 5. Idempotent short-circuit: nothing changed → no aggregate write.
