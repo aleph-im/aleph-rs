@@ -395,7 +395,8 @@ pub async fn handle_instance_command(
             handle_instance_create(aleph_client, ccn_url, json, args).await?;
         }
         InstanceCommand::Delete(args) => {
-            handle_instance_delete(aleph_client, ccn_url, json, args).await?;
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            handle_instance_delete(aleph_client, ccn_url, &scheduler_url, json, args).await?;
         }
         InstanceCommand::Price(args) => {
             handle_instance_price(aleph_client, json, args).await?;
@@ -1099,22 +1100,24 @@ fn build_forget_for_instance<A: Account>(
 async fn handle_instance_delete(
     aleph_client: &AlephClient,
     ccn_url: &Url,
+    scheduler_url: &Url,
     json: bool,
     args: InstanceDeleteArgs,
 ) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
-    let instance = fetch_instance_message(aleph_client, &args.vm_id).await?;
+    let (vm_id, _) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
+    let instance = fetch_instance_message(aleph_client, &vm_id).await?;
     if &instance.sender != account.address() {
         bail!(
             "you are not the owner of instance {} (sender: {})",
-            args.vm_id,
+            vm_id,
             instance.sender
         );
     }
 
-    let prompt = format!("Forget instance {}? This is irreversible.", args.vm_id);
+    let prompt = format!("Forget instance {vm_id}? This is irreversible.");
     if !dry_run && !confirm_action(&prompt, args.yes)? {
         bail!("aborted");
     }

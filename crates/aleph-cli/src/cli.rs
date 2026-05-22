@@ -1551,9 +1551,9 @@ This command does ONLY the FORGET. It does NOT:
 Run those subcommands separately if you need that cleanup.
 
 Examples:
-  aleph instance delete a41f...0564
-  aleph instance delete a41f...0564 --reason \"decommission\"
-  aleph instance delete a41f...0564 --dry-run --json
+  aleph instance delete a41fb91c3e68
+  aleph instance delete a41fb91c3e68 --reason \"decommission\"
+  aleph instance delete a41fb91c3e68 --dry-run --json
 ")]
     Delete(InstanceDeleteArgs),
     /// Erase a VM instance's data on the CRN
@@ -1625,8 +1625,10 @@ pub struct InstanceListArgs {
 
 #[derive(Args)]
 pub struct InstanceDeleteArgs {
-    /// VM instance item hash to forget.
-    pub vm_id: ItemHash,
+    /// VM instance item hash to forget. Accepts a unique prefix (e.g. the
+    /// 12-char hash shown by `aleph instance list`); the scheduler matches it
+    /// server-side.
+    pub vm_id: String,
 
     /// Reason recorded on the FORGET message.
     #[arg(long, default_value = "User deletion")]
@@ -2740,6 +2742,20 @@ mod instance_delete_args_tests {
     fn rejects_missing_vm_id() {
         let result = Cli::try_parse_from(["aleph", "instance", "delete"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_hash_prefix() {
+        let cli = Cli::try_parse_from(["aleph", "instance", "delete", "a41fb91c3e68"])
+            .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command: InstanceCommand::Delete(args),
+            } => {
+                assert_eq!(args.vm_id, "a41fb91c3e68");
+            }
+            _ => panic!("expected instance delete"),
+        }
     }
 
     #[test]
