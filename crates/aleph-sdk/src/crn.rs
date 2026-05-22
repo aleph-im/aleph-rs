@@ -401,6 +401,30 @@ impl CrnClient {
         }
     }
 
+    pub async fn get_backup(&self, vm_id: &ItemHash) -> Result<BackupStatus, CrnError> {
+        let path = format!("/control/machine/{vm_id}/backup");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("GET", &path);
+
+        let mut request = self.http_client.get(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        match status {
+            200 => Ok(BackupStatus::Complete(response.json().await?)),
+            202 => Ok(BackupStatus::InProgress),
+            404 => Ok(BackupStatus::NotFound),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
     pub async fn expire_instance(
         &self,
         vm_id: &ItemHash,
@@ -900,5 +924,73 @@ mod tests {
             }
             CreateBackup::Started => panic!("expected Complete"),
         }
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_backup_in_progress_on_202() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("GET"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let result = client.get_backup(&vm.parse().unwrap()).await.unwrap();
+        assert!(matches!(result, BackupStatus::InProgress));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_backup_complete_on_200() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("GET"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "backup_id": "abc_1",
+                "size": 100,
+                "checksum": "sha256:beef",
+                "expires_at": "2026-05-24T12:00:00.000000Z",
+                "download_url": "https://crn.example/path"
+            })))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        match client.get_backup(&vm.parse().unwrap()).await.unwrap() {
+            BackupStatus::Complete(meta) => assert_eq!(meta.backup_id, "abc_1"),
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_backup_not_found_on_404() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("GET"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let result = client.get_backup(&vm.parse().unwrap()).await.unwrap();
+        assert!(matches!(result, BackupStatus::NotFound));
     }
 }
