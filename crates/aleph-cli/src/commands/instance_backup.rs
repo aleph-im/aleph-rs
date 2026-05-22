@@ -125,6 +125,24 @@ mod tests {
         };
         handle_info(scheduler_url, true, args).await.unwrap();
     }
+
+    #[tokio::test]
+    async fn delete_succeeds_against_mock_crn() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/control/machine/{FULL_HASH}/backup/abc_1")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupDeleteArgs {
+            vm_id: FULL_HASH.to_string(),
+            backup_id: "abc_1".to_string(),
+            crn_url: Some(server.uri()),
+            signing: evm_signing_args(),
+        };
+        handle_delete(scheduler_url, true, args).await.unwrap();
+    }
 }
 
 async fn handle_download(
@@ -136,11 +154,28 @@ async fn handle_download(
 }
 
 async fn handle_delete(
-    _scheduler_url: Url,
-    _json: bool,
-    _args: InstanceBackupDeleteArgs,
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceBackupDeleteArgs,
 ) -> Result<()> {
-    anyhow::bail!("instance backup delete: not yet implemented")
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+    client.delete_backup(&vm_id, &args.backup_id).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "vm_id": vm_id.to_string(),
+                "backup_id": args.backup_id,
+                "status": "deleted"
+            })
+        );
+    } else {
+        eprintln!("Deleted backup {} for {vm_id}.", args.backup_id);
+    }
+    Ok(())
 }
 
 async fn handle_restore(
