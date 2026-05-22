@@ -57,8 +57,10 @@ pub fn pick_unique_match(input: &str, matches: Vec<VmEntry>) -> Result<(ItemHash
     }
 }
 
-/// Translate a `VmEntry` to the URL of the CRN it's allocated to. Refuses any
-/// status other than `dispatched` / `duplicated`.
+/// Translate a `VmEntry` to the URL of the CRN it's allocated to.
+/// `dispatched` proceeds silently; `duplicated` emits a stderr warning
+/// before following the scheduler's canonical pick. Any other status is
+/// an error pointing the user at `--crn-url`.
 ///
 /// Looks the CRN up via the scheduler's `/api/v1/nodes/<hash>` endpoint
 /// rather than the third-party crns-list aggregator.
