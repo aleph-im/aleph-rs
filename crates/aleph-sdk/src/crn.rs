@@ -482,6 +482,22 @@ impl CrnClient {
         }
     }
 
+    /// Returns the URL and auth headers the caller needs to drive a multipart
+    /// POST to `/control/machine/<vm>/restore` themselves. Used by
+    /// `aleph instance backup restore --file`, which streams a QCOW2 from disk.
+    pub fn restore_endpoint(
+        &self,
+        vm_id: &ItemHash,
+    ) -> Result<(Url, Vec<(&'static str, String)>), CrnError> {
+        let path = format!("/control/machine/{vm_id}/restore");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self
+            .auth_headers("POST", &path)
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok((url, headers))
+    }
+
     pub async fn expire_instance(
         &self,
         vm_id: &ItemHash,
@@ -1102,6 +1118,29 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status, "restored");
         assert_eq!(resp.vm_hash, vm);
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[test]
+    fn restore_endpoint_returns_url_and_two_auth_headers() {
+        use aleph_types::account::EvmAccount;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let url = Url::parse("https://crn.example/").unwrap();
+        let client = CrnClient::new(&account, url).unwrap();
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99"
+            .parse()
+            .unwrap();
+        let (endpoint, headers) = client.restore_endpoint(&vm).unwrap();
+        assert_eq!(
+            endpoint.as_str(),
+            "https://crn.example/control/machine/5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99/restore"
+        );
+        let names: Vec<&str> = headers.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"X-SignedPubKey"));
+        assert!(names.contains(&"X-SignedOperation"));
+        for (_, value) in &headers {
+            assert!(!value.is_empty());
+        }
     }
 
     #[cfg(feature = "account-evm")]
