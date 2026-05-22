@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-cli"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "actix-web",
  "aleph-sdk",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-sdk"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "aleph-types",
  "alloy-contract",
@@ -370,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-types"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "assert_matches",
  "bs58",
