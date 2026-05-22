@@ -397,11 +397,26 @@ pub async fn handle_instance_command(
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             handle_instance_list(aleph_client, scheduler_url, json, args).await?;
         }
-        InstanceCommand::Start(args) => crn::handle_start(json, args).await?,
-        InstanceCommand::Stop(args) => crn::handle_operation(json, args, "stop").await?,
-        InstanceCommand::Reboot(args) => crn::handle_operation(json, args, "reboot").await?,
-        InstanceCommand::Erase(args) => crn::handle_operation(json, args, "erase").await?,
-        InstanceCommand::Logs(args) => crn::handle_logs(json, args).await?,
+        InstanceCommand::Start(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            crn::handle_start(scheduler_url, json, args).await?
+        }
+        InstanceCommand::Stop(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            crn::handle_operation(scheduler_url, json, args, "stop").await?
+        }
+        InstanceCommand::Reboot(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            crn::handle_operation(scheduler_url, json, args, "reboot").await?
+        }
+        InstanceCommand::Erase(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            crn::handle_operation(scheduler_url, json, args, "erase").await?
+        }
+        InstanceCommand::Logs(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            crn::handle_logs(scheduler_url, json, args).await?
+        }
         InstanceCommand::Ssh(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             super::instance_ssh::handle_ssh(scheduler_url, args).await?;

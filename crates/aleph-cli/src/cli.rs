@@ -1746,27 +1746,35 @@ pub struct AuthorizationRevokeArgs {
 
 #[derive(Args)]
 pub struct CrnArgs {
-    /// CRN endpoint URL.
+    /// CRN endpoint URL. Optional emergency override: if omitted, the CRN is
+    /// discovered via the scheduler. Pass this only to bypass the scheduler's
+    /// choice (e.g. when an instance is reported as `duplicated` and you want
+    /// to target a specific node).
     #[arg(long)]
-    pub crn_url: String,
+    pub crn_url: Option<String>,
 
-    /// VM instance item hash.
-    pub vm_id: ItemHash,
+    /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
+    /// shown by `aleph instance list`); the scheduler matches it server-side.
+    pub vm_id: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
 }
 
-/// Start is separate because it's unauthenticated — signing args are still
+/// Start is separate because it's unauthenticated: signing args are still
 /// required to construct the CrnClient but no auth headers are sent.
 #[derive(Args)]
 pub struct CrnStartArgs {
-    /// CRN endpoint URL.
+    /// CRN endpoint URL. Optional emergency override: if omitted, the CRN is
+    /// discovered via the scheduler. Pass this only to bypass the scheduler's
+    /// choice (e.g. when an instance is reported as `duplicated` and you want
+    /// to target a specific node).
     #[arg(long)]
-    pub crn_url: String,
+    pub crn_url: Option<String>,
 
-    /// VM instance item hash.
-    pub vm_id: ItemHash,
+    /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
+    /// shown by `aleph instance list`); the scheduler matches it server-side.
+    pub vm_id: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
