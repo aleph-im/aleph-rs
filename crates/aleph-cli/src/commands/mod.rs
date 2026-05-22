@@ -7,6 +7,7 @@ pub mod crn;
 pub mod domain;
 pub mod file;
 pub mod instance;
+pub mod instance_backup;
 pub mod instance_interactive;
 pub mod instance_ssh;
 pub mod instance_target;
