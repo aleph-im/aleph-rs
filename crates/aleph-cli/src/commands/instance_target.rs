@@ -69,9 +69,20 @@ pub async fn crn_url_from_entry(
 ) -> Result<Url> {
     let status = entry.status.as_str();
     let allocated_node = match status {
-        "dispatched" | "duplicated" => entry.allocated_node.as_deref().ok_or_else(|| {
-            anyhow!("instance {vm_id} has status `{status}` but no allocated_node")
+        "dispatched" => entry.allocated_node.as_deref().ok_or_else(|| {
+            anyhow!("instance {vm_id} has status `dispatched` but no allocated_node")
         })?,
+        "duplicated" => {
+            let node = entry.allocated_node.as_deref().ok_or_else(|| {
+                anyhow!("instance {vm_id} has status `duplicated` but no allocated_node")
+            })?;
+            eprintln!(
+                "warning: instance {vm_id} is reported as duplicated (allocated to multiple \
+                 CRNs). Defaulting to scheduler's canonical pick {node}. Pass --crn-url to \
+                 target a different one."
+            );
+            node
+        }
         _ => bail!(
             "instance {vm_id} cannot be reached: scheduler reports status `{status}`. \
              Pass --crn-url to target a CRN directly."
@@ -219,6 +230,31 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("status `scheduled`"));
         assert!(msg.contains("--crn-url"));
+    }
+
+    #[tokio::test]
+    async fn crn_url_from_entry_returns_address_when_duplicated() {
+        // Stderr-capture in unit tests is awkward; we assert the URL is
+        // returned rather than asserting on the warning text. The behavior
+        // contract (warn-and-proceed) lives in the source.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{NODE_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_hash": NODE_HASH,
+                "address": "https://crn.example.io/",
+                "status": "ok",
+            })))
+            .mount(&server)
+            .await;
+
+        let vm_id: ItemHash = FULL_HASH.parse().unwrap();
+        let mut entry = dispatched_entry();
+        entry.status = "duplicated".to_string();
+        let url = crn_url_from_entry(&Url::parse(&server.uri()).unwrap(), &vm_id, &entry)
+            .await
+            .unwrap();
+        assert_eq!(url.as_str(), "https://crn.example.io/");
     }
 
     #[tokio::test]
