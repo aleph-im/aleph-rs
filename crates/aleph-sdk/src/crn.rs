@@ -425,6 +425,32 @@ impl CrnClient {
         }
     }
 
+    pub async fn delete_backup(
+        &self,
+        vm_id: &ItemHash,
+        backup_id: &str,
+    ) -> Result<(), CrnError> {
+        let path = format!("/control/machine/{vm_id}/backup/{backup_id}");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("DELETE", &path);
+
+        let mut request = self.http_client.delete(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        match status {
+            200 => Ok(()),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
     pub async fn expire_instance(
         &self,
         vm_id: &ItemHash,
@@ -992,5 +1018,58 @@ mod tests {
         let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
         let result = client.get_backup(&vm.parse().unwrap()).await.unwrap();
         assert!(matches!(result, BackupStatus::NotFound));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn delete_backup_succeeds_on_200() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        let backup_id = "abc_1";
+        Mock::given(method("DELETE"))
+            .and(path(format!("/control/machine/{vm}/backup/{backup_id}")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        client
+            .delete_backup(&vm.parse().unwrap(), backup_id)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn delete_backup_surfaces_404_as_api_error() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        let backup_id = "abc_1";
+        Mock::given(method("DELETE"))
+            .and(path(format!("/control/machine/{vm}/backup/{backup_id}")))
+            .respond_with(ResponseTemplate::new(404).set_body_string("no such backup"))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let err = client
+            .delete_backup(&vm.parse().unwrap(), backup_id)
+            .await
+            .unwrap_err();
+        match err {
+            CrnError::Api { status, body } => {
+                assert_eq!(status, 404);
+                assert!(body.contains("no such backup"));
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 }
