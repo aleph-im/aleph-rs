@@ -2515,8 +2515,10 @@ pub struct WebsiteDeployArgs {
     /// Override payment chain (defaults to signing account's chain).
     #[arg(long)]
     pub payment_chain: Option<String>,
-    #[arg(long, default_value = "hold")]
-    pub payment_type: String,
+    /// Payment type for the STORE message and the websites aggregate entry.
+    /// `credit` (default) consumes credits; `hold` requires locked stake.
+    #[arg(long, value_enum)]
+    pub payment_type: Option<PaymentTypeCli>,
     /// Attach a domain (repeatable). Each domain creates/updates a `domains` entry.
     #[arg(long)]
     pub domain: Vec<String>,
@@ -2554,6 +2556,11 @@ pub struct WebsiteUpdateArgs {
     pub idempotent: bool,
     #[arg(long)]
     pub channel: Option<String>,
+    /// Payment type for the new STORE message. `credit` (default) consumes
+    /// credits; `hold` requires locked stake. The existing `websites`
+    /// aggregate payment metadata is preserved verbatim.
+    #[arg(long, value_enum)]
+    pub payment_type: Option<PaymentTypeCli>,
     /// Sign on behalf of another address (requires an authorization from that
     /// address). All aggregate writes and the STORE upload target the owner.
     #[arg(long)]
