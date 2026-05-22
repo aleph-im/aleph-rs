@@ -1069,14 +1069,13 @@ fn build_forget_for_instance<A: Account>(
     reason: &str,
 ) -> Result<PendingMessage> {
     if instance.message_type != MessageType::Instance {
-        bail!(
-            "expected INSTANCE message, got {:?}",
-            instance.message_type
-        );
+        bail!("expected INSTANCE message, got {:?}", instance.message_type);
     }
-    Ok(ForgetBuilder::new(account, vec![instance.item_hash.clone()])
-        .reason(reason)
-        .build()?)
+    Ok(
+        ForgetBuilder::new(account, vec![instance.item_hash.clone()])
+            .reason(reason)
+            .build()?,
+    )
 }
 
 async fn handle_instance_delete(
@@ -1097,10 +1096,7 @@ async fn handle_instance_delete(
         );
     }
 
-    let prompt = format!(
-        "Forget instance {}? This is irreversible.",
-        args.vm_id
-    );
+    let prompt = format!("Forget instance {}? This is irreversible.", args.vm_id);
     if !dry_run && !confirm_action(&prompt, args.yes)? {
         bail!("aborted");
     }
@@ -1468,10 +1464,8 @@ mod tests {
     fn build_forget_for_instance_targets_only_the_instance_hash() {
         let instance = fixture_message();
         let account = TestAccount::new();
-        let pending =
-            build_forget_for_instance(&account, &instance, "User deletion").unwrap();
-        let value: serde_json::Value =
-            serde_json::from_str(&pending.item_content).unwrap();
+        let pending = build_forget_for_instance(&account, &instance, "User deletion").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
         let hashes = value["hashes"].as_array().unwrap();
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].as_str().unwrap(), instance.item_hash.to_string());
