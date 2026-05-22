@@ -80,6 +80,17 @@ pub enum BackupStatus {
     NotFound,
 }
 
+/// Response from POST /control/machine/<vm>/restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreResponse {
+    pub status: String,
+    pub vm_hash: String,
+    #[serde(default)]
+    pub old_rootfs_backup: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
 /// Networking info for a running VM, returned by `/about/executions/list`.
 ///
 /// `ipv6` is a CIDR like `"fc00:1:2:3:1:abcd:1234:5670/124"` - the prefix
@@ -764,5 +775,21 @@ mod tests {
         assert_eq!(payload["chain"], "ETH");
         assert!(payload["pubkey"]["kty"] == "EC");
         assert!(payload["expires"].as_str().unwrap().ends_with("Z"));
+    }
+
+    #[test]
+    fn deserialize_restore_response() {
+        let json = r#"{
+            "status": "restored",
+            "vm_hash": "abc123",
+            "old_rootfs_backup": "/var/lib/aleph/backups/abc123-old.qcow2"
+        }"#;
+        let resp: RestoreResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status, "restored");
+        assert_eq!(resp.vm_hash, "abc123");
+        assert_eq!(
+            resp.old_rootfs_backup.as_deref(),
+            Some("/var/lib/aleph/backups/abc123-old.qcow2")
+        );
     }
 }
