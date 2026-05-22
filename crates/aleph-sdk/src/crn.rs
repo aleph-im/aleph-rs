@@ -451,6 +451,37 @@ impl CrnClient {
         }
     }
 
+    pub async fn restore_from_volume(
+        &self,
+        vm_id: &ItemHash,
+        volume_ref: &str,
+    ) -> Result<RestoreResponse, CrnError> {
+        let path = format!("/control/machine/{vm_id}/restore");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("POST", &path);
+
+        let mut request = self.http_client.post(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+
+        let response = request
+            .json(&serde_json::json!({ "volume_ref": volume_ref }))
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        match status {
+            200 => Ok(response.json().await?),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
     pub async fn expire_instance(
         &self,
         vm_id: &ItemHash,
@@ -1041,6 +1072,36 @@ mod tests {
             .delete_backup(&vm.parse().unwrap(), backup_id)
             .await
             .unwrap();
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn restore_from_volume_posts_json_and_decodes_response() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        let volume_ref = "d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/restore")))
+            .and(body_json(serde_json::json!({ "volume_ref": volume_ref })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "restored",
+                "vm_hash": vm,
+                "old_rootfs_backup": "/var/lib/aleph/backups/old.qcow2"
+            })))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let resp = client
+            .restore_from_volume(&vm.parse().unwrap(), volume_ref)
+            .await
+            .unwrap();
+        assert_eq!(resp.status, "restored");
+        assert_eq!(resp.vm_hash, vm);
     }
 
     #[cfg(feature = "account-evm")]
