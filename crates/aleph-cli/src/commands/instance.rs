@@ -1,9 +1,12 @@
 use crate::cli::{
-    InstanceCommand, InstanceCreateArgs, InstanceListArgs, InstancePriceArgs, parse_size_to_mib,
+    InstanceCommand, InstanceCreateArgs, InstanceDeleteArgs, InstanceListArgs, InstancePriceArgs,
+    parse_size_to_mib,
 };
-use crate::common::{resolve_account, resolve_address, submit_or_preview};
-use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter};
-use aleph_sdk::messages::InstanceBuilder;
+use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
+use aleph_sdk::client::{
+    AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter, MessageWithStatus,
+};
+use aleph_sdk::messages::{ForgetBuilder, InstanceBuilder};
 use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
@@ -18,6 +21,7 @@ use aleph_types::message::execution::volume::{
     BaseVolume, EphemeralVolume, ImmutableVolume, MachineVolume, PersistentVolume,
     PersistentVolumeSize, VolumePersistence,
 };
+use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{Message, MessageContentEnum, MessageType};
 use aleph_types::timestamp::Timestamp;
 use anyhow::{Context, Result, anyhow, bail};
@@ -389,6 +393,9 @@ pub async fn handle_instance_command(
     match command {
         InstanceCommand::Create(args) => {
             handle_instance_create(aleph_client, ccn_url, json, args).await?;
+        }
+        InstanceCommand::Delete(args) => {
+            handle_instance_delete(aleph_client, ccn_url, json, args).await?;
         }
         InstanceCommand::Price(args) => {
             handle_instance_price(aleph_client, json, args).await?;
@@ -1035,6 +1042,87 @@ async fn handle_instance_price(
     Ok(())
 }
 
+/// Fetch an INSTANCE message by item hash and assert it is currently usable
+/// (processed or in the process of being removed). Returns a clean error for
+/// pending / forgotten / rejected statuses or for non-INSTANCE hashes.
+async fn fetch_instance_message(
+    aleph_client: &AlephClient,
+    item_hash: &ItemHash,
+) -> Result<Message> {
+    let with_status = aleph_client
+        .get_message(item_hash)
+        .await
+        .with_context(|| format!("failed to fetch instance {item_hash}"))?;
+    let message = match with_status {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Removed { .. } => {
+            bail!("instance {item_hash} has been removed")
+        }
+        MessageWithStatus::Pending { .. } => {
+            bail!(
+                "instance {item_hash} is still pending; wait for it to be processed before deleting"
+            )
+        }
+        MessageWithStatus::Forgotten { .. } => {
+            bail!("instance {item_hash} has already been forgotten")
+        }
+        MessageWithStatus::Rejected { .. } => {
+            bail!("instance {item_hash} was rejected by the network")
+        }
+    };
+    if message.message_type != MessageType::Instance {
+        bail!(
+            "item {item_hash} is not an INSTANCE message (got {:?})",
+            message.message_type
+        );
+    }
+    Ok(message)
+}
+
+/// Build the FORGET targeting an INSTANCE message.
+fn build_forget_for_instance<A: Account>(
+    account: &A,
+    instance: &Message,
+    reason: &str,
+) -> Result<PendingMessage> {
+    if instance.message_type != MessageType::Instance {
+        bail!("expected INSTANCE message, got {:?}", instance.message_type);
+    }
+    Ok(
+        ForgetBuilder::new(account, vec![instance.item_hash.clone()])
+            .reason(reason)
+            .build()?,
+    )
+}
+
+async fn handle_instance_delete(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: InstanceDeleteArgs,
+) -> Result<()> {
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+
+    let instance = fetch_instance_message(aleph_client, &args.vm_id).await?;
+    if &instance.sender != account.address() {
+        bail!(
+            "you are not the owner of instance {} (sender: {})",
+            args.vm_id,
+            instance.sender
+        );
+    }
+
+    let prompt = format!("Forget instance {}? This is irreversible.", args.vm_id);
+    if !dry_run && !confirm_action(&prompt, args.yes)? {
+        bail!("aborted");
+    }
+
+    let pending = build_forget_for_instance(&account, &instance, &args.reason)?;
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1344,6 +1432,63 @@ mod tests {
             row.node_hash.as_deref(),
             Some("dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04")
         );
+    }
+
+    const INSTANCE_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/messages/instance/instance-gpu-payg.json"
+    ));
+
+    fn fixture_message() -> Message {
+        serde_json::from_str(INSTANCE_FIXTURE).expect("parse fixture")
+    }
+
+    #[test]
+    fn fixture_loads_as_instance_message() {
+        let msg = fixture_message();
+        assert_eq!(msg.message_type, MessageType::Instance);
+    }
+
+    use aleph_types::account::{Account, SignError};
+    use aleph_types::chain::{Chain, Signature};
+
+    /// Minimal test account that produces a dummy signature. Mirrors the
+    /// `TestAccount` in `commands/program.rs` tests.
+    struct TestAccount {
+        address: Address,
+    }
+
+    impl TestAccount {
+        fn new() -> Self {
+            Self {
+                address: Address::from("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef".to_string()),
+            }
+        }
+    }
+
+    impl Account for TestAccount {
+        fn chain(&self) -> Chain {
+            Chain::Ethereum
+        }
+        fn address(&self) -> &Address {
+            &self.address
+        }
+        fn sign_raw(&self, _buffer: &[u8]) -> Result<Signature, SignError> {
+            Ok(Signature::from("0xDUMMY".to_string()))
+        }
+    }
+
+    #[test]
+    fn build_forget_for_instance_targets_only_the_instance_hash() {
+        let instance = fixture_message();
+        let account = TestAccount::new();
+        let pending = build_forget_for_instance(&account, &instance, "User deletion").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        let hashes = value["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].as_str().unwrap(), instance.item_hash.to_string());
+        assert_eq!(value["reason"], "User deletion");
+        assert!(value["aggregates"].as_array().is_none_or(|a| a.is_empty()));
     }
 
     fn sample_row(
