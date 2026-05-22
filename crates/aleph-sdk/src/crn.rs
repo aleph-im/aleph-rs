@@ -362,6 +362,45 @@ impl CrnClient {
         Ok(response.json::<ActiveVmList>().await?)
     }
 
+    pub async fn create_backup(
+        &self,
+        vm_id: &ItemHash,
+        opts: CreateBackupOpts,
+    ) -> Result<CreateBackup, CrnError> {
+        let path = format!("/control/machine/{vm_id}/backup");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("POST", &path);
+
+        let mut request = self.http_client.post(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if opts.include_volumes {
+            query.push(("include_volumes", "true"));
+        }
+        if opts.skip_fsfreeze {
+            query.push(("skip_fsfreeze", "true"));
+        }
+        if !query.is_empty() {
+            request = request.query(&query);
+        }
+
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        match status {
+            202 => Ok(CreateBackup::Started),
+            200 => Ok(CreateBackup::Complete(response.json().await?)),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
     pub async fn expire_instance(
         &self,
         vm_id: &ItemHash,
@@ -791,5 +830,75 @@ mod tests {
             resp.old_rootfs_backup.as_deref(),
             Some("/var/lib/aleph/backups/abc123-old.qcow2")
         );
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn create_backup_returns_started_on_202() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .and(query_param("include_volumes", "true"))
+            .and(query_param("skip_fsfreeze", "true"))
+            .respond_with(ResponseTemplate::new(202).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let url = Url::parse(&server.uri()).unwrap();
+        let client = CrnClient::new(&account, url).unwrap();
+        let result = client
+            .create_backup(
+                &vm.parse().unwrap(),
+                CreateBackupOpts {
+                    include_volumes: true,
+                    skip_fsfreeze: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, CreateBackup::Started));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn create_backup_returns_complete_on_200() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "backup_id": "abc_1",
+                "size": 100,
+                "checksum": "sha256:deadbeef",
+                "expires_at": "2026-05-24T12:00:00.000000Z",
+                "download_url": "https://crn.example/path"
+            })))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let url = Url::parse(&server.uri()).unwrap();
+        let client = CrnClient::new(&account, url).unwrap();
+        let result = client
+            .create_backup(&vm.parse().unwrap(), CreateBackupOpts::default())
+            .await
+            .unwrap();
+        match result {
+            CreateBackup::Complete(meta) => {
+                assert_eq!(meta.backup_id, "abc_1");
+                assert_eq!(meta.size, 100);
+            }
+            CreateBackup::Started => panic!("expected Complete"),
+        }
     }
 }
