@@ -429,6 +429,15 @@ pub async fn handle_instance_command(
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             super::instance_ssh::handle_ssh(scheduler_url, args).await?;
         }
+        InstanceCommand::PortForwarder { command } => {
+            crate::commands::port_forwarder::handle_port_forwarder_command(
+                aleph_client,
+                ccn_url,
+                json,
+                command,
+            )
+            .await?;
+        }
     }
     Ok(())
 }

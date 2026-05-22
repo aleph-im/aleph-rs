@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use aleph_types::account::{Account, SignError};
@@ -40,7 +40,7 @@ pub enum LogType {
 
 /// Networking info for a running VM, returned by `/about/executions/list`.
 ///
-/// `ipv6` is a CIDR like `"fc00:1:2:3:1:abcd:1234:5670/124"` — the prefix
+/// `ipv6` is a CIDR like `"fc00:1:2:3:1:abcd:1234:5670/124"` - the prefix
 /// assigned to the VM's interface, not the address you `ssh` to directly.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExecutionNetworking {
@@ -56,6 +56,34 @@ pub struct ExecutionNetworking {
 pub struct ExecutionInfo {
     #[serde(default)]
     pub networking: Option<ExecutionNetworking>,
+}
+
+/// Subset of the `/v2/about/executions/list` response shape on a CRN.
+///
+/// Only the fields actually consumed by `aleph instance port-forwarder list`
+/// are modeled. Unknown fields on the wire are silently ignored so CRN
+/// response shape evolution does not break us.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActiveVmList(pub HashMap<ItemHash, ActiveVm>);
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActiveVm {
+    #[serde(default)]
+    pub networking: Option<ActiveVmNetworking>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActiveVmNetworking {
+    #[serde(default)]
+    pub mapped_ports: BTreeMap<u16, MappedPort>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MappedPort {
+    pub host: u16,
+    /// Forward-compat for fields the CRN may add (e.g. protocol filters).
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -229,6 +257,56 @@ impl CrnClient {
 
     pub async fn erase_instance(&self, vm_id: &ItemHash) -> Result<(), CrnError> {
         self.perform_operation(vm_id, "erase").await
+    }
+
+    /// Ask the CRN to re-read the sender's `port-forwarding` aggregate and apply
+    /// it to `vm_id` immediately. The CRN normally refreshes on its own schedule;
+    /// this is the explicit prod.
+    ///
+    /// The endpoint is unauthenticated (no `X-SignedOperation` header). It is
+    /// safe for anyone to ask the CRN to refresh; the actual configuration
+    /// comes from the per-sender aggregate stored on the CCN.
+    ///
+    /// 2xx -> `Ok(())`. 404 -> [`CrnError::VmNotFound`]. Other statuses
+    /// -> [`CrnError::Api`] with the body.
+    pub async fn update_instance_config(&self, vm_id: &ItemHash) -> Result<(), CrnError> {
+        let path = format!("/control/{vm_id}/update");
+        let url = self.crn_url.join(&path).expect("valid path");
+
+        let response = self.http_client.post(url).send().await?;
+        let status = response.status().as_u16();
+        match status {
+            200..=299 => Ok(()),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
+    /// List the VMs currently active on this CRN, indexed by item hash.
+    ///
+    /// Calls `GET /v2/about/executions/list`. The v1 fallback that the Python
+    /// SDK does (on 404) is intentionally not implemented here - users on
+    /// v1-only CRNs will see `external_port` as `N/A` in `aleph instance
+    /// port-forwarder list`, same graceful degradation as an unreachable CRN.
+    ///
+    /// No auth; this endpoint is public.
+    pub async fn get_active_vms(&self) -> Result<ActiveVmList, CrnError> {
+        let url = self
+            .crn_url
+            .join("/v2/about/executions/list")
+            .expect("valid path");
+        let response = self.http_client.get(url).send().await?;
+        let status = response.status().as_u16();
+        if !(200..=299).contains(&status) {
+            return Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            });
+        }
+        Ok(response.json::<ActiveVmList>().await?)
     }
 
     pub async fn expire_instance(
@@ -511,6 +589,62 @@ mod tests {
             .unwrap();
 
         verifying_key.verify(&payload_bytes, &signature).unwrap();
+    }
+
+    #[test]
+    fn update_instance_config_url_format() {
+        // We can't easily mock reqwest here without bringing in wiremock; this
+        // pin documents the URL path that the method uses. The runtime test
+        // would otherwise just duplicate what the implementation says.
+        let base = Url::parse("https://crn.example.com").unwrap();
+        let vm_id_str = "1111111111111111111111111111111111111111111111111111111111111111";
+        let joined = base.join(&format!("/control/{vm_id_str}/update")).unwrap();
+        assert_eq!(
+            joined.path(),
+            "/control/1111111111111111111111111111111111111111111111111111111111111111/update"
+        );
+    }
+
+    #[test]
+    fn deserialize_active_vm_list_full_shape() {
+        let json = serde_json::json!({
+            "1111111111111111111111111111111111111111111111111111111111111111": {
+                "networking": {
+                    "mapped_ports": {
+                        "80":  { "host": 24001 },
+                        "443": { "host": 24002, "protocol": "tcp" }
+                    }
+                },
+                "irrelevant_field": "ignored"
+            }
+        });
+        let list: ActiveVmList = serde_json::from_value(json).unwrap();
+        assert_eq!(list.0.len(), 1);
+        let (_, vm) = list.0.iter().next().unwrap();
+        let net = vm.networking.as_ref().unwrap();
+        assert_eq!(net.mapped_ports.get(&80).unwrap().host, 24001);
+        assert_eq!(net.mapped_ports.get(&443).unwrap().host, 24002);
+        assert_eq!(
+            net.mapped_ports.get(&443).unwrap().extra.get("protocol"),
+            Some(&serde_json::json!("tcp"))
+        );
+    }
+
+    #[test]
+    fn deserialize_active_vm_list_missing_networking() {
+        let json = serde_json::json!({
+            "1111111111111111111111111111111111111111111111111111111111111111": {}
+        });
+        let list: ActiveVmList = serde_json::from_value(json).unwrap();
+        let (_, vm) = list.0.iter().next().unwrap();
+        assert!(vm.networking.is_none());
+    }
+
+    #[test]
+    fn deserialize_active_vm_list_empty() {
+        let json = serde_json::json!({});
+        let list: ActiveVmList = serde_json::from_value(json).unwrap();
+        assert!(list.0.is_empty());
     }
 
     #[cfg(feature = "account-evm")]
