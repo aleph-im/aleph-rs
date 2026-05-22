@@ -1476,8 +1476,7 @@ Examples:
     Create(InstanceCreateArgs),
     /// Forget an INSTANCE message (send a FORGET).
     #[command(long_about = "\
-Send a FORGET message for an INSTANCE you own. The message becomes \
-tombstoned and the network treats the instance as deleted.
+Delete an instance. Forgets the corresponding INSTANCE message.
 
 This command does ONLY the FORGET. It does NOT:
   - erase the VM on the CRN  (run `aleph instance erase` first)
