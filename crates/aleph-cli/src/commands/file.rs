@@ -1,19 +1,29 @@
 use crate::cli::{
-    FileCommand, FileDownloadArgs, FilePinArgs, FileUploadArgs, PaymentTypeCli, StorageEngineCli,
+    FileCommand, FileDeleteArgs, FileDownloadArgs, FileListArgs, FilePinArgs, FileUploadArgs,
+    PaymentTypeCli, SortOrderCli, StorageEngineCli,
 };
 use crate::common::{
     print_submission_result, report_authenticated_upload_status, resolve_account, resolve_address,
     submit_or_preview,
 };
-use aleph_sdk::client::{AlephClient, AlephStorageClient, hash_file};
+use aleph_sdk::client::{
+    AccountFile, AlephAccountClient, AlephClient, AlephMessageClient, AlephStorageClient,
+    MessageFilter, hash_file,
+};
 use aleph_sdk::messages::StoreBuilder;
 use aleph_sdk::verify::Hasher;
+use aleph_types::account::Account;
+use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
-use aleph_types::message::{FileRef, StorageEngine};
+use aleph_types::message::{FileRef, MessageContentEnum, MessageType, StorageEngine};
 use anyhow::{Context, Result, bail};
+use futures_util::{StreamExt, TryStreamExt};
+use std::collections::HashMap;
 use url::Url;
+
+use super::message::{ForgetTargets, forget_targets};
 
 fn resolve_payment(choice: Option<PaymentTypeCli>) -> Payment {
     match choice.unwrap_or(PaymentTypeCli::Credit) {
@@ -37,6 +47,12 @@ pub async fn handle_file_command(
         }
         FileCommand::Download(args) => {
             handle_file_download(aleph_client, json, args).await?;
+        }
+        FileCommand::List(args) => {
+            handle_file_list(aleph_client, json, args).await?;
+        }
+        FileCommand::Delete(args) => {
+            handle_file_delete(aleph_client, ccn_url, json, args).await?;
         }
     }
     Ok(())
@@ -357,6 +373,256 @@ async fn handle_file_download(
     Ok(())
 }
 
+async fn handle_file_list(
+    aleph_client: &AlephClient,
+    json: bool,
+    args: FileListArgs,
+) -> Result<()> {
+    let address = match args.address.as_deref() {
+        Some(value) => resolve_address(value)?,
+        None => {
+            let identity = crate::cli::IdentityArgs {
+                account: None,
+                private_key: None,
+                chain: None,
+            };
+            let account = resolve_account(&identity)?;
+            account.address().clone()
+        }
+    };
+
+    let sort_order = match args.sort_order {
+        SortOrderCli::Asc => 1,
+        SortOrderCli::Desc => -1,
+    };
+
+    let files: Vec<AccountFile> = aleph_client
+        .get_account_files_iterator(&address, None, Some(sort_order))
+        .take(args.count as usize)
+        .try_collect()
+        .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&files)?);
+    } else {
+        // Fetch the address-wide total separately. Cursor pages carry their
+        // own copy of `total_size`, but the iterator hides them; one extra
+        // round-trip keeps the surface clean.
+        let total_size = aleph_client.get_total_storage_size(&address).await?;
+        print!("{}", format_files_table(&files, total_size));
+    }
+    Ok(())
+}
+
+async fn handle_file_delete(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: FileDeleteArgs,
+) -> Result<()> {
+    if args.hashes.is_empty() {
+        bail!("at least one file hash is required");
+    }
+    // The owner of the STORE messages we're forgetting: --on-behalf-of when
+    // set, otherwise the signing account. The eventual FORGET message is
+    // submitted with the same on-behalf-of semantics, so the resolution
+    // address has to match what the network will check ownership against.
+    let owner = match args.on_behalf_of.as_deref() {
+        Some(addr) => resolve_address(addr)?,
+        None => resolve_account(&args.signing.identity)?.address().clone(),
+    };
+
+    if !json {
+        eprintln!(
+            "Resolving {} file hash(es) to STORE message hash(es)...",
+            args.hashes.len()
+        );
+    }
+    let message_hashes = resolve_file_to_store_messages(aleph_client, &owner, &args.hashes).await?;
+
+    // Deliberately *don't* propagate `on_behalf_of` to the FORGET envelope.
+    // `--on-behalf-of` only scopes the STORE lookup above (multiple users
+    // can pin the same file content_hash; we want the owner's pin, not
+    // anyone else's). The FORGET itself ships with `content.address =
+    // sender`: the network checks delegate authorization against the
+    // owner of the hashes inside, so spelling it out on the envelope is
+    // unnecessary - and pinning content.address to a single owner would
+    // cause the FORGET to be rejected when the hash list spans pins from
+    // multiple owners.
+    forget_targets(
+        aleph_client,
+        ccn_url,
+        json,
+        ForgetTargets {
+            hashes: message_hashes,
+            aggregates: Vec::new(),
+            reason: args.reason,
+            channel: args.channel,
+            on_behalf_of: None,
+            yes: args.yes,
+            confirm_label: "STORE message",
+            signing: args.signing,
+        },
+    )
+    .await
+}
+
+/// Look up the STORE message that pins each `file_hash` for `owner`, and
+/// return the list of matching message hashes (one per pin).
+///
+/// In practice there is one STORE message per (sender, file_hash), but if a
+/// caller pinned the same content multiple times (e.g. with different refs)
+/// all of those messages are returned so the FORGET releases every pin.
+async fn resolve_file_to_store_messages(
+    aleph_client: &AlephClient,
+    owner: &Address,
+    file_hashes: &[ItemHash],
+) -> Result<Vec<ItemHash>> {
+    // Filter by `owners` (content owner), not `addresses` (sender): for
+    // files uploaded with `--on-behalf-of`, the sender is the user's signing
+    // account while the owner is the on-behalf-of address. The network
+    // checks forget ownership against the content owner too, so this is
+    // the right field for the lookup.
+    let filter = MessageFilter {
+        message_type: Some(MessageType::Store),
+        owners: Some(vec![owner.clone()]),
+        content_hashes: Some(file_hashes.to_vec()),
+        ..Default::default()
+    };
+
+    // Defensive cap: usually one match per file_hash, but a re-pin with a
+    // different ref could produce duplicates. 4x leaves plenty of slack.
+    let cap = (file_hashes.len() * 4).max(64);
+    let messages = aleph_client
+        .get_messages_iterator(filter, None)
+        .take(cap)
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    let mut by_file: HashMap<ItemHash, Vec<ItemHash>> = HashMap::new();
+    for m in messages {
+        if let MessageContentEnum::Store(store) = m.content() {
+            by_file
+                .entry(store.file_hash())
+                .or_default()
+                .push(m.item_hash.clone());
+        }
+    }
+
+    let mut resolved = Vec::new();
+    let mut missing = Vec::new();
+    for fh in file_hashes {
+        match by_file.get(fh) {
+            Some(hs) => resolved.extend(hs.iter().cloned()),
+            None => missing.push(fh.to_string()),
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "no STORE message with owner {owner} found for file hash(es): {}\n\
+             Hint: `aleph file list` shows the pins for an address, and \
+             `aleph message forget` accepts STORE message hashes directly.",
+            missing.join(", "),
+        );
+    }
+    Ok(resolved)
+}
+
+fn size_in_mb(size: memsizes::Bytes) -> f64 {
+    size.count() as f64 / (1024.0 * 1024.0)
+}
+
+fn format_created(ts: &aleph_types::timestamp::Timestamp) -> String {
+    ts.to_datetime()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| "-".into())
+}
+
+fn format_files_table(files: &[AccountFile], account_total_size: memsizes::Bytes) -> String {
+    use std::fmt::Write;
+
+    const FILE_HASH_HEADER: &str = "FILE_HASH";
+    const SIZE_HEADER: &str = "SIZE (MB)";
+    const TYPE_HEADER: &str = "TYPE";
+    const CREATED_HEADER: &str = "CREATED";
+    const ITEM_HASH_HEADER: &str = "ITEM_HASH";
+
+    let file_hash_w = files
+        .iter()
+        .map(|f| f.file_hash.len())
+        .chain(std::iter::once(FILE_HASH_HEADER.len()))
+        .max()
+        .unwrap_or(FILE_HASH_HEADER.len());
+
+    let size_strings: Vec<String> = files
+        .iter()
+        .map(|f| format!("{:.4}", size_in_mb(f.size)))
+        .collect();
+    let size_w = size_strings
+        .iter()
+        .map(|s| s.len())
+        .chain(std::iter::once(SIZE_HEADER.len()))
+        .max()
+        .unwrap_or(SIZE_HEADER.len());
+
+    let type_w = files
+        .iter()
+        .map(|f| f.storage_engine.len())
+        .chain(std::iter::once(TYPE_HEADER.len()))
+        .max()
+        .unwrap_or(TYPE_HEADER.len());
+
+    // "%Y-%m-%d %H:%M:%S" is always 19 chars; pad against the header anyway.
+    let created_w = CREATED_HEADER.len().max(19);
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{:<file_hash_w$}  {:>size_w$}  {:<type_w$}  {:<created_w$}  {}",
+        FILE_HASH_HEADER,
+        SIZE_HEADER,
+        TYPE_HEADER,
+        CREATED_HEADER,
+        ITEM_HASH_HEADER,
+        file_hash_w = file_hash_w,
+        size_w = size_w,
+        type_w = type_w,
+        created_w = created_w,
+    )
+    .expect("writing to String cannot fail");
+
+    for (file, size_str) in files.iter().zip(size_strings.iter()) {
+        writeln!(
+            out,
+            "{:<file_hash_w$}  {:>size_w$}  {:<type_w$}  {:<created_w$}  {}",
+            file.file_hash,
+            size_str,
+            file.storage_engine,
+            format_created(&file.created),
+            file.item_hash,
+            file_hash_w = file_hash_w,
+            size_w = size_w,
+            type_w = type_w,
+            created_w = created_w,
+        )
+        .expect("writing to String cannot fail");
+    }
+
+    if files.is_empty() {
+        writeln!(out, "(no files)").expect("writing to String cannot fail");
+    } else {
+        writeln!(
+            out,
+            "\nShown: {} file(s). Account total: ~ {:.4} MB.",
+            files.len(),
+            size_in_mb(account_total_size),
+        )
+        .expect("writing to String cannot fail");
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +646,73 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let err = walk_folder_summary(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("empty folder"));
+    }
+
+    use aleph_types::timestamp::Timestamp;
+    use chrono::{TimeZone, Utc};
+    use memsizes::Bytes;
+
+    fn sample_files() -> Vec<AccountFile> {
+        vec![
+            AccountFile {
+                file_hash: "QmYzN9wJgkRfTDopwzCG7VkrcU8xKZxxJzAv4dQk2tSx9".into(),
+                size: Bytes::from(13_000_000),
+                storage_engine: "ipfs".into(),
+                created: Timestamp::from(Utc.with_ymd_and_hms(2025, 4, 12, 9, 21, 3).unwrap()),
+                item_hash: "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c"
+                    .parse()
+                    .unwrap(),
+            },
+            AccountFile {
+                file_hash: "abc123def456000000000000000000000000000000000000000000000000aabb"
+                    .into(),
+                size: Bytes::from(3200),
+                storage_engine: "storage".into(),
+                created: Timestamp::from(Utc.with_ymd_and_hms(2025, 4, 10, 14, 8, 0).unwrap()),
+                item_hash: "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e"
+                    .parse()
+                    .unwrap(),
+            },
+        ]
+    }
+
+    #[test]
+    fn format_files_table_includes_headers_and_rows() {
+        let out = format_files_table(&sample_files(), Bytes::from(13_003_200));
+        let mut lines = out.lines();
+        let header = lines.next().expect("header");
+        assert!(header.contains("FILE_HASH"));
+        assert!(header.contains("SIZE (MB)"));
+        assert!(header.contains("TYPE"));
+        assert!(header.contains("CREATED"));
+        assert!(header.contains("ITEM_HASH"));
+
+        let row1 = lines.next().expect("row1");
+        assert!(row1.contains("QmYzN9wJgkRfTDopwzCG7VkrcU8xKZxxJzAv4dQk2tSx9"));
+        assert!(row1.contains("12.3978")); // 13_000_000 / 1024^2
+        assert!(row1.contains("ipfs"));
+        assert!(row1.contains("2025-04-12 09:21:03"));
+
+        let row2 = lines.next().expect("row2");
+        assert!(row2.contains("storage"));
+        assert!(row2.contains("0.0031")); // 3200 / 1024^2
+
+        assert!(out.contains("Shown: 2 file(s)"));
+        assert!(out.contains("Account total: ~ 12.4008 MB"));
+    }
+
+    #[test]
+    fn format_files_table_empty_says_no_files() {
+        let out = format_files_table(&[], Bytes::from(0));
+        assert!(out.contains("FILE_HASH"));
+        assert!(out.contains("(no files)"));
+        // No "Shown:" line for the empty case.
+        assert!(!out.contains("Shown:"));
+    }
+
+    #[test]
+    fn size_in_mb_converts_using_mib() {
+        assert!((size_in_mb(Bytes::from(1_048_576)) - 1.0).abs() < 1e-6);
+        assert_eq!(size_in_mb(Bytes::from(0)), 0.0);
     }
 }

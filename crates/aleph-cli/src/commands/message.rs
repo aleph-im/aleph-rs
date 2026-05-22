@@ -1,8 +1,9 @@
-use crate::cli::{ForgetArgs, GetMessageArgs, MessageCommand};
+use crate::cli::{ForgetArgs, GetMessageArgs, MessageCommand, SigningArgs};
 use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephClient, AlephMessageClient};
 use aleph_types::channel::Channel;
+use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
 use anyhow::{Result, bail};
 use futures_util::{StreamExt, TryStreamExt};
@@ -44,37 +45,74 @@ async fn handle_forget(
     json: bool,
     args: ForgetArgs,
 ) -> Result<()> {
-    let dry_run = args.signing.dry_run;
-    let total = args.hashes.len() + args.aggregates.as_ref().map_or(0, Vec::len);
+    forget_targets(
+        aleph_client,
+        ccn_url,
+        json,
+        ForgetTargets {
+            hashes: args.hashes,
+            aggregates: args.aggregates.unwrap_or_default(),
+            reason: args.reason,
+            channel: args.channel,
+            on_behalf_of: args.on_behalf_of,
+            yes: args.yes,
+            confirm_label: "target",
+            signing: args.signing,
+        },
+    )
+    .await
+}
+
+pub struct ForgetTargets {
+    pub hashes: Vec<ItemHash>,
+    pub aggregates: Vec<ItemHash>,
+    pub reason: Option<String>,
+    pub channel: Option<String>,
+    pub on_behalf_of: Option<String>,
+    pub yes: bool,
+    /// Singular noun used in the confirmation prompt (pluralized with `(s)`).
+    pub confirm_label: &'static str,
+    pub signing: SigningArgs,
+}
+
+pub async fn forget_targets(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    targets: ForgetTargets,
+) -> Result<()> {
+    let dry_run = targets.signing.dry_run;
+    let total = targets.hashes.len() + targets.aggregates.len();
     if total == 0 {
-        bail!("at least one hash or --aggregates entry is required");
+        bail!("at least one hash is required");
     }
     if !dry_run {
         let prompt = format!(
-            "Forget {total} target(s)? This is irreversible — content will be tombstoned on the network."
+            "Forget {total} {label}(s)? This is irreversible - content will be tombstoned on the network.",
+            label = targets.confirm_label,
         );
-        if !confirm_action(&prompt, args.yes)? {
+        if !confirm_action(&prompt, targets.yes)? {
             eprintln!("Aborted.");
             return Ok(());
         }
     }
-    let account = resolve_account(&args.signing.identity)?;
-    let hashes: Vec<String> = args.hashes.iter().map(|h| h.to_string()).collect();
+    let account = resolve_account(&targets.signing.identity)?;
+    let hashes: Vec<String> = targets.hashes.iter().map(|h| h.to_string()).collect();
     let mut envelope = serde_json::json!({
         "hashes": hashes,
     });
-    if let Some(aggs) = args.aggregates {
-        let agg_strs: Vec<String> = aggs.iter().map(|h| h.to_string()).collect();
+    if !targets.aggregates.is_empty() {
+        let agg_strs: Vec<String> = targets.aggregates.iter().map(|h| h.to_string()).collect();
         envelope["aggregates"] = serde_json::json!(agg_strs);
     }
-    if let Some(reason) = args.reason {
+    if let Some(reason) = targets.reason {
         envelope["reason"] = serde_json::json!(reason);
     }
     let mut builder = MessageBuilder::new(&account, MessageType::Forget, envelope);
-    if let Some(owner) = args.on_behalf_of {
+    if let Some(owner) = targets.on_behalf_of {
         builder = builder.on_behalf_of(resolve_address(&owner)?);
     }
-    if let Some(ch) = args.channel {
+    if let Some(ch) = targets.channel {
         builder = builder.channel(Channel::from(ch));
     }
     let pending = builder.build()?;

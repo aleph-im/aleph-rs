@@ -1294,8 +1294,29 @@ pub struct AliasRemoveArgs {
 
 #[derive(Subcommand)]
 pub enum FileCommand {
+    /// Delete files by hash, releasing the matching STORE pins
+    #[command(long_about = "\
+Delete files by their content hash (IPFS CID or native hex). Each hash is \
+resolved to the STORE message that pins the file for the owner, and that \
+message is forgotten - releasing the pin.
+
+Use `aleph message forget` instead when you need to forget a specific \
+STORE *message* by its item hash (e.g. to remove a duplicate pin while \
+keeping the file alive via the others).
+
+Forget is irreversible. You can only delete files owned by your own \
+address (or that you have an authorization to forget on behalf of).
+
+Examples:
+  aleph file delete Qmabc...                          # IPFS CID
+  aleph file delete 9675a23e...                       # native hex
+  aleph file delete Qmabc... QmDef... --reason \"superseded\"
+  aleph file delete Qmabc... -y --on-behalf-of 0x...")]
+    Delete(FileDeleteArgs),
     /// Download a file by hash, message hash, or ref
     Download(FileDownloadArgs),
+    /// List the files stored by an address
+    List(FileListArgs),
     /// Pin an existing file by creating a STORE message for a known item hash
     Pin(FilePinArgs),
     /// Upload a file and create a STORE message
@@ -1432,6 +1453,50 @@ pub struct FileDownloadArgs {
     /// Write file contents to stdout instead of saving to a file.
     #[arg(long)]
     pub stdout: bool,
+}
+
+#[derive(Args)]
+pub struct FileListArgs {
+    /// Address to query. Accepts a hex address (`0x…`), a local account
+    /// name, or an alias. Defaults to the current default account.
+    #[arg(long)]
+    pub address: Option<String>,
+
+    /// Maximum number of files to display. Walks the server's cursor
+    /// pagination behind the scenes; safe for large values.
+    #[arg(long, default_value = "25")]
+    pub count: u32,
+
+    /// Sort order by creation time.
+    #[arg(long, value_enum, default_value = "desc")]
+    pub sort_order: SortOrderCli,
+}
+
+#[derive(Args)]
+pub struct FileDeleteArgs {
+    /// File hashes to delete (IPFS CID or native hex). Each hash is resolved
+    /// to the owner's STORE message and forgotten, releasing the file pin.
+    /// To forget a specific STORE *message* by hash, use `aleph message forget`.
+    pub hashes: Vec<ItemHash>,
+
+    /// Reason for forgetting.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    /// Skip the confirmation prompt and submit immediately.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
 
 #[derive(Subcommand)]
