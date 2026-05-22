@@ -4,17 +4,19 @@ use futures_util::StreamExt;
 use url::Url;
 
 use crate::cli::{CrnArgs, CrnStartArgs, SigningArgs};
+use crate::commands::instance_target::resolve_target;
 use crate::common::resolve_account;
 
-fn build_client(crn_url: &str, signing: &SigningArgs) -> Result<CrnClient> {
+fn build_client(crn_url: &Url, signing: &SigningArgs) -> Result<CrnClient> {
     let account = resolve_account(&signing.identity)?;
-    let url = Url::parse(crn_url)?;
-    Ok(CrnClient::new(&account, url)?)
+    Ok(CrnClient::new(&account, crn_url.clone())?)
 }
 
-pub async fn handle_start(json: bool, args: CrnStartArgs) -> Result<()> {
-    let client = build_client(&args.crn_url, &args.signing)?;
-    let response = client.start_instance(&args.vm_id).await?;
+pub async fn handle_start(scheduler_url: Url, json: bool, args: CrnStartArgs) -> Result<()> {
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+    let response = client.start_instance(&vm_id).await?;
 
     if json {
         println!(
@@ -27,9 +29,9 @@ pub async fn handle_start(json: bool, args: CrnStartArgs) -> Result<()> {
             }))?
         );
     } else if response.successful {
-        eprintln!("Instance {} started on {}", args.vm_id, args.crn_url);
+        eprintln!("Instance {vm_id} started on {crn_url}");
     } else {
-        eprintln!("Instance {} failed to start", args.vm_id);
+        eprintln!("Instance {vm_id} failed to start");
         if !response.failing.is_empty() {
             eprintln!("  Failing: {}", response.failing.join(", "));
         }
@@ -41,13 +43,20 @@ pub async fn handle_start(json: bool, args: CrnStartArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn handle_operation(json: bool, args: CrnArgs, operation: &str) -> Result<()> {
-    let client = build_client(&args.crn_url, &args.signing)?;
+pub async fn handle_operation(
+    scheduler_url: Url,
+    json: bool,
+    args: CrnArgs,
+    operation: &str,
+) -> Result<()> {
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
 
     match operation {
-        "stop" => client.stop_instance(&args.vm_id).await?,
-        "reboot" => client.reboot_instance(&args.vm_id).await?,
-        "erase" => client.erase_instance(&args.vm_id).await?,
+        "stop" => client.stop_instance(&vm_id).await?,
+        "reboot" => client.reboot_instance(&vm_id).await?,
+        "erase" => client.erase_instance(&vm_id).await?,
         _ => unreachable!(),
     }
 
@@ -55,7 +64,7 @@ pub async fn handle_operation(json: bool, args: CrnArgs, operation: &str) -> Res
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "vm_id": args.vm_id.to_string(),
+                "vm_id": vm_id.to_string(),
                 "operation": operation,
                 "status": "ok",
             }))?
@@ -67,7 +76,7 @@ pub async fn handle_operation(json: bool, args: CrnArgs, operation: &str) -> Res
             "erase" => "erased",
             _ => unreachable!(),
         };
-        eprintln!("Instance {} {past_tense} on {}", args.vm_id, args.crn_url);
+        eprintln!("Instance {vm_id} {past_tense} on {crn_url}");
     }
 
     Ok(())
@@ -82,30 +91,29 @@ fn sanitize_log(s: &str) -> String {
     while let Some(c) = chars.next() {
         match c {
             '\x1b' => {
-                // Skip ANSI escape sequence
                 if let Some(next) = chars.next()
                     && next == '['
                 {
-                    // CSI sequence: skip until final byte (0x40-0x7E)
                     for c in chars.by_ref() {
                         if ('\x40'..='\x7e').contains(&c) {
                             break;
                         }
                     }
                 }
-                // else: 2-char escape — already consumed
             }
             '\n' | '\t' => result.push(c),
-            c if c.is_control() => {} // strip CR, BEL, etc.
+            c if c.is_control() => {}
             c => result.push(c),
         }
     }
     result
 }
 
-pub async fn handle_logs(json: bool, args: CrnArgs) -> Result<()> {
-    let client = build_client(&args.crn_url, &args.signing)?;
-    let mut stream = std::pin::pin!(client.stream_logs(&args.vm_id).await?);
+pub async fn handle_logs(scheduler_url: Url, json: bool, args: CrnArgs) -> Result<()> {
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+    let mut stream = std::pin::pin!(client.stream_logs(&vm_id).await?);
 
     while let Some(result) = stream.next().await {
         let entry = result?;
