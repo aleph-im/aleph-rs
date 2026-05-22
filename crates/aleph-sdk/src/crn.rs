@@ -41,7 +41,9 @@ pub enum LogType {
 /// Options for `CrnClient::create_backup`. Defaults to `false` for both fields.
 #[derive(Debug, Clone, Default)]
 pub struct CreateBackupOpts {
+    /// Include persistent volumes in the backup archive.
     pub include_volumes: bool,
+    /// Skip the QEMU guest agent filesystem freeze. Faster, less consistent.
     pub skip_fsfreeze: bool,
 }
 
@@ -63,14 +65,14 @@ pub struct BackupMetadata {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Result of POST /backup. 200 -> Complete; 202 -> Started.
+/// Result of `POST /control/machine/<vm>/backup`. 200 -> Complete; 202 -> Started.
 #[derive(Debug, Clone)]
 pub enum CreateBackup {
     Started,
     Complete(BackupMetadata),
 }
 
-/// Result of GET /backup. 202 -> InProgress; 200 -> Complete; 404 -> NotFound.
+/// Result of `GET /control/machine/<vm>/backup`. 202 -> InProgress; 200 -> Complete; 404 -> NotFound.
 #[derive(Debug, Clone)]
 pub enum BackupStatus {
     InProgress,
@@ -599,6 +601,7 @@ mod tests {
         let meta: BackupMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(meta.volumes, vec!["data".to_string(), "cache".to_string()]);
         assert_eq!(meta.extra["future_field"], "ignored-but-preserved");
+        assert_eq!(meta.extra.len(), 1, "extra should only contain unknown fields, not absorb known ones");
     }
 
     #[test]
