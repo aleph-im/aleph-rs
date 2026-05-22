@@ -1619,6 +1619,9 @@ Examples:
     Start(CrnStartArgs),
     /// Stop a running VM instance
     Stop(CrnArgs),
+    /// Manage VM backups (create / info / download / delete / restore).
+    #[command(subcommand)]
+    Backup(InstanceBackupCommand),
 }
 
 #[derive(Args)]
@@ -1883,6 +1886,95 @@ pub struct CrnStartArgs {
     /// shown by `aleph instance list`); the scheduler matches it server-side.
     pub vm_id: String,
 
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum InstanceBackupCommand {
+    /// Create a backup of a running VM. POSTs to the CRN and either returns
+    /// immediately (`--follow` polls until completion).
+    Create(InstanceBackupCreateArgs),
+    /// Show the latest backup status for a VM.
+    Info(InstanceBackupInfoArgs),
+    /// Download a backup archive to disk.
+    Download(InstanceBackupDownloadArgs),
+    /// Delete a backup.
+    Delete(InstanceBackupDeleteArgs),
+    /// Restore a VM from a local QCOW2 file or an Aleph volume reference.
+    Restore(InstanceBackupRestoreArgs),
+}
+
+#[derive(Args)]
+pub struct InstanceBackupCreateArgs {
+    /// VM instance item hash (accepts a unique prefix).
+    pub vm_id: String,
+    /// Include persistent volumes in the backup archive.
+    #[arg(long)]
+    pub include_volumes: bool,
+    /// Skip the QEMU guest agent filesystem freeze. Faster, less consistent.
+    #[arg(long)]
+    pub skip_fsfreeze: bool,
+    /// Poll the CRN until the backup completes (or times out after 30 min).
+    #[arg(long)]
+    pub follow: bool,
+    /// Optional CRN URL override. The CRN is normally discovered via the
+    /// scheduler.
+    #[arg(long)]
+    pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct InstanceBackupInfoArgs {
+    pub vm_id: String,
+    #[arg(long)]
+    pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct InstanceBackupDownloadArgs {
+    /// Either a VM item hash (or prefix), or a presigned backup URL.
+    pub vm_id_or_url: String,
+    /// Output path. Defaults to ./backup-<vm_id_short>.tar.
+    #[arg(short, long)]
+    pub output: Option<std::path::PathBuf>,
+    /// Optional CRN URL override (ignored when arg is already a URL).
+    #[arg(long)]
+    pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct InstanceBackupDeleteArgs {
+    pub vm_id: String,
+    pub backup_id: String,
+    #[arg(long)]
+    pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+#[command(group(
+    clap::ArgGroup::new("restore_source")
+        .required(true)
+        .args(["file", "volume_ref"]),
+))]
+pub struct InstanceBackupRestoreArgs {
+    pub vm_id: String,
+    /// Local QCOW2 file to upload as the new rootfs.
+    #[arg(short, long, group = "restore_source")]
+    pub file: Option<std::path::PathBuf>,
+    /// Item hash of an Aleph volume to restore from (server-side download).
+    #[arg(long, group = "restore_source")]
+    pub volume_ref: Option<String>,
+    #[arg(long)]
+    pub crn_url: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }

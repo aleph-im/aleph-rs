@@ -440,6 +440,9 @@ pub async fn handle_instance_command(
             )
             .await?;
         }
+        InstanceCommand::Backup(_) => {
+            anyhow::bail!("backup subcommand not yet implemented");
+        }
     }
     Ok(())
 }
