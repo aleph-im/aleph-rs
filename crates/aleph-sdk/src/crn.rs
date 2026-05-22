@@ -7,7 +7,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use futures_util::{SinkExt, Stream, StreamExt};
 use p256::ecdsa::{SigningKey, signature::Signer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use url::Url;
 
@@ -36,6 +36,46 @@ pub enum LogType {
     Stdout,
     Stderr,
     System,
+}
+
+/// Options for `CrnClient::create_backup`. Defaults to `false` for both fields.
+#[derive(Debug, Clone, Default)]
+pub struct CreateBackupOpts {
+    pub include_volumes: bool,
+    pub skip_fsfreeze: bool,
+}
+
+/// Backup metadata returned by the CRN once a backup is complete.
+///
+/// `expires_at` is kept as a `String` (ISO 8601) rather than a typed timestamp
+/// so the SDK doesn't take a transitive dep on chrono/time for one passthrough
+/// field. Callers needing typed time parse at the call site.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupMetadata {
+    pub backup_id: String,
+    pub size: u64,
+    pub checksum: String,
+    pub expires_at: String,
+    pub download_url: String,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Result of POST /backup. 200 -> Complete; 202 -> Started.
+#[derive(Debug, Clone)]
+pub enum CreateBackup {
+    Started,
+    Complete(BackupMetadata),
+}
+
+/// Result of GET /backup. 202 -> InProgress; 200 -> Complete; 404 -> NotFound.
+#[derive(Debug, Clone)]
+pub enum BackupStatus {
+    InProgress,
+    Complete(BackupMetadata),
+    NotFound,
 }
 
 /// Networking info for a running VM, returned by `/about/executions/list`.
@@ -526,6 +566,39 @@ mod tests {
         let json = r#"{"type": "system", "message": "VM is starting"}"#;
         let entry: LogEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.log_type, LogType::System);
+    }
+
+    #[test]
+    fn deserialize_backup_metadata_minimal() {
+        let json = r#"{
+            "backup_id": "abc_123",
+            "size": 12345,
+            "checksum": "sha256:deadbeef",
+            "expires_at": "2026-05-24T12:00:00.000000Z",
+            "download_url": "https://crn.example/control/machine/abc/backup/abc_123?signature=x&expires=1"
+        }"#;
+        let meta: BackupMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.backup_id, "abc_123");
+        assert_eq!(meta.size, 12345);
+        assert_eq!(meta.checksum, "sha256:deadbeef");
+        assert!(meta.volumes.is_empty());
+        assert!(meta.extra.is_empty());
+    }
+
+    #[test]
+    fn deserialize_backup_metadata_with_volumes_and_extra() {
+        let json = r#"{
+            "backup_id": "abc_123",
+            "size": 12345,
+            "checksum": "sha256:deadbeef",
+            "expires_at": "2026-05-24T12:00:00.000000Z",
+            "download_url": "https://crn.example/path",
+            "volumes": ["data", "cache"],
+            "future_field": "ignored-but-preserved"
+        }"#;
+        let meta: BackupMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.volumes, vec!["data".to_string(), "cache".to_string()]);
+        assert_eq!(meta.extra["future_field"], "ignored-but-preserved");
     }
 
     #[test]
