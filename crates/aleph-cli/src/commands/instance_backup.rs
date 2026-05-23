@@ -44,8 +44,37 @@ async fn handle_create(
     };
     let initial = client.create_backup(&vm_id, opts).await?;
 
-    // --follow path is added in Task 14.
-    let result = initial;
+    let result = if args.follow {
+        use aleph_sdk::crn::CreateBackup;
+        match initial {
+            CreateBackup::Complete(meta) => CreateBackup::Complete(meta),
+            CreateBackup::Started => {
+                eprintln!("Backup queued for {vm_id}, polling...");
+                let outcome = poll_until_complete(
+                    || async { Ok(client.get_backup(&vm_id).await?) },
+                    |d| async move { tokio::time::sleep(d).await },
+                    FOLLOW_TIMEOUT,
+                    FOLLOW_POLL_INTERVAL,
+                )
+                .await?;
+                match outcome {
+                    FollowOutcome::Complete(meta) => CreateBackup::Complete(meta),
+                    FollowOutcome::NotFound => {
+                        anyhow::bail!(
+                            "backup vanished while polling for {vm_id} (CRN returned 404)"
+                        );
+                    }
+                    FollowOutcome::Timeout => {
+                        anyhow::bail!(
+                            "backup still in progress after 30 minutes; run 'aleph instance backup info {vm_id}' later"
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        initial
+    };
     render_create_result(&vm_id, json, &result);
     Ok(())
 }
@@ -78,6 +107,47 @@ fn render_create_result(
                 println!("checksum     {}", meta.checksum);
                 println!("expires_at   {}", meta.expires_at);
                 println!("download_url {}", meta.download_url);
+            }
+        }
+    }
+}
+
+const FOLLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const FOLLOW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Outcome of `poll_until_complete`. `Timeout` carries no data; the caller
+/// already knows which VM it was polling.
+pub(crate) enum FollowOutcome {
+    Complete(aleph_sdk::crn::BackupMetadata),
+    NotFound,
+    Timeout,
+}
+
+/// Poll `fetch_status` until it returns `Complete` / `NotFound`, or until
+/// `timeout` elapses. `sleep` lets tests inject a no-op delay.
+pub(crate) async fn poll_until_complete<F, Fut, S, SFut>(
+    mut fetch_status: F,
+    mut sleep: S,
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> anyhow::Result<FollowOutcome>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<aleph_sdk::crn::BackupStatus>>,
+    S: FnMut(std::time::Duration) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    use aleph_sdk::crn::BackupStatus;
+    let start = std::time::Instant::now();
+    loop {
+        match fetch_status().await? {
+            BackupStatus::Complete(meta) => return Ok(FollowOutcome::Complete(meta)),
+            BackupStatus::NotFound => return Ok(FollowOutcome::NotFound),
+            BackupStatus::InProgress => {
+                if start.elapsed() >= timeout {
+                    return Ok(FollowOutcome::Timeout);
+                }
+                sleep(poll_interval).await;
             }
         }
     }
@@ -209,6 +279,97 @@ mod tests {
             signing: evm_signing_args(),
         };
         handle_create(scheduler_url, true, args).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn poll_until_complete_returns_complete_immediately() {
+        use aleph_sdk::crn::{BackupMetadata, BackupStatus};
+        let meta = BackupMetadata {
+            backup_id: "x".into(),
+            size: 1,
+            checksum: "sha256:00".into(),
+            expires_at: "now".into(),
+            download_url: "https://x".into(),
+            volumes: vec![],
+            extra: Default::default(),
+        };
+        let mut returned = Some(BackupStatus::Complete(meta));
+        let outcome = poll_until_complete(
+            || {
+                let v = returned.take().unwrap();
+                async move { Ok(v) }
+            },
+            |_| async {},
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(0),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, FollowOutcome::Complete(_)));
+    }
+
+    #[tokio::test]
+    async fn poll_until_complete_polls_then_completes() {
+        use aleph_sdk::crn::{BackupMetadata, BackupStatus};
+        use std::cell::RefCell;
+        let calls = RefCell::new(0usize);
+        let outcome = poll_until_complete(
+            || async {
+                let n = {
+                    let mut c = calls.borrow_mut();
+                    *c += 1;
+                    *c
+                };
+                Ok(if n < 3 {
+                    BackupStatus::InProgress
+                } else {
+                    BackupStatus::Complete(BackupMetadata {
+                        backup_id: "x".into(),
+                        size: 1,
+                        checksum: "sha256:00".into(),
+                        expires_at: "now".into(),
+                        download_url: "https://x".into(),
+                        volumes: vec![],
+                        extra: Default::default(),
+                    })
+                })
+            },
+            |_| async {},
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(0),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, FollowOutcome::Complete(_)));
+        assert_eq!(*calls.borrow(), 3);
+    }
+
+    #[tokio::test]
+    async fn poll_until_complete_times_out() {
+        use aleph_sdk::crn::BackupStatus;
+        let outcome = poll_until_complete(
+            || async { Ok(BackupStatus::InProgress) },
+            |_| async {},
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(0),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, FollowOutcome::Timeout));
+    }
+
+    #[tokio::test]
+    async fn poll_until_complete_propagates_not_found() {
+        use aleph_sdk::crn::BackupStatus;
+        let outcome = poll_until_complete(
+            || async { Ok(BackupStatus::NotFound) },
+            |_| async {},
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(0),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, FollowOutcome::NotFound));
     }
 }
 
