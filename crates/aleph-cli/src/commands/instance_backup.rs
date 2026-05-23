@@ -609,6 +609,31 @@ mod tests {
         handle_download(scheduler_url, true, args).await.unwrap();
         assert_eq!(tokio::fs::read(&output).await.unwrap(), body);
     }
+
+    #[tokio::test]
+    async fn restore_from_volume_ref_calls_crn() {
+        let server = MockServer::start().await;
+        let volume_ref = "d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{FULL_HASH}/restore")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "restored",
+                "vm_hash": FULL_HASH,
+                "old_rootfs_backup": null
+            })))
+            .mount(&server)
+            .await;
+
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupRestoreArgs {
+            vm_id: FULL_HASH.to_string(),
+            file: None,
+            volume_ref: Some(volume_ref.to_string()),
+            crn_url: Some(server.uri()),
+            signing: evm_signing_args(),
+        };
+        handle_restore(scheduler_url, true, args).await.unwrap();
+    }
 }
 
 async fn handle_download(
@@ -705,9 +730,30 @@ async fn handle_delete(
 }
 
 async fn handle_restore(
-    _scheduler_url: Url,
-    _json: bool,
-    _args: InstanceBackupRestoreArgs,
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceBackupRestoreArgs,
 ) -> Result<()> {
-    anyhow::bail!("instance backup restore: not yet implemented")
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+
+    let response = match (&args.file, &args.volume_ref) {
+        (Some(_path), None) => {
+            // --file path handled in Task 18.
+            anyhow::bail!("--file restore not implemented yet");
+        }
+        (None, Some(volume_ref)) => client.restore_from_volume(&vm_id, volume_ref).await?,
+        _ => unreachable!("clap arg group enforces exactly one"),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        eprintln!("Restored {} (status: {}).", response.vm_hash, response.status);
+        if let Some(old) = &response.old_rootfs_backup {
+            eprintln!("Previous rootfs backed up at {old}.");
+        }
+    }
+    Ok(())
 }
