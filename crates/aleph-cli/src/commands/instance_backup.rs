@@ -29,11 +29,58 @@ fn build_client(crn_url: &Url, signing: &SigningArgs) -> Result<CrnClient> {
 }
 
 async fn handle_create(
-    _scheduler_url: Url,
-    _json: bool,
-    _args: InstanceBackupCreateArgs,
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceBackupCreateArgs,
 ) -> Result<()> {
-    anyhow::bail!("instance backup create: not yet implemented")
+    use aleph_sdk::crn::CreateBackupOpts;
+
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+    let opts = CreateBackupOpts {
+        include_volumes: args.include_volumes,
+        skip_fsfreeze: args.skip_fsfreeze,
+    };
+    let initial = client.create_backup(&vm_id, opts).await?;
+
+    // --follow path is added in Task 14.
+    let result = initial;
+    render_create_result(&vm_id, json, &result);
+    Ok(())
+}
+
+fn render_create_result(
+    vm_id: &aleph_types::item_hash::ItemHash,
+    json: bool,
+    result: &aleph_sdk::crn::CreateBackup,
+) {
+    use aleph_sdk::crn::CreateBackup;
+    if json {
+        match result {
+            CreateBackup::Started => println!(
+                "{}",
+                serde_json::json!({"vm_id": vm_id.to_string(), "status": "queued"})
+            ),
+            CreateBackup::Complete(meta) => {
+                println!("{}", serde_json::to_string_pretty(meta).unwrap())
+            }
+        }
+    } else {
+        match result {
+            CreateBackup::Started => eprintln!(
+                "Backup queued for {vm_id}. Run 'aleph instance backup info {vm_id}' to check status."
+            ),
+            CreateBackup::Complete(meta) => {
+                eprintln!("Backup complete for {vm_id}.");
+                println!("backup_id    {}", meta.backup_id);
+                println!("size         {} bytes", meta.size);
+                println!("checksum     {}", meta.checksum);
+                println!("expires_at   {}", meta.expires_at);
+                println!("download_url {}", meta.download_url);
+            }
+        }
+    }
 }
 
 async fn handle_info(
@@ -142,6 +189,26 @@ mod tests {
             signing: evm_signing_args(),
         };
         handle_delete(scheduler_url, true, args).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_returns_queued_on_202() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{FULL_HASH}/backup")))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupCreateArgs {
+            vm_id: FULL_HASH.to_string(),
+            include_volumes: false,
+            skip_fsfreeze: false,
+            follow: false,
+            crn_url: Some(server.uri()),
+            signing: evm_signing_args(),
+        };
+        handle_create(scheduler_url, true, args).await.unwrap();
     }
 }
 
