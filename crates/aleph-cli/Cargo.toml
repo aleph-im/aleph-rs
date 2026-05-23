@@ -23,6 +23,7 @@ memsizes = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 url = { workspace = true }
 directories = { workspace = true }
 rpassword = { workspace = true }

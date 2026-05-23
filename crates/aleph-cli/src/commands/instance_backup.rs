@@ -306,6 +306,46 @@ async fn download_from_url(
     Ok(())
 }
 
+async fn restore_from_file(
+    client: &CrnClient,
+    vm_id: &aleph_types::item_hash::ItemHash,
+    path: &std::path::Path,
+) -> Result<aleph_sdk::crn::RestoreResponse> {
+    let file_size = tokio::fs::metadata(path).await?.len();
+    let file = tokio::fs::File::open(path).await?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = reqwest::Body::wrap_stream(stream);
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rootfs.qcow2")
+        .to_string();
+    let part = reqwest::multipart::Part::stream_with_length(body, file_size)
+        .file_name(file_name)
+        .mime_str("application/octet-stream")?;
+    let form = reqwest::multipart::Form::new().part("rootfs", part);
+
+    let (url, headers) = client.restore_endpoint(vm_id)?;
+    let http = reqwest::Client::new();
+    let mut request = http.post(url).multipart(form);
+    for (name, value) in &headers {
+        request = request.header(*name, value);
+    }
+    eprintln!("Uploading {file_size} bytes from {}...", path.display());
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        if status.as_u16() == 413 {
+            anyhow::bail!(
+                "instance rejected the upload: too large (413). The CRN typically caps restores; check the CRN's documented limit."
+            );
+        }
+        anyhow::bail!("restore failed: HTTP {status}: {body}");
+    }
+    Ok(response.json().await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +651,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_file_uploads_multipart() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{FULL_HASH}/restore")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "restored",
+                "vm_hash": FULL_HASH
+            })))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let qcow = tmpdir.path().join("rootfs.qcow2");
+        tokio::fs::write(&qcow, b"fake-qcow2-data").await.unwrap();
+
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupRestoreArgs {
+            vm_id: FULL_HASH.to_string(),
+            file: Some(qcow.clone()),
+            volume_ref: None,
+            crn_url: Some(server.uri()),
+            signing: evm_signing_args(),
+        };
+        handle_restore(scheduler_url, true, args).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn restore_from_volume_ref_calls_crn() {
         let server = MockServer::start().await;
         let volume_ref = "d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77";
@@ -739,10 +806,7 @@ async fn handle_restore(
     let client = build_client(&crn_url, &args.signing)?;
 
     let response = match (&args.file, &args.volume_ref) {
-        (Some(_path), None) => {
-            // --file path handled in Task 18.
-            anyhow::bail!("--file restore not implemented yet");
-        }
+        (Some(path), None) => restore_from_file(&client, &vm_id, path).await?,
         (None, Some(volume_ref)) => client.restore_from_volume(&vm_id, volume_ref).await?,
         _ => unreachable!("clap arg group enforces exactly one"),
     };
