@@ -91,6 +91,14 @@ pub struct RestoreResponse {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Signed URL + auth headers for driving a multipart POST to
+/// `/control/machine/<vm>/restore` from outside the SDK.
+#[derive(Debug, Clone)]
+pub struct RestoreEndpoint {
+    pub url: Url,
+    pub headers: Vec<(&'static str, String)>,
+}
+
 /// Networking info for a running VM, returned by `/about/executions/list`.
 ///
 /// `ipv6` is a CIDR like `"fc00:1:2:3:1:abcd:1234:5670/124"` - the prefix
@@ -425,11 +433,7 @@ impl CrnClient {
         }
     }
 
-    pub async fn delete_backup(
-        &self,
-        vm_id: &ItemHash,
-        backup_id: &str,
-    ) -> Result<(), CrnError> {
+    pub async fn delete_backup(&self, vm_id: &ItemHash, backup_id: &str) -> Result<(), CrnError> {
         let path = format!("/control/machine/{vm_id}/backup/{backup_id}");
         let url = self.crn_url.join(&path).expect("valid path");
         let headers = self.auth_headers("DELETE", &path);
@@ -485,17 +489,14 @@ impl CrnClient {
     /// Returns the URL and auth headers the caller needs to drive a multipart
     /// POST to `/control/machine/<vm>/restore` themselves. Used by
     /// `aleph instance backup restore --file`, which streams a QCOW2 from disk.
-    pub fn restore_endpoint(
-        &self,
-        vm_id: &ItemHash,
-    ) -> Result<(Url, Vec<(&'static str, String)>), CrnError> {
+    pub fn restore_endpoint(&self, vm_id: &ItemHash) -> Result<RestoreEndpoint, CrnError> {
         let path = format!("/control/machine/{vm_id}/restore");
         let url = self.crn_url.join(&path).expect("valid path");
         let headers = self
             .auth_headers("POST", &path)
             .into_iter()
             .collect::<Vec<_>>();
-        Ok((url, headers))
+        Ok(RestoreEndpoint { url, headers })
     }
 
     pub async fn expire_instance(
@@ -748,7 +749,11 @@ mod tests {
         let meta: BackupMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(meta.volumes, vec!["data".to_string(), "cache".to_string()]);
         assert_eq!(meta.extra["future_field"], "ignored-but-preserved");
-        assert_eq!(meta.extra.len(), 1, "extra should only contain unknown fields, not absorb known ones");
+        assert_eq!(
+            meta.extra.len(),
+            1,
+            "extra should only contain unknown fields, not absorb known ones"
+        );
     }
 
     #[test]
@@ -1130,15 +1135,15 @@ mod tests {
         let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99"
             .parse()
             .unwrap();
-        let (endpoint, headers) = client.restore_endpoint(&vm).unwrap();
+        let endpoint = client.restore_endpoint(&vm).unwrap();
         assert_eq!(
-            endpoint.as_str(),
+            endpoint.url.as_str(),
             "https://crn.example/control/machine/5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99/restore"
         );
-        let names: Vec<&str> = headers.iter().map(|(n, _)| *n).collect();
+        let names: Vec<&str> = endpoint.headers.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"X-SignedPubKey"));
         assert!(names.contains(&"X-SignedOperation"));
-        for (_, value) in &headers {
+        for (_, value) in &endpoint.headers {
             assert!(!value.is_empty());
         }
     }

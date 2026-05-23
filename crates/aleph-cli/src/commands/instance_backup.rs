@@ -153,11 +153,7 @@ where
     }
 }
 
-async fn handle_info(
-    scheduler_url: Url,
-    json: bool,
-    args: InstanceBackupInfoArgs,
-) -> Result<()> {
+async fn handle_info(scheduler_url: Url, json: bool, args: InstanceBackupInfoArgs) -> Result<()> {
     use aleph_sdk::crn::BackupStatus;
     let (vm_id, crn_url) =
         resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
@@ -252,11 +248,7 @@ async fn stream_to_part_file(
     Ok((hex::encode(hasher.finalize()), written))
 }
 
-async fn download_from_url(
-    url: Url,
-    output: Option<std::path::PathBuf>,
-    json: bool,
-) -> Result<()> {
+async fn download_from_url(url: Url, output: Option<std::path::PathBuf>, json: bool) -> Result<()> {
     let output = output.unwrap_or_else(|| std::path::PathBuf::from("backup.tar"));
     let mut part = output.clone();
     part.as_mut_os_string().push(".part");
@@ -272,7 +264,7 @@ async fn download_from_url(
         .headers()
         .get("X-Backup-Checksum")
         .and_then(|v| v.to_str().ok())
-        .map(|s| normalize_sha256(s));
+        .map(normalize_sha256);
     let (digest, written) = stream_to_part_file(response, &part).await?;
     if let Some(expected) = expected_checksum {
         if digest != expected {
@@ -325,10 +317,10 @@ async fn restore_from_file(
         .mime_str("application/octet-stream")?;
     let form = reqwest::multipart::Form::new().part("rootfs", part);
 
-    let (url, headers) = client.restore_endpoint(vm_id)?;
+    let endpoint = client.restore_endpoint(vm_id)?;
     let http = reqwest::Client::new();
-    let mut request = http.post(url).multipart(form);
-    for (name, value) in &headers {
+    let mut request = http.post(endpoint.url).multipart(form);
+    for (name, value) in &endpoint.headers {
         request = request.header(*name, value);
     }
     eprintln!("Uploading {file_size} bytes from {}...", path.display());
@@ -344,6 +336,127 @@ async fn restore_from_file(
         anyhow::bail!("restore failed: HTTP {status}: {body}");
     }
     Ok(response.json().await?)
+}
+
+async fn handle_download(
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceBackupDownloadArgs,
+) -> Result<()> {
+    use aleph_sdk::crn::BackupStatus;
+
+    let parsed_url = Url::parse(&args.vm_id_or_url)
+        .ok()
+        .filter(|u| !u.scheme().is_empty() && u.has_host());
+    if let Some(direct_url) = parsed_url {
+        return download_from_url(direct_url, args.output, json).await;
+    }
+
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id_or_url, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+    let meta = match client.get_backup(&vm_id).await? {
+        BackupStatus::Complete(m) => m,
+        BackupStatus::InProgress => anyhow::bail!(
+            "backup for {vm_id} is still in progress; wait or pass --follow on create"
+        ),
+        BackupStatus::NotFound => anyhow::bail!(
+            "no backup found for {vm_id}; create one with 'aleph instance backup create'"
+        ),
+    };
+
+    let output = args.output.unwrap_or_else(|| default_output_path(&vm_id));
+    let mut part = output.clone();
+    part.as_mut_os_string().push(".part");
+
+    eprintln!("Downloading backup for {vm_id} ({} bytes)...", meta.size);
+    let http = reqwest::Client::new();
+    let response = http.get(&meta.download_url).send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("backup download failed: HTTP {status}: {body}");
+    }
+    let (digest, written) = stream_to_part_file(response, &part).await?;
+    let expected = normalize_sha256(&meta.checksum);
+    if digest != expected {
+        let _ = tokio::fs::remove_file(&part).await;
+        anyhow::bail!(
+            "checksum mismatch: expected {expected}, computed {digest}. Partial file deleted."
+        );
+    }
+    tokio::fs::rename(&part, &output).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "path": output.to_string_lossy(),
+                "bytes": written,
+                "checksum": format!("sha256:{digest}")
+            })
+        );
+    } else {
+        eprintln!(
+            "Saved {written} bytes to {} (sha256:{digest}).",
+            output.display()
+        );
+    }
+    Ok(())
+}
+
+async fn handle_delete(
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceBackupDeleteArgs,
+) -> Result<()> {
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+    client.delete_backup(&vm_id, &args.backup_id).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "vm_id": vm_id.to_string(),
+                "backup_id": args.backup_id,
+                "status": "deleted"
+            })
+        );
+    } else {
+        eprintln!("Deleted backup {} for {vm_id}.", args.backup_id);
+    }
+    Ok(())
+}
+
+async fn handle_restore(
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceBackupRestoreArgs,
+) -> Result<()> {
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+
+    let response = match (&args.file, &args.volume_ref) {
+        (Some(path), None) => restore_from_file(&client, &vm_id, path).await?,
+        (None, Some(volume_ref)) => client.restore_from_volume(&vm_id, volume_ref).await?,
+        _ => unreachable!("clap arg group enforces exactly one"),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        eprintln!(
+            "Restored {} (status: {}).",
+            response.vm_hash, response.status
+        );
+        if let Some(old) = &response.old_rootfs_backup {
+            eprintln!("Previous rootfs backed up at {old}.");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -600,7 +713,9 @@ mod tests {
             crn_url: Some(crn_server.uri()),
             signing: evm_signing_args(),
         };
-        let err = handle_download(scheduler_url, true, args).await.unwrap_err();
+        let err = handle_download(scheduler_url, true, args)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"));
         assert!(!output.exists());
         assert!(!tmpdir.path().join("out.tar.part").exists());
@@ -701,123 +816,4 @@ mod tests {
         };
         handle_restore(scheduler_url, true, args).await.unwrap();
     }
-}
-
-async fn handle_download(
-    scheduler_url: Url,
-    json: bool,
-    args: InstanceBackupDownloadArgs,
-) -> Result<()> {
-    use aleph_sdk::crn::BackupStatus;
-
-    // VM-id form vs URL form. The URL form is added in Task 16.
-    let parsed_url = Url::parse(&args.vm_id_or_url)
-        .ok()
-        .filter(|u| !u.scheme().is_empty() && u.has_host());
-    if let Some(direct_url) = parsed_url {
-        return download_from_url(direct_url, args.output, json).await;
-    }
-
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id_or_url, args.crn_url.as_deref()).await?;
-    let client = build_client(&crn_url, &args.signing)?;
-    let meta = match client.get_backup(&vm_id).await? {
-        BackupStatus::Complete(m) => m,
-        BackupStatus::InProgress => anyhow::bail!(
-            "backup for {vm_id} is still in progress; wait or pass --follow on create"
-        ),
-        BackupStatus::NotFound => anyhow::bail!(
-            "no backup found for {vm_id}; create one with 'aleph instance backup create'"
-        ),
-    };
-
-    let output = args.output.unwrap_or_else(|| default_output_path(&vm_id));
-    let mut part = output.clone();
-    part.as_mut_os_string().push(".part");
-
-    eprintln!("Downloading backup for {vm_id} ({} bytes)...", meta.size);
-    let http = reqwest::Client::new();
-    let response = http.get(&meta.download_url).send().await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("backup download failed: HTTP {status}: {body}");
-    }
-    let (digest, written) = stream_to_part_file(response, &part).await?;
-    let expected = normalize_sha256(&meta.checksum);
-    if digest != expected {
-        let _ = tokio::fs::remove_file(&part).await;
-        anyhow::bail!(
-            "checksum mismatch: expected {expected}, computed {digest}. Partial file deleted."
-        );
-    }
-    tokio::fs::rename(&part, &output).await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "path": output.to_string_lossy(),
-                "bytes": written,
-                "checksum": format!("sha256:{digest}")
-            })
-        );
-    } else {
-        eprintln!(
-            "Saved {written} bytes to {} (sha256:{digest}).",
-            output.display()
-        );
-    }
-    Ok(())
-}
-
-async fn handle_delete(
-    scheduler_url: Url,
-    json: bool,
-    args: InstanceBackupDeleteArgs,
-) -> Result<()> {
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
-    let client = build_client(&crn_url, &args.signing)?;
-    client.delete_backup(&vm_id, &args.backup_id).await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "vm_id": vm_id.to_string(),
-                "backup_id": args.backup_id,
-                "status": "deleted"
-            })
-        );
-    } else {
-        eprintln!("Deleted backup {} for {vm_id}.", args.backup_id);
-    }
-    Ok(())
-}
-
-async fn handle_restore(
-    scheduler_url: Url,
-    json: bool,
-    args: InstanceBackupRestoreArgs,
-) -> Result<()> {
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
-    let client = build_client(&crn_url, &args.signing)?;
-
-    let response = match (&args.file, &args.volume_ref) {
-        (Some(path), None) => restore_from_file(&client, &vm_id, path).await?,
-        (None, Some(volume_ref)) => client.restore_from_volume(&vm_id, volume_ref).await?,
-        _ => unreachable!("clap arg group enforces exactly one"),
-    };
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&response)?);
-    } else {
-        eprintln!("Restored {} (status: {}).", response.vm_hash, response.status);
-        if let Some(old) = &response.old_rootfs_backup {
-            eprintln!("Previous rootfs backed up at {old}.");
-        }
-    }
-    Ok(())
 }
