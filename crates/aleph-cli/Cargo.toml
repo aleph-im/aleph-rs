@@ -34,6 +34,7 @@ thiserror = { workspace = true }
 k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
+sha2 = { workspace = true }
 zeroize = { workspace = true }
 coins-ledger = { workspace = true }
 dialoguer = { workspace = true, features = ["fuzzy-select"] }

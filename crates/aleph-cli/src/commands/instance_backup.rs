@@ -195,6 +195,63 @@ async fn handle_info(
     Ok(())
 }
 
+use std::path::Path;
+
+/// Default output filename for a downloaded backup: ./backup-<first-12-of-hash>.tar.
+fn default_output_path(vm_id: &aleph_types::item_hash::ItemHash) -> std::path::PathBuf {
+    let s = vm_id.to_string();
+    let short: String = s.chars().take(12).collect();
+    std::path::PathBuf::from(format!("backup-{short}.tar"))
+}
+
+/// Strip the optional `sha256:` prefix and lower-case the hex digest.
+fn normalize_sha256(value: &str) -> String {
+    let trimmed = value.trim();
+    trimmed
+        .strip_prefix("sha256:")
+        .unwrap_or(trimmed)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Stream `response.bytes_stream()` to `dest_part`, return the SHA-256 hex
+/// of the bytes written and the total byte count. Reports progress to stderr
+/// every ~500 ms when `Content-Length` is known.
+async fn stream_to_part_file(
+    response: reqwest::Response,
+    dest_part: &Path,
+) -> anyhow::Result<(String, u64)> {
+    use futures_util::StreamExt;
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    let total = response.content_length();
+    let mut file = tokio::fs::File::create(dest_part).await?;
+    let mut stream = response.bytes_stream();
+    let mut hasher = Sha256::new();
+    let mut written: u64 = 0;
+    let mut last_report = std::time::Instant::now();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        file.write_all(&chunk).await?;
+        hasher.update(&chunk);
+        written += chunk.len() as u64;
+        if last_report.elapsed() >= std::time::Duration::from_millis(500) {
+            match total {
+                Some(t) if t > 0 => {
+                    let pct = (written as f64 / t as f64 * 100.0).min(100.0);
+                    eprint!("\r  downloaded {written}/{t} bytes ({pct:.1}%)");
+                }
+                _ => eprint!("\r  downloaded {written} bytes"),
+            }
+            last_report = std::time::Instant::now();
+        }
+    }
+    file.flush().await?;
+    eprintln!();
+    Ok((hex::encode(hasher.finalize()), written))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +274,22 @@ mod tests {
     }
 
     const FULL_HASH: &str = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+
+    #[test]
+    fn default_output_path_uses_short_hash() {
+        let hash: aleph_types::item_hash::ItemHash = FULL_HASH.parse().unwrap();
+        assert_eq!(
+            default_output_path(&hash),
+            std::path::PathBuf::from("backup-5a586d6f59f6.tar")
+        );
+    }
+
+    #[test]
+    fn normalize_sha256_strips_prefix() {
+        assert_eq!(normalize_sha256("sha256:DEADBEEF"), "deadbeef");
+        assert_eq!(normalize_sha256("deadbeef"), "deadbeef");
+        assert_eq!(normalize_sha256(" sha256:abc "), "abc");
+    }
 
     #[tokio::test]
     async fn info_complete_renders_metadata_in_json_mode() {
@@ -359,6 +432,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn download_streams_atomically_and_verifies_checksum() {
+        use sha2::{Digest, Sha256};
+
+        let download_server = MockServer::start().await;
+        let crn_server = MockServer::start().await;
+        let body = b"hello backup tar".to_vec();
+        let expected_digest = hex::encode(Sha256::digest(&body));
+
+        Mock::given(method("GET"))
+            .and(path("/dl"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&download_server)
+            .await;
+
+        let metadata = serde_json::json!({
+            "backup_id": "abc_1",
+            "size": body.len(),
+            "checksum": format!("sha256:{expected_digest}"),
+            "expires_at": "2026-05-24T12:00:00.000000Z",
+            "download_url": format!("{}/dl", download_server.uri()),
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/control/machine/{FULL_HASH}/backup")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
+            .mount(&crn_server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let output = tmpdir.path().join("out.tar");
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupDownloadArgs {
+            vm_id_or_url: FULL_HASH.to_string(),
+            output: Some(output.clone()),
+            crn_url: Some(crn_server.uri()),
+            signing: evm_signing_args(),
+        };
+        handle_download(scheduler_url, true, args).await.unwrap();
+
+        let written = tokio::fs::read(&output).await.unwrap();
+        assert_eq!(written, body);
+        assert!(!tmpdir.path().join("out.tar.part").exists());
+    }
+
+    #[tokio::test]
+    async fn download_aborts_on_checksum_mismatch() {
+        let download_server = MockServer::start().await;
+        let crn_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dl"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"corrupt-data".to_vec()))
+            .mount(&download_server)
+            .await;
+        let metadata = serde_json::json!({
+            "backup_id": "abc_1",
+            "size": 12,
+            "checksum": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "expires_at": "2026-05-24T12:00:00.000000Z",
+            "download_url": format!("{}/dl", download_server.uri()),
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/control/machine/{FULL_HASH}/backup")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
+            .mount(&crn_server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let output = tmpdir.path().join("out.tar");
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupDownloadArgs {
+            vm_id_or_url: FULL_HASH.to_string(),
+            output: Some(output.clone()),
+            crn_url: Some(crn_server.uri()),
+            signing: evm_signing_args(),
+        };
+        let err = handle_download(scheduler_url, true, args).await.unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"));
+        assert!(!output.exists());
+        assert!(!tmpdir.path().join("out.tar.part").exists());
+    }
+
+    #[tokio::test]
     async fn poll_until_complete_propagates_not_found() {
         use aleph_sdk::crn::BackupStatus;
         let outcome = poll_until_complete(
@@ -374,11 +528,71 @@ mod tests {
 }
 
 async fn handle_download(
-    _scheduler_url: Url,
-    _json: bool,
-    _args: InstanceBackupDownloadArgs,
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceBackupDownloadArgs,
 ) -> Result<()> {
-    anyhow::bail!("instance backup download: not yet implemented")
+    use aleph_sdk::crn::BackupStatus;
+
+    // VM-id form vs URL form. The URL form is added in Task 16.
+    let parsed_url = Url::parse(&args.vm_id_or_url)
+        .ok()
+        .filter(|u| !u.scheme().is_empty() && u.has_host());
+    if parsed_url.is_some() {
+        anyhow::bail!("URL form not implemented yet");
+    }
+
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id_or_url, args.crn_url.as_deref()).await?;
+    let client = build_client(&crn_url, &args.signing)?;
+    let meta = match client.get_backup(&vm_id).await? {
+        BackupStatus::Complete(m) => m,
+        BackupStatus::InProgress => anyhow::bail!(
+            "backup for {vm_id} is still in progress; wait or pass --follow on create"
+        ),
+        BackupStatus::NotFound => anyhow::bail!(
+            "no backup found for {vm_id}; create one with 'aleph instance backup create'"
+        ),
+    };
+
+    let output = args.output.unwrap_or_else(|| default_output_path(&vm_id));
+    let mut part = output.clone();
+    part.as_mut_os_string().push(".part");
+
+    eprintln!("Downloading backup for {vm_id} ({} bytes)...", meta.size);
+    let http = reqwest::Client::new();
+    let response = http.get(&meta.download_url).send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("backup download failed: HTTP {status}: {body}");
+    }
+    let (digest, written) = stream_to_part_file(response, &part).await?;
+    let expected = normalize_sha256(&meta.checksum);
+    if digest != expected {
+        let _ = tokio::fs::remove_file(&part).await;
+        anyhow::bail!(
+            "checksum mismatch: expected {expected}, computed {digest}. Partial file deleted."
+        );
+    }
+    tokio::fs::rename(&part, &output).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "path": output.to_string_lossy(),
+                "bytes": written,
+                "checksum": format!("sha256:{digest}")
+            })
+        );
+    } else {
+        eprintln!(
+            "Saved {written} bytes to {} (sha256:{digest}).",
+            output.display()
+        );
+    }
+    Ok(())
 }
 
 async fn handle_delete(
