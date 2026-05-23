@@ -252,6 +252,60 @@ async fn stream_to_part_file(
     Ok((hex::encode(hasher.finalize()), written))
 }
 
+async fn download_from_url(
+    url: Url,
+    output: Option<std::path::PathBuf>,
+    json: bool,
+) -> Result<()> {
+    let output = output.unwrap_or_else(|| std::path::PathBuf::from("backup.tar"));
+    let mut part = output.clone();
+    part.as_mut_os_string().push(".part");
+
+    let http = reqwest::Client::new();
+    let response = http.get(url.clone()).send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("backup download failed: HTTP {status}: {body}");
+    }
+    let expected_checksum = response
+        .headers()
+        .get("X-Backup-Checksum")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| normalize_sha256(s));
+    let (digest, written) = stream_to_part_file(response, &part).await?;
+    if let Some(expected) = expected_checksum {
+        if digest != expected {
+            let _ = tokio::fs::remove_file(&part).await;
+            anyhow::bail!(
+                "checksum mismatch: expected {expected}, computed {digest}. Partial file deleted."
+            );
+        }
+    } else {
+        eprintln!(
+            "warning: download response had no X-Backup-Checksum header; integrity not verified."
+        );
+    }
+    tokio::fs::rename(&part, &output).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "path": output.to_string_lossy(),
+                "bytes": written,
+                "checksum": format!("sha256:{digest}")
+            })
+        );
+    } else {
+        eprintln!(
+            "Saved {written} bytes to {} (sha256:{digest}).",
+            output.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +579,36 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, FollowOutcome::NotFound));
     }
+
+    #[tokio::test]
+    async fn download_url_form_verifies_via_header() {
+        use sha2::{Digest, Sha256};
+
+        let server = MockServer::start().await;
+        let body = b"some-tar-content".to_vec();
+        let digest = hex::encode(Sha256::digest(&body));
+        Mock::given(method("GET"))
+            .and(path("/dl"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(body.clone())
+                    .insert_header("X-Backup-Checksum", format!("sha256:{digest}").as_str()),
+            )
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let output = tmpdir.path().join("out.tar");
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupDownloadArgs {
+            vm_id_or_url: format!("{}/dl", server.uri()),
+            output: Some(output.clone()),
+            crn_url: None,
+            signing: evm_signing_args(),
+        };
+        handle_download(scheduler_url, true, args).await.unwrap();
+        assert_eq!(tokio::fs::read(&output).await.unwrap(), body);
+    }
 }
 
 async fn handle_download(
@@ -538,8 +622,8 @@ async fn handle_download(
     let parsed_url = Url::parse(&args.vm_id_or_url)
         .ok()
         .filter(|u| !u.scheme().is_empty() && u.has_host());
-    if parsed_url.is_some() {
-        anyhow::bail!("URL form not implemented yet");
+    if let Some(direct_url) = parsed_url {
+        return download_from_url(direct_url, args.output, json).await;
     }
 
     let (vm_id, crn_url) =
