@@ -469,15 +469,17 @@ async fn handle_website_deploy(
         for d in &args.domain {
             let entry = DomainEntry {
                 kind: DomainTargetType::Ipfs,
-                program_type: DomainTargetType::Ipfs,
+                program_type: Some(DomainTargetType::Ipfs),
                 message_id: volume_id.clone(),
-                updated_at: now,
+                updated_at: Some(now),
                 options: DomainOptions {
                     catch_all_path: Some(
                         aleph_sdk::aggregate_models::websites::DEFAULT_IPFS_CATCH_ALL_PATH
                             .to_string(),
                     ),
+                    extra: Default::default(),
                 },
+                extra: Default::default(),
             };
             content.insert(d.clone(), serde_json::to_value(&entry)?);
             domains_attached.push(d.clone());
@@ -733,7 +735,7 @@ async fn handle_website_update(
             }
             let mut updated: DomainEntry = e.clone();
             updated.message_id = new_volume_id.clone();
-            updated.updated_at = now;
+            updated.updated_at = Some(now);
             content.insert(name.clone(), serde_json::to_value(&updated)?);
             domains_repointed.push(name.clone());
         }
