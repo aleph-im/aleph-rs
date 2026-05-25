@@ -650,6 +650,10 @@ async fn handle_website_update(
 
     // 6. Build the new entry: bump version, extend history, preserve
     //    payment / ens / created_at; metadata override-able from args.
+    //    Capture a single `now` shared by the website entry and any domain
+    //    re-pointing below, so all records written by this update carry the
+    //    same `updated_at` (mirroring handle_website_deploy).
+    let now = now_secs_f64();
     let mut history = old.history.clone();
     history.insert(old.version.to_string(), old.volume_id.clone());
 
@@ -672,7 +676,7 @@ async fn handle_website_update(
         history,
         ens: old.ens.clone(),
         created_at: old.created_at,
-        updated_at: now_secs_f64(),
+        updated_at: now,
     };
 
     // 7. Submit the partial aggregate update.
@@ -716,7 +720,6 @@ async fn handle_website_update(
     if !args.skip_domain_update {
         use aleph_sdk::aggregate_models::domains::{DOMAINS_AGGREGATE_KEY, DomainEntry};
         let domains = aleph_client.get_domains_aggregate(&owner_address).await?;
-        let now = now_secs_f64();
         let mut content = serde_json::Map::new();
         let allowlist: Option<std::collections::HashSet<&String>> = if args.domain.is_empty() {
             None
