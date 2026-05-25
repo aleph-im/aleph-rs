@@ -100,10 +100,11 @@ async fn handle_list(
 
 /// Resolve the host-side mapped ports for each VM in the aggregate.
 ///
-/// For each non-null entry, contacts the scheduler to get the CRN URL, then
-/// fetches `/v2/about/executions/list` from the CRN to find the mapped ports.
-/// Any failure (scheduler unreachable, CRN unreachable, allocated_node is a
-/// hash rather than a URL) degrades silently: that VM simply won't have
+/// For each non-null entry, contacts the scheduler to get the CRN URL
+/// (resolving the `allocated_node` hash via `/api/v1/nodes/<hash>` when
+/// needed), then fetches `/v2/about/executions/list` from the CRN to find
+/// the mapped ports. Any failure (scheduler unreachable, CRN unreachable,
+/// VM not allocated yet) degrades silently: that VM simply won't have
 /// external port data.
 async fn resolve_external_ports(
     scheduler_url: &Url,
@@ -124,14 +125,18 @@ async fn resolve_external_ports(
             _ => continue,
         };
 
-        // Only use allocated_node if it looks like a URL.
-        let crn_url = match vm_entry.allocated_node {
-            Some(ref s) if s.starts_with("http://") || s.starts_with("https://") => s.clone(),
-            _ => continue,
-        };
+        let crn_url =
+            match super::instance_target::crn_url_from_entry(scheduler_url, vm_id, &vm_entry).await
+            {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
 
         // Fetch the executions list from the CRN.
-        let executions_url = format!("{}/v2/about/executions/list", crn_url.trim_end_matches('/'));
+        let executions_url = format!(
+            "{}/v2/about/executions/list",
+            crn_url.as_str().trim_end_matches('/')
+        );
         let response = match reqwest::get(&executions_url).await {
             Ok(r) if r.status().is_success() => r,
             _ => continue,
@@ -525,16 +530,8 @@ async fn handle_refresh(
 ) -> Result<()> {
     let account = resolve_account(&args.identity)?;
 
-    let (vm_id, vm) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
-    let crn_url_raw = vm
-        .allocated_node
-        .ok_or_else(|| anyhow::anyhow!("no allocation found for {vm_id}"))?;
-    if !(crn_url_raw.starts_with("http://") || crn_url_raw.starts_with("https://")) {
-        bail!(
-            "scheduler returned a non-URL allocation ({crn_url_raw}); resolving CRN hash to URL is a follow-up"
-        );
-    }
-    let crn_url = Url::parse(&crn_url_raw)?;
+    let (vm_id, crn_url) =
+        super::instance_target::resolve_target(scheduler_url, &args.vm_id, None).await?;
 
     let client = CrnClient::new(&account, crn_url.clone())?;
     client.update_instance_config(&vm_id).await?;
