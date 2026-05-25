@@ -2622,6 +2622,31 @@ mod port_forwarder_args_tests {
             _ => panic!("expected port-forwarder delete"),
         }
     }
+
+    #[test]
+    fn create_accepts_hash_prefix() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "port-forwarder",
+            "create",
+            "a41fb91c3e68",
+            "443",
+        ])
+        .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command:
+                    InstanceCommand::PortForwarder {
+                        command: PortForwarderCommand::Create(args),
+                    },
+            } => {
+                assert_eq!(args.vm_id, "a41fb91c3e68");
+                assert_eq!(args.port, 443);
+            }
+            _ => panic!("expected port-forwarder create"),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -2940,15 +2965,17 @@ pub struct PortForwarderListArgs {
     #[arg(long)]
     pub address: Option<String>,
 
-    /// Restrict the list to a single VM item hash.
+    /// Restrict the list to a single VM. Accepts a unique hash prefix
+    /// (e.g. the 12-char hash shown by `aleph instance list`).
     #[arg(long)]
-    pub vm_id: Option<ItemHash>,
+    pub vm_id: Option<String>,
 }
 
 #[derive(Args)]
 pub struct PortForwarderCreateArgs {
-    /// Item hash of the target VM / program / IPFS website.
-    pub vm_id: ItemHash,
+    /// Item hash of the target VM / program / IPFS website. Accepts a unique
+    /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
+    pub vm_id: String,
     /// Port number to forward (1..=65535).
     #[arg(value_parser = clap::value_parser!(u16).range(1..=65535))]
     pub port: u16,
@@ -2970,8 +2997,9 @@ pub struct PortForwarderCreateArgs {
 
 #[derive(Args)]
 pub struct PortForwarderUpdateArgs {
-    /// Item hash of the target VM / program / IPFS website.
-    pub vm_id: ItemHash,
+    /// Item hash of the target VM / program / IPFS website. Accepts a unique
+    /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
+    pub vm_id: String,
     /// Port number to forward (1..=65535).
     #[arg(value_parser = clap::value_parser!(u16).range(1..=65535))]
     pub port: u16,
@@ -2993,8 +3021,9 @@ pub struct PortForwarderUpdateArgs {
 
 #[derive(Args)]
 pub struct PortForwarderDeleteArgs {
-    /// Item hash of the target VM / program / IPFS website.
-    pub vm_id: ItemHash,
+    /// Item hash of the target VM / program / IPFS website. Accepts a unique
+    /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
+    pub vm_id: String,
     /// If set, only delete this port. Otherwise delete the whole entry for `vm_id`.
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
     pub port: Option<u16>,
@@ -3013,7 +3042,8 @@ pub struct PortForwarderDeleteArgs {
 
 #[derive(Args)]
 pub struct PortForwarderRefreshArgs {
-    pub vm_id: ItemHash,
+    /// Item hash of the target VM. Accepts a unique prefix.
+    pub vm_id: String,
     #[command(flatten)]
     pub identity: IdentityArgs,
 }

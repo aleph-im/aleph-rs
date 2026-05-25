@@ -27,38 +27,48 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use url::Url;
 
-const SCHEDULER_BASE_URL: &str = "https://scheduler.api.aleph.cloud";
-
 pub async fn handle_port_forwarder_command(
     aleph_client: &AlephClient,
     ccn_url: &Url,
+    scheduler_url: &Url,
     json: bool,
     command: PortForwarderCommand,
 ) -> Result<()> {
     match command {
-        PortForwarderCommand::List(args) => handle_list(aleph_client, json, args).await,
+        PortForwarderCommand::List(args) => {
+            handle_list(aleph_client, scheduler_url, json, args).await
+        }
         PortForwarderCommand::Create(args) => {
-            handle_create(aleph_client, ccn_url, json, args).await
+            handle_create(aleph_client, ccn_url, scheduler_url, json, args).await
         }
         PortForwarderCommand::Update(args) => {
-            handle_update(aleph_client, ccn_url, json, args).await
+            handle_update(aleph_client, ccn_url, scheduler_url, json, args).await
         }
         PortForwarderCommand::Delete(args) => {
-            handle_delete(aleph_client, ccn_url, json, args).await
+            handle_delete(aleph_client, ccn_url, scheduler_url, json, args).await
         }
-        PortForwarderCommand::Refresh(args) => handle_refresh(json, args).await,
+        PortForwarderCommand::Refresh(args) => handle_refresh(scheduler_url, json, args).await,
     }
 }
 
 async fn handle_list(
     aleph_client: &AlephClient,
+    scheduler_url: &Url,
     json: bool,
     args: PortForwarderListArgs,
 ) -> Result<()> {
     let address = resolve_address_or_active(args.address.as_deref())?;
     let aggregate = aleph_client.get_port_forwarding_aggregate(&address).await?;
 
-    let vm_filter = args.vm_id.as_ref();
+    let resolved_filter: Option<ItemHash> = match args.vm_id.as_deref() {
+        Some(input) => Some(
+            super::instance_target::resolve_vm(scheduler_url, input)
+                .await?
+                .0,
+        ),
+        None => None,
+    };
+    let vm_filter = resolved_filter.as_ref();
 
     // Count non-null entries that pass the vm_id filter.
     let matching_count = aggregate
@@ -77,7 +87,7 @@ async fn handle_list(
         return Ok(());
     }
 
-    let externals = resolve_external_ports(&aggregate).await;
+    let externals = resolve_external_ports(scheduler_url, &aggregate).await;
 
     if json {
         println!("{}", render_list_json(&aggregate, &externals, vm_filter));
@@ -96,12 +106,10 @@ async fn handle_list(
 /// hash rather than a URL) degrades silently: that VM simply won't have
 /// external port data.
 async fn resolve_external_ports(
+    scheduler_url: &Url,
     aggregate: &PortForwardingAggregate,
 ) -> HashMap<ItemHash, HashMap<u16, u16>> {
-    let scheduler = match Url::parse(SCHEDULER_BASE_URL) {
-        Ok(u) => SchedulerClient::new(u),
-        Err(_) => return HashMap::new(),
-    };
+    let scheduler = SchedulerClient::new(scheduler_url.clone());
 
     let mut result: HashMap<ItemHash, HashMap<u16, u16>> = HashMap::new();
 
@@ -326,10 +334,13 @@ pub(crate) fn require_at_least_one_protocol(tcp: bool, udp: bool) -> Result<()> 
 async fn handle_create(
     aleph_client: &AlephClient,
     ccn_url: &Url,
+    scheduler_url: &Url,
     json: bool,
     args: PortForwarderCreateArgs,
 ) -> Result<()> {
     require_at_least_one_protocol(args.tcp, args.udp)?;
+
+    let (vm_id, _) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
 
     let account = resolve_account(&args.signing.identity)?;
     let owner_address = match args.on_behalf_of.as_deref() {
@@ -345,7 +356,7 @@ async fn handle_create(
         tcp: args.tcp,
         udp: args.udp,
     };
-    let content = build_create_or_update_content(&existing, &args.vm_id, args.port, flags);
+    let content = build_create_or_update_content(&existing, &vm_id, args.port, flags);
 
     let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content);
     if let Some(channel) = args.channel {
@@ -361,7 +372,7 @@ async fn handle_create(
     if !json && !args.signing.dry_run {
         eprintln!(
             "Port forward created for {} on port {} (tcp={}, udp={})",
-            args.vm_id, args.port, args.tcp, args.udp
+            vm_id, args.port, args.tcp, args.udp
         );
     }
     Ok(())
@@ -370,10 +381,13 @@ async fn handle_create(
 async fn handle_update(
     aleph_client: &AlephClient,
     ccn_url: &Url,
+    scheduler_url: &Url,
     json: bool,
     args: PortForwarderUpdateArgs,
 ) -> Result<()> {
     require_at_least_one_protocol(args.tcp, args.udp)?;
+
+    let (vm_id, _) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
 
     let account = resolve_account(&args.signing.identity)?;
     let owner_address = match args.on_behalf_of.as_deref() {
@@ -384,13 +398,13 @@ async fn handle_update(
     let existing = aleph_client
         .get_port_forwarding_aggregate(&owner_address)
         .await?;
-    ensure_port_exists(&existing, &args.vm_id, args.port)?;
+    ensure_port_exists(&existing, &vm_id, args.port)?;
 
     let flags = PortFlags {
         tcp: args.tcp,
         udp: args.udp,
     };
-    let content = build_create_or_update_content(&existing, &args.vm_id, args.port, flags);
+    let content = build_create_or_update_content(&existing, &vm_id, args.port, flags);
 
     let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content);
     if let Some(channel) = args.channel {
@@ -406,7 +420,7 @@ async fn handle_update(
     if !json && !args.signing.dry_run {
         eprintln!(
             "Port forward updated for {} on port {} (tcp={}, udp={})",
-            args.vm_id, args.port, args.tcp, args.udp
+            vm_id, args.port, args.tcp, args.udp
         );
     }
     Ok(())
@@ -456,9 +470,12 @@ pub(crate) fn build_delete_all_content(
 async fn handle_delete(
     aleph_client: &AlephClient,
     ccn_url: &Url,
+    scheduler_url: &Url,
     json: bool,
     args: PortForwarderDeleteArgs,
 ) -> Result<()> {
+    let (vm_id, _) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
+
     let account = resolve_account(&args.signing.identity)?;
     let owner_address = match args.on_behalf_of.as_deref() {
         Some(value) => resolve_address(value)?,
@@ -470,17 +487,14 @@ async fn handle_delete(
         .await?;
 
     let content = match args.port {
-        Some(port) => build_delete_port_content(&existing, &args.vm_id, port)?,
+        Some(port) => build_delete_port_content(&existing, &vm_id, port)?,
         None => {
             if !args.yes
-                && !crate::common::confirm_tty(&format!(
-                    "Delete all port forwards for {}?",
-                    args.vm_id
-                ))?
+                && !crate::common::confirm_tty(&format!("Delete all port forwards for {vm_id}?"))?
             {
                 bail!("aborted");
             }
-            build_delete_all_content(&existing, &args.vm_id)?
+            build_delete_all_content(&existing, &vm_id)?
         }
     };
 
@@ -497,48 +511,45 @@ async fn handle_delete(
 
     if !json && !args.signing.dry_run {
         match args.port {
-            Some(p) => eprintln!("Port forward {} deleted for {}", p, args.vm_id),
-            None => eprintln!("All port forwards deleted for {}", args.vm_id),
+            Some(p) => eprintln!("Port forward {p} deleted for {vm_id}"),
+            None => eprintln!("All port forwards deleted for {vm_id}"),
         }
     }
     Ok(())
 }
 
-async fn handle_refresh(json: bool, args: PortForwarderRefreshArgs) -> Result<()> {
+async fn handle_refresh(
+    scheduler_url: &Url,
+    json: bool,
+    args: PortForwarderRefreshArgs,
+) -> Result<()> {
     let account = resolve_account(&args.identity)?;
 
-    let scheduler = SchedulerClient::new(
-        Url::parse(SCHEDULER_BASE_URL).expect("SCHEDULER_BASE_URL is a valid URL"),
-    );
-    let vm = scheduler
-        .get_vm(&args.vm_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("scheduler has no record of VM {}", args.vm_id))?;
+    let (vm_id, vm) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
     let crn_url_raw = vm
         .allocated_node
-        .ok_or_else(|| anyhow::anyhow!("no allocation found for {}", args.vm_id))?;
+        .ok_or_else(|| anyhow::anyhow!("no allocation found for {vm_id}"))?;
     if !(crn_url_raw.starts_with("http://") || crn_url_raw.starts_with("https://")) {
         bail!(
-            "scheduler returned a non-URL allocation ({}); resolving CRN hash to URL is a follow-up",
-            crn_url_raw
+            "scheduler returned a non-URL allocation ({crn_url_raw}); resolving CRN hash to URL is a follow-up"
         );
     }
     let crn_url = Url::parse(&crn_url_raw)?;
 
     let client = CrnClient::new(&account, crn_url.clone())?;
-    client.update_instance_config(&args.vm_id).await?;
+    client.update_instance_config(&vm_id).await?;
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "vm_id": args.vm_id.to_string(),
+                "vm_id": vm_id.to_string(),
                 "crn_url": crn_url.to_string(),
                 "status": "refreshed"
             }))?
         );
     } else {
-        eprintln!("CRN {} refreshed for VM {}", crn_url, args.vm_id);
+        eprintln!("CRN {crn_url} refreshed for VM {vm_id}");
     }
     Ok(())
 }
