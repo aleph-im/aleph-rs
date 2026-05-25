@@ -17,8 +17,8 @@ use aleph_sdk::aggregate_models::port_forwarding::{
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::crn::CrnClient;
 use aleph_sdk::messages::AggregateBuilder;
-use aleph_sdk::scheduler::SchedulerClient;
-use aleph_types::account::Account;
+use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
+use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use anyhow::{Result, bail};
@@ -57,18 +57,22 @@ async fn handle_list(
     json: bool,
     args: PortForwarderListArgs,
 ) -> Result<()> {
-    let address = resolve_address_or_active(args.address.as_deref())?;
-    let aggregate = aleph_client.get_port_forwarding_aggregate(&address).await?;
-
-    let resolved_filter: Option<ItemHash> = match args.vm_id.as_deref() {
-        Some(input) => Some(
-            super::instance_target::resolve_vm(scheduler_url, input)
-                .await?
-                .0,
-        ),
+    let resolved_vm = match args.vm_id.as_deref() {
+        Some(input) => Some(super::instance_target::resolve_vm(scheduler_url, input).await?),
         None => None,
     };
-    let vm_filter = resolved_filter.as_ref();
+
+    // Default to the VM owner's aggregate when --vm-id is given, since the CRN
+    // only consults that address. --address overrides for arbitrary inspection.
+    let address = match (args.address.as_deref(), resolved_vm.as_ref()) {
+        (Some(explicit), _) => resolve_address(explicit)?,
+        (None, Some((vm_id, entry))) => owner_from_entry(vm_id, entry)?,
+        (None, None) => resolve_address_or_active(None)?,
+    };
+
+    let aggregate = aleph_client.get_port_forwarding_aggregate(&address).await?;
+
+    let vm_filter = resolved_vm.as_ref().map(|(vm_id, _)| vm_id);
 
     // Count non-null entries that pass the vm_id filter.
     let matching_count = aggregate
@@ -336,6 +340,19 @@ pub(crate) fn require_at_least_one_protocol(tcp: bool, udp: bool) -> Result<()> 
     Ok(())
 }
 
+/// Extract the VM owner's address from the scheduler entry. The CRN only
+/// honours port-forwarding aggregates whose `content.address` matches the VM
+/// owner, so this is the only useful target for any aggregate write.
+fn owner_from_entry(vm_id: &ItemHash, entry: &VmEntry) -> Result<Address> {
+    let raw = entry.owner.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "scheduler has no owner address for VM {vm_id}; cannot determine \
+             port-forwarding aggregate target"
+        )
+    })?;
+    resolve_address(raw)
+}
+
 async fn handle_create(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -345,13 +362,10 @@ async fn handle_create(
 ) -> Result<()> {
     require_at_least_one_protocol(args.tcp, args.udp)?;
 
-    let (vm_id, _) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
+    let (vm_id, vm_entry) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
+    let owner_address = owner_from_entry(&vm_id, &vm_entry)?;
 
     let account = resolve_account(&args.signing.identity)?;
-    let owner_address = match args.on_behalf_of.as_deref() {
-        Some(value) => resolve_address(value)?,
-        None => account.address().clone(),
-    };
 
     let existing = aleph_client
         .get_port_forwarding_aggregate(&owner_address)
@@ -363,12 +377,10 @@ async fn handle_create(
     };
     let content = build_create_or_update_content(&existing, &vm_id, args.port, flags);
 
-    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content);
+    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content)
+        .on_behalf_of(owner_address);
     if let Some(channel) = args.channel {
         builder = builder.channel(Channel::from(channel));
-    }
-    if args.on_behalf_of.is_some() {
-        builder = builder.on_behalf_of(owner_address);
     }
     let pending = builder.build()?;
 
@@ -392,13 +404,10 @@ async fn handle_update(
 ) -> Result<()> {
     require_at_least_one_protocol(args.tcp, args.udp)?;
 
-    let (vm_id, _) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
+    let (vm_id, vm_entry) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
+    let owner_address = owner_from_entry(&vm_id, &vm_entry)?;
 
     let account = resolve_account(&args.signing.identity)?;
-    let owner_address = match args.on_behalf_of.as_deref() {
-        Some(value) => resolve_address(value)?,
-        None => account.address().clone(),
-    };
 
     let existing = aleph_client
         .get_port_forwarding_aggregate(&owner_address)
@@ -411,12 +420,10 @@ async fn handle_update(
     };
     let content = build_create_or_update_content(&existing, &vm_id, args.port, flags);
 
-    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content);
+    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content)
+        .on_behalf_of(owner_address);
     if let Some(channel) = args.channel {
         builder = builder.channel(Channel::from(channel));
-    }
-    if args.on_behalf_of.is_some() {
-        builder = builder.on_behalf_of(owner_address);
     }
     let pending = builder.build()?;
 
@@ -479,13 +486,10 @@ async fn handle_delete(
     json: bool,
     args: PortForwarderDeleteArgs,
 ) -> Result<()> {
-    let (vm_id, _) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
+    let (vm_id, vm_entry) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
+    let owner_address = owner_from_entry(&vm_id, &vm_entry)?;
 
     let account = resolve_account(&args.signing.identity)?;
-    let owner_address = match args.on_behalf_of.as_deref() {
-        Some(value) => resolve_address(value)?,
-        None => account.address().clone(),
-    };
 
     let existing = aleph_client
         .get_port_forwarding_aggregate(&owner_address)
@@ -503,12 +507,10 @@ async fn handle_delete(
         }
     };
 
-    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content);
+    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content)
+        .on_behalf_of(owner_address);
     if let Some(channel) = args.channel {
         builder = builder.channel(Channel::from(channel));
-    }
-    if args.on_behalf_of.is_some() {
-        builder = builder.on_behalf_of(owner_address);
     }
     let pending = builder.build()?;
 

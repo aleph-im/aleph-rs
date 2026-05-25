@@ -2988,9 +2988,6 @@ pub struct PortForwarderCreateArgs {
     /// Channel for the AGGREGATE message.
     #[arg(long)]
     pub channel: Option<String>,
-    /// Sign on behalf of another address (requires authorization).
-    #[arg(long)]
-    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -3012,9 +3009,6 @@ pub struct PortForwarderUpdateArgs {
     /// Channel for the AGGREGATE message.
     #[arg(long)]
     pub channel: Option<String>,
-    /// Sign on behalf of another address (requires authorization).
-    #[arg(long)]
-    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -3033,9 +3027,6 @@ pub struct PortForwarderDeleteArgs {
     /// Channel for the AGGREGATE message.
     #[arg(long)]
     pub channel: Option<String>,
-    /// Sign on behalf of another address (requires authorization).
-    #[arg(long)]
-    pub on_behalf_of: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
