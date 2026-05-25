@@ -46,7 +46,9 @@ struct DomainListRow {
     #[serde(rename = "type")]
     kind: DomainTargetType,
     message_id: Option<String>,
-    updated_at: f64,
+    /// `None` for legacy entries on the CCN that have no `updated_at` field.
+    /// JSON output emits `null`; TTY prints "-".
+    updated_at: Option<f64>,
 }
 
 async fn handle_domain_list(
@@ -81,6 +83,10 @@ async fn handle_domain_list(
             "DOMAIN", "TYPE", "MESSAGE_ID"
         );
         for row in rows {
+            let updated = row
+                .updated_at
+                .map(format_epoch_for_tty)
+                .unwrap_or_else(|| "-".to_string());
             println!(
                 "{:<32} {:<10} {:<48} {}",
                 row.domain,
@@ -88,7 +94,7 @@ async fn handle_domain_list(
                     .unwrap_or_default()
                     .trim_matches('"'),
                 row.message_id.as_deref().unwrap_or("-"),
-                format_epoch_for_tty(row.updated_at)
+                updated,
             );
         }
     }
@@ -168,6 +174,7 @@ async fn handle_domain_add(
                 args.catch_all_path
                     .unwrap_or_else(|| DEFAULT_IPFS_CATCH_ALL_PATH.to_string()),
             ),
+            extra: Default::default(),
         }
     } else {
         DomainOptions::default()
@@ -175,10 +182,11 @@ async fn handle_domain_add(
 
     let entry = DomainEntry {
         kind,
-        program_type: kind,
+        program_type: Some(kind),
         message_id,
-        updated_at: now_secs_f64(),
+        updated_at: Some(now_secs_f64()),
         options,
+        extra: Default::default(),
     };
 
     let mut content = serde_json::Map::new();
@@ -264,7 +272,7 @@ async fn handle_domain_attach(
 
     let new_message_id = resolve_target(aleph_client, &owner_address, &args.target).await?;
     entry.message_id = new_message_id;
-    entry.updated_at = now_secs_f64();
+    entry.updated_at = Some(now_secs_f64());
 
     let mut content = serde_json::Map::new();
     content.insert(args.domain.clone(), serde_json::to_value(&entry)?);
@@ -300,7 +308,7 @@ async fn handle_domain_detach(
         .and_then(|e| e.clone())
         .ok_or_else(|| anyhow::anyhow!("domain {} not found", args.domain))?;
     entry.message_id.clear();
-    entry.updated_at = now_secs_f64();
+    entry.updated_at = Some(now_secs_f64());
 
     let mut content = serde_json::Map::new();
     content.insert(args.domain.clone(), serde_json::to_value(&entry)?);

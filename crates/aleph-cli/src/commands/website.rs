@@ -469,15 +469,17 @@ async fn handle_website_deploy(
         for d in &args.domain {
             let entry = DomainEntry {
                 kind: DomainTargetType::Ipfs,
-                program_type: DomainTargetType::Ipfs,
+                program_type: Some(DomainTargetType::Ipfs),
                 message_id: volume_id.clone(),
-                updated_at: now,
+                updated_at: Some(now),
                 options: DomainOptions {
                     catch_all_path: Some(
                         aleph_sdk::aggregate_models::websites::DEFAULT_IPFS_CATCH_ALL_PATH
                             .to_string(),
                     ),
+                    extra: Default::default(),
                 },
+                extra: Default::default(),
             };
             content.insert(d.clone(), serde_json::to_value(&entry)?);
             domains_attached.push(d.clone());
@@ -648,6 +650,10 @@ async fn handle_website_update(
 
     // 6. Build the new entry: bump version, extend history, preserve
     //    payment / ens / created_at; metadata override-able from args.
+    //    Capture a single `now` shared by the website entry and any domain
+    //    re-pointing below, so all records written by this update carry the
+    //    same `updated_at` (mirroring handle_website_deploy).
+    let now = now_secs_f64();
     let mut history = old.history.clone();
     history.insert(old.version.to_string(), old.volume_id.clone());
 
@@ -670,7 +676,7 @@ async fn handle_website_update(
         history,
         ens: old.ens.clone(),
         created_at: old.created_at,
-        updated_at: now_secs_f64(),
+        updated_at: now,
     };
 
     // 7. Submit the partial aggregate update.
@@ -714,7 +720,6 @@ async fn handle_website_update(
     if !args.skip_domain_update {
         use aleph_sdk::aggregate_models::domains::{DOMAINS_AGGREGATE_KEY, DomainEntry};
         let domains = aleph_client.get_domains_aggregate(&owner_address).await?;
-        let now = now_secs_f64();
         let mut content = serde_json::Map::new();
         let allowlist: Option<std::collections::HashSet<&String>> = if args.domain.is_empty() {
             None
@@ -733,7 +738,7 @@ async fn handle_website_update(
             }
             let mut updated: DomainEntry = e.clone();
             updated.message_id = new_volume_id.clone();
-            updated.updated_at = now;
+            updated.updated_at = Some(now);
             content.insert(name.clone(), serde_json::to_value(&updated)?);
             domains_repointed.push(name.clone());
         }
