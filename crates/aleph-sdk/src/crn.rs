@@ -270,7 +270,7 @@ impl CrnClient {
     /// 2xx -> `Ok(())`. 404 -> [`CrnError::VmNotFound`]. Other statuses
     /// -> [`CrnError::Api`] with the body.
     pub async fn update_instance_config(&self, vm_id: &ItemHash) -> Result<(), CrnError> {
-        let path = format!("/control/{vm_id}/update");
+        let path = format!("/control/machine/{vm_id}/update");
         let url = self.crn_url.join(&path).expect("valid path");
 
         let response = self.http_client.post(url).send().await?;
@@ -598,10 +598,12 @@ mod tests {
         // would otherwise just duplicate what the implementation says.
         let base = Url::parse("https://crn.example.com").unwrap();
         let vm_id_str = "1111111111111111111111111111111111111111111111111111111111111111";
-        let joined = base.join(&format!("/control/{vm_id_str}/update")).unwrap();
+        let joined = base
+            .join(&format!("/control/machine/{vm_id_str}/update"))
+            .unwrap();
         assert_eq!(
             joined.path(),
-            "/control/1111111111111111111111111111111111111111111111111111111111111111/update"
+            "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/update"
         );
     }
 
