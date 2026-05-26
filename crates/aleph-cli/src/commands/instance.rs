@@ -84,7 +84,7 @@ fn node_from_requirements(requirements: Option<&HostRequirements>) -> Option<Str
 }
 
 /// First 12 chars of the item hash, lower-cased. Used in the text table.
-fn format_item_hash_short(hash: &ItemHash) -> String {
+pub(crate) fn format_item_hash_short(hash: &ItemHash) -> String {
     let s = hash.to_string();
     s.chars().take(12).collect()
 }

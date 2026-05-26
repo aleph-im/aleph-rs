@@ -256,7 +256,7 @@ pub(crate) fn render_list_text(
     let mut out = String::new();
     writeln!(
         out,
-        "{:<64}  {:>5}  {:>13}  {:>5}  {:>5}",
+        "{:<12}  {:>5}  {:>13}  {:>5}  {:>5}",
         "ITEM_HASH", "PORT", "EXTERNAL_PORT", "TCP", "UDP"
     )
     .unwrap();
@@ -270,8 +270,8 @@ pub(crate) fn render_list_text(
                 .unwrap_or_else(|| "N/A".to_string());
             writeln!(
                 out,
-                "{:<64}  {:>5}  {:>13}  {:>5}  {:>5}",
-                vm_id.to_string(),
+                "{:<12}  {:>5}  {:>13}  {:>5}  {:>5}",
+                super::instance::format_item_hash_short(vm_id),
                 port,
                 external_str,
                 flags.tcp,
