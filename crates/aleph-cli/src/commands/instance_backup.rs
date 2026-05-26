@@ -262,7 +262,12 @@ enum ChecksumPolicy {
 /// GET `url`, stream to `<output>.part`, verify SHA-256 per `policy`, rename
 /// atomically, and print the final path + size + checksum. Used by both forms
 /// of `aleph instance backup download` (VM-id resolution and direct URL).
+///
+/// The caller passes the `reqwest::Client` so the VM-id form can reuse the
+/// `CrnClient`'s underlying client (and therefore its TLS connection) instead
+/// of opening a fresh one for the presigned-URL GET.
 async fn download_and_render(
+    http: &reqwest::Client,
     url: &str,
     output: std::path::PathBuf,
     policy: ChecksumPolicy,
@@ -271,7 +276,6 @@ async fn download_and_render(
     let mut part = output.clone();
     part.as_mut_os_string().push(".part");
 
-    let http = reqwest::Client::new();
     let response = http.get(url).send().await?;
     if !response.status().is_success() {
         let status = response.status();
@@ -323,9 +327,35 @@ async fn download_and_render(
     Ok(())
 }
 
+/// Derive a default output filename from the presigned download URL.
+///
+/// The CRN's URL ends in `/control/machine/<vm>/backup/<backup_id>?...`, so
+/// the last non-empty path segment is the `<backup_id>` (e.g.
+/// `5a586d6f...-2026-05-26-14-30-00`). Returns `<segment>.tar`, or
+/// `backup.tar` as a last-resort fallback when the URL exposes no usable
+/// segment.
+fn default_url_output(url: &Url) -> std::path::PathBuf {
+    let last_segment = url
+        .path_segments()
+        .and_then(|segments| segments.rev().find(|s| !s.is_empty()));
+    match last_segment {
+        Some(name) if name.ends_with(".tar") => std::path::PathBuf::from(name),
+        Some(name) => std::path::PathBuf::from(format!("{name}.tar")),
+        None => std::path::PathBuf::from("backup.tar"),
+    }
+}
+
 async fn download_from_url(url: Url, output: Option<std::path::PathBuf>, json: bool) -> Result<()> {
-    let output = output.unwrap_or_else(|| std::path::PathBuf::from("backup.tar"));
-    download_and_render(url.as_str(), output, ChecksumPolicy::FromHeader, json).await
+    let output = output.unwrap_or_else(|| default_url_output(&url));
+    let http = reqwest::Client::new();
+    download_and_render(
+        &http,
+        url.as_str(),
+        output,
+        ChecksumPolicy::FromHeader,
+        json,
+    )
+    .await
 }
 
 /// What kind of file the user passed to `restore --file`.
@@ -569,6 +599,7 @@ async fn handle_download(
     let output = args.output.unwrap_or_else(|| default_output_path(&vm_id));
     eprintln!("Downloading backup for {vm_id} ({} bytes)...", meta.size);
     download_and_render(
+        client.http_client(),
         &meta.download_url,
         output,
         ChecksumPolicy::Required(meta.checksum),
@@ -668,6 +699,36 @@ mod tests {
         assert_eq!(normalize_sha256("sha256:DEADBEEF"), "deadbeef");
         assert_eq!(normalize_sha256("deadbeef"), "deadbeef");
         assert_eq!(normalize_sha256(" sha256:abc "), "abc");
+    }
+
+    #[test]
+    fn default_url_output_extracts_backup_id_from_crn_path() {
+        let url = Url::parse(
+            "https://crn.example/control/machine/abc/backup/abc-2026-05-26?signature=x&expires=1",
+        )
+        .unwrap();
+        assert_eq!(
+            default_url_output(&url),
+            std::path::PathBuf::from("abc-2026-05-26.tar")
+        );
+    }
+
+    #[test]
+    fn default_url_output_keeps_existing_tar_suffix() {
+        let url = Url::parse("https://crn.example/dl/backup-foo.tar?sig=x").unwrap();
+        assert_eq!(
+            default_url_output(&url),
+            std::path::PathBuf::from("backup-foo.tar")
+        );
+    }
+
+    #[test]
+    fn default_url_output_falls_back_when_no_segment() {
+        let url = Url::parse("https://crn.example/?sig=x").unwrap();
+        assert_eq!(
+            default_url_output(&url),
+            std::path::PathBuf::from("backup.tar")
+        );
     }
 
     #[tokio::test]
