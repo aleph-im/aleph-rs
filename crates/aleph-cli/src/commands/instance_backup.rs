@@ -248,32 +248,57 @@ async fn stream_to_part_file(
     Ok((hex::encode(hasher.finalize()), written))
 }
 
-async fn download_from_url(url: Url, output: Option<std::path::PathBuf>, json: bool) -> Result<()> {
-    let output = output.unwrap_or_else(|| std::path::PathBuf::from("backup.tar"));
+/// Policy for verifying the SHA-256 of a downloaded backup.
+enum ChecksumPolicy {
+    /// Caller knows the expected hex digest (with or without `sha256:`). A
+    /// mismatch is a hard error; the partial file is deleted before bailing.
+    Required(String),
+    /// Read the digest from the response's `X-Backup-Checksum` header. If the
+    /// header is absent, emit a stderr warning and skip verification. A
+    /// mismatch is still a hard error when the header is present.
+    FromHeader,
+}
+
+/// GET `url`, stream to `<output>.part`, verify SHA-256 per `policy`, rename
+/// atomically, and print the final path + size + checksum. Used by both forms
+/// of `aleph instance backup download` (VM-id resolution and direct URL).
+async fn download_and_render(
+    url: &str,
+    output: std::path::PathBuf,
+    policy: ChecksumPolicy,
+    json: bool,
+) -> Result<()> {
     let mut part = output.clone();
     part.as_mut_os_string().push(".part");
 
     let http = reqwest::Client::new();
-    let response = http.get(url.clone()).send().await?;
+    let response = http.get(url).send().await?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         anyhow::bail!("backup download failed: HTTP {status}: {body}");
     }
-    let expected_checksum = response
-        .headers()
-        .get("X-Backup-Checksum")
-        .and_then(|v| v.to_str().ok())
-        .map(normalize_sha256);
+
+    // Extract the expected digest BEFORE stream_to_part_file consumes the response.
+    let expected = match &policy {
+        ChecksumPolicy::Required(c) => Some(normalize_sha256(c)),
+        ChecksumPolicy::FromHeader => response
+            .headers()
+            .get("X-Backup-Checksum")
+            .and_then(|v| v.to_str().ok())
+            .map(normalize_sha256),
+    };
+    let header_was_missing = matches!(policy, ChecksumPolicy::FromHeader) && expected.is_none();
+
     let (digest, written) = stream_to_part_file(response, &part).await?;
-    if let Some(expected) = expected_checksum {
-        if digest != expected {
+    if let Some(expected) = &expected {
+        if &digest != expected {
             let _ = tokio::fs::remove_file(&part).await;
             anyhow::bail!(
                 "checksum mismatch: expected {expected}, computed {digest}. Partial file deleted."
             );
         }
-    } else {
+    } else if header_was_missing {
         eprintln!(
             "warning: download response had no X-Backup-Checksum header; integrity not verified."
         );
@@ -296,6 +321,11 @@ async fn download_from_url(url: Url, output: Option<std::path::PathBuf>, json: b
         );
     }
     Ok(())
+}
+
+async fn download_from_url(url: Url, output: Option<std::path::PathBuf>, json: bool) -> Result<()> {
+    let output = output.unwrap_or_else(|| std::path::PathBuf::from("backup.tar"));
+    download_and_render(url.as_str(), output, ChecksumPolicy::FromHeader, json).await
 }
 
 /// What kind of file the user passed to `restore --file`.
@@ -537,43 +567,14 @@ async fn handle_download(
     };
 
     let output = args.output.unwrap_or_else(|| default_output_path(&vm_id));
-    let mut part = output.clone();
-    part.as_mut_os_string().push(".part");
-
     eprintln!("Downloading backup for {vm_id} ({} bytes)...", meta.size);
-    let http = reqwest::Client::new();
-    let response = http.get(&meta.download_url).send().await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("backup download failed: HTTP {status}: {body}");
-    }
-    let (digest, written) = stream_to_part_file(response, &part).await?;
-    let expected = normalize_sha256(&meta.checksum);
-    if digest != expected {
-        let _ = tokio::fs::remove_file(&part).await;
-        anyhow::bail!(
-            "checksum mismatch: expected {expected}, computed {digest}. Partial file deleted."
-        );
-    }
-    tokio::fs::rename(&part, &output).await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "path": output.to_string_lossy(),
-                "bytes": written,
-                "checksum": format!("sha256:{digest}")
-            })
-        );
-    } else {
-        eprintln!(
-            "Saved {written} bytes to {} (sha256:{digest}).",
-            output.display()
-        );
-    }
-    Ok(())
+    download_and_render(
+        &meta.download_url,
+        output,
+        ChecksumPolicy::Required(meta.checksum),
+        json,
+    )
+    .await
 }
 
 async fn handle_delete(
