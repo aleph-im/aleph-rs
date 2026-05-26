@@ -673,12 +673,14 @@ async fn fetch_instance_message(
     Ok(message)
 }
 
-pub async fn handle_instance_show(
+/// Build and populate an `InstanceShow` from the CCN, scheduler, and
+/// optionally the CRN and port-forwarding aggregate. This is the orchestration
+/// core; rendering is left to the caller.
+pub(crate) async fn build_instance_show(
     aleph_client: &AlephClient,
     scheduler_url: Url,
-    json: bool,
-    args: InstanceShowArgs,
-) -> Result<()> {
+    args: &InstanceShowArgs,
+) -> Result<InstanceShow> {
     let scheduler = SchedulerClient::new(scheduler_url.clone());
 
     // 1. Resolve the VM. Accept full hash directly; otherwise let the
@@ -721,7 +723,16 @@ pub async fn handle_instance_show(
         populate_verbose(&mut show, &scheduler, aleph_client).await;
     }
 
-    // 6. Render.
+    Ok(show)
+}
+
+pub async fn handle_instance_show(
+    aleph_client: &AlephClient,
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceShowArgs,
+) -> Result<()> {
+    let show = build_instance_show(aleph_client, scheduler_url, &args).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&render_json(&show))?);
     } else {
@@ -1138,6 +1149,9 @@ mod tests {
             .await;
         // 5. CCN aggregate fetch (port-forwarding). The owner address comes
         //    from the fixture: 0x238224C744F4b90b4494516e074D2676ECfC6803
+        //
+        //    Wire format (verified against PortForwardingAggregate):
+        //      {"data": {"port-forwarding": {"<hash>": {"ports": {"<port>": {"tcp":..,"udp":..}}}}}}
         let owner_addr = "0x238224C744F4b90b4494516e074D2676ECfC6803";
         Mock::given(method("GET"))
             .and(path(format!("/api/v0/aggregates/{owner_addr}.json")))
@@ -1146,7 +1160,7 @@ mod tests {
                 "data": {
                     "port-forwarding": {
                         VM_HASH: {
-                            "22": { "host": 24221 }
+                            "ports": { "22": { "tcp": true, "udp": false } }
                         }
                     }
                 }
@@ -1157,9 +1171,25 @@ mod tests {
         let aleph_client = AlephClient::new(Url::parse(&server.uri()).unwrap());
         let scheduler_url = Url::parse(&server.uri()).unwrap();
         let args = make_show_args(VM_HASH, true);
-        handle_instance_show(&aleph_client, scheduler_url, true, args)
+        let show = build_instance_show(&aleph_client, scheduler_url, &args)
             .await
             .expect("verbose handler succeeds");
+
+        // Networking populated from CRN.
+        assert_eq!(
+            show.networking.as_ref().and_then(|n| n.ipv6.as_deref()),
+            Some("fc00:1:2:3:1:abcd:1234:5670/124")
+        );
+
+        // Mapped ports populated.
+        let mapped = show.mapped_ports.as_ref().expect("mapped_ports is Some");
+        assert_eq!(mapped.get(&22), Some(&24221u16));
+
+        // Port-forwards populated from aggregate with correct vm_port.
+        let forwards = show.port_forwards.as_ref().expect("port_forwards is Some");
+        assert!(!forwards.is_empty(), "port_forwards must be non-empty");
+        let pf = forwards.iter().find(|p| p.vm_port == 22).expect("port 22 present");
+        assert_eq!(pf.host, 24221);
     }
 
     #[tokio::test]
@@ -1185,12 +1215,13 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        // aggregate still returns ok (separate code path)
+        // aggregate still returns ok with empty agg (separate code path)
         let owner_addr = "0x238224C744F4b90b4494516e074D2676ECfC6803";
         Mock::given(method("GET"))
             .and(path(format!("/api/v0/aggregates/{owner_addr}.json")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "address": owner_addr, "data": { "port-forwarding": {} }
+                "address": owner_addr,
+                "data": { "port-forwarding": {} }
             })))
             .mount(&server)
             .await;
@@ -1199,9 +1230,16 @@ mod tests {
         let scheduler_url = Url::parse(&server.uri()).unwrap();
         let args = make_show_args(VM_HASH, true);
         // Must NOT error - degradation only.
-        handle_instance_show(&aleph_client, scheduler_url, true, args)
+        let show = build_instance_show(&aleph_client, scheduler_url, &args)
             .await
             .expect("handler succeeds despite CRN unreachable");
+
+        // CRN was unreachable, so networking is None.
+        assert!(show.networking.is_none(), "networking must be None when CRN unreachable");
+
+        // Aggregate was fetched successfully but was empty.
+        let forwards = show.port_forwards.as_ref().expect("port_forwards is Some");
+        assert!(forwards.is_empty(), "port_forwards must be empty when aggregate is empty");
     }
 
     #[tokio::test]
