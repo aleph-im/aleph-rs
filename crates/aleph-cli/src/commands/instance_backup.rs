@@ -444,17 +444,17 @@ async fn restore_from_file(
 ) -> Result<aleph_sdk::crn::RestoreResponse> {
     let source = detect_restore_source(path).await?;
 
-    let (upload_size, body, display) = match source {
+    let (upload_size, body, display, tar_task) = match source {
         RestoreSource::Qcow2 { size } => {
             let file = tokio::fs::File::open(path).await?;
             let stream = tokio_util::io::ReaderStream::new(file);
             let body = reqwest::Body::wrap_stream(with_upload_progress(stream, size));
-            (size, body, format!("{}", path.display()))
+            (size, body, format!("{}", path.display()), None)
         }
         RestoreSource::BackupTar { rootfs_size } => {
             let path_owned = path.to_path_buf();
             let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(8);
-            tokio::task::spawn_blocking(move || {
+            let handle = tokio::task::spawn_blocking(move || {
                 stream_rootfs_from_tar(&path_owned, &tx);
             });
             let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -463,6 +463,7 @@ async fn restore_from_file(
                 rootfs_size,
                 body,
                 format!("{} ({ROOTFS_MEMBER_NAME} inside)", path.display()),
+                Some(handle),
             )
         }
     };
@@ -479,8 +480,23 @@ async fn restore_from_file(
         request = request.header(*name, value);
     }
     eprintln!("Uploading {upload_size} bytes from {display}...");
-    let response = request.send().await?;
+    let upload_result = request.send().await;
     eprintln!();
+
+    // If the tar producer panicked, the channel closed early and the upload
+    // likely failed with a truncation error. Surface the panic as the cause
+    // instead so the user sees the actual problem, not the downstream symptom.
+    if let Some(handle) = tar_task
+        && let Err(join_err) = handle.await
+        && join_err.is_panic()
+    {
+        anyhow::bail!(
+            "tar streaming task panicked while reading {ROOTFS_MEMBER_NAME}; \
+             the upload was likely truncated"
+        );
+    }
+
+    let response = upload_result?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
