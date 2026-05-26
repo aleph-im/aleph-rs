@@ -283,6 +283,166 @@ mod tests {
         // MockServer's `expect(1)` is verified on drop.
     }
 
+    fn rejected_storage_envelope() -> serde_json::Value {
+        serde_json::json!({
+            "status": "rejected",
+            "error_code": 6,
+            "message": {
+                "sender": "0xABCD",
+                "chain": "ETH",
+                "signature": "0xSIG",
+                "type": "STORE",
+                "item_type": "storage",
+                "item_content": null,
+                "item_hash": HASH,
+                "time": 1234.0,
+                "channel": null,
+                "content": null,
+            }
+        })
+    }
+
+    /// wiremock matcher: rejects requests whose body contains the substring "item_content".
+    /// We can't easily express absence via body_partial_json, so use a plain custom Match.
+    struct NoItemContentInBody;
+    impl wiremock::Match for NoItemContentInBody {
+        fn matches(&self, req: &wiremock::Request) -> bool {
+            let body = std::str::from_utf8(&req.body).unwrap_or("");
+            !body.contains("\"item_content\"")
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_storage_rejected_reposts_without_item_content() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rejected_storage_envelope()))
+            .mount(&server)
+            .await;
+
+        let post_mock = Mock::given(method("POST"))
+            .and(path("/api/v0/messages"))
+            .and(NoItemContentInBody)
+            .respond_with(ResponseTemplate::new(200).set_body_json(post_message_success()))
+            .expect(1);
+        post_mock.mount(&server).await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let ccn_url = Url::parse(&server.uri()).unwrap();
+        let args = RetryArgs {
+            item_hash: item_hash(),
+            dry_run: false,
+        };
+
+        handle_retry(&client, &ccn_url, false, args)
+            .await
+            .expect("retry succeeds");
+    }
+
+    #[tokio::test]
+    async fn retry_rejected_missing_signature_bails() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "status": "rejected",
+            "error_code": 1,
+            "message": {
+                "sender": "0xABCD",
+                "chain": "ETH",
+                "signature": null,
+                "type": "POST",
+                "item_type": "inline",
+                "item_content": "{}",
+                "item_hash": HASH,
+                "time": 1234.0,
+                "channel": null,
+                "content": null,
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let ccn_url = Url::parse(&server.uri()).unwrap();
+        let args = RetryArgs {
+            item_hash: item_hash(),
+            dry_run: false,
+        };
+
+        let err = handle_retry(&client, &ccn_url, false, args)
+            .await
+            .expect_err("expected missing-signature bail");
+        assert!(err.to_string().contains("signature"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn retry_inline_rejected_missing_item_content_bails() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "status": "rejected",
+            "error_code": 0,
+            "message": {
+                "sender": "0xABCD",
+                "chain": "ETH",
+                "signature": "0xSIG",
+                "type": "POST",
+                "item_type": "inline",
+                "item_content": null,
+                "item_hash": HASH,
+                "time": 1234.0,
+                "channel": null,
+                "content": null,
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let ccn_url = Url::parse(&server.uri()).unwrap();
+        let args = RetryArgs {
+            item_hash: item_hash(),
+            dry_run: false,
+        };
+
+        let err = handle_retry(&client, &ccn_url, false, args)
+            .await
+            .expect_err("expected missing-item_content bail");
+        assert!(err.to_string().contains("item_content"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn retry_dry_run_does_not_post() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{HASH}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(rejected_inline_envelope(r#"{"x":1}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        // If a POST were issued, wiremock returns 404 for unmocked paths and
+        // repost_or_preview would surface that as an error. We assert success,
+        // proving the dry-run path skipped the POST entirely.
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let ccn_url = Url::parse(&server.uri()).unwrap();
+        let args = RetryArgs {
+            item_hash: item_hash(),
+            dry_run: true,
+        };
+
+        handle_retry(&client, &ccn_url, false, args)
+            .await
+            .expect("dry-run succeeds without POSTing");
+    }
+
     #[tokio::test]
     async fn retry_non_rejected_bails_with_status() {
         let server = MockServer::start().await;
