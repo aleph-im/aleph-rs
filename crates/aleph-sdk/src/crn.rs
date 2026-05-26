@@ -60,7 +60,7 @@ pub struct ExecutionInfo {
 
 /// Subset of the `/v2/about/executions/list` response shape on a CRN.
 ///
-/// Only the fields actually consumed by `aleph instance port-forwarder list`
+/// Only the fields actually consumed by `aleph instance port-forward list`
 /// are modeled. Unknown fields on the wire are silently ignored so CRN
 /// response shape evolution does not break us.
 #[derive(Debug, Clone, Deserialize)]
@@ -290,7 +290,7 @@ impl CrnClient {
     /// Calls `GET /v2/about/executions/list`. The v1 fallback that the Python
     /// SDK does (on 404) is intentionally not implemented here - users on
     /// v1-only CRNs will see `external_port` as `N/A` in `aleph instance
-    /// port-forwarder list`, same graceful degradation as an unreachable CRN.
+    /// port-forward list`, same graceful degradation as an unreachable CRN.
     ///
     /// No auth; this endpoint is public.
     pub async fn get_active_vms(&self) -> Result<ActiveVmList, CrnError> {

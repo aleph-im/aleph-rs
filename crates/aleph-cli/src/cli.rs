@@ -1545,7 +1545,7 @@ Delete an instance. Forgets the corresponding INSTANCE message.
 
 This command does ONLY the FORGET. It does NOT:
   - erase the VM on the CRN  (run `aleph instance erase` first)
-  - remove port forwards     (run `aleph instance port-forwarder delete`)
+  - remove port forwards     (run `aleph instance port-forward delete`)
   - stop a streaming flow    (Superfluid flow stays open on PAYG)
 
 Run those subcommands separately if you need that cleanup.
@@ -1567,9 +1567,9 @@ Examples:
     /// Stream logs from a running VM instance
     Logs(CrnArgs),
     /// Manage TCP/UDP port forwards for VMs, programs, or IPFS websites.
-    PortForwarder {
+    PortForward {
         #[clap(subcommand)]
-        command: PortForwarderCommand,
+        command: PortForwardCommand,
     },
     /// Show pricing for an instance configuration
     #[command(long_about = "\
@@ -2484,7 +2484,7 @@ mod credit_transfer_args_tests {
 }
 
 #[cfg(test)]
-mod port_forwarder_args_tests {
+mod port_forward_args_tests {
     use super::*;
 
     #[test]
@@ -2492,7 +2492,7 @@ mod port_forwarder_args_tests {
         let cli = Cli::try_parse_from([
             "aleph",
             "instance",
-            "port-forwarder",
+            "port-forward",
             "list",
             "--address",
             "0xABCD1234",
@@ -2503,14 +2503,14 @@ mod port_forwarder_args_tests {
         match cli.command {
             Commands::Instance {
                 command:
-                    InstanceCommand::PortForwarder {
-                        command: PortForwarderCommand::List(args),
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::List(args),
                     },
             } => {
                 assert_eq!(args.address.as_deref(), Some("0xABCD1234"));
                 assert!(args.vm_id.is_some());
             }
-            _ => panic!("expected port-forwarder list"),
+            _ => panic!("expected port-forward list"),
         }
     }
 
@@ -2519,7 +2519,7 @@ mod port_forwarder_args_tests {
         match Cli::try_parse_from([
             "aleph",
             "instance",
-            "port-forwarder",
+            "port-forward",
             "create",
             "1111111111111111111111111111111111111111111111111111111111111111",
             "0",
@@ -2534,7 +2534,7 @@ mod port_forwarder_args_tests {
         let result = Cli::try_parse_from([
             "aleph",
             "instance",
-            "port-forwarder",
+            "port-forward",
             "create",
             "1111111111111111111111111111111111111111111111111111111111111111",
             "65536",
@@ -2550,7 +2550,7 @@ mod port_forwarder_args_tests {
         let cli = Cli::try_parse_from([
             "aleph",
             "instance",
-            "port-forwarder",
+            "port-forward",
             "create",
             "1111111111111111111111111111111111111111111111111111111111111111",
             "443",
@@ -2559,15 +2559,15 @@ mod port_forwarder_args_tests {
         match cli.command {
             Commands::Instance {
                 command:
-                    InstanceCommand::PortForwarder {
-                        command: PortForwarderCommand::Create(args),
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::Create(args),
                     },
             } => {
                 assert_eq!(args.port, 443);
                 assert!(args.tcp);
                 assert!(!args.udp);
             }
-            _ => panic!("expected port-forwarder create"),
+            _ => panic!("expected port-forward create"),
         }
     }
 
@@ -2576,7 +2576,7 @@ mod port_forwarder_args_tests {
         let cli = Cli::try_parse_from([
             "aleph",
             "instance",
-            "port-forwarder",
+            "port-forward",
             "create",
             "1111111111111111111111111111111111111111111111111111111111111111",
             "5353",
@@ -2589,14 +2589,14 @@ mod port_forwarder_args_tests {
         match cli.command {
             Commands::Instance {
                 command:
-                    InstanceCommand::PortForwarder {
-                        command: PortForwarderCommand::Create(args),
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::Create(args),
                     },
             } => {
                 assert!(!args.tcp);
                 assert!(args.udp);
             }
-            _ => panic!("expected port-forwarder create"),
+            _ => panic!("expected port-forward create"),
         }
     }
 
@@ -2605,7 +2605,7 @@ mod port_forwarder_args_tests {
         let cli = Cli::try_parse_from([
             "aleph",
             "instance",
-            "port-forwarder",
+            "port-forward",
             "delete",
             "1111111111111111111111111111111111111111111111111111111111111111",
         ])
@@ -2613,13 +2613,13 @@ mod port_forwarder_args_tests {
         match cli.command {
             Commands::Instance {
                 command:
-                    InstanceCommand::PortForwarder {
-                        command: PortForwarderCommand::Delete(args),
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::Delete(args),
                     },
             } => {
                 assert!(args.port.is_none());
             }
-            _ => panic!("expected port-forwarder delete"),
+            _ => panic!("expected port-forward delete"),
         }
     }
 
@@ -2628,7 +2628,7 @@ mod port_forwarder_args_tests {
         let cli = Cli::try_parse_from([
             "aleph",
             "instance",
-            "port-forwarder",
+            "port-forward",
             "create",
             "a41fb91c3e68",
             "443",
@@ -2637,14 +2637,14 @@ mod port_forwarder_args_tests {
         match cli.command {
             Commands::Instance {
                 command:
-                    InstanceCommand::PortForwarder {
-                        command: PortForwarderCommand::Create(args),
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::Create(args),
                     },
             } => {
                 assert_eq!(args.vm_id, "a41fb91c3e68");
                 assert_eq!(args.port, 443);
             }
-            _ => panic!("expected port-forwarder create"),
+            _ => panic!("expected port-forward create"),
         }
     }
 }
@@ -2945,21 +2945,21 @@ mod instance_delete_args_tests {
 }
 
 #[derive(Subcommand)]
-pub enum PortForwarderCommand {
+pub enum PortForwardCommand {
     /// List configured port forwards for an address (optionally for one VM).
-    List(PortForwarderListArgs),
+    List(PortForwardListArgs),
     /// Create a port forward for `<VM_ID>` on `<PORT>`.
-    Create(PortForwarderCreateArgs),
+    Create(PortForwardCreateArgs),
     /// Update an existing port forward's TCP/UDP flags.
-    Update(PortForwarderUpdateArgs),
+    Update(PortForwardUpdateArgs),
     /// Delete a port forward (a single port, or all ports if `--port` is omitted).
-    Delete(PortForwarderDeleteArgs),
+    Delete(PortForwardDeleteArgs),
     /// Ask the CRN running this VM to re-read the aggregate immediately.
-    Refresh(PortForwarderRefreshArgs),
+    Refresh(PortForwardRefreshArgs),
 }
 
 #[derive(Args)]
-pub struct PortForwarderListArgs {
+pub struct PortForwardListArgs {
     /// Address to inspect (hex, account name, or alias).
     /// Defaults to the current default account's address.
     #[arg(long)]
@@ -2972,7 +2972,7 @@ pub struct PortForwarderListArgs {
 }
 
 #[derive(Args)]
-pub struct PortForwarderCreateArgs {
+pub struct PortForwardCreateArgs {
     /// Item hash of the target VM / program / IPFS website. Accepts a unique
     /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
     pub vm_id: String,
@@ -2993,7 +2993,7 @@ pub struct PortForwarderCreateArgs {
 }
 
 #[derive(Args)]
-pub struct PortForwarderUpdateArgs {
+pub struct PortForwardUpdateArgs {
     /// Item hash of the target VM / program / IPFS website. Accepts a unique
     /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
     pub vm_id: String,
@@ -3014,7 +3014,7 @@ pub struct PortForwarderUpdateArgs {
 }
 
 #[derive(Args)]
-pub struct PortForwarderDeleteArgs {
+pub struct PortForwardDeleteArgs {
     /// Item hash of the target VM / program / IPFS website. Accepts a unique
     /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
     pub vm_id: String,
@@ -3032,7 +3032,7 @@ pub struct PortForwarderDeleteArgs {
 }
 
 #[derive(Args)]
-pub struct PortForwarderRefreshArgs {
+pub struct PortForwardRefreshArgs {
     /// Item hash of the target VM. Accepts a unique prefix.
     pub vm_id: String,
     #[command(flatten)]

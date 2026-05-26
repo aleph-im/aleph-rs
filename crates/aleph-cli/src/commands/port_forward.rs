@@ -1,12 +1,12 @@
-//! `aleph instance port-forwarder` subcommands.
+//! `aleph instance port-forward` subcommands.
 //!
 //! Backed by the per-sender `port-forwarding` aggregate plus two CRN
 //! endpoints: `GET /v2/about/executions/list` (for the host-side mapped port)
 //! and `POST /control/{vm_id}/update` (for `refresh`).
 
 use crate::cli::{
-    PortForwarderCommand, PortForwarderCreateArgs, PortForwarderDeleteArgs, PortForwarderListArgs,
-    PortForwarderRefreshArgs, PortForwarderUpdateArgs,
+    PortForwardCommand, PortForwardCreateArgs, PortForwardDeleteArgs, PortForwardListArgs,
+    PortForwardRefreshArgs, PortForwardUpdateArgs,
 };
 use crate::common::{
     resolve_account, resolve_address, resolve_address_or_active, submit_or_preview,
@@ -27,27 +27,27 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use url::Url;
 
-pub async fn handle_port_forwarder_command(
+pub async fn handle_port_forward_command(
     aleph_client: &AlephClient,
     ccn_url: &Url,
     scheduler_url: &Url,
     json: bool,
-    command: PortForwarderCommand,
+    command: PortForwardCommand,
 ) -> Result<()> {
     match command {
-        PortForwarderCommand::List(args) => {
+        PortForwardCommand::List(args) => {
             handle_list(aleph_client, scheduler_url, json, args).await
         }
-        PortForwarderCommand::Create(args) => {
+        PortForwardCommand::Create(args) => {
             handle_create(aleph_client, ccn_url, scheduler_url, json, args).await
         }
-        PortForwarderCommand::Update(args) => {
+        PortForwardCommand::Update(args) => {
             handle_update(aleph_client, ccn_url, scheduler_url, json, args).await
         }
-        PortForwarderCommand::Delete(args) => {
+        PortForwardCommand::Delete(args) => {
             handle_delete(aleph_client, ccn_url, scheduler_url, json, args).await
         }
-        PortForwarderCommand::Refresh(args) => handle_refresh(scheduler_url, json, args).await,
+        PortForwardCommand::Refresh(args) => handle_refresh(scheduler_url, json, args).await,
     }
 }
 
@@ -55,7 +55,7 @@ async fn handle_list(
     aleph_client: &AlephClient,
     scheduler_url: &Url,
     json: bool,
-    args: PortForwarderListArgs,
+    args: PortForwardListArgs,
 ) -> Result<()> {
     let resolved_vm = match args.vm_id.as_deref() {
         Some(input) => Some(super::instance_target::resolve_vm(scheduler_url, input).await?),
@@ -322,7 +322,7 @@ pub(crate) fn ensure_port_exists(
         .ok_or_else(|| anyhow::anyhow!("VM {} has no port-forwarding entry", vm_id))?;
     if !entry.ports.contains_key(&port) {
         bail!(
-            "port {} is not configured for {}; use `aleph instance port-forwarder create` instead",
+            "port {} is not configured for {}; use `aleph instance port-forward create` instead",
             port,
             vm_id
         );
@@ -358,7 +358,7 @@ async fn handle_create(
     ccn_url: &Url,
     scheduler_url: &Url,
     json: bool,
-    args: PortForwarderCreateArgs,
+    args: PortForwardCreateArgs,
 ) -> Result<()> {
     require_at_least_one_protocol(args.tcp, args.udp)?;
 
@@ -400,7 +400,7 @@ async fn handle_update(
     ccn_url: &Url,
     scheduler_url: &Url,
     json: bool,
-    args: PortForwarderUpdateArgs,
+    args: PortForwardUpdateArgs,
 ) -> Result<()> {
     require_at_least_one_protocol(args.tcp, args.udp)?;
 
@@ -484,7 +484,7 @@ async fn handle_delete(
     ccn_url: &Url,
     scheduler_url: &Url,
     json: bool,
-    args: PortForwarderDeleteArgs,
+    args: PortForwardDeleteArgs,
 ) -> Result<()> {
     let (vm_id, vm_entry) = super::instance_target::resolve_vm(scheduler_url, &args.vm_id).await?;
     let owner_address = owner_from_entry(&vm_id, &vm_entry)?;
@@ -528,7 +528,7 @@ async fn handle_delete(
 async fn handle_refresh(
     scheduler_url: &Url,
     json: bool,
-    args: PortForwarderRefreshArgs,
+    args: PortForwardRefreshArgs,
 ) -> Result<()> {
     let account = resolve_account(&args.identity)?;
 
