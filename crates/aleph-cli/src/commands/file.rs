@@ -303,8 +303,8 @@ async fn handle_file_pin(
         ItemHash::Ipfs(_) => StorageEngine::Ipfs,
     };
 
-    let mut builder =
-        StoreBuilder::new(&account, args.item_hash, storage_engine).payment(Payment::credits());
+    let mut builder = StoreBuilder::new(&account, args.item_hash, storage_engine)
+        .payment(resolve_payment(args.payment_type));
     if let Some(owner) = args.on_behalf_of {
         builder = builder.on_behalf_of(resolve_address(&owner)?);
     }

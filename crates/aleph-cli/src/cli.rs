@@ -1412,6 +1412,11 @@ pub struct FilePinArgs {
     /// engine; an IPFS CID selects the `ipfs` engine.
     pub item_hash: ItemHash,
 
+    /// Payment type for the STORE message. `credit` (default) consumes
+    /// credits; `hold` requires locked stake on the account.
+    #[arg(long, value_enum)]
+    pub payment_type: Option<PaymentTypeCli>,
+
     /// Channel name.
     #[arg(long)]
     pub channel: Option<String>,
