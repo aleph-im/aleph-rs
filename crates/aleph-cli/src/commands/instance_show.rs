@@ -1237,6 +1237,10 @@ mod tests {
 
         // CRN was unreachable, so networking is None.
         assert!(show.networking.is_none(), "networking must be None when CRN unreachable");
+        assert!(
+            show.mapped_ports.is_none(),
+            "mapped_ports must stay None when CRN is unreachable"
+        );
 
         // Aggregate was fetched successfully but was empty.
         let forwards = show.port_forwards.as_ref().expect("port_forwards is Some");
