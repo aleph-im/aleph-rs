@@ -915,15 +915,17 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/v2/about/executions/list"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564": {
-                    "networking": {
-                        "mapped_ports": { "22": { "host": 24221 } },
-                        "ipv6": "fc00:1:2:3:1:abcd:1234:5670/124",
-                        "ipv4": null
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564": {
+                        "networking": {
+                            "mapped_ports": { "22": { "host": 24221 } },
+                            "ipv6": "fc00:1:2:3:1:abcd:1234:5670/124",
+                            "ipv4": null
+                        }
                     }
-                }
-            })))
+                })),
+            )
             .mount(&server)
             .await;
 
@@ -931,10 +933,9 @@ mod tests {
         let url = url::Url::parse(&server.uri()).unwrap();
         let list = super::fetch_active_vms(&http, &url).await.expect("ok");
 
-        let vm_id: ItemHash =
-            "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564"
-                .parse()
-                .unwrap();
+        let vm_id: ItemHash = "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564"
+            .parse()
+            .unwrap();
         let entry = list.0.get(&vm_id).expect("vm present");
         let net = entry.networking.as_ref().expect("networking present");
         assert_eq!(net.ipv6.as_deref(), Some("fc00:1:2:3:1:abcd:1234:5670/124"));

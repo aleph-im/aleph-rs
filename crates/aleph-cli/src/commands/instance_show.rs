@@ -369,7 +369,12 @@ pub(crate) fn render_text(s: &InstanceShow) -> String {
     if let Some(name) = s.identity.name.as_deref() {
         writeln!(out, "  Name           {name}").unwrap();
     }
-    writeln!(out, "  Created        {}", format_ts(&s.identity.created_at)).unwrap();
+    writeln!(
+        out,
+        "  Created        {}",
+        format_ts(&s.identity.created_at)
+    )
+    .unwrap();
     writeln!(out, "  Owner          {}", s.identity.owner).unwrap();
     if s.identity.sender != s.identity.owner {
         writeln!(out, "  Sender         {}", s.identity.sender).unwrap();
@@ -521,7 +526,12 @@ fn format_gpus(gpus: &[GpuSummary]) -> String {
         return MISSING.into();
     }
     gpus.iter()
-        .map(|g| format!("{} {} ({}, {})", g.vendor, g.device_name, g.device_id, g.device_class))
+        .map(|g| {
+            format!(
+                "{} {} ({}, {})",
+                g.vendor, g.device_name, g.device_id, g.device_class
+            )
+        })
         .collect::<Vec<_>>()
         .join("; ")
 }
@@ -607,9 +617,9 @@ async fn populate_verbose(
                                 ),
                             }
                         }
-                        Err(e) => eprintln!(
-                            "warning: invalid CRN address `{addr}` from scheduler: {e}"
-                        ),
+                        Err(e) => {
+                            eprintln!("warning: invalid CRN address `{addr}` from scheduler: {e}")
+                        }
                     }
                 } else {
                     eprintln!(
@@ -621,9 +631,7 @@ async fn populate_verbose(
             Ok(None) => eprintln!(
                 "warning: scheduler has no record of node {node_hash}; networking unavailable"
             ),
-            Err(e) => eprintln!(
-                "warning: scheduler unreachable for node {node_hash}: {e}"
-            ),
+            Err(e) => eprintln!("warning: scheduler unreachable for node {node_hash}: {e}"),
         }
     }
 
@@ -665,9 +673,7 @@ async fn populate_verbose(
 
 /// Render a port's protocol flags as a compact string. Returns `None` when no
 /// flags are set (default behaviour, typically tcp+udp depending on CRN config).
-fn format_proto(
-    flags: &aleph_sdk::aggregate_models::port_forwarding::PortFlags,
-) -> Option<String> {
+fn format_proto(flags: &aleph_sdk::aggregate_models::port_forwarding::PortFlags) -> Option<String> {
     let mut parts = Vec::new();
     if flags.tcp {
         parts.push("tcp");
@@ -886,7 +892,8 @@ mod tests {
 
     #[test]
     fn parse_ssh_key_without_comment() {
-        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGGqxlNwZh0RTk4UpAQ4XBQjPpswxqDjW7Lu8fThIzNd";
+        let raw =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGGqxlNwZh0RTk4UpAQ4XBQjPpswxqDjW7Lu8fThIzNd";
         let key = parse_ssh_key(raw);
         assert_eq!(key.algo, "ssh-ed25519");
         assert_eq!(key.comment, None);
@@ -913,7 +920,8 @@ mod tests {
         // The fingerprint of a fixed key blob is deterministic. We don't bake
         // the exact value (it's algorithm-dependent and not load-bearing here),
         // but two parses of the same key must agree.
-        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGGqxlNwZh0RTk4UpAQ4XBQjPpswxqDjW7Lu8fThIzNd";
+        let raw =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGGqxlNwZh0RTk4UpAQ4XBQjPpswxqDjW7Lu8fThIzNd";
         let a = parse_ssh_key(raw);
         let b = parse_ssh_key(raw);
         assert_eq!(a.fingerprint, b.fingerprint);
@@ -1029,10 +1037,7 @@ mod tests {
         assert!(obj.contains_key("networking"));
         assert!(obj.contains_key("mapped_ports"));
         assert!(obj.contains_key("port_forwards"));
-        assert_eq!(
-            obj["networking"]["ipv6"].as_str(),
-            Some("fc00::1/64")
-        );
+        assert_eq!(obj["networking"]["ipv6"].as_str(), Some("fc00::1/64"));
     }
 
     #[test]
@@ -1053,8 +1058,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const VM_HASH: &str = "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564";
-    const NODE_HASH: &str =
-        "dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04";
+    const NODE_HASH: &str = "dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04";
 
     fn make_show_args(vm_id: &str, verbose: bool) -> InstanceShowArgs {
         InstanceShowArgs {
@@ -1091,10 +1095,12 @@ mod tests {
         // 1. scheduler.get_vm(hash) -> dispatched entry
         Mock::given(method("GET"))
             .and(path(format!("/api/v1/vms/{VM_HASH}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(
-                VM_HASH,
-                "dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04",
-            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(
+                    VM_HASH,
+                    "dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04",
+                )),
+            )
             .mount(&server)
             .await;
         // 2. CCN get_message
@@ -1141,10 +1147,7 @@ mod tests {
             .await
             .expect_err("expected zero-match failure");
         let msg = err.to_string();
-        assert!(
-            msg.contains("no instance matches `deadbe`"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("no instance matches `deadbe`"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -1155,9 +1158,9 @@ mod tests {
         // 1. scheduler.get_vm
         Mock::given(method("GET"))
             .and(path(format!("/api/v1/vms/{VM_HASH}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(
-                VM_HASH, NODE_HASH,
-            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(VM_HASH, NODE_HASH)),
+            )
             .mount(&server)
             .await;
         // 2. CCN get_message
@@ -1230,7 +1233,10 @@ mod tests {
         // Port-forwards populated from aggregate with correct vm_port.
         let forwards = show.port_forwards.as_ref().expect("port_forwards is Some");
         assert!(!forwards.is_empty(), "port_forwards must be non-empty");
-        let pf = forwards.iter().find(|p| p.vm_port == 22).expect("port 22 present");
+        let pf = forwards
+            .iter()
+            .find(|p| p.vm_port == 22)
+            .expect("port 22 present");
         assert_eq!(pf.host, 24221);
         assert_eq!(pf.proto.as_deref(), Some("tcp"));
     }
@@ -1242,9 +1248,9 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path(format!("/api/v1/vms/{VM_HASH}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(
-                VM_HASH, NODE_HASH,
-            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(VM_HASH, NODE_HASH)),
+            )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -1278,7 +1284,10 @@ mod tests {
             .expect("handler succeeds despite CRN unreachable");
 
         // CRN was unreachable, so networking is None.
-        assert!(show.networking.is_none(), "networking must be None when CRN unreachable");
+        assert!(
+            show.networking.is_none(),
+            "networking must be None when CRN unreachable"
+        );
         assert!(
             show.mapped_ports.is_none(),
             "mapped_ports must stay None when CRN is unreachable"
@@ -1286,7 +1295,10 @@ mod tests {
 
         // Aggregate was fetched successfully but was empty.
         let forwards = show.port_forwards.as_ref().expect("port_forwards is Some");
-        assert!(forwards.is_empty(), "port_forwards must be empty when aggregate is empty");
+        assert!(
+            forwards.is_empty(),
+            "port_forwards must be empty when aggregate is empty"
+        );
     }
 
     fn show_with_verbose_data() -> InstanceShow {
@@ -1297,8 +1309,16 @@ mod tests {
         });
         show.mapped_ports = Some(BTreeMap::from([(22u16, 24221u16), (80u16, 24222u16)]));
         show.port_forwards = Some(vec![
-            PortForward { vm_port: 22, host: 24221, proto: None },
-            PortForward { vm_port: 80, host: 24222, proto: Some("tcp+udp".into()) },
+            PortForward {
+                vm_port: 22,
+                host: 24221,
+                proto: None,
+            },
+            PortForward {
+                vm_port: 80,
+                host: 24222,
+                proto: Some("tcp+udp".into()),
+            },
         ]);
         show
     }
@@ -1326,14 +1346,20 @@ mod tests {
         let out = render_text(&show);
         let p22 = out.find("22  -> 24221").unwrap();
         let p80 = out.find("80  -> 24222").unwrap();
-        assert!(p22 < p80, "mapped ports should be sorted ascending by VM port");
+        assert!(
+            p22 < p80,
+            "mapped ports should be sorted ascending by VM port"
+        );
     }
 
     #[test]
     fn render_text_verbose_port_forwards_proto_column() {
         let show = show_with_verbose_data();
         let out = render_text(&show);
-        assert!(out.contains("22/tcp"), "default proto column for entries without flags");
+        assert!(
+            out.contains("22/tcp"),
+            "default proto column for entries without flags"
+        );
         assert!(out.contains("80/tcp+udp"));
     }
 
