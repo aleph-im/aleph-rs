@@ -407,6 +407,36 @@ fn stream_rootfs_from_tar(
     }
 }
 
+/// Wrap an upload byte stream so it reports progress to stderr every ~500 ms.
+/// Symmetric with `stream_to_part_file` on the download path; emits a final
+/// 100% line on the last chunk so the rendered percentage doesn't get stuck
+/// just below 100% when the last chunk arrives between ticks.
+fn with_upload_progress<S>(stream: S, total: u64) -> impl futures_util::Stream<Item = S::Item>
+where
+    S: futures_util::Stream<Item = std::io::Result<bytes::Bytes>>,
+{
+    use futures_util::StreamExt;
+    let mut sent: u64 = 0;
+    let mut last_report = std::time::Instant::now();
+    stream.map(move |chunk| {
+        if let Ok(bytes) = &chunk {
+            sent = sent.saturating_add(bytes.len() as u64);
+            let due = last_report.elapsed() >= std::time::Duration::from_millis(500);
+            if due || sent >= total {
+                let shown = sent.min(total);
+                let pct = if total == 0 {
+                    100.0
+                } else {
+                    (shown as f64 / total as f64 * 100.0).min(100.0)
+                };
+                eprint!("\r  uploaded {shown}/{total} bytes ({pct:.1}%)");
+                last_report = std::time::Instant::now();
+            }
+        }
+        chunk
+    })
+}
+
 async fn restore_from_file(
     client: &CrnClient,
     vm_id: &aleph_types::item_hash::ItemHash,
@@ -418,7 +448,7 @@ async fn restore_from_file(
         RestoreSource::Qcow2 { size } => {
             let file = tokio::fs::File::open(path).await?;
             let stream = tokio_util::io::ReaderStream::new(file);
-            let body = reqwest::Body::wrap_stream(stream);
+            let body = reqwest::Body::wrap_stream(with_upload_progress(stream, size));
             (size, body, format!("{}", path.display()))
         }
         RestoreSource::BackupTar { rootfs_size } => {
@@ -428,7 +458,7 @@ async fn restore_from_file(
                 stream_rootfs_from_tar(&path_owned, &tx);
             });
             let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-            let body = reqwest::Body::wrap_stream(stream);
+            let body = reqwest::Body::wrap_stream(with_upload_progress(stream, rootfs_size));
             (
                 rootfs_size,
                 body,
@@ -450,6 +480,7 @@ async fn restore_from_file(
     }
     eprintln!("Uploading {upload_size} bytes from {display}...");
     let response = request.send().await?;
+    eprintln!();
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
