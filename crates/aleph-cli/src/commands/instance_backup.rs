@@ -298,22 +298,147 @@ async fn download_from_url(url: Url, output: Option<std::path::PathBuf>, json: b
     Ok(())
 }
 
+/// What kind of file the user passed to `restore --file`.
+#[derive(Debug)]
+enum RestoreSource {
+    /// A raw QCOW2 image. Uploaded as-is.
+    Qcow2 { size: u64 },
+    /// An `aleph instance backup download` archive. The `rootfs.qcow2`
+    /// member is streamed out of the tar and uploaded; other members
+    /// (data volumes) are ignored, since the CRN's restore endpoint only
+    /// accepts a rootfs replacement.
+    BackupTar { rootfs_size: u64 },
+}
+
+const QCOW2_MAGIC: &[u8; 4] = b"QFI\xfb";
+const TAR_MAGIC_OFFSET: usize = 257;
+const TAR_MAGIC: &[u8; 5] = b"ustar";
+const ROOTFS_MEMBER_NAME: &str = "rootfs.qcow2";
+
+/// Inspect the first 512 bytes of `path` and classify it as a raw QCOW2 or
+/// an aleph backup tar. Walks tar headers (cheap, microseconds) to find the
+/// rootfs size up front so the multipart `Content-Length` is known.
+async fn detect_restore_source(path: &std::path::Path) -> Result<RestoreSource> {
+    use tokio::io::AsyncReadExt;
+    let mut header = [0u8; 512];
+    let mut file = tokio::fs::File::open(path).await?;
+    let read = file.read(&mut header).await?;
+    if read >= QCOW2_MAGIC.len() && &header[..QCOW2_MAGIC.len()] == QCOW2_MAGIC {
+        let size = tokio::fs::metadata(path).await?.len();
+        return Ok(RestoreSource::Qcow2 { size });
+    }
+    if read >= TAR_MAGIC_OFFSET + TAR_MAGIC.len()
+        && &header[TAR_MAGIC_OFFSET..TAR_MAGIC_OFFSET + TAR_MAGIC.len()] == TAR_MAGIC
+    {
+        let path_owned = path.to_path_buf();
+        let rootfs_size = tokio::task::spawn_blocking(move || find_rootfs_in_tar(&path_owned))
+            .await
+            .map_err(|e| anyhow::anyhow!("tar inspection task failed: {e}"))??;
+        return Ok(RestoreSource::BackupTar { rootfs_size });
+    }
+    anyhow::bail!(
+        "{} is neither a QCOW2 image nor an aleph backup archive. Pass a raw \
+         .qcow2 or a backup .tar produced by 'aleph instance backup download'.",
+        path.display()
+    );
+}
+
+/// Walk tar headers to find the size of the `rootfs.qcow2` member. Reads
+/// only the headers, not the payload; runs in microseconds even on a
+/// multi-gigabyte archive.
+fn find_rootfs_in_tar(path: &std::path::Path) -> Result<u64> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = tar::Archive::new(file);
+    for entry in archive.entries()? {
+        let entry = entry?;
+        if entry.path()?.to_str() == Some(ROOTFS_MEMBER_NAME) {
+            return Ok(entry.header().size()?);
+        }
+    }
+    anyhow::bail!(
+        "'{ROOTFS_MEMBER_NAME}' not found inside {}. This does not look like an \
+         aleph backup archive.",
+        path.display()
+    );
+}
+
+/// Synchronously stream the `rootfs.qcow2` member's bytes out of a tar into
+/// `tx`. Runs inside `tokio::task::spawn_blocking`. On any I/O error or if
+/// the member is missing, sends the error through `tx` so the consumer's
+/// stream surfaces it.
+fn stream_rootfs_from_tar(
+    path: &std::path::Path,
+    tx: &tokio::sync::mpsc::Sender<std::io::Result<bytes::Bytes>>,
+) {
+    use std::io::Read;
+    let result = (|| -> std::io::Result<bool> {
+        let file = std::fs::File::open(path)?;
+        let mut archive = tar::Archive::new(file);
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            if entry.path()?.to_str() == Some(ROOTFS_MEMBER_NAME) {
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = entry.read(&mut buf)?;
+                    if n == 0 {
+                        return Ok(true);
+                    }
+                    let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+                    if tx.blocking_send(Ok(chunk)).is_err() {
+                        // Receiver dropped (e.g. upload aborted); exit cleanly.
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    })();
+    match result {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = tx.blocking_send(Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("'{ROOTFS_MEMBER_NAME}' not found in tar"),
+            )));
+        }
+        Err(e) => {
+            let _ = tx.blocking_send(Err(e));
+        }
+    }
+}
+
 async fn restore_from_file(
     client: &CrnClient,
     vm_id: &aleph_types::item_hash::ItemHash,
     path: &std::path::Path,
 ) -> Result<aleph_sdk::crn::RestoreResponse> {
-    let file_size = tokio::fs::metadata(path).await?.len();
-    let file = tokio::fs::File::open(path).await?;
-    let stream = tokio_util::io::ReaderStream::new(file);
-    let body = reqwest::Body::wrap_stream(stream);
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("rootfs.qcow2")
-        .to_string();
-    let part = reqwest::multipart::Part::stream_with_length(body, file_size)
-        .file_name(file_name)
+    let source = detect_restore_source(path).await?;
+
+    let (upload_size, body, display) = match source {
+        RestoreSource::Qcow2 { size } => {
+            let file = tokio::fs::File::open(path).await?;
+            let stream = tokio_util::io::ReaderStream::new(file);
+            let body = reqwest::Body::wrap_stream(stream);
+            (size, body, format!("{}", path.display()))
+        }
+        RestoreSource::BackupTar { rootfs_size } => {
+            let path_owned = path.to_path_buf();
+            let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(8);
+            tokio::task::spawn_blocking(move || {
+                stream_rootfs_from_tar(&path_owned, &tx);
+            });
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+            let body = reqwest::Body::wrap_stream(stream);
+            (
+                rootfs_size,
+                body,
+                format!("{} ({ROOTFS_MEMBER_NAME} inside)", path.display()),
+            )
+        }
+    };
+
+    let part = reqwest::multipart::Part::stream_with_length(body, upload_size)
+        .file_name(ROOTFS_MEMBER_NAME.to_string())
         .mime_str("application/octet-stream")?;
     let form = reqwest::multipart::Form::new().part("rootfs", part);
 
@@ -323,7 +448,7 @@ async fn restore_from_file(
     for (name, value) in &endpoint.headers {
         request = request.header(*name, value);
     }
-    eprintln!("Uploading {file_size} bytes from {}...", path.display());
+    eprintln!("Uploading {upload_size} bytes from {display}...");
     let response = request.send().await?;
     let status = response.status();
     if !status.is_success() {
@@ -765,8 +890,31 @@ mod tests {
         assert_eq!(tokio::fs::read(&output).await.unwrap(), body);
     }
 
+    /// Build a fake QCOW2-like blob: the 4-byte magic followed by `filler`
+    /// bytes of payload. The CLI's source-detection only reads the magic,
+    /// and the test CRN doesn't decode the payload either.
+    fn fake_qcow2(filler: &[u8]) -> Vec<u8> {
+        let mut bytes = QCOW2_MAGIC.to_vec();
+        bytes.extend_from_slice(filler);
+        bytes
+    }
+
+    /// Build a fake aleph backup tar in memory containing a single
+    /// `rootfs.qcow2` member whose payload is `qcow2_bytes`. Returns the
+    /// fully-serialized tar.
+    fn fake_backup_tar(qcow2_bytes: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path(ROOTFS_MEMBER_NAME).unwrap();
+        header.set_size(qcow2_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, qcow2_bytes).unwrap();
+        builder.into_inner().unwrap()
+    }
+
     #[tokio::test]
-    async fn restore_file_uploads_multipart() {
+    async fn restore_file_uploads_qcow2_directly() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path(format!("/control/machine/{FULL_HASH}/restore")))
@@ -779,7 +927,9 @@ mod tests {
 
         let tmpdir = tempfile::tempdir().unwrap();
         let qcow = tmpdir.path().join("rootfs.qcow2");
-        tokio::fs::write(&qcow, b"fake-qcow2-data").await.unwrap();
+        tokio::fs::write(&qcow, fake_qcow2(b"qcow2-payload"))
+            .await
+            .unwrap();
 
         let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
         let args = InstanceBackupRestoreArgs {
@@ -790,6 +940,67 @@ mod tests {
             signing: evm_signing_args(),
         };
         handle_restore(scheduler_url, true, args).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_file_extracts_rootfs_from_backup_tar() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{FULL_HASH}/restore")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "restored",
+                "vm_hash": FULL_HASH
+            })))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tar_path = tmpdir.path().join("backup-deadbeef.tar");
+        let qcow2 = fake_qcow2(b"qcow2-from-tar");
+        tokio::fs::write(&tar_path, fake_backup_tar(&qcow2))
+            .await
+            .unwrap();
+
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupRestoreArgs {
+            vm_id: FULL_HASH.to_string(),
+            file: Some(tar_path.clone()),
+            volume_ref: None,
+            crn_url: Some(server.uri()),
+            signing: evm_signing_args(),
+        };
+        handle_restore(scheduler_url, true, args).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_file_rejects_unrecognized_format() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let junk = tmpdir.path().join("garbage.bin");
+        tokio::fs::write(&junk, b"this is not a qcow2 or a tar archive")
+            .await
+            .unwrap();
+        let err = detect_restore_source(&junk).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not a QCOW2 image") || msg.contains("aleph backup archive"));
+    }
+
+    #[tokio::test]
+    async fn restore_file_rejects_tar_without_rootfs() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tar_path = tmpdir.path().join("no-rootfs.tar");
+        // Build a tar whose only member is something other than rootfs.qcow2.
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path("other.bin").unwrap();
+        header.set_size(3);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, &b"abc"[..]).unwrap();
+        let tar_bytes = builder.into_inner().unwrap();
+        tokio::fs::write(&tar_path, &tar_bytes).await.unwrap();
+
+        let err = detect_restore_source(&tar_path).await.unwrap_err();
+        assert!(err.to_string().contains(ROOTFS_MEMBER_NAME));
     }
 
     #[tokio::test]
