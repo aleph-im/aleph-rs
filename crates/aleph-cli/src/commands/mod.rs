@@ -9,6 +9,7 @@ pub mod file;
 pub mod instance;
 pub mod instance_backup;
 pub mod instance_interactive;
+pub mod instance_show;
 pub mod instance_ssh;
 pub mod instance_target;
 pub mod message;
