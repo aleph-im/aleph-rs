@@ -245,6 +245,8 @@ Forget is irreversible. You can only forget messages your own address owns \
     // Boxing because of a large enum variant.
     /// List messages (with filters)
     List(Box<MessageListArgs>),
+    /// Re-submit a previously rejected message
+    Retry(RetryArgs),
     /// Sync messages from one node to another
     Sync(Box<SyncArgs>),
 }
@@ -276,6 +278,16 @@ pub struct SyncArgs {
 pub struct GetMessageArgs {
     /// The item hash of the message to fetch.
     pub item_hash: ItemHash,
+}
+
+#[derive(Args)]
+pub struct RetryArgs {
+    /// The item hash of the rejected message to re-submit.
+    pub item_hash: ItemHash,
+
+    /// Print the reconstructed envelope without submitting.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Subcommand)]

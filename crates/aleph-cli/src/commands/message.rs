@@ -1,4 +1,4 @@
-use crate::cli::{ForgetArgs, GetMessageArgs, MessageCommand, SigningArgs};
+use crate::cli::{ForgetArgs, GetMessageArgs, MessageCommand, RetryArgs, SigningArgs};
 use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephClient, AlephMessageClient};
@@ -33,6 +33,9 @@ pub async fn handle_message_command(
         }
         MessageCommand::Forget(args) => {
             handle_forget(aleph_client, ccn_url, json, args).await?;
+        }
+        MessageCommand::Retry(args) => {
+            handle_retry(aleph_client, ccn_url, json, args).await?;
         }
     }
 
@@ -117,6 +120,15 @@ pub async fn forget_targets(
     }
     let pending = builder.build()?;
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
+async fn handle_retry(
+    _aleph_client: &AlephClient,
+    _ccn_url: &Url,
+    _json: bool,
+    _args: RetryArgs,
+) -> Result<()> {
+    bail!("not yet implemented")
 }
 
 #[cfg(test)]
