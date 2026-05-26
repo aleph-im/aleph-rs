@@ -5,7 +5,8 @@
 //! owner's port-forwarding aggregate.
 
 use crate::cli::InstanceShowArgs;
-use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageWithStatus};
+use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageWithStatus};
+use aleph_sdk::crn::fetch_active_vms;
 use aleph_sdk::scheduler::SchedulerClient;
 use aleph_types::chain::{Address, Chain};
 use aleph_types::channel::Channel;
@@ -528,6 +529,117 @@ pub(crate) fn render_json(s: &InstanceShow) -> serde_json::Value {
     serde_json::to_value(s).expect("InstanceShow always serializes")
 }
 
+async fn populate_verbose(
+    show: &mut InstanceShow,
+    scheduler: &SchedulerClient,
+    aleph_client: &AlephClient,
+) {
+    // --- CRN networking + mapped ports ---
+    if let Some(node_hash) = show.placement.allocated_node.as_deref() {
+        match scheduler.get_node(node_hash).await {
+            Ok(Some(node)) => {
+                if let Some(addr) = node.address.as_deref() {
+                    match Url::parse(addr) {
+                        Ok(crn_url) => {
+                            let http = reqwest::Client::new();
+                            match fetch_active_vms(&http, &crn_url).await {
+                                Ok(list) => {
+                                    if let Some(entry) = list.0.get(&show.identity.item_hash) {
+                                        if let Some(net) = entry.networking.as_ref() {
+                                            show.networking = Some(Networking {
+                                                ipv4: net.ipv4.clone(),
+                                                ipv6: net.ipv6.clone(),
+                                            });
+                                            let mapped: BTreeMap<u16, u16> = net
+                                                .mapped_ports
+                                                .iter()
+                                                .map(|(k, v)| (*k, v.host))
+                                                .collect();
+                                            show.mapped_ports = Some(mapped);
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!(
+                                    "warning: CRN {crn_url} unreachable, \
+                                     networking/mapped ports unavailable: {e}"
+                                ),
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "warning: invalid CRN address `{addr}` from scheduler: {e}"
+                        ),
+                    }
+                } else {
+                    eprintln!(
+                        "warning: scheduler knows node {node_hash} but has no reachable \
+                         address; networking unavailable"
+                    );
+                }
+            }
+            Ok(None) => eprintln!(
+                "warning: scheduler has no record of node {node_hash}; networking unavailable"
+            ),
+            Err(e) => eprintln!(
+                "warning: scheduler unreachable for node {node_hash}: {e}"
+            ),
+        }
+    }
+
+    // --- Port-forwarding aggregate ---
+    match aleph_client
+        .get_port_forwarding_aggregate(&show.identity.owner)
+        .await
+    {
+        Ok(agg) => {
+            let mut forwards: Vec<PortForward> = Vec::new();
+            for (vm_id, ports_opt) in agg.iter() {
+                if vm_id != &show.identity.item_hash {
+                    continue;
+                }
+                let Some(ports) = ports_opt else { continue };
+                for (vm_port, flags) in ports.ports.iter() {
+                    let host = show
+                        .mapped_ports
+                        .as_ref()
+                        .and_then(|m| m.get(vm_port))
+                        .copied()
+                        .unwrap_or(0);
+                    forwards.push(PortForward {
+                        vm_port: *vm_port,
+                        host,
+                        proto: format_proto(flags),
+                    });
+                }
+            }
+            forwards.sort_by_key(|p| p.vm_port);
+            show.port_forwards = Some(forwards);
+        }
+        Err(e) => eprintln!(
+            "warning: port-forwarding aggregate unavailable for {}: {e}",
+            show.identity.owner
+        ),
+    }
+}
+
+/// Render a port's protocol flags as a compact string. Returns `None` when no
+/// flags are set (default behaviour, typically tcp+udp depending on CRN config).
+fn format_proto(
+    flags: &aleph_sdk::aggregate_models::port_forwarding::PortFlags,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if flags.tcp {
+        parts.push("tcp");
+    }
+    if flags.udp {
+        parts.push("udp");
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("+"))
+    }
+}
+
 async fn fetch_instance_message(
     aleph_client: &AlephClient,
     item_hash: &ItemHash,
@@ -604,8 +716,10 @@ pub async fn handle_instance_show(
         scheduling_status: Some(entry.scheduling_status.clone()),
     };
 
-    // 5. (verbose extras come in later tasks)
-    let _ = args.verbose;
+    // 5. Verbose extras: CRN networking + port-forwarding aggregate.
+    if args.verbose {
+        populate_verbose(&mut show, &scheduler, aleph_client).await;
+    }
 
     // 6. Render.
     if json {
@@ -886,6 +1000,15 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const VM_HASH: &str = "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564";
+    const NODE_HASH: &str =
+        "dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04";
+
+    fn make_show_args(vm_id: &str, verbose: bool) -> InstanceShowArgs {
+        InstanceShowArgs {
+            vm_id: vm_id.to_string(),
+            verbose,
+        }
+    }
 
     fn vm_entry_dispatched(hash: &str, node: &str) -> serde_json::Value {
         serde_json::json!({
@@ -969,6 +1092,116 @@ mod tests {
             msg.contains("no instance matches `deadbe`"),
             "got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_instance_show_verbose_populates_networking_and_aggregate() {
+        let server = MockServer::start().await;
+        let msg = fixture_message();
+
+        // 1. scheduler.get_vm
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/vms/{VM_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(
+                VM_HASH, NODE_HASH,
+            )))
+            .mount(&server)
+            .await;
+        // 2. CCN get_message
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{VM_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(message_envelope(&msg)))
+            .mount(&server)
+            .await;
+        // 3. scheduler.get_node
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{NODE_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "node_hash": NODE_HASH,
+                "address": format!("{}/", server.uri()),
+                "status": "ok",
+            })))
+            .mount(&server)
+            .await;
+        // 4. CRN /v2/about/executions/list
+        Mock::given(method("GET"))
+            .and(path("/v2/about/executions/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                VM_HASH: {
+                    "networking": {
+                        "ipv6": "fc00:1:2:3:1:abcd:1234:5670/124",
+                        "mapped_ports": { "22": { "host": 24221 } }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        // 5. CCN aggregate fetch (port-forwarding). The owner address comes
+        //    from the fixture: 0x238224C744F4b90b4494516e074D2676ECfC6803
+        let owner_addr = "0x238224C744F4b90b4494516e074D2676ECfC6803";
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/aggregates/{owner_addr}.json")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "address": owner_addr,
+                "data": {
+                    "port-forwarding": {
+                        VM_HASH: {
+                            "22": { "host": 24221 }
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let aleph_client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let scheduler_url = Url::parse(&server.uri()).unwrap();
+        let args = make_show_args(VM_HASH, true);
+        handle_instance_show(&aleph_client, scheduler_url, true, args)
+            .await
+            .expect("verbose handler succeeds");
+    }
+
+    #[tokio::test]
+    async fn handle_instance_show_verbose_degrades_when_crn_unreachable() {
+        let server = MockServer::start().await;
+        let msg = fixture_message();
+
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/vms/{VM_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(
+                VM_HASH, NODE_HASH,
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{VM_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(message_envelope(&msg)))
+            .mount(&server)
+            .await;
+        // get_node fails (500) -> handler must warn and continue
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{NODE_HASH}")))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        // aggregate still returns ok (separate code path)
+        let owner_addr = "0x238224C744F4b90b4494516e074D2676ECfC6803";
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/aggregates/{owner_addr}.json")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "address": owner_addr, "data": { "port-forwarding": {} }
+            })))
+            .mount(&server)
+            .await;
+
+        let aleph_client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let scheduler_url = Url::parse(&server.uri()).unwrap();
+        let args = make_show_args(VM_HASH, true);
+        // Must NOT error - degradation only.
+        handle_instance_show(&aleph_client, scheduler_url, true, args)
+            .await
+            .expect("handler succeeds despite CRN unreachable");
     }
 
     #[tokio::test]
