@@ -1,5 +1,8 @@
 use crate::aggregate_models::corechannel::CoreChannelAggregate;
 use crate::aggregate_models::domains::{DOMAINS_AGGREGATE_KEY, DomainsAggregate};
+use crate::aggregate_models::port_forwarding::{
+    PORT_FORWARDING_AGGREGATE_KEY, PortForwardingAggregate,
+};
 use crate::aggregate_models::pricing::{PRICING_ADDRESS, PricingAggregate};
 use crate::aggregate_models::websites::{WEBSITES_AGGREGATE_KEY, WebsitesAggregate};
 use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
@@ -1391,6 +1394,20 @@ pub trait AlephAggregateClient {
         &self,
         address: &Address,
     ) -> impl Future<Output = Result<DomainsAggregate, MessageError>> + Send;
+
+    /// Returns the `port-forwarding` aggregate for the given address.
+    ///
+    /// "No aggregate stored for this address" is mapped to an empty aggregate
+    /// regardless of how the CCN signals it:
+    ///
+    /// * `200` with `data: null`, `data: {}`, or `data: {"port-forwarding": null}` -> empty.
+    /// * `404 Not Found` -> empty.
+    ///
+    /// Other transport errors (timeouts, 5xx, parse failures, etc.) are propagated.
+    fn get_port_forwarding_aggregate(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<PortForwardingAggregate, MessageError>> + Send;
 
     /// Returns the most recent version of multiple aggregates, keyed by their aggregate key.
     ///
@@ -2996,6 +3013,17 @@ impl AlephAggregateClient for AlephClient {
         extract_aggregate_value(raw, DOMAINS_AGGREGATE_KEY)
     }
 
+    async fn get_port_forwarding_aggregate(
+        &self,
+        address: &Address,
+    ) -> Result<PortForwardingAggregate, MessageError> {
+        let raw = map_aggregate_404_to_empty(
+            self.get_aggregate::<Option<serde_json::Value>>(address, PORT_FORWARDING_AGGREGATE_KEY)
+                .await,
+        )?;
+        extract_aggregate_value(raw, PORT_FORWARDING_AGGREGATE_KEY)
+    }
+
     async fn get_aggregates(
         &self,
         address: &Address,
@@ -4227,6 +4255,13 @@ mod tests {
                 Ok(DomainsAggregate::new())
             }
 
+            async fn get_port_forwarding_aggregate(
+                &self,
+                _address: &Address,
+            ) -> Result<PortForwardingAggregate, MessageError> {
+                Ok(PortForwardingAggregate::new())
+            }
+
             async fn get_aggregates(
                 &self,
                 _address: &Address,
@@ -4256,6 +4291,14 @@ mod tests {
             let client = MockAggregateClient;
             let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
             let agg = client.get_domains_aggregate(&addr).await.unwrap();
+            assert!(agg.is_empty());
+        }
+
+        #[tokio::test]
+        async fn mock_returns_empty_port_forwarding_aggregate_by_default() {
+            let client = MockAggregateClient;
+            let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+            let agg = client.get_port_forwarding_aggregate(&addr).await.unwrap();
             assert!(agg.is_empty());
         }
 
@@ -4338,6 +4381,24 @@ mod tests {
 
             let agg = client
                 .get_domains_aggregate(&addr)
+                .await
+                .expect("404 should map to an empty aggregate, not an error");
+            assert!(agg.is_empty());
+        }
+
+        #[tokio::test]
+        async fn get_port_forwarding_aggregate_returns_empty_on_404() {
+            let url = start_canned_response_server(HTTP_404_RESPONSE).await;
+            let client = AlephClient::builder(url)
+                .retry_config(RetryConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                })
+                .build();
+            let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+
+            let agg = client
+                .get_port_forwarding_aggregate(&addr)
                 .await
                 .expect("404 should map to an empty aggregate, not an error");
             assert!(agg.is_empty());

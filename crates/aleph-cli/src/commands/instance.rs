@@ -84,7 +84,7 @@ fn node_from_requirements(requirements: Option<&HostRequirements>) -> Option<Str
 }
 
 /// First 12 chars of the item hash, lower-cased. Used in the text table.
-fn format_item_hash_short(hash: &ItemHash) -> String {
+pub(crate) fn format_item_hash_short(hash: &ItemHash) -> String {
     let s = hash.to_string();
     s.chars().take(12).collect()
 }
@@ -428,6 +428,17 @@ pub async fn handle_instance_command(
         InstanceCommand::Ssh(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             super::instance_ssh::handle_ssh(scheduler_url, args).await?;
+        }
+        InstanceCommand::PortForward { command } => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            crate::commands::port_forward::handle_port_forward_command(
+                aleph_client,
+                ccn_url,
+                &scheduler_url,
+                json,
+                command,
+            )
+            .await?;
         }
     }
     Ok(())

@@ -1545,7 +1545,7 @@ Delete an instance. Forgets the corresponding INSTANCE message.
 
 This command does ONLY the FORGET. It does NOT:
   - erase the VM on the CRN  (run `aleph instance erase` first)
-  - remove port forwards     (run `aleph instance port-forwarder delete`)
+  - remove port forwards     (run `aleph instance port-forward delete`)
   - stop a streaming flow    (Superfluid flow stays open on PAYG)
 
 Run those subcommands separately if you need that cleanup.
@@ -1566,6 +1566,12 @@ Examples:
     List(InstanceListArgs),
     /// Stream logs from a running VM instance
     Logs(CrnArgs),
+    /// Manage TCP/UDP port forwards for VMs, programs, or IPFS websites.
+    #[command(visible_alias = "pfw")]
+    PortForward {
+        #[clap(subcommand)]
+        command: PortForwardCommand,
+    },
     /// Show pricing for an instance configuration
     #[command(long_about = "\
 Show pricing for an instance configuration.
@@ -2478,6 +2484,185 @@ mod credit_transfer_args_tests {
     }
 }
 
+#[cfg(test)]
+mod port_forward_args_tests {
+    use super::*;
+
+    #[test]
+    fn list_accepts_address_and_vm_id() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "port-forward",
+            "list",
+            "--address",
+            "0xABCD1234",
+            "--vm-id",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        ])
+        .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command:
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::List(args),
+                    },
+            } => {
+                assert_eq!(args.address.as_deref(), Some("0xABCD1234"));
+                assert!(args.vm_id.is_some());
+            }
+            _ => panic!("expected port-forward list"),
+        }
+    }
+
+    #[test]
+    fn create_rejects_port_zero() {
+        match Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "port-forward",
+            "create",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "0",
+        ]) {
+            Ok(_) => panic!("expected parse error for port 0"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation),
+        }
+    }
+
+    #[test]
+    fn create_rejects_port_above_max() {
+        let result = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "port-forward",
+            "create",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "65536",
+        ]);
+        match result {
+            Ok(_) => panic!("expected parse error for port 65536"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation),
+        }
+    }
+
+    #[test]
+    fn create_defaults_tcp_true_udp_false() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "port-forward",
+            "create",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "443",
+        ])
+        .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command:
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::Create(args),
+                    },
+            } => {
+                assert_eq!(args.port, 443);
+                assert!(args.tcp);
+                assert!(!args.udp);
+            }
+            _ => panic!("expected port-forward create"),
+        }
+    }
+
+    #[test]
+    fn create_accepts_explicit_udp_only() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "port-forward",
+            "create",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "5353",
+            "--tcp",
+            "false",
+            "--udp",
+            "true",
+        ])
+        .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command:
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::Create(args),
+                    },
+            } => {
+                assert!(!args.tcp);
+                assert!(args.udp);
+            }
+            _ => panic!("expected port-forward create"),
+        }
+    }
+
+    #[test]
+    fn delete_accepts_optional_port() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "port-forward",
+            "delete",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        ])
+        .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command:
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::Delete(args),
+                    },
+            } => {
+                assert!(args.port.is_none());
+            }
+            _ => panic!("expected port-forward delete"),
+        }
+    }
+
+    #[test]
+    fn create_accepts_hash_prefix() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "port-forward",
+            "create",
+            "a41fb91c3e68",
+            "443",
+        ])
+        .expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command:
+                    InstanceCommand::PortForward {
+                        command: PortForwardCommand::Create(args),
+                    },
+            } => {
+                assert_eq!(args.vm_id, "a41fb91c3e68");
+                assert_eq!(args.port, 443);
+            }
+            _ => panic!("expected port-forward create"),
+        }
+    }
+
+    #[test]
+    fn pfw_alias_resolves_to_port_forward() {
+        let cli = Cli::try_parse_from(["aleph", "instance", "pfw", "list"]).expect("clap parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Instance {
+                command: InstanceCommand::PortForward {
+                    command: PortForwardCommand::List(_),
+                },
+            }
+        ));
+    }
+}
+
 #[derive(Subcommand)]
 pub enum DomainCommand {
     /// List all domains for an account
@@ -2771,4 +2956,99 @@ mod instance_delete_args_tests {
             _ => panic!("expected instance delete"),
         }
     }
+}
+
+#[derive(Subcommand)]
+pub enum PortForwardCommand {
+    /// List configured port forwards for an address (optionally for one VM).
+    List(PortForwardListArgs),
+    /// Create a port forward for `<VM_ID>` on `<PORT>`.
+    Create(PortForwardCreateArgs),
+    /// Update an existing port forward's TCP/UDP flags.
+    Update(PortForwardUpdateArgs),
+    /// Delete a port forward (a single port, or all ports if `--port` is omitted).
+    Delete(PortForwardDeleteArgs),
+    /// Ask the CRN running this VM to re-read the aggregate immediately.
+    Refresh(PortForwardRefreshArgs),
+}
+
+#[derive(Args)]
+pub struct PortForwardListArgs {
+    /// Address to inspect (hex, account name, or alias).
+    /// Defaults to the current default account's address.
+    #[arg(long)]
+    pub address: Option<String>,
+
+    /// Restrict the list to a single VM. Accepts a unique hash prefix
+    /// (e.g. the 12-char hash shown by `aleph instance list`).
+    #[arg(long)]
+    pub vm_id: Option<String>,
+}
+
+#[derive(Args)]
+pub struct PortForwardCreateArgs {
+    /// Item hash of the target VM / program / IPFS website. Accepts a unique
+    /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
+    pub vm_id: String,
+    /// Port number to forward (1..=65535).
+    #[arg(value_parser = clap::value_parser!(u16).range(1..=65535))]
+    pub port: u16,
+    /// Allow TCP for this port. (Use `--tcp false` to disable.)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub tcp: bool,
+    /// Allow UDP for this port. (Use `--udp true` to enable.)
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub udp: bool,
+    /// Channel for the AGGREGATE message.
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct PortForwardUpdateArgs {
+    /// Item hash of the target VM / program / IPFS website. Accepts a unique
+    /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
+    pub vm_id: String,
+    /// Port number to forward (1..=65535).
+    #[arg(value_parser = clap::value_parser!(u16).range(1..=65535))]
+    pub port: u16,
+    /// Allow TCP for this port. (Use `--tcp false` to disable.)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub tcp: bool,
+    /// Allow UDP for this port. (Use `--udp true` to enable.)
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub udp: bool,
+    /// Channel for the AGGREGATE message.
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct PortForwardDeleteArgs {
+    /// Item hash of the target VM / program / IPFS website. Accepts a unique
+    /// prefix (e.g. the 12-char hash shown by `aleph instance list`).
+    pub vm_id: String,
+    /// If set, only delete this port. Otherwise delete the whole entry for `vm_id`.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=65535))]
+    pub port: Option<u16>,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Channel for the AGGREGATE message.
+    #[arg(long)]
+    pub channel: Option<String>,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct PortForwardRefreshArgs {
+    /// Item hash of the target VM. Accepts a unique prefix.
+    pub vm_id: String,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
 }

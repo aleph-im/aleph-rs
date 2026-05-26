@@ -12,6 +12,7 @@ pub mod instance_ssh;
 pub mod instance_target;
 pub mod message;
 pub mod node;
+pub mod port_forward;
 pub mod post;
 pub mod program;
 pub mod sync;
