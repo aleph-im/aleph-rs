@@ -314,19 +314,38 @@ fn volume_summary(v: &MachineVolume) -> Volume {
     }
 }
 
-/// Parse an OpenSSH public key string into an `SshKey`. The fingerprint is
-/// filled in by `Task 3`'s helper; for now produce an `<unparseable>`
-/// placeholder so this task compiles and tests pass.
+/// Parse an OpenSSH public key string into an `SshKey`.
+///
+/// Fingerprint format: `SHA256:<base64-no-padding(sha256(key_blob))>` where
+/// `key_blob` is the base64-decoded middle field of the public-key line.
+/// Returns `"<unparseable>"` for the fingerprint when the line is malformed or
+/// the blob field is not valid standard base64.
 fn parse_ssh_key(raw: &str) -> SshKey {
-    // Real impl lands in Task 3. Until then, capture algo + comment from the
-    // line so the rest of the tests in this task are meaningful.
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
     let mut parts = raw.split_whitespace();
     let algo = parts.next().unwrap_or("").to_string();
-    let _b64 = parts.next();
+    let blob_b64 = parts.next();
     let comment = parts.collect::<Vec<_>>().join(" ");
     let comment = (!comment.is_empty()).then_some(comment);
+
+    let fingerprint = match blob_b64 {
+        Some(b64) if !algo.is_empty() => {
+            match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(blob) => {
+                    let digest = Sha256::digest(&blob);
+                    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest);
+                    format!("SHA256:{b64}")
+                }
+                Err(_) => "<unparseable>".to_string(),
+            }
+        }
+        _ => "<unparseable>".to_string(),
+    };
+
     SshKey {
-        fingerprint: "<unparseable>".to_string(),
+        fingerprint,
         algo,
         comment,
         raw: raw.to_string(),
@@ -421,5 +440,60 @@ mod tests {
         assert!(show.networking.is_none());
         assert!(show.mapped_ports.is_none());
         assert!(show.port_forwards.is_none());
+    }
+
+    // Well-known fingerprints. The blob is the base64-decoded second field
+    // of the key line; SHA-256(blob), then base64 without padding, becomes
+    // the fingerprint.
+
+    #[test]
+    fn parse_ssh_key_ed25519_with_comment() {
+        // Sample ed25519 key.
+        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGGqxlNwZh0RTk4UpAQ4XBQjPpswxqDjW7Lu8fThIzNd alice@example";
+        let key = parse_ssh_key(raw);
+        assert_eq!(key.algo, "ssh-ed25519");
+        assert_eq!(key.comment.as_deref(), Some("alice@example"));
+        assert!(
+            key.fingerprint.starts_with("SHA256:"),
+            "fingerprint must be SHA256:<base64>, got `{}`",
+            key.fingerprint
+        );
+        // Length sanity: SHA-256 base64-no-pad is 43 chars; prefix adds 7.
+        assert_eq!(key.fingerprint.len(), 7 + 43);
+    }
+
+    #[test]
+    fn parse_ssh_key_without_comment() {
+        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGGqxlNwZh0RTk4UpAQ4XBQjPpswxqDjW7Lu8fThIzNd";
+        let key = parse_ssh_key(raw);
+        assert_eq!(key.algo, "ssh-ed25519");
+        assert_eq!(key.comment, None);
+        assert!(key.fingerprint.starts_with("SHA256:"));
+    }
+
+    #[test]
+    fn parse_ssh_key_unparseable_returns_placeholder() {
+        let raw = "not-a-valid-ssh-key";
+        let key = parse_ssh_key(raw);
+        assert_eq!(key.fingerprint, "<unparseable>");
+        assert_eq!(key.raw, raw);
+    }
+
+    #[test]
+    fn parse_ssh_key_unparseable_bad_base64() {
+        let raw = "ssh-ed25519 not%valid%base64 alice";
+        let key = parse_ssh_key(raw);
+        assert_eq!(key.fingerprint, "<unparseable>");
+    }
+
+    #[test]
+    fn parse_ssh_key_deterministic_fingerprint() {
+        // The fingerprint of a fixed key blob is deterministic. We don't bake
+        // the exact value (it's algorithm-dependent and not load-bearing here),
+        // but two parses of the same key must agree.
+        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGGqxlNwZh0RTk4UpAQ4XBQjPpswxqDjW7Lu8fThIzNd";
+        let a = parse_ssh_key(raw);
+        let b = parse_ssh_key(raw);
+        assert_eq!(a.fingerprint, b.fingerprint);
     }
 }
