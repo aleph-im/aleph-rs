@@ -520,6 +520,10 @@ fn format_volume(v: &Volume) -> String {
     }
 }
 
+pub(crate) fn render_json(s: &InstanceShow) -> serde_json::Value {
+    serde_json::to_value(s).expect("InstanceShow always serializes")
+}
+
 pub async fn handle_instance_show(
     _aleph_client: &AlephClient,
     _scheduler_url: Url,
@@ -740,5 +744,56 @@ mod tests {
         let out = render_text(&show);
         assert!(out.contains("Status         -"));
         assert!(out.contains("Allocated      -"));
+    }
+
+    #[test]
+    fn render_json_default_omits_verbose_keys() {
+        let show = show_for_render();
+        let v = render_json(&show);
+        let obj = v.as_object().expect("top level is object");
+        assert!(obj.contains_key("identity"));
+        assert!(obj.contains_key("resources"));
+        assert!(obj.contains_key("image"));
+        assert!(obj.contains_key("placement"));
+        // These three are absent (not null) when not fetched.
+        assert!(!obj.contains_key("networking"));
+        assert!(!obj.contains_key("mapped_ports"));
+        assert!(!obj.contains_key("port_forwards"));
+    }
+
+    #[test]
+    fn render_json_verbose_keys_present_when_set() {
+        let mut show = show_for_render();
+        show.networking = Some(Networking {
+            ipv4: None,
+            ipv6: Some("fc00::1/64".into()),
+        });
+        show.mapped_ports = Some(BTreeMap::from([(22u16, 24221u16)]));
+        show.port_forwards = Some(vec![PortForward {
+            vm_port: 22,
+            host: 24221,
+            proto: None,
+        }]);
+        let v = render_json(&show);
+        let obj = v.as_object().expect("top level is object");
+        assert!(obj.contains_key("networking"));
+        assert!(obj.contains_key("mapped_ports"));
+        assert!(obj.contains_key("port_forwards"));
+        assert_eq!(
+            obj["networking"]["ipv6"].as_str(),
+            Some("fc00::1/64")
+        );
+    }
+
+    #[test]
+    fn render_json_identity_serializes_timestamp_as_rfc3339() {
+        let show = show_for_render();
+        let v = render_json(&show);
+        let ts = v["identity"]["created_at"]
+            .as_str()
+            .expect("created_at is string");
+        // RFC3339 always carries a `T` separator and a `Z` or `+HH:MM` suffix.
+        assert!(ts.contains('T'));
+        assert!(ts.ends_with('Z') || ts.contains('+') || ts.contains('-'));
     }
 }
