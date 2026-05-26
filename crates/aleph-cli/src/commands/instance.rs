@@ -650,6 +650,27 @@ pub(crate) fn resolve_image_refs(
     })
 }
 
+/// Resolve `--runtime` (program create) against an in-memory `VmImagesData`.
+/// Pure: does no network I/O. `None` triggers the `defaults.runtime` fallback.
+pub(crate) fn resolve_runtime_ref(
+    runtime: Option<ImageRef>,
+    data: &VmImagesData,
+) -> anyhow::Result<ItemHash> {
+    let resolved = match runtime {
+        Some(ImageRef::Hash(h)) => h,
+        Some(ImageRef::Preset(name)) => data.runtime(&name)?.hash.clone(),
+        None => {
+            let default_name = data
+                .defaults
+                .runtime
+                .as_deref()
+                .ok_or(VmImagesError::NoDefault { kind: "runtime" })?;
+            data.runtime(default_name)?.hash.clone()
+        }
+    };
+    Ok(resolved)
+}
+
 async fn handle_instance_create(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -2005,6 +2026,86 @@ mod tests {
             )
             .unwrap();
             assert!(r.confidential_firmware.is_none());
+        }
+    }
+
+    mod resolve_runtime_ref_tests {
+        use super::super::resolve_runtime_ref;
+        use crate::cli::ImageRef;
+        use aleph_sdk::aggregate_models::vm_images::{ImageEntry, VmImageDefaults, VmImagesData};
+        use aleph_types::item_hash::ItemHash;
+        use std::collections::BTreeMap;
+
+        const PY312_HASH: &str = "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696";
+
+        fn h(hex: &str) -> ItemHash {
+            ItemHash::try_from(hex).unwrap()
+        }
+
+        fn data_with_python312() -> VmImagesData {
+            let mut runtimes = BTreeMap::new();
+            runtimes.insert(
+                "python312".to_string(),
+                ImageEntry {
+                    hash: h(PY312_HASH),
+                    display_name: None,
+                    description: None,
+                    deprecated: false,
+                },
+            );
+            VmImagesData {
+                rootfs: BTreeMap::new(),
+                runtimes,
+                firmwares: BTreeMap::new(),
+                defaults: VmImageDefaults {
+                    rootfs: None,
+                    firmware: None,
+                    runtime: Some("python312".to_string()),
+                },
+            }
+        }
+
+        #[test]
+        fn none_uses_default_runtime() {
+            let r = resolve_runtime_ref(None, &data_with_python312()).unwrap();
+            assert_eq!(r.to_string(), PY312_HASH);
+        }
+
+        #[test]
+        fn none_without_default_errors() {
+            let mut data = data_with_python312();
+            data.defaults.runtime = None;
+            let err = resolve_runtime_ref(None, &data).unwrap_err();
+            assert!(err.to_string().contains("no default runtime"));
+        }
+
+        #[test]
+        fn preset_resolves_active_entry() {
+            let r = resolve_runtime_ref(
+                Some(ImageRef::Preset("python312".to_string())),
+                &data_with_python312(),
+            )
+            .unwrap();
+            assert_eq!(r.to_string(), PY312_HASH);
+        }
+
+        #[test]
+        fn unknown_preset_lists_available() {
+            let err = resolve_runtime_ref(
+                Some(ImageRef::Preset("nope".to_string())),
+                &data_with_python312(),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("python312"));
+        }
+
+        #[test]
+        fn hash_passes_through_without_aggregate() {
+            let raw = h("1111111111111111111111111111111111111111111111111111111111111111");
+            let r =
+                resolve_runtime_ref(Some(ImageRef::Hash(raw.clone())), &VmImagesData::default())
+                    .unwrap();
+            assert_eq!(r.to_string(), raw.to_string());
         }
     }
 }
