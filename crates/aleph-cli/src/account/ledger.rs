@@ -119,6 +119,16 @@ pub enum LedgerError {
     Communication(String),
     #[error("Invalid derivation path: {0}")]
     InvalidPath(#[from] DerivationPathError),
+    #[error(
+        "Connected Ledger device is signing for {device_address} at {derivation_path}, \
+         but this account expects {expected_address}. Wrong device? Disconnect it \
+         and connect the Ledger you imported this account from."
+    )]
+    WrongDevice {
+        expected_address: String,
+        device_address: String,
+        derivation_path: String,
+    },
 }
 
 impl From<LedgerError> for SignError {
@@ -359,6 +369,30 @@ impl aleph_types::account::Account for LedgerEvmAccount {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let ledger = connect().await.map_err(SignError::from)?;
+
+                // Pre-flight: confirm the connected device exposes the same key
+                // as the stored account. Without this, a different Ledger (or a
+                // device with a different seed) would silently produce a valid
+                // signature for the wrong address, and the only surfacing would
+                // be an opaque "invalid signature" rejection from the CCN.
+                // `get_evm_address` uses p1=0x00 (no user confirmation), so this
+                // round-trip is silent and adds only the APDU latency.
+                let device_addr = get_evm_address(&ledger, &self.derivation_path)
+                    .await
+                    .map_err(SignError::from)?;
+                if !self
+                    .address
+                    .as_str()
+                    .eq_ignore_ascii_case(device_addr.as_str())
+                {
+                    return Err(LedgerError::WrongDevice {
+                        expected_address: self.address.as_str().to_string(),
+                        device_address: device_addr.as_str().to_string(),
+                        derivation_path: self.derivation_path.to_string(),
+                    }
+                    .into());
+                }
+
                 sign_evm(&ledger, &self.derivation_path, buffer)
                     .await
                     .map_err(Into::into)
@@ -456,5 +490,19 @@ mod tests {
     fn ledger_error_converts_to_sign_error() {
         let err: SignError = LedgerError::UserRejected.into();
         assert!(err.to_string().contains("rejected"));
+    }
+
+    #[test]
+    fn wrong_device_error_mentions_both_addresses_and_path() {
+        let err = LedgerError::WrongDevice {
+            expected_address: "0xAAAA".to_string(),
+            device_address: "0xBBBB".to_string(),
+            derivation_path: "m/44'/60'/0'/0/0".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("0xAAAA"), "got: {msg}");
+        assert!(msg.contains("0xBBBB"), "got: {msg}");
+        assert!(msg.contains("m/44'/60'/0'/0/0"), "got: {msg}");
+        assert!(msg.contains("Wrong device"), "got: {msg}");
     }
 }
