@@ -5,7 +5,8 @@
 //! owner's port-forwarding aggregate.
 
 use crate::cli::InstanceShowArgs;
-use aleph_sdk::client::AlephClient;
+use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageWithStatus};
+use aleph_sdk::scheduler::SchedulerClient;
 use aleph_types::chain::{Address, Chain};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
@@ -14,10 +15,13 @@ use aleph_types::message::execution::environment::{
     GpuProperties, Hypervisor, TrustedExecutionEnvironment,
 };
 use aleph_types::message::execution::volume::{MachineVolume, VolumePersistence};
-use aleph_types::message::{Message, MessageContentEnum};
+use aleph_types::message::{Message, MessageContentEnum, MessageType};
 use aleph_types::timestamp::Timestamp;
+use anyhow::{Context, Result, anyhow, bail};
 use std::collections::BTreeMap;
 use url::Url;
+
+use crate::commands::instance_target::pick_unique_match;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct InstanceShow {
@@ -524,13 +528,92 @@ pub(crate) fn render_json(s: &InstanceShow) -> serde_json::Value {
     serde_json::to_value(s).expect("InstanceShow always serializes")
 }
 
+async fn fetch_instance_message(
+    aleph_client: &AlephClient,
+    item_hash: &ItemHash,
+) -> Result<Message> {
+    let with_status = aleph_client
+        .get_message(item_hash)
+        .await
+        .with_context(|| format!("failed to fetch instance {item_hash}"))?;
+    let message = match with_status {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Removed { .. } => {
+            bail!("instance {item_hash} has been removed")
+        }
+        MessageWithStatus::Pending { .. } => {
+            bail!("instance {item_hash} is still pending; try again in a few seconds")
+        }
+        MessageWithStatus::Forgotten { .. } => {
+            bail!("instance {item_hash} has already been forgotten")
+        }
+        MessageWithStatus::Rejected { .. } => {
+            bail!("instance {item_hash} was rejected by the network")
+        }
+    };
+    if message.message_type != MessageType::Instance {
+        bail!(
+            "item {item_hash} is not an INSTANCE message (got {:?})",
+            message.message_type
+        );
+    }
+    Ok(message)
+}
+
 pub async fn handle_instance_show(
-    _aleph_client: &AlephClient,
-    _scheduler_url: Url,
-    _json: bool,
-    _args: InstanceShowArgs,
-) -> anyhow::Result<()> {
-    anyhow::bail!("not yet implemented")
+    aleph_client: &AlephClient,
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceShowArgs,
+) -> Result<()> {
+    let scheduler = SchedulerClient::new(scheduler_url.clone());
+
+    // 1. Resolve the VM. Accept full hash directly; otherwise let the
+    //    scheduler expand a prefix.
+    let (item_hash, entry) = if let Ok(hash) = ItemHash::try_from(args.vm_id.as_str()) {
+        let entry = scheduler
+            .get_vm(&hash)
+            .await
+            .context("querying scheduler")?
+            .ok_or_else(|| anyhow!("instance {hash} not found in the scheduler"))?;
+        (hash, entry)
+    } else {
+        let matches = scheduler
+            .find_vms_by_hash_prefix(&args.vm_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "looking up VMs matching prefix `{}` in the scheduler",
+                    args.vm_id
+                )
+            })?;
+        pick_unique_match(&args.vm_id, matches)?
+    };
+
+    // 2. Fetch the CCN INSTANCE message.
+    let message = fetch_instance_message(aleph_client, &item_hash).await?;
+
+    // 3. Build the core view.
+    let mut show = build_from_message(&message)?;
+
+    // 4. Populate placement from the scheduler entry we already fetched.
+    show.placement = Placement {
+        status: Some(entry.status.clone()),
+        allocated_node: entry.allocated_node.clone(),
+        scheduling_status: Some(entry.scheduling_status.clone()),
+    };
+
+    // 5. (verbose extras come in later tasks)
+    let _ = args.verbose;
+
+    // 6. Render.
+    if json {
+        println!("{}", serde_json::to_string_pretty(&render_json(&show))?);
+    } else {
+        print!("{}", render_text(&show));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -795,5 +878,132 @@ mod tests {
         // RFC3339 always carries a `T` separator and a `Z` or `+HH:MM` suffix.
         assert!(ts.contains('T'));
         assert!(ts.ends_with('Z') || ts.contains('+') || ts.contains('-'));
+    }
+
+    // Handler-level integration tests using wiremock.
+
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const VM_HASH: &str = "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564";
+
+    fn vm_entry_dispatched(hash: &str, node: &str) -> serde_json::Value {
+        serde_json::json!({
+            "vm_hash": hash,
+            "vm_type": "instance",
+            "allocated_node": node,
+            "status": "dispatched",
+            "scheduling_status": "dispatched",
+            "migration_target": null,
+            "owner": null,
+        })
+    }
+
+    /// Build the response envelope for `GET /api/v0/messages/{hash}`.
+    /// `GetMessageResponse` uses `#[serde(flatten)]` on `MessageWithStatus`,
+    /// which is `#[serde(tag = "status", rename_all = "lowercase")]`.
+    /// So the wire format is `{"status": "processed", "message": <Message>}`.
+    fn message_envelope(message: &Message) -> serde_json::Value {
+        serde_json::json!({ "status": "processed", "message": message })
+    }
+
+    #[tokio::test]
+    async fn handle_instance_show_default_renders_text() {
+        let server = MockServer::start().await;
+        let msg = fixture_message();
+
+        // 1. scheduler.get_vm(hash) -> dispatched entry
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/vms/{VM_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(
+                VM_HASH,
+                "dc3d1d194a990b5c54380c3c0439562fefa42f5a46807cba1c500ec3affecf04",
+            )))
+            .mount(&server)
+            .await;
+        // 2. CCN get_message
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{VM_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(message_envelope(&msg)))
+            .mount(&server)
+            .await;
+
+        let aleph_client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let scheduler_url = Url::parse(&server.uri()).unwrap();
+        let args = InstanceShowArgs {
+            vm_id: VM_HASH.to_string(),
+            verbose: false,
+        };
+        // Capture stdout via a sub-test that asserts the call succeeds; the
+        // actual textual content is exercised by render_text_* tests.
+        handle_instance_show(&aleph_client, scheduler_url, false, args)
+            .await
+            .expect("handler succeeds");
+    }
+
+    #[tokio::test]
+    async fn handle_instance_show_prefix_zero_match_errors() {
+        let server = MockServer::start().await;
+        // Prefix path: /api/v1/vms?vm_hash=<prefix>
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param("vm_hash", "deadbe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [],
+                "pagination": {"total_items": 0},
+            })))
+            .mount(&server)
+            .await;
+
+        let aleph_client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let scheduler_url = Url::parse(&server.uri()).unwrap();
+        let args = InstanceShowArgs {
+            vm_id: "deadbe".to_string(),
+            verbose: false,
+        };
+        let err = handle_instance_show(&aleph_client, scheduler_url, false, args)
+            .await
+            .expect_err("expected zero-match failure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no instance matches `deadbe`"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_instance_show_prefix_ambiguous_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param("vm_hash", "a41"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [
+                    vm_entry_dispatched(
+                        "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564",
+                        "node1"
+                    ),
+                    vm_entry_dispatched(
+                        "a41ffff00000000000000000000000000000000000000000000000000000ffff",
+                        "node2"
+                    ),
+                ],
+                "pagination": {"total_items": 2},
+            })))
+            .mount(&server)
+            .await;
+
+        let aleph_client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let scheduler_url = Url::parse(&server.uri()).unwrap();
+        let args = InstanceShowArgs {
+            vm_id: "a41".to_string(),
+            verbose: false,
+        };
+        let err = handle_instance_show(&aleph_client, scheduler_url, false, args)
+            .await
+            .expect_err("expected ambiguous failure");
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"));
+        assert!(msg.contains("matches 2 instances"));
     }
 }
