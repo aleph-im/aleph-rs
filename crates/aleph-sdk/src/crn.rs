@@ -7,7 +7,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use futures_util::{SinkExt, Stream, StreamExt};
 use p256::ecdsa::{SigningKey, signature::Signer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use url::Url;
 
@@ -36,6 +36,67 @@ pub enum LogType {
     Stdout,
     Stderr,
     System,
+}
+
+/// Options for `CrnClient::create_backup`. Defaults to `false` for both fields.
+#[derive(Debug, Clone, Default)]
+pub struct CreateBackupOpts {
+    /// Include persistent volumes in the backup archive.
+    pub include_volumes: bool,
+    /// Skip the QEMU guest agent filesystem freeze. Faster, less consistent.
+    pub skip_fsfreeze: bool,
+}
+
+/// Backup metadata returned by the CRN once a backup is complete.
+///
+/// `expires_at` is kept as a `String` (ISO 8601) rather than a typed timestamp
+/// so the SDK doesn't take a transitive dep on chrono/time for one passthrough
+/// field. Callers needing typed time parse at the call site.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupMetadata {
+    pub backup_id: String,
+    pub size: u64,
+    pub checksum: String,
+    pub expires_at: String,
+    pub download_url: String,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Result of `POST /control/machine/<vm>/backup`. 200 -> Complete; 202 -> Started.
+#[derive(Debug, Clone)]
+pub enum CreateBackup {
+    Started,
+    Complete(BackupMetadata),
+}
+
+/// Result of `GET /control/machine/<vm>/backup`. 202 -> InProgress; 200 -> Complete; 404 -> NotFound.
+#[derive(Debug, Clone)]
+pub enum BackupStatus {
+    InProgress,
+    Complete(BackupMetadata),
+    NotFound,
+}
+
+/// Response from `POST /control/machine/<vm>/restore`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreResponse {
+    pub status: String,
+    pub vm_hash: String,
+    #[serde(default)]
+    pub old_rootfs_backup: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Signed URL + auth headers for driving a multipart POST to
+/// `/control/machine/<vm>/restore` from outside the SDK.
+#[derive(Debug, Clone)]
+pub struct RestoreEndpoint {
+    pub url: Url,
+    pub headers: Vec<(&'static str, String)>,
 }
 
 /// Networking info for a running VM, returned by `/about/executions/list`.
@@ -183,6 +244,14 @@ impl CrnClient {
         })
     }
 
+    /// Borrow the underlying HTTP client. Useful when a caller needs to drive
+    /// a request that isn't a standard CRN method (e.g. the multipart restore
+    /// upload, which the SDK doesn't model as a single call) but wants to
+    /// share any future client-level configuration (timeouts, TLS, etc.).
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+
     pub async fn start_instance(&self, vm_id: &ItemHash) -> Result<AllocationResponse, CrnError> {
         let url = self
             .crn_url
@@ -307,6 +376,135 @@ impl CrnClient {
             });
         }
         Ok(response.json::<ActiveVmList>().await?)
+    }
+
+    pub async fn create_backup(
+        &self,
+        vm_id: &ItemHash,
+        opts: CreateBackupOpts,
+    ) -> Result<CreateBackup, CrnError> {
+        let path = format!("/control/machine/{vm_id}/backup");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("POST", &path);
+
+        let mut request = self.http_client.post(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if opts.include_volumes {
+            query.push(("include_volumes", "true"));
+        }
+        if opts.skip_fsfreeze {
+            query.push(("skip_fsfreeze", "true"));
+        }
+        if !query.is_empty() {
+            request = request.query(&query);
+        }
+
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        match status {
+            202 => Ok(CreateBackup::Started),
+            200 => Ok(CreateBackup::Complete(response.json().await?)),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
+    pub async fn get_backup(&self, vm_id: &ItemHash) -> Result<BackupStatus, CrnError> {
+        let path = format!("/control/machine/{vm_id}/backup");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("GET", &path);
+
+        let mut request = self.http_client.get(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        match status {
+            200 => Ok(BackupStatus::Complete(response.json().await?)),
+            202 => Ok(BackupStatus::InProgress),
+            404 => Ok(BackupStatus::NotFound),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
+    pub async fn delete_backup(&self, vm_id: &ItemHash, backup_id: &str) -> Result<(), CrnError> {
+        let path = format!("/control/machine/{vm_id}/backup/{backup_id}");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("DELETE", &path);
+
+        let mut request = self.http_client.delete(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        match status {
+            200 => Ok(()),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
+    pub async fn restore_from_volume(
+        &self,
+        vm_id: &ItemHash,
+        volume_ref: &str,
+    ) -> Result<RestoreResponse, CrnError> {
+        let path = format!("/control/machine/{vm_id}/restore");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("POST", &path);
+
+        let mut request = self.http_client.post(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+
+        let response = request
+            .json(&serde_json::json!({ "volume_ref": volume_ref }))
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        match status {
+            200 => Ok(response.json().await?),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
+    /// Returns the URL and auth headers the caller needs to drive a multipart
+    /// POST to `/control/machine/<vm>/restore` themselves. Used by
+    /// `aleph instance backup restore --file`, which streams a QCOW2 from disk.
+    pub fn restore_endpoint(&self, vm_id: &ItemHash) -> Result<RestoreEndpoint, CrnError> {
+        let path = format!("/control/machine/{vm_id}/restore");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self
+            .auth_headers("POST", &path)
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(RestoreEndpoint { url, headers })
     }
 
     pub async fn expire_instance(
@@ -529,6 +727,44 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_backup_metadata_minimal() {
+        let json = r#"{
+            "backup_id": "abc_123",
+            "size": 12345,
+            "checksum": "sha256:deadbeef",
+            "expires_at": "2026-05-24T12:00:00.000000Z",
+            "download_url": "https://crn.example/control/machine/abc/backup/abc_123?signature=x&expires=1"
+        }"#;
+        let meta: BackupMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.backup_id, "abc_123");
+        assert_eq!(meta.size, 12345);
+        assert_eq!(meta.checksum, "sha256:deadbeef");
+        assert!(meta.volumes.is_empty());
+        assert!(meta.extra.is_empty());
+    }
+
+    #[test]
+    fn deserialize_backup_metadata_with_volumes_and_extra() {
+        let json = r#"{
+            "backup_id": "abc_123",
+            "size": 12345,
+            "checksum": "sha256:deadbeef",
+            "expires_at": "2026-05-24T12:00:00.000000Z",
+            "download_url": "https://crn.example/path",
+            "volumes": ["data", "cache"],
+            "future_field": "ignored-but-preserved"
+        }"#;
+        let meta: BackupMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.volumes, vec!["data".to_string(), "cache".to_string()]);
+        assert_eq!(meta.extra["future_field"], "ignored-but-preserved");
+        assert_eq!(
+            meta.extra.len(),
+            1,
+            "extra should only contain unknown fields, not absorb known ones"
+        );
+    }
+
+    #[test]
     fn p256_pubkey_to_jwk_format() {
         let signing_key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
         let verifying_key = signing_key.verifying_key();
@@ -688,5 +924,265 @@ mod tests {
         assert_eq!(payload["chain"], "ETH");
         assert!(payload["pubkey"]["kty"] == "EC");
         assert!(payload["expires"].as_str().unwrap().ends_with("Z"));
+    }
+
+    #[test]
+    fn deserialize_restore_response() {
+        let json = r#"{
+            "status": "restored",
+            "vm_hash": "abc123",
+            "old_rootfs_backup": "/var/lib/aleph/backups/abc123-old.qcow2"
+        }"#;
+        let resp: RestoreResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status, "restored");
+        assert_eq!(resp.vm_hash, "abc123");
+        assert_eq!(
+            resp.old_rootfs_backup.as_deref(),
+            Some("/var/lib/aleph/backups/abc123-old.qcow2")
+        );
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn create_backup_returns_started_on_202() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .and(query_param("include_volumes", "true"))
+            .and(query_param("skip_fsfreeze", "true"))
+            .respond_with(ResponseTemplate::new(202).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let url = Url::parse(&server.uri()).unwrap();
+        let client = CrnClient::new(&account, url).unwrap();
+        let result = client
+            .create_backup(
+                &vm.parse().unwrap(),
+                CreateBackupOpts {
+                    include_volumes: true,
+                    skip_fsfreeze: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, CreateBackup::Started));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn create_backup_returns_complete_on_200() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "backup_id": "abc_1",
+                "size": 100,
+                "checksum": "sha256:deadbeef",
+                "expires_at": "2026-05-24T12:00:00.000000Z",
+                "download_url": "https://crn.example/path"
+            })))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let url = Url::parse(&server.uri()).unwrap();
+        let client = CrnClient::new(&account, url).unwrap();
+        let result = client
+            .create_backup(&vm.parse().unwrap(), CreateBackupOpts::default())
+            .await
+            .unwrap();
+        match result {
+            CreateBackup::Complete(meta) => {
+                assert_eq!(meta.backup_id, "abc_1");
+                assert_eq!(meta.size, 100);
+            }
+            CreateBackup::Started => panic!("expected Complete"),
+        }
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_backup_in_progress_on_202() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("GET"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let result = client.get_backup(&vm.parse().unwrap()).await.unwrap();
+        assert!(matches!(result, BackupStatus::InProgress));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_backup_complete_on_200() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("GET"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "backup_id": "abc_1",
+                "size": 100,
+                "checksum": "sha256:beef",
+                "expires_at": "2026-05-24T12:00:00.000000Z",
+                "download_url": "https://crn.example/path"
+            })))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        match client.get_backup(&vm.parse().unwrap()).await.unwrap() {
+            BackupStatus::Complete(meta) => assert_eq!(meta.backup_id, "abc_1"),
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_backup_not_found_on_404() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("GET"))
+            .and(path(format!("/control/machine/{vm}/backup")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let result = client.get_backup(&vm.parse().unwrap()).await.unwrap();
+        assert!(matches!(result, BackupStatus::NotFound));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn delete_backup_succeeds_on_200() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        let backup_id = "abc_1";
+        Mock::given(method("DELETE"))
+            .and(path(format!("/control/machine/{vm}/backup/{backup_id}")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        client
+            .delete_backup(&vm.parse().unwrap(), backup_id)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn restore_from_volume_posts_json_and_decodes_response() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        let volume_ref = "d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/restore")))
+            .and(body_json(serde_json::json!({ "volume_ref": volume_ref })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "restored",
+                "vm_hash": vm,
+                "old_rootfs_backup": "/var/lib/aleph/backups/old.qcow2"
+            })))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let resp = client
+            .restore_from_volume(&vm.parse().unwrap(), volume_ref)
+            .await
+            .unwrap();
+        assert_eq!(resp.status, "restored");
+        assert_eq!(resp.vm_hash, vm);
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[test]
+    fn restore_endpoint_returns_url_and_two_auth_headers() {
+        use aleph_types::account::EvmAccount;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let url = Url::parse("https://crn.example/").unwrap();
+        let client = CrnClient::new(&account, url).unwrap();
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99"
+            .parse()
+            .unwrap();
+        let endpoint = client.restore_endpoint(&vm).unwrap();
+        assert_eq!(
+            endpoint.url.as_str(),
+            "https://crn.example/control/machine/5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99/restore"
+        );
+        let names: Vec<&str> = endpoint.headers.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"X-SignedPubKey"));
+        assert!(names.contains(&"X-SignedOperation"));
+        for (_, value) in &endpoint.headers {
+            assert!(!value.is_empty());
+        }
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn delete_backup_surfaces_404_as_api_error() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        let backup_id = "abc_1";
+        Mock::given(method("DELETE"))
+            .and(path(format!("/control/machine/{vm}/backup/{backup_id}")))
+            .respond_with(ResponseTemplate::new(404).set_body_string("no such backup"))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let err = client
+            .delete_backup(&vm.parse().unwrap(), backup_id)
+            .await
+            .unwrap_err();
+        match err {
+            CrnError::Api { status, body } => {
+                assert_eq!(status, 404);
+                assert!(body.contains("no such backup"));
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 }

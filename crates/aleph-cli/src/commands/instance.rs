@@ -440,6 +440,10 @@ pub async fn handle_instance_command(
             )
             .await?;
         }
+        InstanceCommand::Backup(sub) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            super::instance_backup::dispatch(scheduler_url, json, sub).await?;
+        }
     }
     Ok(())
 }
