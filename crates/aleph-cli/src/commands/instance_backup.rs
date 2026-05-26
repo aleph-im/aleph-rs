@@ -667,7 +667,27 @@ mod tests {
     use super::*;
     use crate::cli::{ChainCli, IdentityArgs, SigningArgs};
     use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    /// Custom matcher: pass when the request body contains the given byte
+    /// sequence anywhere. Unlike wiremock's `body_string_contains`, this does
+    /// not require the whole body to be valid UTF-8, which matters for
+    /// multipart payloads carrying binary (e.g. QCOW2 magic bytes).
+    struct BodyContains(&'static [u8]);
+    impl wiremock::Match for BodyContains {
+        fn matches(&self, request: &Request) -> bool {
+            request.body.windows(self.0.len()).any(|w| w == self.0)
+        }
+    }
+
+    /// Inverse of `BodyContains`. Lets us assert "this multipart body was
+    /// NOT the wrapping tar" by checking the tar magic (`ustar`) is absent.
+    struct BodyDoesNotContain(&'static [u8]);
+    impl wiremock::Match for BodyDoesNotContain {
+        fn matches(&self, request: &Request) -> bool {
+            !request.body.windows(self.0.len()).any(|w| w == self.0)
+        }
+    }
 
     fn evm_signing_args() -> SigningArgs {
         SigningArgs {
@@ -998,6 +1018,35 @@ mod tests {
         assert_eq!(tokio::fs::read(&output).await.unwrap(), body);
     }
 
+    #[tokio::test]
+    async fn download_url_form_warns_when_checksum_header_missing() {
+        // No X-Backup-Checksum header on the response: download_and_render
+        // should warn and write the file anyway (vs. the
+        // ChecksumPolicy::Required path used by the VM-id branch, which
+        // would have errored on a missing/mismatched digest).
+        let server = MockServer::start().await;
+        let body = b"unverified-bytes".to_vec();
+        Mock::given(method("GET"))
+            .and(path("/dl"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let output = tmpdir.path().join("out.tar");
+        let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
+        let args = InstanceBackupDownloadArgs {
+            vm_id_or_url: format!("{}/dl", server.uri()),
+            output: Some(output.clone()),
+            crn_url: None,
+            signing: evm_signing_args(),
+        };
+        handle_download(scheduler_url, true, args).await.unwrap();
+        assert_eq!(tokio::fs::read(&output).await.unwrap(), body);
+        // The .part file is gone (rename happened) even with no checksum.
+        assert!(!tmpdir.path().join("out.tar.part").exists());
+    }
+
     /// Build a fake QCOW2-like blob: the 4-byte magic followed by `filler`
     /// bytes of payload. The CLI's source-detection only reads the magic,
     /// and the test CRN doesn't decode the payload either.
@@ -1024,8 +1073,11 @@ mod tests {
     #[tokio::test]
     async fn restore_file_uploads_qcow2_directly() {
         let server = MockServer::start().await;
+        // Assert the multipart body actually contains the QCOW2 payload bytes,
+        // not just that the request hit the right path.
         Mock::given(method("POST"))
             .and(path(format!("/control/machine/{FULL_HASH}/restore")))
+            .and(BodyContains(b"qcow2-payload"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "status": "restored",
                 "vm_hash": FULL_HASH
@@ -1053,8 +1105,14 @@ mod tests {
     #[tokio::test]
     async fn restore_file_extracts_rootfs_from_backup_tar() {
         let server = MockServer::start().await;
+        // Stricter than just method+path: assert the extracted QCOW2 content
+        // is present in the multipart body, AND that the wrapping tar's
+        // `ustar` header magic is NOT - catching a regression where the
+        // whole backup tar gets uploaded instead of just rootfs.qcow2.
         Mock::given(method("POST"))
             .and(path(format!("/control/machine/{FULL_HASH}/restore")))
+            .and(BodyContains(b"qcow2-from-tar"))
+            .and(BodyDoesNotContain(b"ustar"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "status": "restored",
                 "vm_hash": FULL_HASH
