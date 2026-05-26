@@ -1190,6 +1190,7 @@ mod tests {
         assert!(!forwards.is_empty(), "port_forwards must be non-empty");
         let pf = forwards.iter().find(|p| p.vm_port == 22).expect("port 22 present");
         assert_eq!(pf.host, 24221);
+        assert_eq!(pf.proto.as_deref(), Some("tcp"));
     }
 
     #[tokio::test]
