@@ -1,14 +1,15 @@
 use crate::cli::{
-    PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs, ProgramListArgs,
-    ProgramShowArgs, StorageEngineCli,
+    ImageRef, PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs,
+    ProgramListArgs, ProgramShowArgs, StorageEngineCli,
 };
 use crate::commands::instance::{
-    parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes,
+    parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes, resolve_runtime_ref,
 };
 use crate::common::{
     confirm_action, print_submission_result, resolve_account, resolve_address, submit_or_preview,
 };
 use crate::program::archive::prepare_archive;
+use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageError,
     MessageFilter, MessageWithStatus, PaginationParams, SortBy, SortOrder, hash_file,
@@ -92,7 +93,27 @@ async fn handle_create(
         eprintln!("  Code hash: {file_hash}");
     }
 
-    // 4. Build STORE
+    // 4. Resolve runtime. Hash inputs short-circuit the aggregate fetch; presets
+    // and a missing flag both require the aggregate (the latter to read
+    // `defaults.runtime`).
+    let needs_aggregate = !matches!(args.runtime, Some(ImageRef::Hash(_)));
+    let vm_images = if needs_aggregate {
+        aleph_client
+            .get_vm_images_aggregate()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to fetch vm-images aggregate: {e}. \
+                     As a fallback, pass --runtime with a raw item hash."
+                )
+            })?
+            .vm_images
+    } else {
+        VmImagesData::default()
+    };
+    let runtime = resolve_runtime_ref(args.runtime.clone(), &vm_images)?;
+
+    // 5. Build STORE
     let mut store_builder =
         StoreBuilder::new(&account, file_hash.clone(), storage_engine).payment(payment.clone());
     if let Some(owner) = &args.on_behalf_of {
@@ -103,19 +124,19 @@ async fn handle_create(
     }
     let store_pending = store_builder.build()?;
 
-    // 5. Resolve resources (size slug or granular flags)
+    // 6. Resolve resources (size slug or granular flags)
     let (vcpus, memory_mib) =
         resolve_program_resources(aleph_client, args.size.as_deref(), args.vcpus, args.memory)
             .await?;
 
-    // 6. Build PROGRAM. `code.ref` is the STORE message's item_hash, not the
+    // 7. Build PROGRAM. `code.ref` is the STORE message's item_hash, not the
     // raw file hash - the VM supervisor resolves it by looking up the STORE
     // and following its embedded file reference.
     let mut program_builder = ProgramBuilder::new(
         &account,
         store_pending.item_hash.clone(),
         args.entrypoint.clone(),
-        args.runtime.clone(),
+        runtime,
     )
     .encoding(encoding)
     .internet(args.internet)
@@ -158,7 +179,7 @@ async fn handle_create(
 
     let program_pending = program_builder.build()?;
 
-    // 7. Dry run: print both envelopes and stop. submit_or_preview prints a
+    // 8. Dry run: print both envelopes and stop. submit_or_preview prints a
     // single envelope; for create we want STORE first then PROGRAM, so we
     // emit them inline and skip both submission paths.
     if dry_run {
@@ -173,7 +194,7 @@ async fn handle_create(
         return Ok(());
     }
 
-    // 8. Upload code archive (mirrors handle_single_file_upload in commands/file.rs)
+    // 9. Upload code archive (mirrors handle_single_file_upload in commands/file.rs)
     if !json {
         eprintln!("Uploading code archive...");
     }
@@ -192,7 +213,7 @@ async fn handle_create(
         }
     }
 
-    // 9. Submit PROGRAM
+    // 10. Submit PROGRAM
     if !json {
         eprintln!("Publishing program message...");
     }

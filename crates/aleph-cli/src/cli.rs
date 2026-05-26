@@ -2369,12 +2369,11 @@ pub struct ProgramCreateArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Runtime item hash. Defaults to the standard Aleph Python 3.12 runtime.
-    #[arg(
-        long,
-        default_value = "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696"
-    )]
-    pub runtime: ItemHash,
+    /// Runtime: preset slug from the vm-images aggregate (e.g. `python312`) or a
+    /// 64-char item hash. When omitted, resolves against the aggregate's
+    /// `defaults.runtime`.
+    #[arg(long, value_parser = parse_image_ref)]
+    pub runtime: Option<ImageRef>,
 
     /// Resource preset slug (e.g. `1vcpu-2gb`). Mutually exclusive with --vcpus / --memory.
     #[arg(long, conflicts_with_all = ["vcpus", "memory"])]
