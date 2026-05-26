@@ -352,6 +352,174 @@ fn parse_ssh_key(raw: &str) -> SshKey {
     }
 }
 
+const MISSING: &str = "-";
+
+pub(crate) fn render_text(s: &InstanceShow) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    // Header + identity block
+    writeln!(out, "INSTANCE {}", s.identity.item_hash).unwrap();
+    if let Some(name) = s.identity.name.as_deref() {
+        writeln!(out, "  Name           {name}").unwrap();
+    }
+    writeln!(out, "  Created        {}", format_ts(&s.identity.created_at)).unwrap();
+    writeln!(out, "  Owner          {}", s.identity.owner).unwrap();
+    if s.identity.sender != s.identity.owner {
+        writeln!(out, "  Sender         {}", s.identity.sender).unwrap();
+    }
+    if let Some(c) = &s.identity.channel {
+        // Channel serializes to a bare string; pull it out via JSON.
+        let channel_str = serde_json::to_value(c)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        writeln!(out, "  Channel        {channel_str}").unwrap();
+    }
+    if let Some(p) = &s.payment {
+        writeln!(out, "  Payment        {}", format_payment(p)).unwrap();
+    }
+
+    // Resources
+    writeln!(out).unwrap();
+    writeln!(out, "RESOURCES").unwrap();
+    writeln!(
+        out,
+        "  Compute        {} vCPU, {} MiB RAM, {} MiB disk",
+        s.resources.vcpus, s.resources.memory_mib, s.image.size_mib
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  Hypervisor     {}",
+        s.resources.hypervisor.as_deref().unwrap_or(MISSING)
+    )
+    .unwrap();
+    writeln!(out, "  GPU            {}", format_gpus(&s.resources.gpus)).unwrap();
+    writeln!(
+        out,
+        "  Trusted        {}",
+        format_tee(s.resources.trusted_execution.as_ref())
+    )
+    .unwrap();
+
+    // Image
+    writeln!(out).unwrap();
+    writeln!(out, "IMAGE").unwrap();
+    writeln!(out, "  Hash           {}", s.image.reference).unwrap();
+    writeln!(out, "  Persistence    {}", s.image.persistence).unwrap();
+    writeln!(out, "  Size           {} MiB", s.image.size_mib).unwrap();
+
+    // Volumes
+    writeln!(out).unwrap();
+    writeln!(out, "VOLUMES ({})", s.volumes.len()).unwrap();
+    for v in &s.volumes {
+        writeln!(out, "  {}", format_volume(v)).unwrap();
+    }
+
+    // SSH keys
+    writeln!(out).unwrap();
+    writeln!(out, "SSH KEYS ({})", s.ssh_keys.len()).unwrap();
+    for k in &s.ssh_keys {
+        let comment = k.comment.as_deref().unwrap_or("");
+        writeln!(out, "  {} ({}) {}", k.fingerprint, k.algo, comment).unwrap();
+    }
+
+    // Placement
+    writeln!(out).unwrap();
+    writeln!(out, "PLACEMENT").unwrap();
+    writeln!(
+        out,
+        "  Pinned         {}",
+        s.pinning.as_deref().unwrap_or(MISSING)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  Status         {}",
+        s.placement.status.as_deref().unwrap_or(MISSING)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  Allocated      {}",
+        s.placement.allocated_node.as_deref().unwrap_or(MISSING)
+    )
+    .unwrap();
+
+    out
+}
+
+fn format_ts(ts: &Timestamp) -> String {
+    ts.to_datetime()
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|_| format!("{}", ts.as_f64()))
+}
+
+fn format_payment(p: &PaymentInfo) -> String {
+    let chain = p
+        .chain
+        .as_ref()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| MISSING.into());
+    match (p.kind.as_str(), p.receiver.as_ref()) {
+        ("superfluid", Some(r)) => format!("superfluid ({chain} -> {r})"),
+        _ => format!("{} ({chain})", p.kind),
+    }
+}
+
+fn format_gpus(gpus: &[GpuSummary]) -> String {
+    if gpus.is_empty() {
+        return MISSING.into();
+    }
+    gpus.iter()
+        .map(|g| format!("{} {} ({}, {})", g.vendor, g.device_name, g.device_id, g.device_class))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_tee(tee: Option<&TrustedExecutionSummary>) -> String {
+    match tee {
+        None => MISSING.into(),
+        Some(t) => format!(
+            "{} policy=0x{:x}",
+            t.firmware.as_deref().unwrap_or("default-firmware"),
+            t.policy
+        ),
+    }
+}
+
+fn format_volume(v: &Volume) -> String {
+    match v {
+        Volume::Persistent {
+            name,
+            mount,
+            size_mib,
+            persistence,
+        } => {
+            let name = name.as_deref().unwrap_or(MISSING);
+            let mount = mount.as_deref().unwrap_or(MISSING);
+            format!("{name:<12} persistent {size_mib} MiB mount={mount} persistence={persistence}")
+        }
+        Volume::Ephemeral { mount, size_mib } => {
+            let mount = mount.as_deref().unwrap_or(MISSING);
+            format!("{:<12} ephemeral  {size_mib} MiB mount={mount}", MISSING)
+        }
+        Volume::Immutable {
+            mount,
+            reference,
+            use_latest,
+        } => {
+            let mount = mount.as_deref().unwrap_or(MISSING);
+            format!(
+                "{:<12} immutable  ref={reference} use_latest={use_latest} mount={mount}",
+                MISSING
+            )
+        }
+    }
+}
+
 pub async fn handle_instance_show(
     _aleph_client: &AlephClient,
     _scheduler_url: Url,
@@ -495,5 +663,82 @@ mod tests {
         let a = parse_ssh_key(raw);
         let b = parse_ssh_key(raw);
         assert_eq!(a.fingerprint, b.fingerprint);
+    }
+
+    fn show_for_render() -> InstanceShow {
+        let mut show = build_from_message(&fixture_message()).expect("build");
+        // Make placement non-trivial to exercise rendering.
+        show.placement = Placement {
+            status: Some("dispatched".into()),
+            allocated_node: Some(
+                "d704be0b15e2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d77".into(),
+            ),
+            scheduling_status: Some("dispatched".into()),
+        };
+        show
+    }
+
+    #[test]
+    fn render_text_default_contains_section_headers() {
+        let show = show_for_render();
+        let out = render_text(&show);
+        assert!(out.contains("INSTANCE "));
+        assert!(out.contains("RESOURCES"));
+        assert!(out.contains("IMAGE"));
+        assert!(out.contains("VOLUMES"));
+        assert!(out.contains("SSH KEYS"));
+        assert!(out.contains("PLACEMENT"));
+    }
+
+    #[test]
+    fn render_text_includes_identity_lines() {
+        let show = show_for_render();
+        let out = render_text(&show);
+        assert!(out.contains("Name           gpu-l40s-2"));
+        assert!(out.contains("Owner          0x238224C744F4b90b4494516e074D2676ECfC6803"));
+    }
+
+    #[test]
+    fn render_text_suppresses_sender_when_equal_to_owner() {
+        let show = show_for_render();
+        let out = render_text(&show);
+        assert!(
+            !out.contains("Sender         0x238224C744F4b90b4494516e074D2676ECfC6803"),
+            "sender row should be suppressed when equal to owner"
+        );
+    }
+
+    #[test]
+    fn render_text_includes_sender_when_different_from_owner() {
+        let mut show = show_for_render();
+        show.identity.sender = Address::from("0xDIFFERENT".to_string());
+        let out = render_text(&show);
+        assert!(out.contains("Sender         0xDIFFERENT"));
+    }
+
+    #[test]
+    fn render_text_omits_verbose_sections_by_default() {
+        let show = show_for_render();
+        let out = render_text(&show);
+        assert!(!out.contains("NETWORKING"));
+        assert!(!out.contains("MAPPED PORTS"));
+        assert!(!out.contains("PORT FORWARDS"));
+    }
+
+    #[test]
+    fn render_text_placement_shows_dispatched() {
+        let show = show_for_render();
+        let out = render_text(&show);
+        assert!(out.contains("Status         dispatched"));
+        assert!(out.contains("Allocated      d704be0b15e2fb"));
+    }
+
+    #[test]
+    fn render_text_unallocated_renders_dashes() {
+        let mut show = show_for_render();
+        show.placement = Placement::default();
+        let out = render_text(&show);
+        assert!(out.contains("Status         -"));
+        assert!(out.contains("Allocated      -"));
     }
 }
