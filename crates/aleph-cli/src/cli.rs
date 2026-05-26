@@ -1567,6 +1567,7 @@ Examples:
     /// Stream logs from a running VM instance
     Logs(CrnArgs),
     /// Manage TCP/UDP port forwards for VMs, programs, or IPFS websites.
+    #[command(visible_alias = "pfw")]
     PortForward {
         #[clap(subcommand)]
         command: PortForwardCommand,
@@ -2646,6 +2647,19 @@ mod port_forward_args_tests {
             }
             _ => panic!("expected port-forward create"),
         }
+    }
+
+    #[test]
+    fn pfw_alias_resolves_to_port_forward() {
+        let cli = Cli::try_parse_from(["aleph", "instance", "pfw", "list"]).expect("clap parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Instance {
+                command: InstanceCommand::PortForward {
+                    command: PortForwardCommand::List(_),
+                },
+            }
+        ));
     }
 }
 
