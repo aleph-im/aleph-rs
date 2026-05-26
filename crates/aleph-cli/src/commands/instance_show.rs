@@ -453,6 +453,48 @@ pub(crate) fn render_text(s: &InstanceShow) -> String {
     )
     .unwrap();
 
+    if let Some(net) = &s.networking {
+        writeln!(out).unwrap();
+        writeln!(out, "NETWORKING").unwrap();
+        writeln!(
+            out,
+            "  IPv6           {}",
+            net.ipv6.as_deref().unwrap_or(MISSING)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "  IPv4           {}",
+            net.ipv4.as_deref().unwrap_or(MISSING)
+        )
+        .unwrap();
+    }
+
+    if let Some(mapped) = &s.mapped_ports {
+        writeln!(out).unwrap();
+        writeln!(out, "MAPPED PORTS").unwrap();
+        if mapped.is_empty() {
+            writeln!(out, "  {MISSING}").unwrap();
+        } else {
+            for (vm_port, host_port) in mapped {
+                writeln!(out, "  {vm_port:<3} -> {host_port}").unwrap();
+            }
+        }
+    }
+
+    if let Some(forwards) = &s.port_forwards {
+        writeln!(out).unwrap();
+        writeln!(out, "PORT FORWARDS (aggregate)").unwrap();
+        if forwards.is_empty() {
+            writeln!(out, "  {MISSING}").unwrap();
+        } else {
+            for pf in forwards {
+                let proto = pf.proto.as_deref().unwrap_or("tcp");
+                writeln!(out, "  {}/{proto}  -> [host={}]", pf.vm_port, pf.host).unwrap();
+            }
+        }
+    }
+
     out
 }
 
@@ -1245,6 +1287,54 @@ mod tests {
         // Aggregate was fetched successfully but was empty.
         let forwards = show.port_forwards.as_ref().expect("port_forwards is Some");
         assert!(forwards.is_empty(), "port_forwards must be empty when aggregate is empty");
+    }
+
+    fn show_with_verbose_data() -> InstanceShow {
+        let mut show = show_for_render();
+        show.networking = Some(Networking {
+            ipv4: None,
+            ipv6: Some("fc00:1:2:3:1:abcd:1234:5670/124".into()),
+        });
+        show.mapped_ports = Some(BTreeMap::from([(22u16, 24221u16), (80u16, 24222u16)]));
+        show.port_forwards = Some(vec![
+            PortForward { vm_port: 22, host: 24221, proto: None },
+            PortForward { vm_port: 80, host: 24222, proto: Some("tcp+udp".into()) },
+        ]);
+        show
+    }
+
+    #[test]
+    fn render_text_verbose_includes_three_extra_sections() {
+        let show = show_with_verbose_data();
+        let out = render_text(&show);
+        assert!(out.contains("NETWORKING"));
+        assert!(out.contains("MAPPED PORTS"));
+        assert!(out.contains("PORT FORWARDS"));
+    }
+
+    #[test]
+    fn render_text_verbose_networking_shows_ipv6() {
+        let show = show_with_verbose_data();
+        let out = render_text(&show);
+        assert!(out.contains("IPv6           fc00:1:2:3:1:abcd:1234:5670/124"));
+        assert!(out.contains("IPv4           -"));
+    }
+
+    #[test]
+    fn render_text_verbose_mapped_ports_sorted_ascending() {
+        let show = show_with_verbose_data();
+        let out = render_text(&show);
+        let p22 = out.find("22  -> 24221").unwrap();
+        let p80 = out.find("80  -> 24222").unwrap();
+        assert!(p22 < p80, "mapped ports should be sorted ascending by VM port");
+    }
+
+    #[test]
+    fn render_text_verbose_port_forwards_proto_column() {
+        let show = show_with_verbose_data();
+        let out = render_text(&show);
+        assert!(out.contains("22/tcp"), "default proto column for entries without flags");
+        assert!(out.contains("80/tcp+udp"));
     }
 
     #[tokio::test]
