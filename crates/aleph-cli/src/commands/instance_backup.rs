@@ -474,8 +474,7 @@ async fn restore_from_file(
     let form = reqwest::multipart::Form::new().part("rootfs", part);
 
     let endpoint = client.restore_endpoint(vm_id)?;
-    let http = reqwest::Client::new();
-    let mut request = http.post(endpoint.url).multipart(form);
+    let mut request = client.http_client().post(endpoint.url).multipart(form);
     for (name, value) in &endpoint.headers {
         request = request.header(*name, value);
     }

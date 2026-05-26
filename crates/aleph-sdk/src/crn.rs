@@ -244,6 +244,14 @@ impl CrnClient {
         })
     }
 
+    /// Borrow the underlying HTTP client. Useful when a caller needs to drive
+    /// a request that isn't a standard CRN method (e.g. the multipart restore
+    /// upload, which the SDK doesn't model as a single call) but wants to
+    /// share any future client-level configuration (timeouts, TLS, etc.).
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+
     pub async fn start_instance(&self, vm_id: &ItemHash) -> Result<AllocationResponse, CrnError> {
         let url = self
             .crn_url
