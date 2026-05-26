@@ -1,7 +1,7 @@
 use crate::cli::{ForgetArgs, GetMessageArgs, MessageCommand, RetryArgs, SigningArgs};
 use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
 use aleph_sdk::builder::MessageBuilder;
-use aleph_sdk::client::{AlephClient, AlephMessageClient};
+use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageWithStatus};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
@@ -123,16 +123,33 @@ pub async fn forget_targets(
 }
 
 async fn handle_retry(
-    _aleph_client: &AlephClient,
+    aleph_client: &AlephClient,
     _ccn_url: &Url,
     _json: bool,
-    _args: RetryArgs,
+    args: RetryArgs,
 ) -> Result<()> {
-    bail!("not yet implemented")
+    let status = aleph_client.get_message(&args.item_hash).await?;
+    match status {
+        MessageWithStatus::Rejected { .. } => {
+            bail!("rejected branch not yet implemented")
+        }
+        other => bail!(
+            "message {hash} is {status}, nothing to retry",
+            hash = args.item_hash,
+            status = other.status(),
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use aleph_sdk::client::AlephClient;
+    use aleph_types::item_hash::ItemHash;
+    use url::Url;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     #[test]
     fn forget_envelope_shape() {
         let hashes = vec!["abc123".to_string()];
@@ -143,5 +160,56 @@ mod tests {
         assert_eq!(envelope["hashes"][0], "abc123");
         assert_eq!(envelope["aggregates"][0], "def456");
         assert_eq!(envelope["reason"], "cleanup");
+    }
+
+    const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn item_hash() -> ItemHash {
+        HASH.parse().unwrap()
+    }
+
+    /// Build the `{status, message: ...}` envelope returned by GET /api/v0/messages/{hash}.
+    fn processed_envelope() -> serde_json::Value {
+        serde_json::json!({
+            "status": "processed",
+            "message": {
+                "sender": "0xABCD",
+                "chain": "ETH",
+                "signature": "0xSIG",
+                "type": "POST",
+                "item_type": "inline",
+                "item_content": "{\"type\":\"test\",\"address\":\"0xABCD\",\"time\":1234.0}",
+                "item_hash": HASH,
+                "time": 1234.0,
+                "channel": null,
+                "content": {"type": "test", "address": "0xABCD", "time": 1234.0},
+                "confirmed": true,
+                "confirmations": [],
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn retry_non_rejected_bails_with_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(processed_envelope()))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let ccn_url = Url::parse(&server.uri()).unwrap();
+        let args = RetryArgs {
+            item_hash: item_hash(),
+            dry_run: false,
+        };
+
+        let err = handle_retry(&client, &ccn_url, false, args)
+            .await
+            .expect_err("expected non-rejected status to bail");
+        let msg = err.to_string();
+        assert!(msg.contains("processed"), "got: {msg}");
+        assert!(msg.contains("nothing to retry"), "got: {msg}");
     }
 }
