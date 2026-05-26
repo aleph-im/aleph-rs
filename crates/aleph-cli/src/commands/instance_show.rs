@@ -596,19 +596,19 @@ async fn populate_verbose(
                             let http = reqwest::Client::new();
                             match fetch_active_vms(&http, &crn_url).await {
                                 Ok(list) => {
-                                    if let Some(entry) = list.0.get(&show.identity.item_hash) {
-                                        if let Some(net) = entry.networking.as_ref() {
-                                            show.networking = Some(Networking {
-                                                ipv4: net.ipv4.clone(),
-                                                ipv6: net.ipv6.clone(),
-                                            });
-                                            let mapped: BTreeMap<u16, u16> = net
-                                                .mapped_ports
-                                                .iter()
-                                                .map(|(k, v)| (*k, v.host))
-                                                .collect();
-                                            show.mapped_ports = Some(mapped);
-                                        }
+                                    if let Some(entry) = list.0.get(&show.identity.item_hash)
+                                        && let Some(net) = entry.networking.as_ref()
+                                    {
+                                        show.networking = Some(Networking {
+                                            ipv4: net.ipv4.clone(),
+                                            ipv6: net.ipv6.clone(),
+                                        });
+                                        let mapped: BTreeMap<u16, u16> = net
+                                            .mapped_ports
+                                            .iter()
+                                            .map(|(k, v)| (*k, v.host))
+                                            .collect();
+                                        show.mapped_ports = Some(mapped);
                                     }
                                 }
                                 Err(e) => eprintln!(
