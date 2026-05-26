@@ -137,6 +137,10 @@ pub struct ActiveVm {
 pub struct ActiveVmNetworking {
     #[serde(default)]
     pub mapped_ports: BTreeMap<u16, MappedPort>,
+    #[serde(default)]
+    pub ipv4: Option<String>,
+    #[serde(default)]
+    pub ipv6: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -622,6 +626,27 @@ impl CrnClient {
     }
 }
 
+/// Fetch the list of active VM executions from a CRN's
+/// `/v2/about/executions/list` endpoint. Unauthenticated.
+///
+/// Keys of the returned map are VM item hashes. Mirrors `fetch_executions`
+/// but uses the v2 endpoint, which carries both mapped ports and IPv4/IPv6
+/// addresses per VM.
+pub async fn fetch_active_vms(
+    http: &reqwest::Client,
+    crn_url: &Url,
+) -> Result<ActiveVmList, CrnError> {
+    let mut url = crn_url.clone();
+    url.set_path("/v2/about/executions/list");
+    let resp = http.get(url).send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(CrnError::Api { status, body });
+    }
+    Ok(resp.json::<ActiveVmList>().await?)
+}
+
 /// Fetch the list of running VM executions from a CRN's
 /// `/about/executions/list` endpoint. Unauthenticated.
 ///
@@ -883,6 +908,39 @@ mod tests {
         let json = serde_json::json!({});
         let list: ActiveVmList = serde_json::from_value(json).unwrap();
         assert!(list.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_active_vms_decodes_response() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v2/about/executions/list"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564": {
+                    "networking": {
+                        "mapped_ports": { "22": { "host": 24221 } },
+                        "ipv6": "fc00:1:2:3:1:abcd:1234:5670/124",
+                        "ipv4": null
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let url = url::Url::parse(&server.uri()).unwrap();
+        let list = super::fetch_active_vms(&http, &url).await.expect("ok");
+
+        let vm_id: ItemHash =
+            "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564"
+                .parse()
+                .unwrap();
+        let entry = list.0.get(&vm_id).expect("vm present");
+        let net = entry.networking.as_ref().expect("networking present");
+        assert_eq!(net.ipv6.as_deref(), Some("fc00:1:2:3:1:abcd:1234:5670/124"));
+        assert!(net.ipv4.is_none());
+        assert_eq!(net.mapped_ports.len(), 1);
+        assert_eq!(net.mapped_ports.get(&22).map(|m| m.host), Some(24221));
     }
 
     #[cfg(feature = "account-evm")]
