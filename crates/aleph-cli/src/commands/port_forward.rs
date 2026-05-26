@@ -4,6 +4,7 @@
 //! endpoints: `GET /v2/about/executions/list` (for the host-side mapped port)
 //! and `POST /control/{vm_id}/update` (for `refresh`).
 
+use crate::account::CliAccount;
 use crate::cli::{
     PortForwardCommand, PortForwardCreateArgs, PortForwardDeleteArgs, PortForwardListArgs,
     PortForwardRefreshArgs, PortForwardUpdateArgs,
@@ -15,7 +16,7 @@ use aleph_sdk::aggregate_models::port_forwarding::{
     PORT_FORWARDING_AGGREGATE_KEY, PortFlags, PortForwardingAggregate, Ports,
 };
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
-use aleph_sdk::crn::CrnClient;
+use aleph_sdk::crn::{ActiveVmList, CrnClient};
 use aleph_sdk::messages::AggregateBuilder;
 use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
 use aleph_types::chain::Address;
@@ -146,48 +147,25 @@ async fn resolve_external_ports(
             _ => continue,
         };
 
-        let body: serde_json::Value = match response.json().await {
+        let active = match response.json::<ActiveVmList>().await {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        // The response is an object keyed by vm_id string. Find the entry for
-        // this VM and walk its networking.mapped_ports.
-        let vm_key = vm_id.to_string();
-        let entry = match body.get(&vm_key) {
-            Some(e) => e,
+        let networking = match active.0.get(vm_id).and_then(|vm| vm.networking.as_ref()) {
+            Some(n) => n,
             None => continue,
         };
 
-        let mapped_ports = match entry
-            .get("networking")
-            .and_then(|n| n.get("mapped_ports"))
-            .and_then(|m| m.as_object())
-        {
-            Some(obj) => obj,
-            None => continue,
-        };
-
-        let mut port_map: HashMap<u16, u16> = HashMap::new();
-        for (port_str, port_info) in mapped_ports {
-            let requested: u16 = match port_str.parse() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let host: u16 = match port_info
-                .get("host")
-                .and_then(|h| h.as_u64())
-                .and_then(|h| u16::try_from(h).ok())
-            {
-                Some(p) => p,
-                None => continue,
-            };
-            port_map.insert(requested, host);
+        if networking.mapped_ports.is_empty() {
+            continue;
         }
-
-        if !port_map.is_empty() {
-            result.insert(vm_id.clone(), port_map);
-        }
+        let port_map: HashMap<u16, u16> = networking
+            .mapped_ports
+            .iter()
+            .map(|(requested, mapped)| (*requested, mapped.host))
+            .collect();
+        result.insert(vm_id.clone(), port_map);
     }
 
     result
@@ -340,6 +318,29 @@ pub(crate) fn require_at_least_one_protocol(tcp: bool, udp: bool) -> Result<()> 
     Ok(())
 }
 
+/// Build, sign, and submit (or preview) a `port-forwarding` AGGREGATE write.
+/// Shared tail of `create`/`update`/`delete` - they differ only in how they
+/// build `content` and any pre-write guards.
+#[allow(clippy::too_many_arguments)]
+async fn submit_port_forwarding_change(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    account: &CliAccount,
+    owner_address: Address,
+    channel: Option<String>,
+    content: serde_json::Map<String, serde_json::Value>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    let mut builder = AggregateBuilder::new(account, PORT_FORWARDING_AGGREGATE_KEY, content)
+        .on_behalf_of(owner_address);
+    if let Some(channel) = channel {
+        builder = builder.channel(Channel::from(channel));
+    }
+    let pending = builder.build()?;
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
 /// Extract the VM owner's address from the scheduler entry. The CRN only
 /// honours port-forwarding aggregates whose `content.address` matches the VM
 /// owner, so this is the only useful target for any aggregate write.
@@ -377,14 +378,17 @@ async fn handle_create(
     };
     let content = build_create_or_update_content(&existing, &vm_id, args.port, flags);
 
-    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content)
-        .on_behalf_of(owner_address);
-    if let Some(channel) = args.channel {
-        builder = builder.channel(Channel::from(channel));
-    }
-    let pending = builder.build()?;
-
-    submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await?;
+    submit_port_forwarding_change(
+        aleph_client,
+        ccn_url,
+        &account,
+        owner_address,
+        args.channel,
+        content,
+        args.signing.dry_run,
+        json,
+    )
+    .await?;
 
     if !json && !args.signing.dry_run {
         eprintln!(
@@ -420,14 +424,17 @@ async fn handle_update(
     };
     let content = build_create_or_update_content(&existing, &vm_id, args.port, flags);
 
-    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content)
-        .on_behalf_of(owner_address);
-    if let Some(channel) = args.channel {
-        builder = builder.channel(Channel::from(channel));
-    }
-    let pending = builder.build()?;
-
-    submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await?;
+    submit_port_forwarding_change(
+        aleph_client,
+        ccn_url,
+        &account,
+        owner_address,
+        args.channel,
+        content,
+        args.signing.dry_run,
+        json,
+    )
+    .await?;
 
     if !json && !args.signing.dry_run {
         eprintln!(
@@ -507,14 +514,17 @@ async fn handle_delete(
         }
     };
 
-    let mut builder = AggregateBuilder::new(&account, PORT_FORWARDING_AGGREGATE_KEY, content)
-        .on_behalf_of(owner_address);
-    if let Some(channel) = args.channel {
-        builder = builder.channel(Channel::from(channel));
-    }
-    let pending = builder.build()?;
-
-    submit_or_preview(aleph_client, ccn_url, &pending, args.signing.dry_run, json).await?;
+    submit_port_forwarding_change(
+        aleph_client,
+        ccn_url,
+        &account,
+        owner_address,
+        args.channel,
+        content,
+        args.signing.dry_run,
+        json,
+    )
+    .await?;
 
     if !json && !args.signing.dry_run {
         match args.port {

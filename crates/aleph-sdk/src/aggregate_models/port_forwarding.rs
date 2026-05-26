@@ -45,7 +45,7 @@ mod tests {
         });
         let agg: PortForwardingAggregate = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(agg.len(), 1);
-        let (hash, entry) = agg.iter().next().unwrap();
+        let (_, entry) = agg.iter().next().unwrap();
         let ports = entry.as_ref().unwrap();
         assert_eq!(ports.ports.len(), 3);
         assert_eq!(
@@ -57,7 +57,6 @@ mod tests {
         );
         let again = serde_json::to_value(&agg).unwrap();
         assert_eq!(again, raw);
-        let _ = hash;
     }
 
     #[test]
