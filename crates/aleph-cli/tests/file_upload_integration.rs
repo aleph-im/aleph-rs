@@ -302,7 +302,7 @@ async fn ipfs_upload_surfaces_rejection_from_message_status() {
         .as_str()
         .to_string();
     let rejected_body = format!(
-        r#"{{"status":"rejected","message":{{"sender":"{test_sender}","chain":"ETH","signature":null,"type":"STORE","item_hash":"0000000000000000000000000000000000000000000000000000000000000000","time":1234567890.0,"channel":null,"content":null}},"error_code":6}}"#
+        r#"{{"status":"rejected","message":{{"sender":"{test_sender}","chain":"ETH","signature":null,"type":"STORE","item_type":"storage","item_content":null,"item_hash":"0000000000000000000000000000000000000000000000000000000000000000","time":1234567890.0,"channel":null,"content":null}},"error_code":6}}"#
     );
     Mock::given(method("GET"))
         .and(path_regex(r"^/api/v0/messages/[^/]+$"))
