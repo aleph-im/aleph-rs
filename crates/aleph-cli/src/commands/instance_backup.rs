@@ -193,7 +193,7 @@ async fn handle_info(scheduler_url: Url, json: bool, args: InstanceBackupInfoArg
 
 use std::path::Path;
 
-/// Default output filename for a downloaded backup: ./backup-<first-12-of-hash>.tar.
+/// Default output filename for a downloaded backup: `./backup-<first-12-of-hash>.tar`.
 fn default_output_path(vm_id: &aleph_types::item_hash::ItemHash) -> std::path::PathBuf {
     let s = vm_id.to_string();
     let short: String = s.chars().take(12).collect();
