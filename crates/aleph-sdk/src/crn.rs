@@ -80,7 +80,7 @@ pub enum BackupStatus {
     NotFound,
 }
 
-/// Response from POST /control/machine/<vm>/restore.
+/// Response from `POST /control/machine/<vm>/restore`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreResponse {
     pub status: String,
