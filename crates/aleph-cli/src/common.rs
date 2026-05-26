@@ -177,7 +177,6 @@ async fn handle_post_outcome(
 /// assumed to still be pinned on the network. Output, dry-run, and error
 /// handling mirror `submit_or_preview` exactly; the only difference is that
 /// this calls `post_message` directly instead of `submit_message`.
-#[allow(dead_code)] // used in Task 5 (handle_retry)
 pub async fn repost_or_preview(
     client: &aleph_sdk::client::AlephClient,
     ccn_url: &Url,

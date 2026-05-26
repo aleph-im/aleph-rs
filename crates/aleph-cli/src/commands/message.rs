@@ -1,11 +1,15 @@
 use crate::cli::{ForgetArgs, GetMessageArgs, MessageCommand, RetryArgs, SigningArgs};
-use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
+use crate::common::{
+    confirm_action, repost_or_preview, resolve_account, resolve_address, submit_or_preview,
+};
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephClient, AlephMessageClient, MessageWithStatus};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
-use anyhow::{Result, bail};
+use aleph_types::message::item_type::ItemType;
+use aleph_types::message::pending::PendingMessage;
+use anyhow::{Result, anyhow, bail};
 use futures_util::{StreamExt, TryStreamExt};
 use url::Url;
 
@@ -124,14 +128,37 @@ pub async fn forget_targets(
 
 async fn handle_retry(
     aleph_client: &AlephClient,
-    _ccn_url: &Url,
-    _json: bool,
+    ccn_url: &Url,
+    json: bool,
     args: RetryArgs,
 ) -> Result<()> {
     let status = aleph_client.get_message(&args.item_hash).await?;
     match status {
-        MessageWithStatus::Rejected { .. } => {
-            bail!("rejected branch not yet implemented")
+        MessageWithStatus::Rejected {
+            message,
+            error_code: _,
+        } => {
+            let signature = message
+                .signature
+                .ok_or_else(|| anyhow!("rejected envelope has no signature; cannot retry"))?;
+            let item_content = match message.item_type {
+                ItemType::Inline => message.item_content.ok_or_else(|| {
+                    anyhow!("rejected inline message envelope has no item_content; cannot retry")
+                })?,
+                ItemType::Storage | ItemType::Ipfs => String::new(),
+            };
+            let pending = PendingMessage {
+                chain: message.chain,
+                sender: message.sender,
+                signature,
+                message_type: message.message_type,
+                item_type: message.item_type,
+                item_content,
+                item_hash: message.item_hash,
+                time: message.time,
+                channel: message.channel,
+            };
+            repost_or_preview(aleph_client, ccn_url, &pending, args.dry_run, json).await
         }
         other => bail!(
             "message {hash} is {status}, nothing to retry",
@@ -187,6 +214,73 @@ mod tests {
                 "confirmations": [],
             }
         })
+    }
+
+    /// Build a `{status: rejected}` envelope for an inline message.
+    fn rejected_inline_envelope(item_content: &str) -> serde_json::Value {
+        serde_json::json!({
+            "status": "rejected",
+            "error_code": 6,
+            "message": {
+                "sender": "0xABCD",
+                "chain": "ETH",
+                "signature": "0xSIG",
+                "type": "POST",
+                "item_type": "inline",
+                "item_content": item_content,
+                "item_hash": HASH,
+                "time": 1234.0,
+                "channel": null,
+                "content": null,
+            }
+        })
+    }
+
+    fn post_message_success() -> serde_json::Value {
+        serde_json::json!({
+            "publication_status": { "status": "success", "failed": [] },
+            "message_status": "pending"
+        })
+    }
+
+    #[tokio::test]
+    async fn retry_inline_rejected_reposts_envelope() {
+        let server = MockServer::start().await;
+        let item_content = r#"{"type":"test","address":"0xABCD","time":1234.0}"#;
+
+        // 1. GET status -> rejected
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{HASH}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(rejected_inline_envelope(item_content)),
+            )
+            .mount(&server)
+            .await;
+
+        // 2. POST /api/v0/messages with the reconstructed envelope.
+        //    We assert the request body carries the same item_content (inline messages
+        //    serialize it on the wire). The outer JSON wraps item_content as a string
+        //    value, so we use body_partial_json to assert it by value.
+        let post_mock = Mock::given(method("POST"))
+            .and(path("/api/v0/messages"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "message": { "item_content": item_content }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(post_message_success()))
+            .expect(1);
+        post_mock.mount(&server).await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let ccn_url = Url::parse(&server.uri()).unwrap();
+        let args = RetryArgs {
+            item_hash: item_hash(),
+            dry_run: false,
+        };
+
+        handle_retry(&client, &ccn_url, false, args)
+            .await
+            .expect("retry succeeds");
+        // MockServer's `expect(1)` is verified on drop.
     }
 
     #[tokio::test]
