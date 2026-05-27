@@ -364,6 +364,42 @@ impl CrnClient {
         fetch_platform_certificate(&self.http_client, &self.crn_url).await
     }
 
+    /// POST /control/machine/<vm>/confidential/initialize
+    ///
+    /// multipart/form-data body with two byte parts: `session` and `godh`.
+    /// Signed with the same ephemeral-key X-SignedPubKey / X-SignedOperation
+    /// headers as the other /control/machine endpoints.
+    pub async fn initialize_confidential(
+        &self,
+        vm_id: &ItemHash,
+        session: &[u8],
+        godh: &[u8],
+    ) -> Result<(), CrnError> {
+        let path = format!("/control/machine/{vm_id}/confidential/initialize");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let form = reqwest::multipart::Form::new()
+            .part("session", reqwest::multipart::Part::bytes(session.to_vec()))
+            .part("godh", reqwest::multipart::Part::bytes(godh.to_vec()));
+
+        let mut request = self.http_client.post(url).multipart(form);
+        for (name, value) in self.auth_headers("POST", &path) {
+            request = request.header(name, value);
+        }
+        let response = request.send().await?;
+
+        let status = response.status().as_u16();
+        match status {
+            200..=299 => Ok(()),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
     /// List the VMs currently active on this CRN, indexed by item hash.
     ///
     /// Calls `GET /v2/about/executions/list`. The v1 fallback that the Python
@@ -1305,5 +1341,67 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, crate::crn::CrnError::Api { status: 503, .. }));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn initialize_confidential_posts_signed_multipart() {
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        let captured_body = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let captured_ct = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_has_pubkey = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let captured_has_op = std::sync::Arc::new(std::sync::Mutex::new(false));
+
+        let body_handle = captured_body.clone();
+        let ct_handle = captured_ct.clone();
+        let pk_handle = captured_has_pubkey.clone();
+        let op_handle = captured_has_op.clone();
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/initialize",
+            ))
+            .respond_with(move |req: &wiremock::Request| {
+                *body_handle.lock().unwrap() = req.body.clone();
+                *ct_handle.lock().unwrap() = req
+                    .headers
+                    .get("content-type")
+                    .map(|v| v.to_str().unwrap_or_default().to_string())
+                    .unwrap_or_default();
+                *pk_handle.lock().unwrap() = req.headers.contains_key("x-signedpubkey");
+                *op_handle.lock().unwrap() = req.headers.contains_key("x-signedoperation");
+                wiremock::ResponseTemplate::new(200)
+            })
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        client
+            .initialize_confidential(&vm_id, b"session-bytes", b"godh-bytes")
+            .await
+            .unwrap();
+
+        assert!(
+            captured_ct
+                .lock()
+                .unwrap()
+                .starts_with("multipart/form-data")
+        );
+        assert!(*captured_has_pubkey.lock().unwrap());
+        assert!(*captured_has_op.lock().unwrap());
+        let body = captured_body.lock().unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap_or_default();
+        assert!(body_str.contains("name=\"session\""));
+        assert!(body_str.contains("name=\"godh\""));
+        assert!(body_str.contains("session-bytes"));
+        assert!(body_str.contains("godh-bytes"));
     }
 }
