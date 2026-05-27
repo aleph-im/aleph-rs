@@ -429,6 +429,41 @@ impl CrnClient {
         }
     }
 
+    /// POST /control/machine/<vm>/confidential/inject_secret
+    ///
+    /// JSON body `{packet_header, secret}` (both base64 strings). Signed.
+    pub async fn inject_secret(
+        &self,
+        vm_id: &ItemHash,
+        packet_header: &str,
+        secret: &str,
+    ) -> Result<(), CrnError> {
+        let path = format!("/control/machine/{vm_id}/confidential/inject_secret");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let body = serde_json::json!({
+            "packet_header": packet_header,
+            "secret": secret,
+        });
+
+        let mut request = self.http_client.post(url).json(&body);
+        for (name, value) in self.auth_headers("POST", &path) {
+            request = request.header(name, value);
+        }
+        let response = request.send().await?;
+
+        let status = response.status().as_u16();
+        match status {
+            200..=299 => Ok(()),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
     /// List the VMs currently active on this CRN, indexed by item hash.
     ///
     /// Calls `GET /v2/about/executions/list`. The v1 fallback that the Python
@@ -1502,5 +1537,63 @@ mod tests {
 
         let err = client.get_measurement(&vm_id).await.unwrap_err();
         assert!(matches!(err, CrnError::VmNotFound(_)));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn inject_secret_posts_signed_json() {
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/inject_secret",
+            ))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "packet_header": "AAAA",
+                "secret": "BBBB"
+            })))
+            .and(wiremock::matchers::header_exists("x-signedpubkey"))
+            .and(wiremock::matchers::header_exists("x-signedoperation"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        client.inject_secret(&vm_id, "AAAA", "BBBB").await.unwrap();
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn inject_secret_surfaces_400_as_api_error() {
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/inject_secret",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_string("invalid packet"))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        let err = client
+            .inject_secret(&vm_id, "AAAA", "BBBB")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CrnError::Api { status: 400, .. }));
     }
 }
