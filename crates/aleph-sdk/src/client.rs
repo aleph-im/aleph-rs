@@ -491,6 +491,9 @@ pub struct RejectedMessage {
     pub signature: Option<Signature>,
     #[serde(rename = "type")]
     pub message_type: MessageType,
+    pub item_type: ItemType,
+    #[serde(default)]
+    pub item_content: Option<String>,
     pub item_hash: ItemHash,
     pub time: Timestamp,
     pub channel: Option<Channel>,
@@ -4664,5 +4667,46 @@ mod account_files_tests {
             client.get_total_storage_size(&addr).await.unwrap().count(),
             0
         );
+    }
+
+    #[test]
+    fn rejected_message_deserializes_item_type_and_item_content_inline() {
+        let body = serde_json::json!({
+            "sender": "0xABCD",
+            "chain": "ETH",
+            "signature": "0xSIG",
+            "type": "POST",
+            "item_type": "inline",
+            "item_content": "{\"type\":\"test\"}",
+            "item_hash": "0".repeat(64),
+            "time": 1234.0,
+            "channel": "TEST",
+            "content": null,
+        });
+        let rejected: RejectedMessage = serde_json::from_value(body).unwrap();
+        assert_eq!(rejected.item_type, ItemType::Inline);
+        assert_eq!(
+            rejected.item_content.as_deref(),
+            Some("{\"type\":\"test\"}")
+        );
+    }
+
+    #[test]
+    fn rejected_message_deserializes_storage_with_null_item_content() {
+        let body = serde_json::json!({
+            "sender": "0xABCD",
+            "chain": "ETH",
+            "signature": "0xSIG",
+            "type": "STORE",
+            "item_type": "storage",
+            "item_content": null,
+            "item_hash": "0".repeat(64),
+            "time": 1234.0,
+            "channel": null,
+            "content": null,
+        });
+        let rejected: RejectedMessage = serde_json::from_value(body).unwrap();
+        assert_eq!(rejected.item_type, ItemType::Storage);
+        assert!(rejected.item_content.is_none());
     }
 }

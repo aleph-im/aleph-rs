@@ -126,16 +126,30 @@ pub async fn submit_or_preview(
     json: bool,
 ) -> Result<()> {
     if dry_run {
-        if json {
-            println!("{}", serde_json::to_string_pretty(pending)?);
-        } else {
-            eprintln!("Dry run — message not submitted.\n");
-            println!("{}", serde_json::to_string_pretty(pending)?);
-        }
-        return Ok(());
+        return print_dry_run(pending, json);
     }
+    let result = client.submit_message(pending, true).await;
+    handle_post_outcome(client, ccn_url, pending, json, result).await
+}
 
-    let response = match client.submit_message(pending, true).await {
+fn print_dry_run(pending: &PendingMessage, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(pending)?);
+    } else {
+        eprintln!("Dry run - message not submitted.\n");
+        println!("{}", serde_json::to_string_pretty(pending)?);
+    }
+    Ok(())
+}
+
+async fn handle_post_outcome(
+    client: &aleph_sdk::client::AlephClient,
+    ccn_url: &Url,
+    pending: &PendingMessage,
+    json: bool,
+    result: Result<aleph_sdk::client::PostMessageResponse, aleph_sdk::client::MessageError>,
+) -> Result<()> {
+    let response = match result {
         Ok(r) => r,
         Err(MessageError::ApiError { status, body }) => {
             let rejection_code = if status == 422 && is_rejection_body(&body) {
@@ -147,7 +161,6 @@ pub async fn submit_or_preview(
         }
         Err(e) => return Err(e.into()),
     };
-
     print_submission_result(
         ccn_url,
         pending,
@@ -155,6 +168,27 @@ pub async fn submit_or_preview(
         &response.message_status,
         json,
     )
+}
+
+/// Re-submit an already-signed message without re-uploading content.
+///
+/// Used by `message retry`: the signed envelope is reconstructed from a
+/// previously-rejected message, and the blob (for storage/ipfs messages) is
+/// assumed to still be pinned on the network. Output, dry-run, and error
+/// handling mirror `submit_or_preview` exactly; the only difference is that
+/// this calls `post_message` directly instead of `submit_message`.
+pub async fn repost_or_preview(
+    client: &aleph_sdk::client::AlephClient,
+    ccn_url: &Url,
+    pending: &PendingMessage,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    if dry_run {
+        return print_dry_run(pending, json);
+    }
+    let result = client.post_message(pending, true).await;
+    handle_post_outcome(client, ccn_url, pending, json, result).await
 }
 
 /// Report the outcome of an authenticated file upload (`/api/v0/{storage,ipfs}/add_file`).
