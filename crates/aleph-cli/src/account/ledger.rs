@@ -159,6 +159,22 @@ use coins_ledger::Ledger;
 use coins_ledger::common::{APDUCommand, APDUData};
 use coins_ledger::transports::LedgerAsync;
 
+/// Translate a `coins_ledger` transport error into our richer `LedgerError`.
+///
+/// The transport returns `BadRetcode(APDUResponseCodes)` for any non-success
+/// status; without this mapping we'd stringify it and surface raw APDU codes
+/// (e.g. `Code 6985 ([APDU_CODE_CONDITIONS_NOT_SATISFIED] ...)`) to the user.
+/// We funnel `BadRetcode` through `apdu_status_to_error` so 0x6985 becomes
+/// `UserRejected`, 0x6804 becomes `DeviceLocked`, etc.
+fn map_transport_error(err: coins_ledger::LedgerError, app_name: &str) -> LedgerError {
+    if let coins_ledger::LedgerError::BadRetcode(code) = &err
+        && let Some(mapped) = apdu_status_to_error(*code as u16, app_name)
+    {
+        return mapped;
+    }
+    LedgerError::Communication(err.to_string())
+}
+
 /// Connect to the first available Ledger device.
 pub async fn connect() -> Result<Ledger, LedgerError> {
     Ledger::init().await.map_err(|e| {
@@ -194,7 +210,7 @@ async fn get_evm_address(ledger: &Ledger, path: &DerivationPath) -> Result<Addre
     let response = ledger
         .exchange(&command)
         .await
-        .map_err(|e| LedgerError::Communication(e.to_string()))?;
+        .map_err(|e| map_transport_error(e, "Ethereum"))?;
 
     let status = response.retcode();
     if let Some(err) = apdu_status_to_error(status, "Ethereum") {
@@ -279,7 +295,7 @@ pub async fn sign_evm(
     let mut response = ledger
         .exchange(&command)
         .await
-        .map_err(|e| LedgerError::Communication(e.to_string()))?;
+        .map_err(|e| map_transport_error(e, "Ethereum"))?;
 
     let mut offset = first_msg_bytes;
     while offset < message.len() {
@@ -305,7 +321,7 @@ pub async fn sign_evm(
         response = ledger
             .exchange(&command)
             .await
-            .map_err(|e| LedgerError::Communication(e.to_string()))?;
+            .map_err(|e| map_transport_error(e, "Ethereum"))?;
 
         offset = end;
     }
@@ -504,5 +520,34 @@ mod tests {
         assert!(msg.contains("0xBBBB"), "got: {msg}");
         assert!(msg.contains("m/44'/60'/0'/0/0"), "got: {msg}");
         assert!(msg.contains("Wrong device"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_transport_translates_bad_retcode_to_user_rejected() {
+        use coins_ledger::LedgerError as CL;
+        use coins_ledger::common::APDUResponseCodes;
+        let err = map_transport_error(
+            CL::BadRetcode(APDUResponseCodes::ConditionsNotSatisfied),
+            "Ethereum",
+        );
+        assert!(matches!(err, LedgerError::UserRejected));
+    }
+
+    #[test]
+    fn map_transport_translates_bad_retcode_to_wrong_app() {
+        use coins_ledger::LedgerError as CL;
+        use coins_ledger::common::APDUResponseCodes;
+        let err = map_transport_error(
+            CL::BadRetcode(APDUResponseCodes::InsNotSupported),
+            "Ethereum",
+        );
+        assert!(matches!(err, LedgerError::WrongApp(name) if name == "Ethereum"));
+    }
+
+    #[test]
+    fn map_transport_falls_back_to_communication_for_non_apdu() {
+        use coins_ledger::LedgerError as CL;
+        let err = map_transport_error(CL::BackendGone, "Ethereum");
+        assert!(matches!(err, LedgerError::Communication(_)));
     }
 }
