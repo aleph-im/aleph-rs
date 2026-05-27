@@ -61,6 +61,7 @@ rand = { version = "0.8" }
 toml = { version = "0.8" }
 tempfile = { version = "3" }
 static_assertions = { version = "1" }
+subtle = { version = "2" }
 walkdir = { version = "2" }
 which = { version = "6" }
 wiremock = { version = "0.6" }

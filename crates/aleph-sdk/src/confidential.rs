@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+/// Default SHA-256 of the OVMF firmware blob used for confidential VMs on
+/// aleph.cloud. Matches Python's `DEFAULT_CONFIDENTIAL_FIRMWARE_HASH` in
+/// `aleph-sdk-python/src/aleph/sdk/conf.py`. Pass `--firmware-hash` to
+/// override or `--firmware-file` to recompute locally.
+pub const DEFAULT_CONFIDENTIAL_FIRMWARE_HASH_HEX: &str =
+    "89b76b0e64fe9015084fbffdf8ac98185bafc688bfe7a0b398585c392d03c7ee";
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SEVInfo {
     pub api_major: u8,

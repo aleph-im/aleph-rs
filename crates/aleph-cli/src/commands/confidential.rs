@@ -1,12 +1,17 @@
 //! `aleph instance confidential` command tree.
 
-use crate::cli::{ConfidentialCommand, ConfidentialInitSessionArgs};
+use crate::cli::{ConfidentialCommand, ConfidentialInitSessionArgs, ConfidentialStartArgs};
 use crate::commands::instance_target::resolve_target;
 use crate::common::{confirm_action, resolve_account};
 use crate::config::store::ConfigStore;
 use crate::sevctl::Sevctl;
+use aleph_sdk::confidential::{
+    DEFAULT_CONFIDENTIAL_FIRMWARE_HASH_HEX, build_secret_packet, calculate_firmware_hash,
+    compute_expected_measure,
+};
 use aleph_sdk::crn::CrnClient;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
+use subtle::ConstantTimeEq;
 use url::Url;
 
 pub async fn dispatch(scheduler_url: Url, json: bool, cmd: ConfidentialCommand) -> Result<()> {
@@ -14,9 +19,7 @@ pub async fn dispatch(scheduler_url: Url, json: bool, cmd: ConfidentialCommand) 
         ConfidentialCommand::InitSession(args) => {
             handle_init_session(scheduler_url, json, args).await
         }
-        ConfidentialCommand::Start(_) => Err(anyhow!(
-            "`aleph instance confidential start` is not yet implemented"
-        )),
+        ConfidentialCommand::Start(args) => handle_start(scheduler_url, json, args).await,
         ConfidentialCommand::Create(_) => Err(anyhow!(
             "`aleph instance confidential create` is not yet implemented"
         )),
@@ -96,5 +99,112 @@ async fn handle_init_session(
 
     // 9. Done.
     println!("Confidential session initialized for {vm_id} on {crn_url}.");
+    Ok(())
+}
+
+async fn handle_start(scheduler_url: Url, json: bool, args: ConfidentialStartArgs) -> Result<()> {
+    // 1. Resolve target.
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+
+    // 2. Session dir must exist.
+    let session_dir = ConfigStore::confidential_sessions_dir()?.join(vm_id.to_string());
+    if !session_dir.exists() {
+        bail!(
+            "no session found for {vm_id}. Run 'aleph instance confidential init-session {vm_id}' first."
+        );
+    }
+
+    // 3. CRN client.
+    let account = resolve_account(&args.identity)?;
+    let crn = CrnClient::new(&account, crn_url.clone())?;
+
+    // 4. Fetch measurement.
+    let measurement = crn
+        .get_measurement(&vm_id)
+        .await
+        .context("fetching VM measurement from CRN")?;
+    let (vm_measure, nonce) = measurement.split_launch_measure()?;
+
+    // 5. Resolve expected firmware hash.
+    let firmware_hash_hex = if let Some(path) = args.firmware_file.as_deref() {
+        calculate_firmware_hash(path).with_context(|| format!("hashing {}", path.display()))?
+    } else if let Some(h) = args.firmware_hash.clone() {
+        h
+    } else {
+        DEFAULT_CONFIDENTIAL_FIRMWARE_HASH_HEX.to_string()
+    };
+    let firmware_hash: [u8; 32] = hex::decode(&firmware_hash_hex)
+        .with_context(|| format!("decoding firmware hash hex: {firmware_hash_hex}"))?
+        .try_into()
+        .map_err(|v: Vec<u8>| {
+            anyhow!(
+                "firmware hash must be 32 bytes (got {}); was {firmware_hash_hex:?}",
+                v.len()
+            )
+        })?;
+
+    // 6. Read TIK.
+    let tik_path = session_dir.join("vm_tik.bin");
+    let tik_bytes =
+        std::fs::read(&tik_path).with_context(|| format!("reading {}", tik_path.display()))?;
+    let tik: [u8; 16] = tik_bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow!("vm_tik.bin must be 16 bytes (got {})", v.len()))?;
+
+    // 7. Validate measurement (constant time).
+    let expected = compute_expected_measure(&measurement.sev_info, &tik, &firmware_hash, &nonce);
+    if expected.ct_eq(&vm_measure).unwrap_u8() == 0 {
+        bail!(
+            "VM measurement does not match expected firmware (hash {firmware_hash_hex}). \
+             The VM may be running tampered code, or the firmware hash is wrong. \
+             Pass --firmware-file to recompute locally. Refusing to inject secret."
+        );
+    }
+
+    // 8. Read TEK.
+    let tek_path = session_dir.join("vm_tek.bin");
+    let tek_bytes =
+        std::fs::read(&tek_path).with_context(|| format!("reading {}", tek_path.display()))?;
+    let tek: [u8; 16] = tek_bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow!("vm_tek.bin must be 16 bytes (got {})", v.len()))?;
+
+    // 9. Acquire secret.
+    let secret = match args.secret {
+        Some(s) => s,
+        None => {
+            rpassword::prompt_password("VM disk-decryption secret: ").context("reading secret")?
+        }
+    };
+
+    // 10. Random IV (16 bytes).
+    use rand::RngCore;
+    let mut iv = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut iv);
+
+    // 11. Build + inject.
+    let (packet_header, encrypted_secret) =
+        build_secret_packet(&tek, &tik, &vm_measure, &secret, iv);
+    crn.inject_secret(&vm_id, &packet_header, &encrypted_secret)
+        .await
+        .context("CRN rejected the secret injection")?;
+
+    // 12. Output.
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "ok",
+                "vm_id": vm_id.to_string(),
+                "crn_url": crn_url.to_string(),
+            })
+        );
+    } else {
+        println!("Instance {vm_id} is starting on {crn_url}.");
+        println!("  Networking: aleph instance show {vm_id} --verbose");
+        println!("  SSH:        aleph instance ssh {vm_id}");
+        println!("  Logs:       aleph instance logs {vm_id}");
+    }
     Ok(())
 }
