@@ -358,6 +358,12 @@ impl CrnClient {
         }
     }
 
+    /// GET /about/certificates - returns the platform certificate chain
+    /// bundle (PEM, matches `sevctl export` output). Unsigned; public endpoint.
+    pub async fn get_platform_certificate(&self) -> Result<Vec<u8>, CrnError> {
+        fetch_platform_certificate(&self.http_client, &self.crn_url).await
+    }
+
     /// List the VMs currently active on this CRN, indexed by item hash.
     ///
     /// Calls `GET /v2/about/executions/list`. The v1 fallback that the Python
@@ -645,6 +651,24 @@ pub async fn fetch_active_vms(
         return Err(CrnError::Api { status, body });
     }
     Ok(resp.json::<ActiveVmList>().await?)
+}
+
+/// Free-function variant of `CrnClient::get_platform_certificate`. Useful for
+/// tests that don't need to construct a full `CrnClient`.
+pub async fn fetch_platform_certificate(
+    http: &reqwest::Client,
+    crn_url: &Url,
+) -> Result<Vec<u8>, CrnError> {
+    let url = crn_url.join("/about/certificates").expect("valid path");
+    let response = http.get(url).send().await?;
+    let status = response.status().as_u16();
+    if !(200..=299).contains(&status) {
+        return Err(CrnError::Api {
+            status,
+            body: response.text().await?,
+        });
+    }
+    Ok(response.bytes().await?.to_vec())
 }
 
 /// Fetch the list of running VM executions from a CRN's
@@ -1243,5 +1267,43 @@ mod tests {
             }
             other => panic!("expected Api error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_platform_certificate_returns_bytes() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/about/certificates"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_bytes(b"PEM-bytes-here".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let url = url::Url::parse(&server.uri()).unwrap();
+        let bytes = super::fetch_platform_certificate(&http, &url)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"PEM-bytes-here");
+    }
+
+    #[tokio::test]
+    async fn fetch_platform_certificate_surfaces_non_200() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/about/certificates"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(503).set_body_string("temporarily unavailable"),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let url = url::Url::parse(&server.uri()).unwrap();
+        let err = super::fetch_platform_certificate(&http, &url)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::crn::CrnError::Api { status: 503, .. }));
     }
 }
