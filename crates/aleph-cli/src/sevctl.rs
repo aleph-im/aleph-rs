@@ -21,8 +21,12 @@ pub enum SevctlError {
 }
 
 /// Output files produced by `sevctl session`. Paths are derived from the
-/// `<prefix>` argument by appending the four well-known suffixes.
+/// `<prefix>` argument by appending the four well-known suffixes. `tek` and
+/// `tik` are read later by `handle_start` directly from the session directory,
+/// so they are kept here for descriptive completeness even though no caller
+/// uses them via this struct today.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SessionFiles {
     pub godh: PathBuf,
     pub session: PathBuf,
