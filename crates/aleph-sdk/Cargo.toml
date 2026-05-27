@@ -45,7 +45,7 @@ tokio = { workspace = true }
 url = { workspace = true }
 walkdir = { workspace = true }
 hex = { workspace = true }
-hmac = "0.12"
+hmac = { workspace = true }
 p256 = { workspace = true }
 prost = { workspace = true }
 tempfile = { workspace = true }

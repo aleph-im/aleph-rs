@@ -349,6 +349,7 @@ dependencies = [
  "cid",
  "futures-util",
  "hex",
+ "hmac",
  "http 1.4.0",
  "memsizes",
  "multihash",
