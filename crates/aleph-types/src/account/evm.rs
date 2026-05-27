@@ -89,6 +89,11 @@ mod tests {
         0xce, 0x06,
     ];
 
+    // Compile-time guarantee backing the type's doc comment: the secp256k1
+    // signing key wipes its secret scalar on drop. Trips the build if a future
+    // `k256`/`ecdsa` version drops the `ZeroizeOnDrop` impl.
+    static_assertions::assert_impl_all!(SigningKey: zeroize::ZeroizeOnDrop);
+
     #[test]
     fn test_evm_account_creation() {
         let account = EvmAccount::new(Chain::Ethereum, &TEST_KEY).unwrap();
