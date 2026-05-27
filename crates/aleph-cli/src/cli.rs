@@ -130,6 +130,12 @@ pub enum Commands {
         #[clap(subcommand)]
         command: AccountCommand,
     },
+    /// Admin commands (gated by `admin` cargo feature + ALEPH_ADMIN env var).
+    #[cfg(feature = "admin")]
+    Admin {
+        #[clap(subcommand)]
+        command: AdminCommand,
+    },
     /// Create aggregate key-value entries
     Aggregate {
         #[clap(subcommand)]
@@ -2300,6 +2306,203 @@ pub struct BuyCreditArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Subcommand)]
+pub enum AdminCommand {
+    /// Manage the `vm-images` aggregate.
+    Images {
+        #[clap(subcommand)]
+        command: ImagesCommand,
+    },
+}
+
+#[cfg(feature = "admin")]
+#[derive(Subcommand)]
+pub enum ImagesCommand {
+    /// Operate on the rootfs map.
+    Rootfs {
+        #[clap(subcommand)]
+        command: ImagesRootfsCommand,
+    },
+    /// Operate on the runtime map.
+    Runtime {
+        #[clap(subcommand)]
+        command: ImagesRuntimeCommand,
+    },
+    /// Operate on the firmware map.
+    Firmware {
+        #[clap(subcommand)]
+        command: ImagesFirmwareCommand,
+    },
+}
+
+#[cfg(feature = "admin")]
+#[derive(Subcommand)]
+pub enum ImagesRootfsCommand {
+    /// Add a new rootfs entry. Fails if the name already exists.
+    Add(AdminRootfsAddArgs),
+    /// Modify an existing rootfs entry. Fails if the name doesn't exist.
+    Update(AdminRootfsUpdateArgs),
+    /// Mark a rootfs entry as deprecated.
+    Deprecate(AdminEntryByNameArgs),
+    /// Mark a rootfs entry as not deprecated.
+    Undeprecate(AdminEntryByNameArgs),
+    /// Set the default rootfs.
+    Default(AdminEntryByNameArgs),
+    /// Clear the default rootfs.
+    ClearDefault(AdminTargetArgs),
+}
+
+#[cfg(feature = "admin")]
+#[derive(Subcommand)]
+pub enum ImagesRuntimeCommand {
+    /// Add a new runtime entry. Fails if the name already exists.
+    Add(AdminRuntimeAddArgs),
+    /// Modify an existing runtime entry. Fails if the name doesn't exist.
+    Update(AdminRuntimeUpdateArgs),
+    /// Mark a runtime entry as deprecated.
+    Deprecate(AdminEntryByNameArgs),
+    /// Mark a runtime entry as not deprecated.
+    Undeprecate(AdminEntryByNameArgs),
+    /// Set the default runtime.
+    Default(AdminEntryByNameArgs),
+    /// Clear the default runtime.
+    ClearDefault(AdminTargetArgs),
+}
+
+#[cfg(feature = "admin")]
+#[derive(Subcommand)]
+pub enum ImagesFirmwareCommand {
+    /// Add a new firmware entry. Fails if the name already exists.
+    Add(AdminRuntimeAddArgs),
+    /// Modify an existing firmware entry. Fails if the name doesn't exist.
+    Update(AdminRuntimeUpdateArgs),
+    /// Mark a firmware entry as deprecated.
+    Deprecate(AdminEntryByNameArgs),
+    /// Mark a firmware entry as not deprecated.
+    Undeprecate(AdminEntryByNameArgs),
+    /// Set the default firmware.
+    Default(AdminEntryByNameArgs),
+    /// Clear the default firmware.
+    ClearDefault(AdminTargetArgs),
+}
+
+#[cfg(feature = "admin")]
+#[derive(Args, Debug, Clone)]
+pub struct AdminTargetArgs {
+    /// Owner address. Defaults to PRICING_ADDRESS.
+    #[arg(long)]
+    pub address: Option<String>,
+    /// Aggregate key. Defaults to "vm-images".
+    ///
+    /// Non-default keys are intended for fresh aggregates only - the SDK's
+    /// VmImagesAggregate deserializer is hard-wired to look for a "vm-images"
+    /// field in the API response, so reading back a non-default key only works
+    /// before any content has been published under it.
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+    /// Sign on behalf of another address (requires an authorization).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+    /// Skip the "Proceed?" confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Args, Debug, Clone)]
+pub struct AdminEntryByNameArgs {
+    /// Entry name.
+    pub name: String,
+    #[command(flatten)]
+    pub target: AdminTargetArgs,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Args, Debug, Clone)]
+pub struct AdminRootfsAddArgs {
+    /// Entry name.
+    pub name: String,
+    /// Item hash (raw hex or IPFS CID).
+    #[arg(value_parser = clap::value_parser!(ItemHash))]
+    pub hash: ItemHash,
+    /// Human-readable name.
+    #[arg(long)]
+    pub display_name: Option<String>,
+    /// Description.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Minimum disk size in MiB.
+    #[arg(long)]
+    pub min_disk_mib: Option<u64>,
+    /// Add as deprecated.
+    #[arg(long)]
+    pub deprecated: bool,
+    #[command(flatten)]
+    pub target: AdminTargetArgs,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Args, Debug, Clone)]
+pub struct AdminRootfsUpdateArgs {
+    pub name: String,
+    #[arg(long, value_parser = clap::value_parser!(ItemHash))]
+    pub hash: Option<ItemHash>,
+    #[arg(long, conflicts_with = "clear_display_name")]
+    pub display_name: Option<String>,
+    #[arg(long)]
+    pub clear_display_name: bool,
+    #[arg(long, conflicts_with = "clear_description")]
+    pub description: Option<String>,
+    #[arg(long)]
+    pub clear_description: bool,
+    #[arg(long, conflicts_with = "clear_min_disk_mib")]
+    pub min_disk_mib: Option<u64>,
+    #[arg(long)]
+    pub clear_min_disk_mib: bool,
+    #[command(flatten)]
+    pub target: AdminTargetArgs,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Args, Debug, Clone)]
+pub struct AdminRuntimeAddArgs {
+    pub name: String,
+    #[arg(value_parser = clap::value_parser!(ItemHash))]
+    pub hash: ItemHash,
+    #[arg(long)]
+    pub display_name: Option<String>,
+    #[arg(long)]
+    pub description: Option<String>,
+    #[arg(long)]
+    pub deprecated: bool,
+    #[command(flatten)]
+    pub target: AdminTargetArgs,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Args, Debug, Clone)]
+pub struct AdminRuntimeUpdateArgs {
+    pub name: String,
+    #[arg(long, value_parser = clap::value_parser!(ItemHash))]
+    pub hash: Option<ItemHash>,
+    #[arg(long, conflicts_with = "clear_display_name")]
+    pub display_name: Option<String>,
+    #[arg(long)]
+    pub clear_display_name: bool,
+    #[arg(long, conflicts_with = "clear_description")]
+    pub description: Option<String>,
+    #[arg(long)]
+    pub clear_description: bool,
+    #[command(flatten)]
+    pub target: AdminTargetArgs,
 }
 
 pub fn parse_rfc3339_utc(s: &str) -> Result<DateTime<Utc>, String> {
