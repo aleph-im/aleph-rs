@@ -288,6 +288,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "anyhow",
+ "base64",
  "bs58",
  "bytes",
  "chrono",

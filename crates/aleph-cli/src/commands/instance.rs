@@ -417,6 +417,11 @@ pub async fn handle_instance_command(
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             crn::handle_operation(scheduler_url, json, args, "reboot").await?
         }
+        InstanceCommand::Show(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            super::instance_show::handle_instance_show(aleph_client, scheduler_url, json, args)
+                .await?;
+        }
         InstanceCommand::Erase(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             crn::handle_operation(scheduler_url, json, args, "erase").await?

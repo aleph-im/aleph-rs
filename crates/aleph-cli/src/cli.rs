@@ -1615,6 +1615,28 @@ Examples:
     Price(InstancePriceArgs),
     /// Reboot a VM instance
     Reboot(CrnArgs),
+    /// Show details of an instance.
+    #[command(long_about = "\
+Show details of a single VM instance.
+
+By default, gathers data without authenticated calls: the INSTANCE message
+from the CCN, plus scheduler placement and status.
+
+Pass --verbose to additionally reach the allocated CRN for live networking
+(IPv4/IPv6, mapped host ports) and pull the owner's port-forwarding
+aggregate. These extras add up to three HTTP calls; skip them for a fast
+lookup.
+
+For the raw INSTANCE message, use `aleph message get <hash>`.
+
+VM_ID accepts a unique hash prefix (e.g. the 12-char hash shown by `aleph
+instance list`); the scheduler matches it server-side.
+
+Examples:
+  aleph instance show a41fb91c3e68
+  aleph instance show a41fb91c3e68 --verbose
+  aleph instance show a41fb91c3e68 --json")]
+    Show(InstanceShowArgs),
     /// SSH into a dispatched VM instance
     #[command(long_about = "\
 Open an SSH session to a dispatched VM instance.
@@ -1647,6 +1669,18 @@ pub struct InstanceListArgs {
     /// Defaults to the address of the current default account.
     #[arg(long)]
     pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct InstanceShowArgs {
+    /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
+    /// shown by `aleph instance list`); the scheduler matches it server-side.
+    pub vm_id: String,
+
+    /// Also reach the allocated CRN for live networking (IPv4/IPv6, mapped
+    /// host ports) and fetch the owner's port-forwarding aggregate.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 #[derive(Args)]
