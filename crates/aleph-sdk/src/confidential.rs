@@ -88,8 +88,8 @@ pub fn compute_expected_measure(
 ///             secret_table_size_le32 || encrypted_secret_table || vm_measure
 /// per the SEV API spec.
 pub fn build_secret_packet(
-    tek: &[u8],
-    tik: &[u8],
+    tek: &[u8; 16],
+    tik: &[u8; 16],
     vm_measure: &[u8; 32],
     secret: &str,
     iv: [u8; 16],
@@ -128,12 +128,13 @@ pub fn build_secret_packet(
 
     type Aes128Ctr = ctr::Ctr64BE<Aes128>;
     let mut cipher =
-        Aes128Ctr::new_from_slices(tek, &iv).expect("AES-128-CTR with 16-byte key and 16-byte IV");
+        Aes128Ctr::new_from_slices(tek, &iv).expect("AES-128-CTR accepts a 16-byte key and IV");
     let mut ciphertext = table.clone();
     cipher.apply_keystream(&mut ciphertext);
 
     let flags: [u8; 4] = [0, 0, 0, 0];
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(tik).expect("HMAC accepts any key length");
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(tik).expect("HMAC-SHA256 accepts a 16-byte key");
     mac.update(&[0x01u8]);
     mac.update(&flags);
     mac.update(&iv);
@@ -292,10 +293,14 @@ mod tests {
     #[test]
     fn build_secret_packet_locked_fixture() {
         use base64::Engine;
-        // Locked-input fixture - tek/tik/measure are arbitrary fixed values, IV is zero so the
-        // output is fully deterministic. The HMAC and ciphertext are determined by the inputs.
-        let tek = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let tik = hex::decode("0f0e0d0c0b0a09080706050403020100").unwrap();
+        let tek: [u8; 16] = hex::decode("000102030405060708090a0b0c0d0e0f")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let tik: [u8; 16] = hex::decode("0f0e0d0c0b0a09080706050403020100")
+            .unwrap()
+            .try_into()
+            .unwrap();
         let vm_measure: [u8; 32] =
             hex::decode("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .unwrap()

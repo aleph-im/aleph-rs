@@ -79,7 +79,7 @@ hmac = { version = "0.12" }
 zeroize = { version = "1" }
 coins-ledger = { version = "0.13" }
 dialoguer = { version = "0.11" }
-ctrlc = { version = "3.4" }
 ctr = { version = "0.9" }
+ctrlc = { version = "3.4" }
 libc = { version = "0.2" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
