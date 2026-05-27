@@ -4,7 +4,8 @@ use aes::Aes128;
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SEVInfo {
@@ -178,6 +179,13 @@ const fn uuid_le(d1: u32, d2: u16, d3: u16, d4_hi: u8, d4_lo: u8, rest: [u8; 6])
     out
 }
 
+pub fn calculate_firmware_hash(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +296,19 @@ mod tests {
 
         // Expected length: header_guid(16) + header_len(4) + secret_guid(16) + secret_len(4) + secret(9) + zero(1) = 50, rounded up to 64.
         assert_eq!(ciphertext.len(), 64);
+    }
+
+    #[test]
+    fn calculate_firmware_hash_known_input() {
+        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("firmware.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let hex = calculate_firmware_hash(&path).unwrap();
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
