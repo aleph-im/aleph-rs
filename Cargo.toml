@@ -62,6 +62,7 @@ toml = { version = "0.8" }
 tempfile = { version = "3" }
 static_assertions = { version = "1" }
 walkdir = { version = "2" }
+which = { version = "6" }
 wiremock = { version = "0.6" }
 # `zeroize` is requested explicitly so that `SigningKey: ZeroizeOnDrop` (which
 # wipes the secret scalar on drop) follows from our own dependency declaration.
