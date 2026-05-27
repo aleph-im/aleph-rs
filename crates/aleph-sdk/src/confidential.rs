@@ -179,6 +179,9 @@ const fn uuid_le(d1: u32, d2: u16, d3: u16, d4_hi: u8, d4_lo: u8, rest: [u8; 6])
     out
 }
 
+/// Stream-hashes the OVMF firmware blob at `path` and returns the lowercase
+/// hex-encoded SHA-256 digest. Matches `aleph_sdk.utils.calculate_firmware_hash`
+/// in Python; the digest is what AMD's SEV API feeds into the launch measurement.
 pub fn calculate_firmware_hash(path: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
