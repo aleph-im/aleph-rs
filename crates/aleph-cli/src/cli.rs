@@ -70,36 +70,27 @@ pub fn parse_size_to_mib(s: &str) -> Result<u64, String> {
     Ok(mib_rounded)
 }
 
-/// Well-known rootfs image presets.
-pub(crate) const IMAGE_PRESETS: &[(&str, &str)] = &[
-    (
-        "ubuntu22",
-        "4a0f62da42f4478544616519e6f5d58adb1096e069b392b151d47c3609492d0c",
-    ),
-    (
-        "ubuntu24",
-        "5330dcefe1857bcd97b7b7f24d1420a7d46232d53f27be280c8a7071d88bd84e",
-    ),
-    (
-        "debian12",
-        "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717",
-    ),
-];
+/// A user-supplied image reference: either a preset name to be resolved against
+/// the `vm-images` aggregate, or a raw item hash / IPFS CID.
+#[derive(Clone, Debug)]
+pub enum ImageRef {
+    Preset(String),
+    Hash(ItemHash),
+}
 
-/// Parse an image argument: either a preset name or an item hash (native hex or IPFS CID).
-pub fn parse_image(s: &str) -> Result<ItemHash, String> {
-    for (name, hash) in IMAGE_PRESETS {
-        if s.eq_ignore_ascii_case(name) {
-            return hash.parse().map_err(|e| format!("{e}"));
-        }
+/// Parse an image-or-preset argument. Accepts a raw item hash or IPFS CID
+/// (returns `Hash`), or any non-empty non-hash string (returns `Preset`).
+/// Empty / whitespace-only input is rejected. Preset name validity is checked
+/// later, against the network-published `vm-images` aggregate.
+pub fn parse_image_ref(s: &str) -> Result<ImageRef, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("image cannot be empty".to_string());
     }
-    ItemHash::try_from(s).map_err(|_| {
-        let preset_names: Vec<&str> = IMAGE_PRESETS.iter().map(|(n, _)| *n).collect();
-        format!(
-            "'{s}' is not a valid image. Use a preset ({}) or an item hash.",
-            preset_names.join(", ")
-        )
-    })
+    match ItemHash::try_from(trimmed) {
+        Ok(h) => Ok(ImageRef::Hash(h)),
+        Err(_) => Ok(ImageRef::Preset(trimmed.to_string())),
+    }
 }
 
 /// Long-form version string shown by `aleph --version`. Includes the git
@@ -1740,13 +1731,14 @@ pub struct InstanceCreateArgs {
     #[arg(value_name = "NAME")]
     pub name: String,
 
-    /// Root filesystem image: a preset name (ubuntu22, ubuntu24, debian12) or an item hash (hex or IPFS CID).
+    /// Root filesystem image: a preset name (resolved via the network's
+    /// `vm-images` aggregate), or an item hash (hex or IPFS CID).
     #[arg(
         long,
-        value_parser = parse_image,
+        value_parser = parse_image_ref,
         required_unless_present = "interactive"
     )]
-    pub image: Option<ItemHash>,
+    pub image: Option<ImageRef>,
 
     /// Disk size (e.g. 20GB, 1024MB, 1TiB). Required unless --size is used.
     #[arg(long, value_parser = parse_size_to_mib)]
@@ -1792,12 +1784,10 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub confidential: bool,
 
-    /// UEFI firmware hash for confidential VMs.
-    #[arg(
-        long,
-        default_value = "ba5bb13f3abca960b101a759be162b229e2b7e93ecad9d1307e54de887f177ff"
-    )]
-    pub confidential_firmware: String,
+    /// UEFI firmware preset or hash for confidential VMs. Defaults to
+    /// `defaults.firmware` from the `vm-images` aggregate when not set.
+    #[arg(long, value_parser = parse_image_ref)]
+    pub confidential_firmware: Option<ImageRef>,
 
     /// GPU model name (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
     /// Use `aleph instance price --gpu` to list available models.
@@ -2379,12 +2369,11 @@ pub struct ProgramCreateArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Runtime item hash. Defaults to the standard Aleph Python 3.12 runtime.
-    #[arg(
-        long,
-        default_value = "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696"
-    )]
-    pub runtime: ItemHash,
+    /// Runtime: preset slug from the vm-images aggregate (e.g. `python312`) or a
+    /// 64-char item hash. When omitted, resolves against the aggregate's
+    /// `defaults.runtime`.
+    #[arg(long, value_parser = parse_image_ref)]
+    pub runtime: Option<ImageRef>,
 
     /// Resource preset slug (e.g. `1vcpu-2gb`). Mutually exclusive with --vcpus / --memory.
     #[arg(long, conflicts_with_all = ["vcpus", "memory"])]

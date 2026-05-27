@@ -36,6 +36,11 @@ fn create_dry_run_emits_store_and_program_envelopes() {
             "1",
             "--memory",
             "256MiB",
+            // Pass --runtime as a raw hash so the dry run does not need to
+            // fetch the vm-images aggregate (the placeholder CCN URL has no
+            // server behind it).
+            "--runtime",
+            "63f07193e6ee9d207b7d1fcf8286f9aee34e6f12f101d2ec77c1229f92964696",
             "--private-key",
             &private_key_hex,
             "--chain",
