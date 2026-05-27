@@ -1,5 +1,7 @@
 //! SEV-ES launch attestation primitives. Pure data + pure crypto - no I/O.
 
+use aes::Aes128;
+use ctr::cipher::{KeyIvInit, StreamCipher};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -64,6 +66,115 @@ pub fn compute_expected_measure(
     mac.update(firmware_hash);
     mac.update(nonce);
     mac.finalize().into_bytes().into()
+}
+
+/// SEV-ES launch secret injection. AMD SEV API specification, LAUNCH_SECRET command.
+///
+/// Returns `(packet_header_b64, encrypted_secret_b64)`.
+///
+/// Plaintext secret-table layout (AMD spec):
+///   table_header_guid (16 bytes, 1e74f542-71dd-4d66-963e-ef4287ff173b, UUID little-endian)
+///   table_length      (4 bytes, little-endian, = total table length in bytes)
+///   secret_guid       (16 bytes, 736869e5-84f0-4973-92ec-06879ce3da0b, UUID little-endian)
+///   secret_length     (4 bytes, little-endian, = 16 + 4 + secret.len() + 1)
+///   secret_bytes      (utf-8)
+///   nul terminator    (1 byte)
+///   zero padding to a 16-byte boundary
+///
+/// Encrypted with AES-128-CTR using `tek` as the key.
+///
+/// Packet header: flags (4 zero bytes) || iv (16) || HMAC-SHA256(tik, ...) (32).
+/// HMAC input: 0x01 (LAUNCH_SECRET command id) || flags(4) || iv(16) ||
+///             secret_table_size_le32 || encrypted_secret_table || vm_measure
+/// per the SEV API spec.
+pub fn build_secret_packet(
+    tek: &[u8],
+    tik: &[u8],
+    vm_measure: &[u8; 32],
+    secret: &str,
+    iv: [u8; 16],
+) -> (String, String) {
+    use base64::Engine;
+
+    const HEADER_GUID: [u8; 16] = uuid_le(
+        0x1e74f542,
+        0x71dd,
+        0x4d66,
+        0x96,
+        0x3e,
+        [0xef, 0x42, 0x87, 0xff, 0x17, 0x3b],
+    );
+    const SECRET_GUID: [u8; 16] = uuid_le(
+        0x736869e5,
+        0x84f0,
+        0x4973,
+        0x92,
+        0xec,
+        [0x06, 0x87, 0x9c, 0xe3, 0xda, 0x0b],
+    );
+
+    let secret_bytes = secret.as_bytes();
+    let secret_entry_len: u32 = (16 + 4 + secret_bytes.len() + 1) as u32;
+    let total_len_unrounded = 16 + 4 + secret_entry_len as usize;
+    let total_len = (total_len_unrounded + 15) & !15;
+
+    let mut table = vec![0u8; total_len];
+    table[0..16].copy_from_slice(&HEADER_GUID);
+    table[16..20].copy_from_slice(&(total_len as u32).to_le_bytes());
+    table[20..36].copy_from_slice(&SECRET_GUID);
+    table[36..40].copy_from_slice(&secret_entry_len.to_le_bytes());
+    table[40..40 + secret_bytes.len()].copy_from_slice(secret_bytes);
+    // trailing nul is already zero from vec![0u8; total_len]
+
+    type Aes128Ctr = ctr::Ctr64BE<Aes128>;
+    let mut cipher =
+        Aes128Ctr::new_from_slices(tek, &iv).expect("AES-128-CTR with 16-byte key and 16-byte IV");
+    let mut ciphertext = table.clone();
+    cipher.apply_keystream(&mut ciphertext);
+
+    let flags: [u8; 4] = [0, 0, 0, 0];
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(tik).expect("HMAC accepts any key length");
+    mac.update(&[0x01u8]);
+    mac.update(&flags);
+    mac.update(&iv);
+    mac.update(&(total_len as u32).to_le_bytes());
+    mac.update(&ciphertext);
+    mac.update(vm_measure);
+    let header_hmac = mac.finalize().into_bytes();
+
+    let mut header = Vec::with_capacity(4 + 16 + 32);
+    header.extend_from_slice(&flags);
+    header.extend_from_slice(&iv);
+    header.extend_from_slice(&header_hmac);
+
+    (
+        base64::engine::general_purpose::STANDARD.encode(&header),
+        base64::engine::general_purpose::STANDARD.encode(&ciphertext),
+    )
+}
+
+const fn uuid_le(d1: u32, d2: u16, d3: u16, d4_hi: u8, d4_lo: u8, rest: [u8; 6]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    let d1 = d1.to_le_bytes();
+    let d2 = d2.to_le_bytes();
+    let d3 = d3.to_le_bytes();
+    out[0] = d1[0];
+    out[1] = d1[1];
+    out[2] = d1[2];
+    out[3] = d1[3];
+    out[4] = d2[0];
+    out[5] = d2[1];
+    out[6] = d3[0];
+    out[7] = d3[1];
+    out[8] = d4_hi;
+    out[9] = d4_lo;
+    out[10] = rest[0];
+    out[11] = rest[1];
+    out[12] = rest[2];
+    out[13] = rest[3];
+    out[14] = rest[4];
+    out[15] = rest[5];
+    out
 }
 
 #[cfg(test)]
@@ -158,5 +269,54 @@ mod tests {
             m.split_launch_measure(),
             Err(ConfidentialError::InvalidLaunchMeasureBase64(_))
         ));
+    }
+
+    #[test]
+    fn build_secret_packet_table_layout() {
+        use base64::Engine;
+        let tek = [0u8; 16];
+        let tik = [0u8; 16];
+        let vm_measure = [0u8; 32];
+        let secret = "topsecret";
+        let iv = [0u8; 16];
+
+        let (_hdr_b64, sec_b64) = build_secret_packet(&tek, &tik, &vm_measure, secret, iv);
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(&sec_b64)
+            .unwrap();
+
+        // Expected length: header_guid(16) + header_len(4) + secret_guid(16) + secret_len(4) + secret(9) + zero(1) = 50, rounded up to 64.
+        assert_eq!(ciphertext.len(), 64);
+    }
+
+    #[test]
+    fn build_secret_packet_locked_fixture() {
+        use base64::Engine;
+        // Locked-input fixture - tek/tik/measure are arbitrary fixed values, IV is zero so the
+        // output is fully deterministic. The HMAC and ciphertext are determined by the inputs.
+        let tek = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
+        let tik = hex::decode("0f0e0d0c0b0a09080706050403020100").unwrap();
+        let vm_measure: [u8; 32] =
+            hex::decode("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let secret = "hello";
+        let iv = [0u8; 16];
+
+        let (hdr_b64, sec_b64) = build_secret_packet(&tek, &tik, &vm_measure, secret, iv);
+        let hdr = base64::engine::general_purpose::STANDARD
+            .decode(&hdr_b64)
+            .unwrap();
+        let sec = base64::engine::general_purpose::STANDARD
+            .decode(&sec_b64)
+            .unwrap();
+        // Packet header layout: flags(4 = "\x00\x00\x00\x00") || iv(16) || hmac(32) = 52 bytes
+        assert_eq!(hdr.len(), 52);
+        assert_eq!(&hdr[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&hdr[4..20], &iv);
+        // Ciphertext length matches the table size for a 5-byte secret:
+        // 16 + 4 + 16 + 4 + 5 + 1 = 46, rounded to 48.
+        assert_eq!(sec.len(), 48);
     }
 }
