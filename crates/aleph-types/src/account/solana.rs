@@ -78,6 +78,12 @@ mod tests {
         0x7f, 0x60,
     ];
 
+    // Compile-time guarantee backing the type's doc comment: the Ed25519
+    // signing key wipes its secret scalar on drop. This requires the
+    // ed25519-dalek `zeroize` feature (see root Cargo.toml); trips the build if
+    // that feature or the upstream impl ever goes away.
+    static_assertions::assert_impl_all!(ed25519_dalek::SigningKey: zeroize::ZeroizeOnDrop);
+
     #[test]
     fn test_solana_account_creation() {
         let account = SolanaAccount::new(Chain::Sol, &TEST_KEY).unwrap();

@@ -389,7 +389,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "sha3",
+ "static_assertions",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]

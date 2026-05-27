@@ -59,9 +59,16 @@ rpassword = { version = "7" }
 rand = { version = "0.8" }
 toml = { version = "0.8" }
 tempfile = { version = "3" }
+static_assertions = { version = "1" }
 walkdir = { version = "2" }
 wiremock = { version = "0.6" }
-ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+# `zeroize` is requested explicitly so that `SigningKey: ZeroizeOnDrop` (which
+# wipes the secret scalar on drop) follows from our own dependency declaration.
+# It is currently also force-enabled by ed25519-dalek's `alloc`/`std` feature,
+# but that is an upstream implementation detail we don't want our key-wiping
+# guarantee to silently rely on. The compile-time assertion in account/solana.rs
+# is the backstop if the impl ever disappears.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core", "zeroize"] }
 k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 base64 = { version = "0.22" }
 p256 = { version = "0.13", features = ["ecdsa"] }
