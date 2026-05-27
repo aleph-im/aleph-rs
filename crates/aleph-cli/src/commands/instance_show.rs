@@ -138,7 +138,10 @@ pub(crate) struct Networking {
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct PortForward {
     pub vm_port: u16,
-    pub host: u16,
+    /// Host-side mapped port, cross-referenced from the CRN's `mapped_ports`.
+    /// `None` when the aggregate exposes this VM port but the CRN reports no
+    /// host mapping for it (rendered as `-`, serialized as `null`).
+    pub host: Option<u16>,
     pub proto: Option<String>,
 }
 
@@ -495,7 +498,11 @@ pub(crate) fn render_text(s: &InstanceShow) -> String {
         } else {
             for pf in forwards {
                 let proto = pf.proto.as_deref().unwrap_or("tcp");
-                writeln!(out, "  {}/{proto}  -> [host={}]", pf.vm_port, pf.host).unwrap();
+                let host = pf
+                    .host
+                    .map(|h| h.to_string())
+                    .unwrap_or_else(|| MISSING.into());
+                writeln!(out, "  {}/{proto}  -> [host={host}]", pf.vm_port).unwrap();
             }
         }
     }
@@ -652,8 +659,7 @@ async fn populate_verbose(
                         .mapped_ports
                         .as_ref()
                         .and_then(|m| m.get(vm_port))
-                        .copied()
-                        .unwrap_or(0);
+                        .copied();
                     forwards.push(PortForward {
                         vm_port: *vm_port,
                         host,
@@ -1029,7 +1035,7 @@ mod tests {
         show.mapped_ports = Some(BTreeMap::from([(22u16, 24221u16)]));
         show.port_forwards = Some(vec![PortForward {
             vm_port: 22,
-            host: 24221,
+            host: Some(24221),
             proto: None,
         }]);
         let v = render_json(&show);
@@ -1121,6 +1127,34 @@ mod tests {
         handle_instance_show(&aleph_client, scheduler_url, false, args)
             .await
             .expect("handler succeeds");
+    }
+
+    #[tokio::test]
+    async fn handle_instance_show_json_renders_successfully() {
+        let server = MockServer::start().await;
+        let msg = fixture_message();
+
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/vms/{VM_HASH}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(vm_entry_dispatched(VM_HASH, NODE_HASH)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v0/messages/{VM_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(message_envelope(&msg)))
+            .mount(&server)
+            .await;
+
+        let aleph_client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let scheduler_url = Url::parse(&server.uri()).unwrap();
+        let args = make_show_args(VM_HASH, false);
+        // Exercises the json branch end to end (build -> render_json -> print);
+        // the json content itself is asserted by render_json_* tests.
+        handle_instance_show(&aleph_client, scheduler_url, true, args)
+            .await
+            .expect("json handler succeeds");
     }
 
     #[tokio::test]
@@ -1237,7 +1271,7 @@ mod tests {
             .iter()
             .find(|p| p.vm_port == 22)
             .expect("port 22 present");
-        assert_eq!(pf.host, 24221);
+        assert_eq!(pf.host, Some(24221));
         assert_eq!(pf.proto.as_deref(), Some("tcp"));
     }
 
@@ -1311,12 +1345,12 @@ mod tests {
         show.port_forwards = Some(vec![
             PortForward {
                 vm_port: 22,
-                host: 24221,
+                host: Some(24221),
                 proto: None,
             },
             PortForward {
                 vm_port: 80,
-                host: 24222,
+                host: Some(24222),
                 proto: Some("tcp+udp".into()),
             },
         ]);
@@ -1361,6 +1395,33 @@ mod tests {
             "default proto column for entries without flags"
         );
         assert!(out.contains("80/tcp+udp"));
+    }
+
+    #[test]
+    fn render_text_port_forward_unmapped_host_renders_dash() {
+        let mut show = show_for_render();
+        show.port_forwards = Some(vec![PortForward {
+            vm_port: 22,
+            host: None,
+            proto: Some("tcp".into()),
+        }]);
+        let out = render_text(&show);
+        assert!(
+            out.contains("22/tcp  -> [host=-]"),
+            "unmapped host must render as '-', not 0: {out}"
+        );
+    }
+
+    #[test]
+    fn render_json_port_forward_unmapped_host_is_null() {
+        let mut show = show_for_render();
+        show.port_forwards = Some(vec![PortForward {
+            vm_port: 22,
+            host: None,
+            proto: Some("tcp".into()),
+        }]);
+        let v = render_json(&show);
+        assert!(v["port_forwards"][0]["host"].is_null());
     }
 
     #[tokio::test]
