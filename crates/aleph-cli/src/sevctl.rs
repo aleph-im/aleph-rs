@@ -44,11 +44,6 @@ impl Sevctl {
             .map_err(|_| SevctlError::NotFound)
     }
 
-    /// The full path to the discovered binary. Useful for diagnostic output.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Shell out to `sevctl verify <cert_path>`. Validates the platform cert
     /// chain against AMD's embedded roots. Returns `Ok(())` on exit 0; surfaces
     /// stderr on non-zero exit.

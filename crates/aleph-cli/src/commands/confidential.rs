@@ -84,17 +84,16 @@ async fn handle_init_session(
 
     // 7. Derive session keys (writes vm_{godh,session}.b64 + vm_{tek,tik}.bin).
     let prefix = session_dir.join("vm");
-    sevctl
+    let files = sevctl
         .session(&prefix, &cert_path, args.policy)
         .await
         .context("sevctl session failed")?;
 
     // 8. POST session.b64 + godh.b64 to the CRN.
-    let session_path = session_dir.join("vm_session.b64");
-    let session_bytes = std::fs::read(&session_path)
-        .with_context(|| format!("reading {}", session_path.display()))?;
+    let session_bytes = std::fs::read(&files.session)
+        .with_context(|| format!("reading {}", files.session.display()))?;
     let godh_bytes =
-        std::fs::read(&godh_path).with_context(|| format!("reading {}", godh_path.display()))?;
+        std::fs::read(&files.godh).with_context(|| format!("reading {}", files.godh.display()))?;
     crn.initialize_confidential(&vm_id, &session_bytes, &godh_bytes)
         .await
         .context("CRN rejected the initialize request")?;
