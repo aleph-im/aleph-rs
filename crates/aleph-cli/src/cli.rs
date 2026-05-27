@@ -3206,6 +3206,8 @@ pub struct ConfidentialInitSessionArgs {
     /// Override the CRN URL discovered via the scheduler.
     #[arg(long)]
     pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
     /// SEV policy mask.
     #[arg(long, default_value_t = 0x1)]
     pub policy: u32,
@@ -3224,6 +3226,8 @@ pub struct ConfidentialStartArgs {
     /// Override the CRN URL discovered via the scheduler.
     #[arg(long)]
     pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
     /// Expected OVMF firmware hash (hex). Defaults to the active value from the
     /// vm-images aggregate when omitted.
     #[arg(long)]
@@ -3251,6 +3255,8 @@ pub struct ConfidentialCreateArgs {
     /// Override the CRN URL discovered via the scheduler.
     #[arg(long)]
     pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
     /// SEV policy mask.
     #[arg(long, default_value_t = 0x1)]
     pub policy: u32,
