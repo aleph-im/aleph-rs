@@ -1,6 +1,8 @@
 //! `aleph instance confidential` command tree.
 
-use crate::cli::{ConfidentialCommand, ConfidentialInitSessionArgs, ConfidentialStartArgs};
+use crate::cli::{
+    ConfidentialCommand, ConfidentialCreateArgs, ConfidentialInitSessionArgs, ConfidentialStartArgs,
+};
 use crate::commands::instance_target::resolve_target;
 use crate::common::{confirm_action, resolve_account};
 use crate::config::store::ConfigStore;
@@ -9,8 +11,10 @@ use aleph_sdk::confidential::{
     DEFAULT_CONFIDENTIAL_FIRMWARE_HASH_HEX, build_secret_packet, calculate_firmware_hash,
     compute_expected_measure,
 };
-use aleph_sdk::crn::CrnClient;
+use aleph_sdk::crn::{CrnClient, CrnError};
+use aleph_types::item_hash::ItemHash;
 use anyhow::{Context, Result, anyhow, bail};
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use url::Url;
 
@@ -20,9 +24,7 @@ pub async fn dispatch(scheduler_url: Url, json: bool, cmd: ConfidentialCommand) 
             handle_init_session(scheduler_url, json, args).await
         }
         ConfidentialCommand::Start(args) => handle_start(scheduler_url, json, args).await,
-        ConfidentialCommand::Create(_) => Err(anyhow!(
-            "`aleph instance confidential create` is not yet implemented"
-        )),
+        ConfidentialCommand::Create(args) => handle_create(scheduler_url, json, args).await,
     }
 }
 
@@ -207,4 +209,90 @@ async fn handle_start(scheduler_url: Url, json: bool, args: ConfidentialStartArg
         println!("  Logs:       aleph instance logs {vm_id}");
     }
     Ok(())
+}
+
+async fn handle_create(scheduler_url: Url, json: bool, args: ConfidentialCreateArgs) -> Result<()> {
+    // 0. Sevctl available? Fail fast before doing anything.
+    let _sevctl = Sevctl::find()?;
+
+    // 1. Determine vm_id + crn_url.
+    let vm_id_input = args.vm_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "creating a new VM from `confidential create` requires `instance create` flag forwarding, \
+             which lands in a follow-up. For now, run `aleph instance create --confidential ...` first, \
+             then call `aleph instance confidential create <vm-hash>`."
+        )
+    })?;
+    let (vm_id, crn_url) =
+        resolve_target(&scheduler_url, vm_id_input, args.crn_url.as_deref()).await?;
+
+    // 2. Allocate on the CRN (the "start" step in Python parlance).
+    let account = resolve_account(&args.identity)?;
+    let crn = CrnClient::new(&account, crn_url.clone())?;
+    crn.start_instance(&vm_id)
+        .await
+        .context("CRN failed to start the VM")?;
+
+    // 3. Initialize the confidential session.
+    let init_args = ConfidentialInitSessionArgs {
+        vm_id: vm_id.to_string(),
+        crn_url: Some(crn_url.to_string()),
+        identity: args.identity.clone(),
+        policy: args.policy,
+        keep_session: args.keep_session,
+        debug: args.debug,
+    };
+    handle_init_session(scheduler_url.clone(), json, init_args).await?;
+
+    // 4. Poll until measurement-ready.
+    println!("Waiting for {vm_id} to reach measurement-ready state...");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    poll_measurement_ready(&crn, &vm_id, deadline).await?;
+
+    // 5. Validate measurement + inject secret.
+    let start_args = ConfidentialStartArgs {
+        vm_id: vm_id.to_string(),
+        crn_url: Some(crn_url.to_string()),
+        identity: args.identity,
+        firmware_hash: args.firmware_hash,
+        firmware_file: args.firmware_file,
+        secret: args.secret,
+        json,
+        debug: args.debug,
+    };
+    handle_start(scheduler_url, json, start_args).await
+}
+
+/// Polls `crn.get_measurement(vm_id)` until it returns 200 or `deadline` elapses.
+/// Treats HTTP 404 and 425 as "VM not yet measurement-ready"; surfaces any other
+/// error as a hard failure. Backoff sequence: 1s, 2s, 4s, 5s, 5s, ...
+async fn poll_measurement_ready(
+    crn: &CrnClient,
+    vm_id: &ItemHash,
+    deadline: Instant,
+) -> Result<()> {
+    let schedule: &[u64] = &[1, 2, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5];
+    let mut step = 0usize;
+    loop {
+        match crn.get_measurement(vm_id).await {
+            Ok(_) => return Ok(()),
+            Err(CrnError::VmNotFound(_)) => {
+                // 404 -> not ready yet
+            }
+            Err(CrnError::Api { status: 425, .. }) => {
+                // 425 Too Early -> not ready yet
+            }
+            Err(e) => return Err(e.into()),
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "VM did not become measurement-ready within the timeout. Retry \
+                 'aleph instance confidential start {vm_id}' in a minute, or check \
+                 'aleph instance logs {vm_id}'."
+            );
+        }
+        let secs = schedule[step.min(schedule.len() - 1)];
+        tokio::time::sleep(Duration::from_secs(secs)).await;
+        step = step.saturating_add(1);
+    }
 }
