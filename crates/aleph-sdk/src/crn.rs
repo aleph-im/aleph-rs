@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
+use crate::confidential::SEVMeasurement;
+
 use aleph_types::account::{Account, SignError};
 use aleph_types::item_hash::ItemHash;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -390,6 +392,33 @@ impl CrnClient {
         let status = response.status().as_u16();
         match status {
             200..=299 => Ok(()),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
+    /// GET /control/machine/<vm>/confidential/measurement
+    ///
+    /// Returns the SEV launch measurement (HMAC measure + nonce, plus sev_info).
+    /// Signed.
+    pub async fn get_measurement(&self, vm_id: &ItemHash) -> Result<SEVMeasurement, CrnError> {
+        let path = format!("/control/machine/{vm_id}/confidential/measurement");
+        let url = self.crn_url.join(&path).expect("valid path");
+
+        let mut request = self.http_client.get(url);
+        for (name, value) in self.auth_headers("GET", &path) {
+            request = request.header(name, value);
+        }
+        let response = request.send().await?;
+
+        let status = response.status().as_u16();
+        match status {
+            200..=299 => Ok(response.json::<SEVMeasurement>().await?),
             402 => Err(CrnError::PaymentRequired(response.text().await?)),
             403 => Err(CrnError::Unauthorized(response.text().await?)),
             404 => Err(CrnError::VmNotFound(vm_id.clone())),
@@ -1403,5 +1432,75 @@ mod tests {
         assert!(body_str.contains("name=\"godh\""));
         assert!(body_str.contains("session-bytes"));
         assert!(body_str.contains("godh-bytes"));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_measurement_deserializes_response() {
+        use crate::confidential::SEVInfo;
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/measurement",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sev_info": {
+                        "api_major": 1,
+                        "api_minor": 55,
+                        "build_id": 24,
+                        "policy": 1
+                    },
+                    "launch_measure": "ls2jv10V3HVShVI/RHCo/a43WO0soLZf0huU9ZZstIxRFA2okCqH/Z6nh2uPH9e8"
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        let measurement = client.get_measurement(&vm_id).await.unwrap();
+        assert_eq!(
+            measurement.sev_info,
+            SEVInfo {
+                api_major: 1,
+                api_minor: 55,
+                build_id: 24,
+                policy: 1
+            }
+        );
+        assert!(measurement.launch_measure.starts_with("ls2jv10"));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_measurement_returns_vm_not_found_on_404() {
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/measurement",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        let err = client.get_measurement(&vm_id).await.unwrap_err();
+        assert!(matches!(err, CrnError::VmNotFound(_)));
     }
 }
