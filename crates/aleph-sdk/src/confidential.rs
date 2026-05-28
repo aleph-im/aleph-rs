@@ -93,8 +93,10 @@ pub fn compute_expected_measure(
 ///
 /// Packet header: flags (4 zero bytes) || iv (16) || HMAC-SHA256(tik, ...) (32).
 /// HMAC input: 0x01 (LAUNCH_SECRET command id) || flags(4) || iv(16) ||
-///             secret_table_size_le32 || encrypted_secret_table || vm_measure
-/// per the SEV API spec.
+///             guest_len_le32 || trans_len_le32 || encrypted_secret_table || vm_measure
+/// per the SEV API spec. `guest_len` and `trans_len` are both the (padded)
+/// secret-table size and are hashed as two separate 4-byte fields; omitting the
+/// second one makes the firmware reject the packet with "Bad measurement".
 pub fn build_secret_packet(
     tek: &[u8; 16],
     tik: &[u8; 16],
@@ -146,6 +148,10 @@ pub fn build_secret_packet(
     mac.update(&[0x01u8]);
     mac.update(&flags);
     mac.update(&iv);
+    // GUEST_LEN and TRANS_LEN: both the padded secret-table size, hashed as two
+    // separate little-endian u32 fields (matches the AMD SEV LAUNCH_SECRET spec
+    // and the Python SDK's make_packet_header).
+    mac.update(&(total_len as u32).to_le_bytes());
     mac.update(&(total_len as u32).to_le_bytes());
     mac.update(&ciphertext);
     mac.update(vm_measure);
@@ -341,6 +347,19 @@ mod tests {
         let iv = [0u8; 16];
 
         let (hdr_b64, sec_b64) = build_secret_packet(&tek, &tik, &vm_measure, secret, iv);
+        // Byte-locked against the Python SDK's build_secret for the same inputs.
+        // This pins the full packet-header HMAC (not just its length), so the
+        // two-length-field GUEST_LEN/TRANS_LEN structure can't silently
+        // regress and produce a firmware "Bad measurement" rejection.
+        assert_eq!(
+            hdr_b64,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAD2L7ZcDVWWvxv8DsK1b3ltlaHgsh0Yex4b6SZHp9dgtQ=="
+        );
+        assert_eq!(
+            sec_b64,
+            "hFRPKVr+Pc/5cW4gJjfPQkNGE5Vwqdxtuf/OqvcYK43VNV1Yg5umjIvsFgQPgbCd"
+        );
+
         let hdr = base64::engine::general_purpose::STANDARD
             .decode(&hdr_b64)
             .unwrap();
