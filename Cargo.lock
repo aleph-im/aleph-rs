@@ -369,6 +369,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
+ "tokio-util",
  "url",
  "walkdir",
  "wiremock",

@@ -2340,58 +2340,15 @@ impl AlephStorageClient for AlephClient {
         message: Option<&PendingMessage>,
         sync: bool,
     ) -> Result<ItemHash, StorageError> {
-        let path = path.as_ref();
-
-        // Pass 1: stream file to compute SHA-256 hash locally
-        let local_hash = hash_file(path, Hasher::for_storage()).await?;
-
-        // Pass 2: upload file using reqwest streaming
-        let url = self
-            .ccn_url
-            .join("/api/v0/storage/add_file")
-            .unwrap_or_else(|e| panic!("invalid url: {e}"));
-
-        // Part::file() returns io::Result<Part>, converts via StorageError::Io
-        let part = reqwest::multipart::Part::file(path)
-            .await?
-            .mime_str("application/octet-stream")
-            .expect("valid mime type");
-        let mut form = reqwest::multipart::Form::new().part("file", part);
-
-        if let Some(msg) = message {
-            form = form.part("metadata", build_storage_metadata_part(msg, sync));
-        }
-
-        let response = self
-            .upload_client
-            .post(url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
-
-        let response = handle_storage_response(response).await?;
-
-        let upload: UploadResponse = response
-            .json()
-            .await
-            .map_err(StorageError::InvalidResponseBody)?;
-
-        let server_hash = upload.hash.parse::<ItemHash>().map_err(|source| {
-            StorageError::InvalidResponseHash {
-                value: upload.hash.clone(),
-                source,
-            }
-        })?;
-
-        if local_hash != server_hash {
-            return Err(StorageError::UploadIntegrityMismatch {
-                expected: local_hash,
-                actual: server_hash,
-            });
-        }
-
-        Ok(local_hash)
+        self.upload_file_streaming(
+            "/api/v0/storage/add_file",
+            Hasher::for_storage(),
+            path.as_ref(),
+            message,
+            sync,
+            None,
+        )
+        .await
     }
 
     async fn upload_file_to_ipfs(
@@ -2400,21 +2357,71 @@ impl AlephStorageClient for AlephClient {
         message: Option<&PendingMessage>,
         sync: bool,
     ) -> Result<ItemHash, StorageError> {
-        let path = path.as_ref();
+        self.upload_file_streaming(
+            "/api/v0/ipfs/add_file",
+            Hasher::for_ipfs(),
+            path.as_ref(),
+            message,
+            sync,
+            None,
+        )
+        .await
+    }
+}
 
-        // Pass 1: stream file to compute CIDv0 hash locally
-        let local_hash = hash_file(path, Hasher::for_ipfs()).await?;
+impl AlephClient {
+    /// Shared body for [`AlephStorageClient::upload_file_to_storage`] /
+    /// `upload_file_to_ipfs` and their `_with_progress` variants.
+    ///
+    /// With `progress == None` the file is sent via `Part::file` (no per-chunk
+    /// hook). With `Some(on_tick)` the file is streamed through
+    /// [`crate::progress::report_upload_progress`] so the caller observes upload
+    /// progress. In both cases the locally-computed hash is verified against the
+    /// server's response.
+    async fn upload_file_streaming(
+        &self,
+        endpoint_path: &str,
+        hasher: Hasher,
+        path: &std::path::Path,
+        message: Option<&PendingMessage>,
+        sync: bool,
+        progress: Option<Box<dyn FnMut(u64, u64) + Send>>,
+    ) -> Result<ItemHash, StorageError> {
+        // Pass 1: stream file to compute the content hash locally.
+        let local_hash = hash_file(path, hasher).await?;
 
-        // Pass 2: upload file using reqwest streaming
+        // Pass 2: upload the file.
         let url = self
             .ccn_url
-            .join("/api/v0/ipfs/add_file")
+            .join(endpoint_path)
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let part = reqwest::multipart::Part::file(path)
-            .await?
-            .mime_str("application/octet-stream")
-            .expect("valid mime type");
+        let part = match progress {
+            Some(on_tick) => {
+                // Stream from disk so each chunk passes through the progress
+                // reporter. `Part::stream_with_length` keeps Content-Length set.
+                let total = tokio::fs::metadata(path).await?.len();
+                let file = tokio::fs::File::open(path).await?;
+                let stream = tokio_util::io::ReaderStream::new(file);
+                let body = reqwest::Body::wrap_stream(crate::progress::report_upload_progress(
+                    stream, total, on_tick,
+                ));
+                let file_name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+                reqwest::multipart::Part::stream_with_length(body, total)
+                    .file_name(file_name)
+                    .mime_str("application/octet-stream")
+                    .expect("valid mime type")
+            }
+            // Part::file() returns io::Result<Part>, converts via StorageError::Io
+            None => reqwest::multipart::Part::file(path)
+                .await?
+                .mime_str("application/octet-stream")
+                .expect("valid mime type"),
+        };
         let mut form = reqwest::multipart::Form::new().part("file", part);
 
         if let Some(msg) = message {
@@ -2452,9 +2459,48 @@ impl AlephStorageClient for AlephClient {
 
         Ok(local_hash)
     }
-}
 
-impl AlephClient {
+    /// Like [`AlephStorageClient::upload_file_to_storage`] but reports upload
+    /// progress: `on_tick(sent, total)` is called roughly every 500 ms and once
+    /// more when the upload completes.
+    pub async fn upload_file_to_storage_with_progress(
+        &self,
+        path: &std::path::Path,
+        message: Option<&PendingMessage>,
+        sync: bool,
+        on_tick: impl FnMut(u64, u64) + Send + 'static,
+    ) -> Result<ItemHash, StorageError> {
+        self.upload_file_streaming(
+            "/api/v0/storage/add_file",
+            Hasher::for_storage(),
+            path,
+            message,
+            sync,
+            Some(Box::new(on_tick)),
+        )
+        .await
+    }
+
+    /// Like [`AlephStorageClient::upload_file_to_ipfs`] but reports upload
+    /// progress; see [`Self::upload_file_to_storage_with_progress`].
+    pub async fn upload_file_to_ipfs_with_progress(
+        &self,
+        path: &std::path::Path,
+        message: Option<&PendingMessage>,
+        sync: bool,
+        on_tick: impl FnMut(u64, u64) + Send + 'static,
+    ) -> Result<ItemHash, StorageError> {
+        self.upload_file_streaming(
+            "/api/v0/ipfs/add_file",
+            Hasher::for_ipfs(),
+            path,
+            message,
+            sync,
+            Some(Box::new(on_tick)),
+        )
+        .await
+    }
+
     /// Uploads a directory tree to the configured IPFS gateway and returns
     /// the root directory CID.
     ///

@@ -12,6 +12,7 @@ pub mod crns_list;
 pub mod folder_hash;
 pub mod ipfs;
 pub mod messages;
+pub mod progress;
 mod proto;
 pub mod scheduler;
 pub mod verify;
