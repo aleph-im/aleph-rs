@@ -95,7 +95,7 @@ pub async fn forget_targets(
     }
     if !dry_run {
         let prompt = format!(
-            "Forget {total} {label}(s)? This is irreversible - content will be tombstoned on the network.",
+            "Forget {total} {label}(s)? This is irreversible: content will be deleted permanently from the network.",
             label = targets.confirm_label,
         );
         if !confirm_action(&prompt, targets.yes)? {

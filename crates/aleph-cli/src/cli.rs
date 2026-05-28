@@ -792,8 +792,8 @@ pub struct AggregateListArgs {
 pub struct AggregateForgetArgs {
     /// Item hashes of any AGGREGATE element message belonging to the
     /// aggregates to forget. The network resolves the (sender, key) pair
-    /// from each hash and tombstones every AGGREGATE message under that
-    /// key from that sender.
+    /// from each hash and permanently deletes every AGGREGATE message
+    /// under that key from that sender.
     pub hashes: Vec<ItemHash>,
 
     /// Reason for forgetting.
@@ -842,9 +842,9 @@ pub struct AggregateCreateArgs {
 pub struct ForgetArgs {
     /// Item hashes of the messages to forget (one-by-one).
     ///
-    /// Each hash identifies a single message to tombstone. To forget an
-    /// entire aggregate (all elements with the same sender + key), use
-    /// `--aggregates` instead.
+    /// Each hash identifies a single message to delete permanently. To
+    /// forget an entire aggregate (all elements with the same sender +
+    /// key), use `--aggregates` instead.
     pub hashes: Vec<ItemHash>,
 
     /// Item hashes identifying aggregates to forget *in their entirety*.
