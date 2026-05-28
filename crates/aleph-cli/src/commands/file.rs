@@ -128,18 +128,30 @@ async fn handle_single_file_upload(
         eprintln!("Uploading {}...", args.path.display());
     }
 
-    match storage_engine {
+    // Report byte-progress to stderr, suppressed under --json (keeps machine
+    // output clean). A fn pointer is Copy, so the selected tick flows into
+    // whichever engine branch runs.
+    let on_tick: fn(u64, u64) = if json {
+        |_, _| {}
+    } else {
+        crate::common::render_upload_progress
+    };
+    let upload = match storage_engine {
         StorageEngine::Storage => {
             aleph_client
-                .upload_file_to_storage(&args.path, Some(&pending), true)
-                .await?;
+                .upload_file_to_storage_with_progress(&args.path, Some(&pending), true, on_tick)
+                .await
         }
         StorageEngine::Ipfs => {
             aleph_client
-                .upload_file_to_ipfs(&args.path, Some(&pending), true)
-                .await?;
+                .upload_file_to_ipfs_with_progress(&args.path, Some(&pending), true, on_tick)
+                .await
         }
+    };
+    if !json {
+        eprintln!();
     }
+    upload?;
     // The upload endpoint returns 2xx once the file is pinned and the STORE
     // is queued for ingest. pyaleph may still reject the message after that
     // (e.g. insufficient credits), so fetch the final status before claiming

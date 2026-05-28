@@ -471,30 +471,19 @@ fn stream_rootfs_from_tar(
 /// Symmetric with `stream_to_part_file` on the download path; emits a final
 /// 100% line on the last chunk so the rendered percentage doesn't get stuck
 /// just below 100% when the last chunk arrives between ticks.
+///
+/// Delegates the byte-counting/throttling to the SDK's shared combinator and
+/// the rendering to [`crate::common::render_upload_progress`], so backup
+/// restore and `aleph file`/`aleph program` uploads stay in lockstep.
 fn with_upload_progress<S>(stream: S, total: u64) -> impl futures_util::Stream<Item = S::Item>
 where
-    S: futures_util::Stream<Item = std::io::Result<bytes::Bytes>>,
+    S: futures_util::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static,
 {
-    use futures_util::StreamExt;
-    let mut sent: u64 = 0;
-    let mut last_report = std::time::Instant::now();
-    stream.map(move |chunk| {
-        if let Ok(bytes) = &chunk {
-            sent = sent.saturating_add(bytes.len() as u64);
-            let due = last_report.elapsed() >= std::time::Duration::from_millis(500);
-            if due || sent >= total {
-                let shown = sent.min(total);
-                let pct = if total == 0 {
-                    100.0
-                } else {
-                    (shown as f64 / total as f64 * 100.0).min(100.0)
-                };
-                eprint!("\r  uploaded {shown}/{total} bytes ({pct:.1}%)");
-                last_report = std::time::Instant::now();
-            }
-        }
-        chunk
-    })
+    aleph_sdk::progress::report_upload_progress(
+        stream,
+        total,
+        crate::common::render_upload_progress,
+    )
 }
 
 async fn restore_from_file(
