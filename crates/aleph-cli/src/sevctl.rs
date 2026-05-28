@@ -48,12 +48,17 @@ impl Sevctl {
             .map_err(|_| SevctlError::NotFound)
     }
 
-    /// Shell out to `sevctl verify <cert_path>`. Validates the platform cert
-    /// chain against AMD's embedded roots. Returns `Ok(())` on exit 0; surfaces
-    /// stderr on non-zero exit.
+    /// Shell out to `sevctl verify --sev <cert_path>`. Decodes the platform's
+    /// PDH/PEK/OCA/CEK chain from the file and verifies it up to AMD's roots:
+    /// with no `--ca` argument, sevctl deduces the CPU generation and checks
+    /// the CEK against its compiled-in AMD ASK/ARK rather than any roots that
+    /// happen to be embedded in the file, so a forged ARK in the supplied chain
+    /// cannot satisfy the check. Returns `Ok(())` on exit 0; surfaces stderr on
+    /// non-zero exit.
     pub async fn verify(&self, cert_path: &Path) -> Result<(), SevctlError> {
         let output = tokio::process::Command::new(&self.path)
             .arg("verify")
+            .arg("--sev")
             .arg(cert_path)
             .output()
             .await?;
@@ -132,13 +137,30 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("sevctl");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        // Record argv so we can assert the `--sev <cert>` invocation, then
+        // exit 0. `verify` must use `--sev`; a bare positional is rejected by
+        // sevctl >=0.6.
+        let argv_log = dir.path().join("argv");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
+                argv_log.display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let sevctl = Sevctl { path: fake };
         let cert = dir.path().join("cert.pem");
         std::fs::write(&cert, b"dummy").unwrap();
         sevctl.verify(&cert).await.unwrap();
+
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        let args: Vec<&str> = argv.lines().collect();
+        assert_eq!(args[0], "verify");
+        assert_eq!(args[1], "--sev");
+        assert_eq!(args[2], cert.to_str().unwrap());
     }
 
     #[cfg(unix)]
