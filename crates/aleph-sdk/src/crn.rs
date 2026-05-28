@@ -379,9 +379,21 @@ impl CrnClient {
     ) -> Result<(), CrnError> {
         let path = format!("/control/machine/{vm_id}/confidential/initialize");
         let url = self.crn_url.join(&path).expect("valid path");
+        // The CRN reads each part via aiohttp's `post.get(...).file`, which only
+        // exists for parts carrying a filename in their Content-Disposition. A
+        // filename-less part decodes to a plain string server-side and the
+        // handler 500s with `'str' object has no attribute 'file'`. The server
+        // ignores the filename value (it writes to fixed vm_session.b64 /
+        // vm_godh.b64 paths), so the names below are only for the disposition.
         let form = reqwest::multipart::Form::new()
-            .part("session", reqwest::multipart::Part::bytes(session.to_vec()))
-            .part("godh", reqwest::multipart::Part::bytes(godh.to_vec()));
+            .part(
+                "session",
+                reqwest::multipart::Part::bytes(session.to_vec()).file_name("vm_session.b64"),
+            )
+            .part(
+                "godh",
+                reqwest::multipart::Part::bytes(godh.to_vec()).file_name("vm_godh.b64"),
+            );
 
         let mut request = self.http_client.post(url).multipart(form);
         for (name, value) in self.auth_headers("POST", &path) {
