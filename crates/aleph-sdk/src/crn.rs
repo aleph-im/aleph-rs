@@ -366,7 +366,7 @@ impl CrnClient {
         fetch_platform_certificate(&self.http_client, &self.crn_url).await
     }
 
-    /// POST /control/machine/<vm>/confidential/initialize
+    /// `POST /control/machine/<vm>/confidential/initialize`
     ///
     /// multipart/form-data body with two byte parts: `session` and `godh`.
     /// Signed with the same ephemeral-key X-SignedPubKey / X-SignedOperation
@@ -402,7 +402,7 @@ impl CrnClient {
         }
     }
 
-    /// GET /control/machine/<vm>/confidential/measurement
+    /// `GET /control/machine/<vm>/confidential/measurement`
     ///
     /// Returns the SEV launch measurement (HMAC measure + nonce, plus sev_info).
     /// Signed.
@@ -429,7 +429,7 @@ impl CrnClient {
         }
     }
 
-    /// POST /control/machine/<vm>/confidential/inject_secret
+    /// `POST /control/machine/<vm>/confidential/inject_secret`
     ///
     /// JSON body `{packet_header, secret}` (both base64 strings). Signed.
     pub async fn inject_secret(
