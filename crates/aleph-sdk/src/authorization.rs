@@ -177,294 +177,304 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::AlephClient;
-    use aleph_types::account::{Account, EvmAccount};
-    use aleph_types::chain::Chain;
-    use aleph_types::message::MessageType;
-    use url::Url;
 
-    fn heph_client() -> AlephClient {
-        AlephClient::new(Url::parse("http://localhost:4024").expect("valid url"))
-    }
+    // The tests that drive a live heph instance build `EvmAccount`, which only
+    // exists with the `account-evm` feature. They live in this gated submodule
+    // so `cargo test -p aleph-sdk` (no features) still compiles - the parsing
+    // unit tests further down need no account. Whole-workspace builds turn the
+    // feature on via `aleph-cli`, so it is normally transparent.
+    #[cfg(feature = "account-evm")]
+    mod heph {
+        use super::*;
+        use crate::client::AlephClient;
+        use aleph_types::account::{Account, EvmAccount};
+        use aleph_types::chain::Chain;
+        use aleph_types::message::MessageType;
+        use url::Url;
 
-    fn test_account(key_byte: u8) -> EvmAccount {
-        EvmAccount::new(Chain::Ethereum, &[key_byte; 32]).expect("valid key")
-    }
+        fn heph_client() -> AlephClient {
+            AlephClient::new(Url::parse("http://localhost:4024").expect("valid url"))
+        }
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_get_authorizations_empty() {
-        let client = heph_client();
-        let account = test_account(200);
-        let auths = client.get_authorizations(account.address()).await.unwrap();
-        assert!(
-            auths.is_empty(),
-            "new account should have no authorizations"
-        );
-    }
+        fn test_account(key_byte: u8) -> EvmAccount {
+            EvmAccount::new(Chain::Ethereum, &[key_byte; 32]).expect("valid key")
+        }
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_update_all_then_get() {
-        let client = heph_client();
-        let account = test_account(201);
-        let delegate = Address::from("0xdelegate_201".to_string());
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_get_authorizations_empty() {
+            let client = heph_client();
+            let account = test_account(200);
+            let auths = client.get_authorizations(account.address()).await.unwrap();
+            assert!(
+                auths.is_empty(),
+                "new account should have no authorizations"
+            );
+        }
 
-        let auths = vec![Authorization {
-            address: delegate.clone(),
-            chain: None,
-            channels: vec![],
-            types: vec![MessageType::Post],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        }];
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_update_all_then_get() {
+            let client = heph_client();
+            let account = test_account(201);
+            let delegate = Address::from("0xdelegate_201".to_string());
 
-        update_all_authorizations(&client, &account, auths)
-            .await
-            .unwrap();
+            let auths = vec![Authorization {
+                address: delegate.clone(),
+                chain: None,
+                channels: vec![],
+                types: vec![MessageType::Post],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            }];
 
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(fetched.len(), 1);
-        assert_eq!(fetched[0].address, delegate);
-        assert_eq!(fetched[0].types, vec![MessageType::Post]);
-    }
+            update_all_authorizations(&client, &account, auths)
+                .await
+                .unwrap();
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_add_authorization_creates_aggregate() {
-        let client = heph_client();
-        let account = test_account(202);
-        let delegate = Address::from("0xdelegate_202".to_string());
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(fetched.len(), 1);
+            assert_eq!(fetched[0].address, delegate);
+            assert_eq!(fetched[0].types, vec![MessageType::Post]);
+        }
 
-        let auth = Authorization {
-            address: delegate.clone(),
-            chain: Some(Chain::Ethereum),
-            channels: vec![],
-            types: vec![],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        };
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_add_authorization_creates_aggregate() {
+            let client = heph_client();
+            let account = test_account(202);
+            let delegate = Address::from("0xdelegate_202".to_string());
 
-        add_authorization(&client, &account, auth).await.unwrap();
+            let auth = Authorization {
+                address: delegate.clone(),
+                chain: Some(Chain::Ethereum),
+                channels: vec![],
+                types: vec![],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            };
 
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(fetched.len(), 1);
-        assert_eq!(fetched[0].address, delegate);
-        assert_eq!(fetched[0].chain, Some(Chain::Ethereum));
-    }
+            add_authorization(&client, &account, auth).await.unwrap();
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_add_authorization_preserves_existing() {
-        let client = heph_client();
-        let account = test_account(203);
-        let delegate1 = Address::from("0xdelegate_203a".to_string());
-        let delegate2 = Address::from("0xdelegate_203b".to_string());
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(fetched.len(), 1);
+            assert_eq!(fetched[0].address, delegate);
+            assert_eq!(fetched[0].chain, Some(Chain::Ethereum));
+        }
 
-        let auth1 = Authorization {
-            address: delegate1.clone(),
-            chain: None,
-            channels: vec![],
-            types: vec![MessageType::Post],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        };
-        add_authorization(&client, &account, auth1).await.unwrap();
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_add_authorization_preserves_existing() {
+            let client = heph_client();
+            let account = test_account(203);
+            let delegate1 = Address::from("0xdelegate_203a".to_string());
+            let delegate2 = Address::from("0xdelegate_203b".to_string());
 
-        let auth2 = Authorization {
-            address: delegate2.clone(),
-            chain: None,
-            channels: vec![],
-            types: vec![MessageType::Aggregate],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        };
-        add_authorization(&client, &account, auth2).await.unwrap();
+            let auth1 = Authorization {
+                address: delegate1.clone(),
+                chain: None,
+                channels: vec![],
+                types: vec![MessageType::Post],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            };
+            add_authorization(&client, &account, auth1).await.unwrap();
 
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(fetched.len(), 2);
-        assert!(fetched.iter().any(|a| a.address == delegate1));
-        assert!(fetched.iter().any(|a| a.address == delegate2));
-    }
+            let auth2 = Authorization {
+                address: delegate2.clone(),
+                chain: None,
+                channels: vec![],
+                types: vec![MessageType::Aggregate],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            };
+            add_authorization(&client, &account, auth2).await.unwrap();
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_revoke_nonexistent_delegate_is_noop() {
-        let client = heph_client();
-        let account = test_account(204);
-        let delegate = Address::from("0xdelegate_204".to_string());
-        let nonexistent = Address::from("0xnonexistent".to_string());
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(fetched.len(), 2);
+            assert!(fetched.iter().any(|a| a.address == delegate1));
+            assert!(fetched.iter().any(|a| a.address == delegate2));
+        }
 
-        let auth = Authorization {
-            address: delegate.clone(),
-            chain: None,
-            channels: vec![],
-            types: vec![],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        };
-        add_authorization(&client, &account, auth).await.unwrap();
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_revoke_nonexistent_delegate_is_noop() {
+            let client = heph_client();
+            let account = test_account(204);
+            let delegate = Address::from("0xdelegate_204".to_string());
+            let nonexistent = Address::from("0xnonexistent".to_string());
 
-        // Revoke a delegate that doesn't exist — should not affect existing
-        revoke_all_authorizations(&client, &account, &nonexistent)
-            .await
-            .unwrap();
+            let auth = Authorization {
+                address: delegate.clone(),
+                chain: None,
+                channels: vec![],
+                types: vec![],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            };
+            add_authorization(&client, &account, auth).await.unwrap();
 
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(fetched.len(), 1);
-        assert_eq!(fetched[0].address, delegate);
-    }
+            // Revoke a delegate that doesn't exist — should not affect existing
+            revoke_all_authorizations(&client, &account, &nonexistent)
+                .await
+                .unwrap();
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_full_lifecycle() {
-        let client = heph_client();
-        let account = test_account(205);
-        let delegate1 = Address::from("0xdelegate_205a".to_string());
-        let delegate2 = Address::from("0xdelegate_205b".to_string());
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(fetched.len(), 1);
+            assert_eq!(fetched[0].address, delegate);
+        }
 
-        // Add two authorizations
-        let auth1 = Authorization {
-            address: delegate1.clone(),
-            chain: None,
-            channels: vec!["ch1".to_string()],
-            types: vec![MessageType::Post],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        };
-        add_authorization(&client, &account, auth1).await.unwrap();
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_full_lifecycle() {
+            let client = heph_client();
+            let account = test_account(205);
+            let delegate1 = Address::from("0xdelegate_205a".to_string());
+            let delegate2 = Address::from("0xdelegate_205b".to_string());
 
-        let auth2 = Authorization {
-            address: delegate2.clone(),
-            chain: None,
-            channels: vec![],
-            types: vec![MessageType::Program],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        };
-        add_authorization(&client, &account, auth2).await.unwrap();
+            // Add two authorizations
+            let auth1 = Authorization {
+                address: delegate1.clone(),
+                chain: None,
+                channels: vec!["ch1".to_string()],
+                types: vec![MessageType::Post],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            };
+            add_authorization(&client, &account, auth1).await.unwrap();
 
-        // Verify both present
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(fetched.len(), 2);
+            let auth2 = Authorization {
+                address: delegate2.clone(),
+                chain: None,
+                channels: vec![],
+                types: vec![MessageType::Program],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            };
+            add_authorization(&client, &account, auth2).await.unwrap();
 
-        // Revoke delegate1
-        revoke_all_authorizations(&client, &account, &delegate1)
-            .await
-            .unwrap();
+            // Verify both present
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(fetched.len(), 2);
 
-        // Verify only delegate2 remains
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(fetched.len(), 1);
-        assert_eq!(fetched[0].address, delegate2);
-        assert_eq!(fetched[0].types, vec![MessageType::Program]);
-    }
+            // Revoke delegate1
+            revoke_all_authorizations(&client, &account, &delegate1)
+                .await
+                .unwrap();
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_add_authorization_merges_aggregate_keys() {
-        let client = heph_client();
-        let account = test_account(206);
-        let delegate = Address::from("0xdelegate_206".to_string());
+            // Verify only delegate2 remains
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(fetched.len(), 1);
+            assert_eq!(fetched[0].address, delegate2);
+            assert_eq!(fetched[0].types, vec![MessageType::Program]);
+        }
 
-        let auth1 = Authorization {
-            address: delegate.clone(),
-            chain: None,
-            channels: vec![],
-            types: vec![],
-            post_types: vec![],
-            aggregate_keys: vec!["A".to_string(), "B".to_string()],
-        };
-        add_authorization(&client, &account, auth1).await.unwrap();
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_add_authorization_merges_aggregate_keys() {
+            let client = heph_client();
+            let account = test_account(206);
+            let delegate = Address::from("0xdelegate_206".to_string());
 
-        let auth2 = Authorization {
-            address: delegate.clone(),
-            chain: None,
-            channels: vec![],
-            types: vec![],
-            post_types: vec![],
-            aggregate_keys: vec!["C".to_string()],
-        };
-        add_authorization(&client, &account, auth2).await.unwrap();
+            let auth1 = Authorization {
+                address: delegate.clone(),
+                chain: None,
+                channels: vec![],
+                types: vec![],
+                post_types: vec![],
+                aggregate_keys: vec!["A".to_string(), "B".to_string()],
+            };
+            add_authorization(&client, &account, auth1).await.unwrap();
 
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(fetched.len(), 1, "entries should have merged into one");
-        let mut keys = fetched[0].aggregate_keys.clone();
-        keys.sort();
-        assert_eq!(
-            keys,
-            vec!["A".to_string(), "B".to_string(), "C".to_string()]
-        );
-    }
+            let auth2 = Authorization {
+                address: delegate.clone(),
+                chain: None,
+                channels: vec![],
+                types: vec![],
+                post_types: vec![],
+                aggregate_keys: vec!["C".to_string()],
+            };
+            add_authorization(&client, &account, auth2).await.unwrap();
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_add_authorization_no_merge_on_chain_mismatch() {
-        let client = heph_client();
-        let account = test_account(207);
-        let delegate = Address::from("0xdelegate_207".to_string());
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(fetched.len(), 1, "entries should have merged into one");
+            let mut keys = fetched[0].aggregate_keys.clone();
+            keys.sort();
+            assert_eq!(
+                keys,
+                vec!["A".to_string(), "B".to_string(), "C".to_string()]
+            );
+        }
 
-        let auth1 = Authorization {
-            address: delegate.clone(),
-            chain: Some(Chain::Ethereum),
-            channels: vec![],
-            types: vec![],
-            post_types: vec![],
-            aggregate_keys: vec!["A".to_string()],
-        };
-        add_authorization(&client, &account, auth1).await.unwrap();
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_add_authorization_no_merge_on_chain_mismatch() {
+            let client = heph_client();
+            let account = test_account(207);
+            let delegate = Address::from("0xdelegate_207".to_string());
 
-        let auth2 = Authorization {
-            address: delegate.clone(),
-            chain: Some(Chain::Sol),
-            channels: vec![],
-            types: vec![],
-            post_types: vec![],
-            aggregate_keys: vec!["B".to_string()],
-        };
-        add_authorization(&client, &account, auth2).await.unwrap();
+            let auth1 = Authorization {
+                address: delegate.clone(),
+                chain: Some(Chain::Ethereum),
+                channels: vec![],
+                types: vec![],
+                post_types: vec![],
+                aggregate_keys: vec!["A".to_string()],
+            };
+            add_authorization(&client, &account, auth1).await.unwrap();
 
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(
-            fetched.len(),
-            2,
-            "chain mismatch must keep entries separate"
-        );
-    }
+            let auth2 = Authorization {
+                address: delegate.clone(),
+                chain: Some(Chain::Sol),
+                channels: vec![],
+                types: vec![],
+                post_types: vec![],
+                aggregate_keys: vec!["B".to_string()],
+            };
+            add_authorization(&client, &account, auth2).await.unwrap();
 
-    #[tokio::test]
-    #[ignore = "requires a running heph instance"]
-    async fn test_add_authorization_no_merge_on_two_field_diff() {
-        let client = heph_client();
-        let account = test_account(208);
-        let delegate = Address::from("0xdelegate_208".to_string());
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(
+                fetched.len(),
+                2,
+                "chain mismatch must keep entries separate"
+            );
+        }
 
-        let auth1 = Authorization {
-            address: delegate.clone(),
-            chain: None,
-            channels: vec!["c1".to_string()],
-            types: vec![MessageType::Post],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        };
-        add_authorization(&client, &account, auth1).await.unwrap();
+        #[tokio::test]
+        #[ignore = "requires a running heph instance"]
+        async fn test_add_authorization_no_merge_on_two_field_diff() {
+            let client = heph_client();
+            let account = test_account(208);
+            let delegate = Address::from("0xdelegate_208".to_string());
 
-        let auth2 = Authorization {
-            address: delegate.clone(),
-            chain: None,
-            channels: vec!["c2".to_string()],
-            types: vec![MessageType::Aggregate],
-            post_types: vec![],
-            aggregate_keys: vec![],
-        };
-        add_authorization(&client, &account, auth2).await.unwrap();
+            let auth1 = Authorization {
+                address: delegate.clone(),
+                chain: None,
+                channels: vec!["c1".to_string()],
+                types: vec![MessageType::Post],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            };
+            add_authorization(&client, &account, auth1).await.unwrap();
 
-        let fetched = client.get_authorizations(account.address()).await.unwrap();
-        assert_eq!(
-            fetched.len(),
-            2,
-            "two differing fields must keep entries separate"
-        );
+            let auth2 = Authorization {
+                address: delegate.clone(),
+                chain: None,
+                channels: vec!["c2".to_string()],
+                types: vec![MessageType::Aggregate],
+                post_types: vec![],
+                aggregate_keys: vec![],
+            };
+            add_authorization(&client, &account, auth2).await.unwrap();
+
+            let fetched = client.get_authorizations(account.address()).await.unwrap();
+            assert_eq!(
+                fetched.len(),
+                2,
+                "two differing fields must keep entries separate"
+            );
+        }
     }
 
     /// Mirrors the `AuthorizationsBody` enum from `client.rs` so we can
