@@ -15,7 +15,7 @@ use futures_util::{Stream, StreamExt};
 const TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Wrap an upload byte stream so it reports cumulative progress to `on_tick`
-/// roughly every [`TICK_INTERVAL`], plus a guaranteed final tick once `total`
+/// roughly every `TICK_INTERVAL`, plus a guaranteed final tick once `total`
 /// bytes have been seen (so a slow last chunk doesn't leave the rendered
 /// percentage stuck just below 100%).
 ///
