@@ -136,7 +136,12 @@ pub fn build_secret_packet(
     table[40..40 + secret_bytes.len()].copy_from_slice(secret_bytes);
     // trailing nul is already zero from vec![0u8; total_len]
 
-    type Aes128Ctr = ctr::Ctr64BE<Aes128>;
+    // Full 128-bit big-endian counter: the entire 16-byte IV is the initial
+    // counter block and increments across all 128 bits. This matches pyca's
+    // `modes.CTR` (used by the Python SDK) and the AMD SEV spec. Ctr64BE would
+    // only carry within the low 64 bits, diverging from Python whenever the
+    // low half overflows mid-table and producing an undecryptable secret.
+    type Aes128Ctr = ctr::Ctr128BE<Aes128>;
     let mut cipher =
         Aes128Ctr::new_from_slices(tek, &iv).expect("AES-128-CTR accepts a 16-byte key and IV");
     let mut ciphertext = table.clone();
@@ -312,6 +317,42 @@ mod tests {
 
         // Expected length: header_guid(16) + header_len(4) + secret_guid(16) + secret_len(4) + secret(9) + zero(1) = 50, rounded up to 64.
         assert_eq!(ciphertext.len(), 64);
+    }
+
+    #[test]
+    fn build_secret_packet_counter_crosses_64bit_boundary() {
+        // IV with the low 64 bits all set: encrypting past the first block
+        // overflows the low half of the counter. A full 128-bit counter
+        // (Ctr128BE, matching pyca) carries into the high half; a Ctr64BE
+        // counter would wrap without carrying and diverge here. Locked against
+        // the Python SDK's build_secret output for these inputs so the cipher
+        // mode cannot regress to a 64-bit counter undetected.
+        let tek: [u8; 16] = hex::decode("000102030405060708090a0b0c0d0e0f")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let tik: [u8; 16] = hex::decode("0f0e0d0c0b0a09080706050403020100")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let vm_measure: [u8; 32] =
+            hex::decode("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let secret = "AAAAAAAAAAAAAAAAAAAA"; // 20 bytes -> 64-byte (4-block) table
+        let mut iv = [0u8; 16];
+        iv[8..16].copy_from_slice(&[0xff; 8]);
+
+        let (hdr_b64, sec_b64) = build_secret_packet(&tek, &tik, &vm_measure, secret, iv);
+        assert_eq!(
+            hdr_b64,
+            "AAAAAAAAAAAAAAAA//////////91B06divu2jCgyMYW3JG41xM1Dd7lX9Miejes1PN/85Q=="
+        );
+        assert_eq!(
+            sec_b64,
+            "e1KbFNcpNOUp7Oxhw0CDKVMYmmoBwm/dgCfZ9KJSn1kTd/NPZY9LNdgDU3T0UZ581RUHdV0uGDC/T/cjsfuZUA=="
+        );
     }
 
     #[test]
