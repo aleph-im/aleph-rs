@@ -145,7 +145,10 @@ async fn handle_start(scheduler_url: Url, json: bool, args: ConfidentialStartArg
             )
         })?;
 
-    // 6. Read TIK.
+    // 6. Read TIK. Read before the TEK because it is needed first, to validate
+    //    the launch measurement in step 7; the TEK is only used later (step 11)
+    //    to encrypt the secret table, and reading it now would be wasted work if
+    //    the measurement check fails.
     let tik_path = session_dir.join("vm_tik.bin");
     let tik_bytes =
         std::fs::read(&tik_path).with_context(|| format!("reading {}", tik_path.display()))?;
@@ -264,13 +267,15 @@ async fn handle_create(scheduler_url: Url, json: bool, args: ConfidentialCreateA
 
 /// Polls `crn.get_measurement(vm_id)` until it returns 200 or `deadline` elapses.
 /// Treats HTTP 404 and 425 as "VM not yet measurement-ready"; surfaces any other
-/// error as a hard failure. Backoff sequence: 1s, 2s, 4s, 5s, 5s, ...
+/// error as a hard failure. Backoff ramps 1s, 2s, 4s, then holds at 5s; the
+/// final entry repeats, so `deadline` is the sole loop terminator (not the
+/// length of the schedule).
 async fn poll_measurement_ready(
     crn: &CrnClient,
     vm_id: &ItemHash,
     deadline: Instant,
 ) -> Result<()> {
-    let schedule: &[u64] = &[1, 2, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5];
+    let schedule: &[u64] = &[1, 2, 4, 5];
     let mut step = 0usize;
     loop {
         match crn.get_measurement(vm_id).await {
