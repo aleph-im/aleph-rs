@@ -130,8 +130,8 @@ async fn handle_start(scheduler_url: Url, json: bool, args: ConfidentialStartArg
     // 5. Resolve expected firmware hash.
     let firmware_hash_hex = if let Some(path) = args.firmware_file.as_deref() {
         calculate_firmware_hash(path).with_context(|| format!("hashing {}", path.display()))?
-    } else if let Some(h) = args.firmware_hash.clone() {
-        h
+    } else if let Some(h) = args.firmware_hash.as_deref() {
+        h.to_string()
     } else {
         DEFAULT_CONFIDENTIAL_FIRMWARE_HASH_HEX.to_string()
     };
