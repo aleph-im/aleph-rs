@@ -11,6 +11,11 @@ use std::path::Path;
 /// aleph.cloud. Matches Python's `DEFAULT_CONFIDENTIAL_FIRMWARE_HASH` in
 /// `aleph-sdk-python/src/aleph/sdk/conf.py`. Pass `--firmware-hash` to
 /// override or `--firmware-file` to recompute locally.
+///
+/// When the platform firmware is updated, regenerate this constant from the new
+/// OVMF blob: `sha256sum OVMF.fd` (equivalently `--firmware-file OVMF.fd`, which
+/// calls [`calculate_firmware_hash`]). Keep it in lockstep with the Python SDK's
+/// value so sessions stay cross-CLI compatible.
 pub const DEFAULT_CONFIDENTIAL_FIRMWARE_HASH_HEX: &str =
     "89b76b0e64fe9015084fbffdf8ac98185bafc688bfe7a0b398585c392d03c7ee";
 

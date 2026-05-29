@@ -3237,6 +3237,10 @@ pub struct ConfidentialStartArgs {
     #[arg(long)]
     pub firmware_file: Option<std::path::PathBuf>,
     /// VM disk-decryption secret. Prompts interactively if absent.
+    ///
+    /// Prefer the interactive prompt: a value passed here is visible to other
+    /// users via the process table (`ps aux`) and is recorded in shell history.
+    /// Only pass `--secret` in trusted, non-interactive contexts.
     #[arg(long)]
     pub secret: Option<String>,
     /// Emit JSON-formatted success/failure.
