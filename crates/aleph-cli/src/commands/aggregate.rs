@@ -131,7 +131,7 @@ async fn handle_aggregate_forget(
         let n = args.hashes.len();
         let prompt = format!(
             "Forget {n} aggregate(s) in their entirety? This is irreversible: every \
-             AGGREGATE element under each (sender, key) pair will be tombstoned."
+             AGGREGATE element under each (sender, key) pair will be permanently deleted."
         );
         if !confirm_action(&prompt, args.yes)? {
             eprintln!("Aborted.");

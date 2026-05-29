@@ -227,7 +227,7 @@ mod tests {
         // returns a single aggregate that mixes spec-shaped entries, entries
         // missing updated_at, entries missing programType, entries with
         // `options: null`, entries with unknown options fields, entries with
-        // unknown top-level fields, and explicit null tombstones.
+        // unknown top-level fields, and explicit null entries.
         let raw = serde_json::json!({
             "spec-shaped.example.com": {
                 "type": "ipfs",
@@ -260,12 +260,12 @@ mod tests {
                 "message_id": "e",
                 "programType": "instance"
             },
-            "tombstone.example.com": null
+            "null-entry.example.com": null
         });
         let agg: DomainsAggregate =
             serde_json::from_value(raw).expect("real-world aggregate must deserialize");
         assert_eq!(agg.len(), 6);
-        assert!(agg.get("tombstone.example.com").unwrap().is_none());
+        assert!(agg.get("null-entry.example.com").unwrap().is_none());
         assert_eq!(
             agg.get("no-updated-at.example.com")
                 .unwrap()
