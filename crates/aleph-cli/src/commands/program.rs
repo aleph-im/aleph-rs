@@ -11,8 +11,8 @@ use crate::common::{
 use crate::program::archive::prepare_archive;
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{
-    AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageError,
-    MessageFilter, MessageWithStatus, PaginationParams, SortBy, SortOrder, hash_file,
+    AlephAggregateClient, AlephClient, AlephMessageClient, MessageError, MessageFilter,
+    MessageWithStatus, PaginationParams, SortBy, SortOrder, hash_file,
 };
 use aleph_sdk::messages::{ForgetBuilder, ProgramBuilder, StoreBuilder};
 use aleph_sdk::verify::Hasher;
@@ -198,20 +198,38 @@ async fn handle_create(
     if !json {
         eprintln!("Uploading code archive...");
     }
-    match storage_engine {
+    let on_tick: fn(u64, u64) = if json {
+        |_, _| {}
+    } else {
+        crate::common::render_upload_progress
+    };
+    let upload = match storage_engine {
         StorageEngine::Storage => {
             aleph_client
-                .upload_file_to_storage(archive.path(), Some(&store_pending), true)
-                .await?;
-            print_submission_result(ccn_url, &store_pending, "success", "processed", json)?;
+                .upload_file_to_storage_with_progress(
+                    archive.path(),
+                    Some(&store_pending),
+                    true,
+                    on_tick,
+                )
+                .await
         }
         StorageEngine::Ipfs => {
             aleph_client
-                .upload_file_to_ipfs(archive.path(), Some(&store_pending), true)
-                .await?;
-            print_submission_result(ccn_url, &store_pending, "success", "processed", json)?;
+                .upload_file_to_ipfs_with_progress(
+                    archive.path(),
+                    Some(&store_pending),
+                    true,
+                    on_tick,
+                )
+                .await
         }
+    };
+    if !json {
+        eprintln!();
     }
+    upload?;
+    print_submission_result(ccn_url, &store_pending, "success", "processed", json)?;
 
     // 10. Submit PROGRAM
     if !json {

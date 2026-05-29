@@ -25,6 +25,21 @@ pub fn format_epoch_for_tty(secs: f64) -> String {
         .unwrap_or_else(|| secs.to_string())
 }
 
+/// Render one upload-progress tick to stderr, overwriting the current line.
+///
+/// Used as the `on_tick` callback for [`aleph_sdk::progress::report_upload_progress`]
+/// by both `aleph file upload` / `aleph program` and `aleph instance backup`
+/// restore, so all upload progress renders identically. The caller is
+/// responsible for printing a trailing newline once the upload finishes.
+pub fn render_upload_progress(sent: u64, total: u64) {
+    let pct = if total == 0 {
+        100.0
+    } else {
+        (sent as f64 / total as f64 * 100.0).min(100.0)
+    };
+    eprint!("\r  uploaded {sent}/{total} bytes ({pct:.1}%)");
+}
+
 /// Returns true if the error is an HTTP 429 Too Many Requests.
 pub fn is_rate_limited(err: &MessageError) -> bool {
     matches!(err, MessageError::ApiError { status: 429, .. })
