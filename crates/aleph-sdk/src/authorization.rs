@@ -181,8 +181,8 @@ mod tests {
     // The tests that drive a live heph instance build `EvmAccount`, which only
     // exists with the `account-evm` feature. They live in this gated submodule
     // so `cargo test -p aleph-sdk` (no features) still compiles - the parsing
-    // unit tests further down need no account. Whole-workspace builds turn the
-    // feature on via `aleph-cli`, so it is normally transparent.
+    // unit tests outside this submodule need no account. Whole-workspace builds
+    // turn the feature on via `aleph-cli`, so it is normally transparent.
     #[cfg(feature = "account-evm")]
     mod heph {
         use super::*;
