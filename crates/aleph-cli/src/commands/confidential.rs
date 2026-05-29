@@ -20,19 +20,13 @@ use url::Url;
 
 pub async fn dispatch(scheduler_url: Url, json: bool, cmd: ConfidentialCommand) -> Result<()> {
     match cmd {
-        ConfidentialCommand::InitSession(args) => {
-            handle_init_session(scheduler_url, json, args).await
-        }
+        ConfidentialCommand::InitSession(args) => handle_init_session(scheduler_url, args).await,
         ConfidentialCommand::Start(args) => handle_start(scheduler_url, json, args).await,
         ConfidentialCommand::Create(args) => handle_create(scheduler_url, json, args).await,
     }
 }
 
-async fn handle_init_session(
-    scheduler_url: Url,
-    _json: bool,
-    args: ConfidentialInitSessionArgs,
-) -> Result<()> {
+async fn handle_init_session(scheduler_url: Url, args: ConfidentialInitSessionArgs) -> Result<()> {
     // 1. Resolve target (hash + CRN URL).
     let (vm_id, crn_url) =
         resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
@@ -244,7 +238,7 @@ async fn handle_create(scheduler_url: Url, json: bool, args: ConfidentialCreateA
         keep_session: args.keep_session,
         debug: args.debug,
     };
-    handle_init_session(scheduler_url.clone(), json, init_args).await?;
+    handle_init_session(scheduler_url.clone(), init_args).await?;
 
     // 4. Poll until measurement-ready.
     println!("Waiting for {vm_id} to reach measurement-ready state...");
@@ -277,6 +271,9 @@ async fn poll_measurement_ready(
 ) -> Result<()> {
     let schedule: &[u64] = &[1, 2, 4, 5];
     let mut step = 0usize;
+    // Remembers the most recent transport error so a deadline expiry caused by a
+    // flaky connection surfaces the underlying cause rather than a bare timeout.
+    let mut last_transport_err: Option<CrnError> = None;
     loop {
         match crn.get_measurement(vm_id).await {
             Ok(_) => return Ok(()),
@@ -286,9 +283,24 @@ async fn poll_measurement_ready(
             Err(CrnError::Api { status: 425, .. }) => {
                 // 425 Too Early -> not ready yet
             }
+            Err(e @ CrnError::Http(_)) => {
+                // Transport-level failure (connection reset, timeout, DNS): the
+                // CRN or the VM's networking may still be coming up, so keep
+                // polling and only surface this if the deadline expires. HTTP
+                // status errors (402/403/5xx) are deliberate rejections and
+                // still abort immediately via the catch-all below.
+                last_transport_err = Some(e);
+            }
             Err(e) => return Err(e.into()),
         }
         if Instant::now() >= deadline {
+            if let Some(e) = last_transport_err {
+                return Err(anyhow::Error::new(e).context(format!(
+                    "VM did not become measurement-ready within the timeout; the CRN was \
+                     unreachable on the last attempt. Check connectivity to the node, then \
+                     retry 'aleph instance confidential start {vm_id}'."
+                )));
+            }
             bail!(
                 "VM did not become measurement-ready within the timeout. Retry \
                  'aleph instance confidential start {vm_id}' in a minute, or check \
