@@ -957,10 +957,12 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
         ("standard", &pricing.instance_gpu_standard),
         ("premium", &pricing.instance_gpu_premium),
     ] {
-        let tier_models: Vec<_> = models.iter().filter(|m| m.tier == tier_name).collect();
+        let mut tier_models: Vec<_> = models.iter().filter(|m| m.tier == tier_name).collect();
         if tier_models.is_empty() {
             continue;
         }
+        // Sort alphabetically by display slug rather than aggregate order.
+        tier_models.sort_by_key(|m| m.slug());
         eprintln!(
             "\n{tier_name} tier  ({})",
             compute_unit_summary(&entity.compute_unit)
