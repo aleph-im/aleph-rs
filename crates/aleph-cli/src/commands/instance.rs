@@ -610,9 +610,10 @@ pub(crate) fn resolve_instance_specs_from_flags(
 
 /// Resolve the number of compute units for a GPU instance.
 ///
-/// The GPU tier's compute-unit count (`min_cu`) is a lower bound. `--size`
-/// (resolved in the GPU pricing namespace) or `--vcpus`/`--memory` can raise
-/// it, but never lower it. With none of those flags, the minimum is used.
+/// The GPU model's compute-unit count (`min_cu`) is a lower bound. A GPU can be
+/// sized at any whole multiple of its compute unit at or above that minimum, so
+/// `--size` (e.g. `3vcpu-18gb`, `4vcpu-24gb`, `5vcpu-30gb`) or `--vcpus`/`--memory`
+/// can raise it but never lower it. With none of those flags, the minimum is used.
 ///
 /// `gpu_display_slug` is only used in error messages. `instance_pricing` must
 /// be the GPU pricing entity (from `for_instance(false, Some(model))`).
@@ -628,26 +629,28 @@ pub(crate) fn resolve_gpu_compute_units(
     let min_slug = instance_pricing.slug_for_compute_units(min_cu);
 
     if let Some(slug) = size {
-        // Resolve size slug to CU count and validate against GPU minimum
-        let size_tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
-            let available: Vec<String> = instance_pricing
-                .tiers
-                .iter()
-                .filter(|t| t.model.is_none() && t.compute_units >= min_cu)
-                .map(|t| instance_pricing.tier_slug(t))
-                .collect();
-            anyhow!(
-                "unknown size '{slug}' for GPU tier. Available sizes: {}",
-                available.join(", ")
-            )
-        })?;
-        if size_tier.compute_units < min_cu {
+        // A GPU is sized at any whole multiple of its compute unit at or above
+        // the model minimum, so the slug is parsed arithmetically rather than
+        // matched against an enumerated tier list.
+        let cu = instance_pricing
+            .compute_units_for_slug(slug)
+            .ok_or_else(|| {
+                anyhow!(
+                    "invalid GPU size '{slug}'. GPU sizes scale in steps of {}vcpu + {} GiB RAM \
+                     (1 compute unit); use the minimum {min_slug} or a larger multiple \
+                     such as {} or {}.",
+                    cu_spec.vcpus,
+                    cu_spec.memory_mib / 1024,
+                    instance_pricing.slug_for_compute_units(min_cu + 1),
+                    instance_pricing.slug_for_compute_units(min_cu + 2),
+                )
+            })?;
+        if cu < min_cu {
             bail!(
-                "size '{slug}' ({} CU) is below the minimum for GPU '{gpu_display_slug}' (min: {min_slug}, {min_cu} CU)",
-                size_tier.compute_units,
+                "size '{slug}' ({cu} CU) is below the minimum for GPU '{gpu_display_slug}' (min: {min_slug}, {min_cu} CU)",
             );
         }
-        Ok(size_tier.compute_units)
+        Ok(cu)
     } else if vcpus.is_some() || memory.is_some() {
         // Compute CU count from raw resources, validate against GPU minimum
         let cu_from_vcpus = vcpus.map(|v| v.div_ceil(cu_spec.vcpus)).unwrap_or(0);
@@ -2253,14 +2256,36 @@ mod tests {
         }
 
         #[test]
+        fn raise_via_size_accepts_multiple_without_matching_tier() {
+            let p = gpu_pricing();
+            // 5 CU has no enumerated tier (tiers are 3, 4, 8) yet is a valid GPU
+            // size: 5 vcpu + 30 GiB RAM at this 1vcpu/6gb-per-CU definition.
+            let cu =
+                resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", Some("5vcpu-30gb"), None, None)
+                    .unwrap();
+            assert_eq!(cu, 5);
+        }
+
+        #[test]
         fn size_below_minimum_errors() {
             let p = gpu_pricing();
-            // No tier below 3 CU exists, but an unknown size also errors.
+            // 1vcpu-6gb is a valid 1-CU size but below the 3-CU GPU minimum.
             let err =
                 resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", Some("1vcpu-6gb"), None, None)
                     .unwrap_err()
                     .to_string();
-            assert!(err.contains("unknown size '1vcpu-6gb'"), "{err}");
+            assert!(err.contains("below the minimum"), "{err}");
+        }
+
+        #[test]
+        fn malformed_or_mismatched_size_errors() {
+            let p = gpu_pricing();
+            // Memory does not match the CU definition (4 CU is 24gb, not 8gb).
+            let err =
+                resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", Some("4vcpu-8gb"), None, None)
+                    .unwrap_err()
+                    .to_string();
+            assert!(err.contains("invalid GPU size '4vcpu-8gb'"), "{err}");
         }
 
         #[test]

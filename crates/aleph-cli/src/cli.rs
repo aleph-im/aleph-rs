@@ -1521,8 +1521,10 @@ Create a new VM instance. Sizing is specified one of three ways:
 human-readable forms like `4GB`, `512MiB`, `1TiB`.
   --gpu <MODEL> [...]                 GPU instance. Use \
 `aleph instance price --list-gpus` to list models. `--gpu <MODEL>` alone \
-sizes the VM at the GPU's minimum; add `--size`, `--vcpus`, or `--memory` \
-to request more. `--disk-size` is optional for GPU instances.
+sizes the VM at the GPU's minimum. GPU sizes scale in compute-unit steps \
+(1 vCPU + 6 GiB each), so `--size` accepts the minimum or any larger multiple \
+(e.g. `4vcpu-24gb`, `5vcpu-30gb`); `--vcpus`/`--memory` work too. `--disk-size` \
+is optional for GPU instances.
 
 Required: NAME (positional), `--image`, and at least one \
 `--ssh-pubkey-file`. Image accepts a preset name (`ubuntu22`, `ubuntu24`, \
@@ -1591,8 +1593,9 @@ There are three ways to specify the instance:
   2. By resources:    --vcpus 4 --memory 8GB --disk-size 100GB
   3. By GPU model:    --gpu h100
 
-GPU instances have a minimum size determined by the model. Use --size \
-or --vcpus/--memory to request more resources (must be >= the GPU minimum). \
+GPU instances have a minimum size determined by the model, then scale in \
+compute-unit steps (1 vCPU + 6 GiB each). --size accepts the minimum or any \
+larger multiple (e.g. 4vcpu-24gb, 5vcpu-30gb); --vcpus/--memory work too. \
 GPU and confidential instances use separate pricing tiers and cannot \
 be combined.
 

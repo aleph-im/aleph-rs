@@ -180,6 +180,28 @@ impl PricingPerEntity {
     pub fn available_slugs(&self) -> Vec<String> {
         self.tiers.iter().map(|tier| self.tier_slug(tier)).collect()
     }
+
+    /// Inverse of `slug_for_compute_units`: parse a size slug into a compute-unit
+    /// count for this entity's compute-unit definition. Returns `None` when the
+    /// slug is not a clean whole multiple of this entity's compute unit (wrong
+    /// format, vcpus not divisible by the per-CU vcpus, or memory that does not
+    /// match the resulting CU count).
+    ///
+    /// Unlike `find_tier_by_slug`, this does not require a matching tier to
+    /// exist: GPU entities list one tier per model (its minimum), but a GPU can
+    /// be sized at any whole multiple of its compute unit at or above that
+    /// minimum, so the size is derived arithmetically rather than enumerated.
+    pub fn compute_units_for_slug(&self, slug: &str) -> Option<u32> {
+        let (vcpu_part, _) = slug.split_once("vcpu-")?;
+        let vcpus: u32 = vcpu_part.parse().ok()?;
+        let per_cu = self.compute_unit.vcpus;
+        if per_cu == 0 || vcpus == 0 || !vcpus.is_multiple_of(per_cu) {
+            return None;
+        }
+        let compute_units = vcpus / per_cu;
+        // Round-trip to validate the memory portion matches this CU definition.
+        (self.slug_for_compute_units(compute_units) == slug).then_some(compute_units)
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +307,45 @@ mod tests {
                 "12vcpu-24gb",
             ]
         );
+    }
+
+    /// A GPU-style compute unit: 1 vCPU + 6 GiB RAM per CU. The model tier's
+    /// `compute_units` is only a minimum; sizes scale by whole CU multiples.
+    fn gpu_pricing() -> PricingPerEntity {
+        PricingPerEntity {
+            compute_unit: ComputeUnitSpec {
+                vcpus: 1,
+                memory_mib: 6144,
+                disk_mib: 61440,
+            },
+            tiers: vec![Tier {
+                id: "tier-1".into(),
+                compute_units: 3,
+                model: Some("RTX 4000 ADA".into()),
+                vram: Some(20480),
+            }],
+            price: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn compute_units_for_slug_accepts_any_clean_multiple() {
+        let gpu = gpu_pricing();
+        // The model minimum and arbitrary larger multiples both resolve, even
+        // though only the 3-CU tier exists.
+        assert_eq!(gpu.compute_units_for_slug("3vcpu-18gb"), Some(3));
+        assert_eq!(gpu.compute_units_for_slug("4vcpu-24gb"), Some(4));
+        assert_eq!(gpu.compute_units_for_slug("5vcpu-30gb"), Some(5));
+    }
+
+    #[test]
+    fn compute_units_for_slug_rejects_mismatched_or_malformed() {
+        let gpu = gpu_pricing();
+        // Memory does not match the CU definition (4 CU would be 24gb, not 8gb).
+        assert_eq!(gpu.compute_units_for_slug("4vcpu-8gb"), None);
+        assert_eq!(gpu.compute_units_for_slug("0vcpu-0gb"), None);
+        assert_eq!(gpu.compute_units_for_slug("garbage"), None);
+        assert_eq!(gpu.compute_units_for_slug(""), None);
     }
 
     #[test]
