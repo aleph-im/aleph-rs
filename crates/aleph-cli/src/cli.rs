@@ -1806,7 +1806,8 @@ pub struct InstanceCreateArgs {
     pub on_behalf_of: Option<String>,
 
     /// Prompt interactively for any values not provided on the command line.
-    /// Always runs the CRN picker.
+    /// Prompts for node placement: let the scheduler choose automatically, or
+    /// pick a specific CRN. Skipped if `--crn-hash` is already set.
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
