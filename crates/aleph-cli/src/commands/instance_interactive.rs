@@ -289,10 +289,7 @@ fn truncate(s: &str, max: usize) -> String {
 fn prompt_pick_specific_crn() -> Result<bool> {
     let idx = Select::new()
         .with_prompt("Node placement")
-        .items(&[
-            "Let the scheduler choose a node automatically",
-            "Choose a specific node",
-        ])
+        .items(&["Automatic", "Choose a specific node"])
         .default(0)
         .interact()?;
     Ok(idx == 1)
