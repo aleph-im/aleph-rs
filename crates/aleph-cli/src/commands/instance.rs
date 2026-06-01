@@ -929,31 +929,53 @@ fn resolve_gpu(name: &str) -> Result<GpuProperties> {
     ))
 }
 
+/// Guidance shown under the GPU table so users know how to actually create a
+/// GPU instance, and so they do not copy the "Min size" slug into `--size`.
+///
+/// `example_model` is a real model slug from the table (or a placeholder when
+/// none is available) so the example line is copy-pasteable.
+/// One line describing a tier's compute unit, e.g.
+/// "1 compute unit = 1 vCPU + 6 GiB RAM + 60 GiB disk".
+fn compute_unit_summary(cu: &aleph_sdk::aggregate_models::pricing::ComputeUnitSpec) -> String {
+    format!(
+        "1 compute unit = {} vCPU + {} GiB RAM + {} GiB disk",
+        cu.vcpus,
+        cu.memory_mib / 1024,
+        cu.disk_mib / 1024,
+    )
+}
+
 fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingData) {
     let models = pricing.available_gpu_models();
     if models.is_empty() {
         eprintln!("No GPU models available.");
         return;
     }
-    eprintln!("  {:<20} {:<16} {:<16} Tier", "Model", "Min size", "VRAM");
-    for gpu in &models {
-        let entity = match gpu.tier.as_str() {
-            "standard" => &pricing.instance_gpu_standard,
-            "premium" => &pricing.instance_gpu_premium,
-            _ => continue,
-        };
-        let min_size = entity.slug_for_compute_units(gpu.compute_units);
-        let vram = gpu
-            .vram_mib
-            .map(|v| format!("{} GiB", v / 1024))
-            .unwrap_or_default();
+    // Group models by their pricing tier. Each tier has its own compute-unit
+    // definition; a model's "Min size" is its minimum number of those units.
+    for (tier_name, entity) in [
+        ("standard", &pricing.instance_gpu_standard),
+        ("premium", &pricing.instance_gpu_premium),
+    ] {
+        let mut tier_models: Vec<_> = models.iter().filter(|m| m.tier == tier_name).collect();
+        if tier_models.is_empty() {
+            continue;
+        }
+        // Sort alphabetically by display slug rather than aggregate order.
+        tier_models.sort_by_key(|m| m.slug());
         eprintln!(
-            "  {:<20} {:<16} {:<16} {}",
-            gpu.slug(),
-            min_size,
-            vram,
-            gpu.tier
+            "\n{tier_name} tier  ({})",
+            compute_unit_summary(&entity.compute_unit)
         );
+        eprintln!("  {:<30} {:<10} Min size", "Model", "VRAM");
+        for gpu in tier_models {
+            let vram = gpu
+                .vram_mib
+                .map(|v| format!("{} GiB", v / 1024))
+                .unwrap_or_default();
+            let min_size = entity.slug_for_compute_units(gpu.compute_units);
+            eprintln!("  {:<30} {:<10} {}", gpu.slug(), vram, min_size);
+        }
     }
 }
 
@@ -1253,6 +1275,20 @@ async fn handle_instance_delete(
 mod tests {
     use super::*;
     use crate::cli::parse_size_to_mib;
+
+    #[test]
+    fn compute_unit_summary_describes_the_unit() {
+        use aleph_sdk::aggregate_models::pricing::ComputeUnitSpec;
+        let cu = ComputeUnitSpec {
+            vcpus: 1,
+            memory_mib: 6144,
+            disk_mib: 61440,
+        };
+        assert_eq!(
+            compute_unit_summary(&cu),
+            "1 compute unit = 1 vCPU + 6 GiB RAM + 60 GiB disk"
+        );
+    }
 
     #[test]
     fn parse_kv_pairs_basic() {
