@@ -934,15 +934,14 @@ fn resolve_gpu(name: &str) -> Result<GpuProperties> {
 ///
 /// `example_model` is a real model slug from the table (or a placeholder when
 /// none is available) so the example line is copy-pasteable.
-fn gpu_usage_footer(example_model: &str, example_min: &str, example_larger: &str) -> String {
+/// One line describing a tier's compute unit, e.g.
+/// "1 compute unit = 1 vCPU + 6 GiB RAM + 60 GiB disk".
+fn compute_unit_summary(cu: &aleph_sdk::aggregate_models::pricing::ComputeUnitSpec) -> String {
     format!(
-        "\nEach GPU has its own compute unit (1 vCPU + 6 GiB RAM). \"Min size\" is the model's\n\
-         minimum number of those units; a GPU can be sized at any larger whole multiple too.\n\
-         Pass the model with --gpu: alone it uses the minimum (disk included), and --size scales\n\
-         in compute-unit steps (e.g. {example_min}, then {example_larger}, and so on). --vcpus / --memory work too.\n\
-         Example:\n  \
-         aleph instance create my-vm --image ubuntu24 --gpu {example_model} --ssh-pubkey-file ~/.ssh/id_ed25519.pub\n  \
-         aleph instance create my-vm --image ubuntu24 --gpu {example_model} --size {example_larger} --ssh-pubkey-file ~/.ssh/id_ed25519.pub"
+        "1 compute unit = {} vCPU + {} GiB RAM + {} GiB disk",
+        cu.vcpus,
+        cu.memory_mib / 1024,
+        cu.disk_mib / 1024,
     )
 }
 
@@ -952,44 +951,30 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
         eprintln!("No GPU models available.");
         return;
     }
-    eprintln!("  {:<20} {:<16} {:<16} Tier", "Model", "Min size", "VRAM");
-    let mut example: Option<(String, String, String)> = None;
-    for gpu in &models {
-        let entity = match gpu.tier.as_str() {
-            "standard" => &pricing.instance_gpu_standard,
-            "premium" => &pricing.instance_gpu_premium,
-            _ => continue,
-        };
-        let min_size = entity.slug_for_compute_units(gpu.compute_units);
-        let vram = gpu
-            .vram_mib
-            .map(|v| format!("{} GiB", v / 1024))
-            .unwrap_or_default();
-        if example.is_none() {
-            // Capture the first model's minimum and the next compute-unit step
-            // up, for a concrete scaling example in the footer.
-            let larger = entity.slug_for_compute_units(gpu.compute_units + 1);
-            example = Some((gpu.slug(), min_size.clone(), larger));
+    // Group models by their pricing tier. Each tier has its own compute-unit
+    // definition; a model's "Min size" is its minimum number of those units.
+    for (tier_name, entity) in [
+        ("standard", &pricing.instance_gpu_standard),
+        ("premium", &pricing.instance_gpu_premium),
+    ] {
+        let tier_models: Vec<_> = models.iter().filter(|m| m.tier == tier_name).collect();
+        if tier_models.is_empty() {
+            continue;
         }
         eprintln!(
-            "  {:<20} {:<16} {:<16} {}",
-            gpu.slug(),
-            min_size,
-            vram,
-            gpu.tier
+            "\n{tier_name} tier  ({})",
+            compute_unit_summary(&entity.compute_unit)
         );
+        eprintln!("  {:<30} {:<10} Min size", "Model", "VRAM");
+        for gpu in tier_models {
+            let vram = gpu
+                .vram_mib
+                .map(|v| format!("{} GiB", v / 1024))
+                .unwrap_or_default();
+            let min_size = entity.slug_for_compute_units(gpu.compute_units);
+            eprintln!("  {:<30} {:<10} {}", gpu.slug(), vram, min_size);
+        }
     }
-    let (example_model, example_min, example_larger) = example.unwrap_or_else(|| {
-        (
-            "<model>".to_string(),
-            "<min>".to_string(),
-            "<larger>".to_string(),
-        )
-    });
-    eprintln!(
-        "{}",
-        gpu_usage_footer(&example_model, &example_min, &example_larger)
-    );
 }
 
 async fn handle_instance_price(
@@ -1290,18 +1275,17 @@ mod tests {
     use crate::cli::parse_size_to_mib;
 
     #[test]
-    fn gpu_usage_footer_guides_to_create_command() {
-        let footer = gpu_usage_footer("rtx-4000-ada", "3vcpu-18gb", "4vcpu-24gb");
-        // Steers users to --gpu and explains the per-GPU compute unit.
-        assert!(footer.contains("--gpu"));
-        assert!(footer.contains("compute unit"));
-        // Explains --size scales in CU steps, showing the min and next multiple.
-        assert!(footer.contains("--size"));
-        assert!(footer.contains("3vcpu-18gb"));
-        assert!(footer.contains("4vcpu-24gb"));
-        // Includes a concrete, runnable example with the model substituted in.
-        assert!(footer.contains("aleph instance create my-vm --image ubuntu24 --gpu rtx-4000-ada"));
-        assert!(footer.contains("--ssh-pubkey-file"));
+    fn compute_unit_summary_describes_the_unit() {
+        use aleph_sdk::aggregate_models::pricing::ComputeUnitSpec;
+        let cu = ComputeUnitSpec {
+            vcpus: 1,
+            memory_mib: 6144,
+            disk_mib: 61440,
+        };
+        assert_eq!(
+            compute_unit_summary(&cu),
+            "1 compute unit = 1 vCPU + 6 GiB RAM + 60 GiB disk"
+        );
     }
 
     #[test]
