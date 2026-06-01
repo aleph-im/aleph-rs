@@ -314,6 +314,7 @@ pub async fn get_address_files_for_api(
     after_time: Option<DateTime<Utc>>,
     after_hash: Option<&str>,
     cursor_mode: bool,
+    file_hash: Option<&str>,
 ) -> AlephResult<Vec<AddressFileRow>> {
     let mut sql = String::from(
         "SELECT fp.file_hash, fp.created, fp.item_hash, f.size, f.type \
@@ -322,6 +323,11 @@ pub async fn get_address_files_for_api(
     );
     let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
         vec![Box::new(owner.to_string())];
+
+    if let Some(fh) = file_hash {
+        params.push(Box::new(fh.to_string()));
+        sql.push_str(&format!(" AND fp.file_hash = ${}", params.len()));
+    }
 
     if let Some(at) = after_time {
         let cmp = if sort_order == SortOrder::Descending {

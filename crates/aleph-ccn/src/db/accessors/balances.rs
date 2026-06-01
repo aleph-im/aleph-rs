@@ -332,10 +332,18 @@ pub async fn consume_address_credits(
     if amount <= 0 {
         return Ok(Vec::new());
     }
-    // Lock and select still-valid lots ordered by emission.
+    // Lock and select still-valid lots ordered by emission. `message_timestamp`
+    // bounds eligibility on both ends: a lot is drainable only if it was granted
+    // at or before the expense (`message_timestamp <= $2`) and is not yet expired.
+    // The lower bound prevents a backdated expense from draining a grant that did
+    // not yet exist at the expense's instant; messages can arrive out of order in
+    // the P2P pipeline, so a future-dated grant may already be cached when an
+    // older expense lands. This keeps eager writes consistent with the repair
+    // replay, which walks history chronologically and enforces both bounds.
     let sql = "SELECT credit_ref, credit_index, amount_remaining, expiration_date \
                FROM credit_balances \
                WHERE address = $1 AND amount_remaining > 0 \
+                 AND message_timestamp <= $2 \
                  AND (expiration_date IS NULL OR expiration_date > $2) \
                ORDER BY message_timestamp ASC, credit_ref ASC, credit_index ASC \
                FOR UPDATE";

@@ -90,11 +90,11 @@ fn store_message(
 
 fn handler() -> StoreMessageHandler {
     let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::default());
-    StoreMessageHandler::new(storage, None, 24, 25 * 1024 * 1024, false, true, 5, Vec::new())
+    StoreMessageHandler::new(storage, None, 24, 25 * 1024 * 1024, false, true, 5, 0.0, Vec::new())
 }
 
 fn handler_with_storage(storage: Arc<dyn StorageEngine>) -> StoreMessageHandler {
-    StoreMessageHandler::new(storage, None, 24, 25 * 1024 * 1024, false, true, 5, Vec::new())
+    StoreMessageHandler::new(storage, None, 24, 25 * 1024 * 1024, false, true, 5, 0.0, Vec::new())
 }
 
 struct StaticApiServers(Vec<String>);

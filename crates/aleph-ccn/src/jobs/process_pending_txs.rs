@@ -419,9 +419,12 @@ mod tests {
     }
 
     #[test]
-    fn backoff_is_exponential() {
+    fn backoff_bounded_by_exponential_cap() {
         use crate::jobs::job_utils::compute_next_retry_interval;
-        assert!(compute_next_retry_interval(2) > compute_next_retry_interval(1));
-        assert!(compute_next_retry_interval(3) > compute_next_retry_interval(2));
+        // Full jitter: each draw is bounded by its exponential cap.
+        for _ in 0..50 {
+            assert!(compute_next_retry_interval(2) <= Duration::from_secs(4));
+            assert!(compute_next_retry_interval(3) <= Duration::from_secs(8));
+        }
     }
 }

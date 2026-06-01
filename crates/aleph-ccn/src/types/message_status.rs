@@ -219,11 +219,17 @@ pub enum MessageProcessingException {
 
     /// Message content not currently available. (`CONTENT_UNAVAILABLE`, retry)
     #[error("MessageContentUnavailable")]
-    MessageContentUnavailable { file_hash: String },
+    MessageContentUnavailable {
+        file_hash: String,
+        details: Option<String>,
+    },
 
     /// A referenced file is unavailable. (`FILE_UNAVAILABLE`, retry)
     #[error("FileUnavailable")]
-    FileUnavailable { file_hash: String },
+    FileUnavailable {
+        file_hash: String,
+        details: Option<String>,
+    },
 
     /// Amend POST without ref. (`POST_AMEND_NO_TARGET`, reject)
     #[error("NoAmendTarget")]
@@ -397,10 +403,15 @@ impl MessageProcessingException {
                 }
             }
             // FileNotFound subclasses: Python builds `f"File not found: {file_hash}"`
-            // and stores it as the single error string.
-            MessageProcessingException::MessageContentUnavailable { file_hash }
-            | MessageProcessingException::FileUnavailable { file_hash } => {
-                Some(json!({ "errors": [format!("File not found: {file_hash}")] }))
+            // and appends `(details)` when present, storing the result as the
+            // single error string.
+            MessageProcessingException::MessageContentUnavailable { file_hash, details }
+            | MessageProcessingException::FileUnavailable { file_hash, details } => {
+                let message = match details {
+                    Some(d) => format!("File not found: {file_hash} ({d})"),
+                    None => format!("File not found: {file_hash}"),
+                };
+                Some(json!({ "errors": [message] }))
             }
             MessageProcessingException::ForgetNotAllowed { file_hash, vm_hash } => {
                 Some(json!({ "errors": [format!("File {file_hash} used on vm {vm_hash}")] }))
@@ -462,16 +473,42 @@ impl MessageProcessingException {
 
 impl MessageProcessingException {
     /// Builder for `MessageContentUnavailable` / `FileUnavailable`, mirroring
-    /// the Python `FileNotFoundException(file_hash)` constructor.
+    /// the Python `FileNotFoundException(file_hash, details=None)` constructor.
     pub fn message_content_unavailable(file_hash: impl Into<String>) -> Self {
         MessageProcessingException::MessageContentUnavailable {
             file_hash: file_hash.into(),
+            details: None,
+        }
+    }
+
+    /// `MessageContentUnavailable` with explanatory `details`, mirroring
+    /// Python's `MessageContentUnavailable(item_hash, "...")`.
+    pub fn message_content_unavailable_with_details(
+        file_hash: impl Into<String>,
+        details: impl Into<String>,
+    ) -> Self {
+        MessageProcessingException::MessageContentUnavailable {
+            file_hash: file_hash.into(),
+            details: Some(details.into()),
         }
     }
 
     pub fn file_unavailable(file_hash: impl Into<String>) -> Self {
         MessageProcessingException::FileUnavailable {
             file_hash: file_hash.into(),
+            details: None,
+        }
+    }
+
+    /// `FileUnavailable` with explanatory `details`, mirroring Python's
+    /// `FileUnavailable(file_hash, "...")`.
+    pub fn file_unavailable_with_details(
+        file_hash: impl Into<String>,
+        details: impl Into<String>,
+    ) -> Self {
+        MessageProcessingException::FileUnavailable {
+            file_hash: file_hash.into(),
+            details: Some(details.into()),
         }
     }
 }

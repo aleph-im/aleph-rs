@@ -133,9 +133,13 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_between_attempts() {
+    fn backoff_bounded_by_exponential_cap() {
         use crate::jobs::job_utils::compute_next_retry_interval;
-        assert!(compute_next_retry_interval(1) > compute_next_retry_interval(0));
-        assert!(compute_next_retry_interval(2) > compute_next_retry_interval(1));
+        // Full jitter: each draw is bounded by its exponential cap.
+        for _ in 0..50 {
+            assert!(compute_next_retry_interval(0) <= Duration::from_secs(1));
+            assert!(compute_next_retry_interval(1) <= Duration::from_secs(2));
+            assert!(compute_next_retry_interval(2) <= Duration::from_secs(4));
+        }
     }
 }

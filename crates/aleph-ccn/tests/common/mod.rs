@@ -628,11 +628,15 @@ pub fn build_message_handler(_pool: DbPool) -> Arc<MessageHandler> {
         credit_balances_addresses: vec!["0xcredits".into()],
         credit_balances_post_types: vec!["aleph_credit_distribution".into()],
         credit_balances_channels: Vec::new(),
+        scoring_addresses: Vec::new(),
+        scoring_channel: "aleph-scoring".into(),
+        scoring_metrics_post_type: "aleph-network-metrics".into(),
         storage_grace_period_hours: 24,
         max_unauthenticated_upload_file_size: 25 * 1024 * 1024,
         ipfs_enabled: false,
         store_files: true,
         ipfs_stat_timeout: 5,
+        ipfs_fetch_jitter_seconds: 0.0,
         api_servers: Vec::new(),
     };
     let signature_verifier = Arc::new(SignatureVerifier::new());
@@ -661,11 +665,15 @@ pub fn build_message_handler_with_storage(
         credit_balances_addresses: vec!["0xcredits".into()],
         credit_balances_post_types: vec!["aleph_credit_distribution".into()],
         credit_balances_channels: Vec::new(),
+        scoring_addresses: Vec::new(),
+        scoring_channel: "aleph-scoring".into(),
+        scoring_metrics_post_type: "aleph-network-metrics".into(),
         storage_grace_period_hours: 24,
         max_unauthenticated_upload_file_size: 25 * 1024 * 1024,
         ipfs_enabled: false,
         store_files: true,
         ipfs_stat_timeout: 5,
+        ipfs_fetch_jitter_seconds: 0.0,
         api_servers: Vec::new(),
     };
     let signature_verifier = Arc::new(SignatureVerifier::new());

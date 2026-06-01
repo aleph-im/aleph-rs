@@ -153,8 +153,15 @@ pub async fn check_authorization_local(
     check_delegated_authorization_local(lookup, sender, address, view).await
 }
 
-/// Send-friendly local copy of `permissions::_check_delegated_authorization`.
-async fn check_delegated_authorization_local(
+/// Send-friendly local copy of `permissions::is_sender_authorized_for_owner`.
+///
+/// Mirrors the public `is_sender_authorized_for_owner` helper in
+/// `aleph/permissions.py`: it answers whether `sender` is authorized to act
+/// for `owner_address` per the owner's `security` aggregate, using `view`'s
+/// attributes (type, channel, chain, post/aggregate scoping) as the filter
+/// match. Callers pass either an inbound message (authorize a submission) or
+/// an existing target message (authorize an action against it, e.g. FORGET).
+pub(crate) async fn check_delegated_authorization_local(
     lookup: &dyn AuthorityLookup,
     sender: &str,
     owner_address: &str,

@@ -325,14 +325,14 @@ mod tests {
     }
 
     #[test]
-    fn backoff_is_exponential() {
-        let a = compute_next_retry_interval(0);
-        let b = compute_next_retry_interval(1);
-        let c = compute_next_retry_interval(2);
-        let d = compute_next_retry_interval(3);
-        assert_eq!(a, Duration::from_secs(1));
-        assert_eq!(b, Duration::from_secs(2));
-        assert_eq!(c, Duration::from_secs(4));
-        assert_eq!(d, Duration::from_secs(8));
+    fn backoff_bounded_by_exponential_cap() {
+        // Full jitter draws uniformly from [0, 2^attempts] seconds, so each
+        // sample is bounded by the exponential cap.
+        for _ in 0..50 {
+            assert!(compute_next_retry_interval(0) <= Duration::from_secs(1));
+            assert!(compute_next_retry_interval(1) <= Duration::from_secs(2));
+            assert!(compute_next_retry_interval(2) <= Duration::from_secs(4));
+            assert!(compute_next_retry_interval(3) <= Duration::from_secs(8));
+        }
     }
 }

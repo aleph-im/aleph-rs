@@ -530,6 +530,7 @@ async fn get_account_files(
         _ => SortOrder::Descending,
     };
     let cursor = raw.get("cursor").cloned();
+    let file_hash = raw.get("file_hash").cloned();
 
     let client = get_db(&state).await?;
 
@@ -551,6 +552,7 @@ async fn get_account_files(
             after_time,
             after_hash.as_deref(),
             true,
+            file_hash.as_deref(),
         )
         .await?;
         let (_nb, total_size) = get_address_files_stats(&**client, &address).await?;
@@ -591,7 +593,15 @@ async fn get_account_files(
     }
 
     let rows = get_address_files_for_api(
-        &**client, &address, pagination, page, sort_order, None, None, false,
+        &**client,
+        &address,
+        pagination,
+        page,
+        sort_order,
+        None,
+        None,
+        false,
+        file_hash.as_deref(),
     )
     .await?;
     let (nb_files, total_size) = get_address_files_stats(&**client, &address).await?;

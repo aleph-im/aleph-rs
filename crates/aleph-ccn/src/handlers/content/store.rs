@@ -8,7 +8,7 @@ use std::time::Duration;
 use aleph_types::message::item_type::ItemType;
 
 use crate::db::accessors::files::{
-    delete_file_pin, get_file_tag, get_message_file_pin, insert_grace_period_file_pin,
+    delete_file_pin, get_file, get_file_tag, get_message_file_pin, insert_grace_period_file_pin,
     insert_message_file_pin, is_pinned_file, refresh_file_tag, upsert_file, upsert_file_tag,
 };
 use crate::db::models::account_costs::{AccountCostsDb, PaymentType};
@@ -27,6 +27,7 @@ use crate::toolkit::constants::MIB;
 use crate::toolkit::costs::{
     StoreAndProgramFreeInput, are_store_and_program_free, is_credit_only_required,
 };
+use crate::toolkit::metrics_keys::store_fetch_keys;
 use crate::toolkit::timestamp::{timestamp_to_datetime, utc_now};
 use crate::types::files::{FileTag, FileType};
 use crate::types::message_status::MessageProcessingException;
@@ -139,6 +140,22 @@ pub struct IpfsFileStats {
     pub is_directory: bool,
 }
 
+/// Wait a randomized delay before starting an IPFS fetch. Mirrors Python's
+/// `_apply_fetch_jitter`.
+///
+/// Spreads the simultaneous fetch attempts from many CCNs receiving the same
+/// STORE message into a rolling wave so early fetchers can become reseeders for
+/// later ones before the origin's uplink is saturated. A no-op when the window
+/// is zero, so the behaviour is opt-in via `ipfs.fetch_jitter_seconds`.
+async fn apply_fetch_jitter(window_seconds: f64, file_hash: &str) {
+    if window_seconds <= 0.0 {
+        return;
+    }
+    let delay = rand::random::<f64>() * window_seconds;
+    tracing::info!("ipfs_fetch_jitter hash={file_hash} delay={delay:.2}");
+    tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+}
+
 /// Decide whether an IPFS object should be pinned locally. Mirrors Python's
 /// `_should_pin_on_ipfs`: always pin directories; pin files only when they
 /// exceed `min_file_size_for_pinning`.
@@ -161,6 +178,9 @@ pub struct StoreMessageHandler {
     pub store_files: bool,
     /// IPFS `/files/stat` timeout, in seconds. Pulled from `config.ipfs.stat_timeout`.
     pub ipfs_stat_timeout_secs: u64,
+    /// Randomized delay window (seconds) applied before an IPFS fetch starts.
+    /// Pulled from `config.ipfs.fetch_jitter_seconds`.
+    pub ipfs_fetch_jitter_seconds: f64,
     /// HTTP API servers used as a fallback when a `storage`-type file is
     /// missing locally. Mirrors Python's `api-servers` peers list.
     pub api_servers: Vec<String>,
@@ -176,6 +196,7 @@ impl StoreMessageHandler {
         ipfs_enabled: bool,
         store_files: bool,
         ipfs_stat_timeout_secs: u64,
+        ipfs_fetch_jitter_seconds: f64,
         api_servers: Vec<String>,
     ) -> Self {
         Self {
@@ -186,6 +207,7 @@ impl StoreMessageHandler {
             ipfs_enabled,
             store_files,
             ipfs_stat_timeout_secs,
+            ipfs_fetch_jitter_seconds,
             api_servers,
             storage_service: None,
         }
@@ -194,6 +216,28 @@ impl StoreMessageHandler {
     pub fn with_storage_service(mut self, storage_service: Arc<StorageService>) -> Self {
         self.storage_service = Some(storage_service);
         self
+    }
+
+    /// Increment a shared STORE file-fetch metric counter by 1. Routes through
+    /// the storage service's node cache (Redis in production). A no-op when no
+    /// storage service is wired or when the increment fails — metrics must
+    /// never block message processing. Mirrors `node_cache.incr` in pyaleph.
+    async fn incr_metric(&self, key: &str) {
+        if let Some(storage_service) = &self.storage_service {
+            if let Err(e) = storage_service.node_cache.incr_metric(key).await {
+                tracing::debug!("failed to increment metric {key}: {e}");
+            }
+        }
+    }
+
+    /// Increment a shared STORE file-fetch metric counter by `amount`. See
+    /// [`Self::incr_metric`]. Mirrors `node_cache.incrby` in pyaleph.
+    async fn incrby_metric(&self, key: &str, amount: i64) {
+        if let Some(storage_service) = &self.storage_service {
+            if let Err(e) = storage_service.node_cache.incrby_metric(key, amount).await {
+                tracing::debug!("failed to increment metric {key} by {amount}: {e}");
+            }
+        }
     }
 
     async fn pin_and_tag_file(
@@ -296,7 +340,10 @@ impl StoreMessageHandler {
             });
         }
 
+        let (total_key, failed_key, duration_key) = store_fetch_keys(item_type);
+
         if item_type == ItemType::Ipfs && self.ipfs_enabled {
+            apply_fetch_jitter(self.ipfs_fetch_jitter_seconds, &file_hash).await;
             if let Some(ipfs) = &self.ipfs_service {
                 let stat_timeout = Duration::from_secs(self.ipfs_stat_timeout_secs);
                 let stat = ipfs
@@ -314,12 +361,34 @@ impl StoreMessageHandler {
                 };
 
                 if should_pin_on_ipfs(&stats, MIB as i64) {
+                    // Counted before the fetch so every attempt is represented. A
+                    // crash between here and the success/failure path leaves the
+                    // total without a matching duration or failure entry, marginally
+                    // skewing the mean — an acceptable tradeoff for approximate
+                    // monitoring counters. Mirrors pyaleph #1164.
+                    self.incr_metric(total_key).await;
+                    let timer = std::time::Instant::now();
                     // Directories are force-pinned regardless of size.
-                    ipfs.pin_add(&file_hash, Duration::from_secs(30), 1)
+                    if ipfs
+                        .pin_add(&file_hash, Duration::from_secs(30), 1)
                         .await
-                        .map_err(|_| {
-                            MessageProcessingException::file_unavailable(file_hash.clone())
-                        })?;
+                        .is_err()
+                    {
+                        self.incr_metric(failed_key).await;
+                        tracing::warn!(
+                            "ipfs_fetch hash={file_hash} type=ipfs path=pin size={} duration={:.2} outcome=fail",
+                            stats.size,
+                            timer.elapsed().as_secs_f64(),
+                        );
+                        return Err(MessageProcessingException::file_unavailable(file_hash.clone()));
+                    }
+                    let elapsed = timer.elapsed().as_secs_f64();
+                    self.incrby_metric(duration_key, (elapsed * 1000.0).round() as i64)
+                        .await;
+                    tracing::info!(
+                        "ipfs_fetch hash={file_hash} type=ipfs path=pin size={} duration={elapsed:.2} outcome=ok",
+                        stats.size,
+                    );
                     upsert_file(client, &file_hash, stats.size, stats.file_type)
                         .await
                         .map_err(|e| MessageProcessingException::InternalError {
@@ -338,6 +407,11 @@ impl StoreMessageHandler {
         })?;
         if !exists {
             if let Some(storage_service) = &self.storage_service {
+                // Fetch content directly from the Aleph network storage API.
+                // Counted before the fetch so every attempt is represented.
+                // Mirrors pyaleph #1164.
+                self.incr_metric(total_key).await;
+                let timer = std::time::Instant::now();
                 match storage_service
                     .get_hash_content(
                         &file_hash,
@@ -351,6 +425,13 @@ impl StoreMessageHandler {
                     .await
                 {
                     Ok(raw) => {
+                        let elapsed = timer.elapsed().as_secs_f64();
+                        self.incrby_metric(duration_key, (elapsed * 1000.0).round() as i64)
+                            .await;
+                        tracing::info!(
+                            "ipfs_fetch hash={file_hash} type={item_type:?} path=http size={} duration={elapsed:.2} outcome=ok",
+                            raw.value.len(),
+                        );
                         upsert_file(client, &file_hash, raw.value.len() as i64, FileType::File)
                             .await
                             .map_err(|e| MessageProcessingException::InternalError {
@@ -365,7 +446,16 @@ impl StoreMessageHandler {
                     }
                     Err(crate::AlephError::NotFound(_))
                     | Err(crate::AlephError::Ipfs(_))
-                    | Err(crate::AlephError::P2p(_)) => {}
+                    | Err(crate::AlephError::P2p(_)) => {
+                        // AlephStorageException equivalents: the network fetch
+                        // came up empty. Record the failure before falling
+                        // through to the IPFS-gateway / api-servers fallbacks.
+                        self.incr_metric(failed_key).await;
+                        tracing::warn!(
+                            "ipfs_fetch hash={file_hash} type={item_type:?} path=http duration={:.2} outcome=unavailable",
+                            timer.elapsed().as_secs_f64(),
+                        );
+                    }
                     Err(e) => {
                         return Err(MessageProcessingException::InternalError {
                             errors: vec![format!("Storage service fetch failed: {e}")],
@@ -414,6 +504,20 @@ impl StoreMessageHandler {
                 )
                 .await
                 {
+                    // Verify the peer-supplied bytes actually hash to the
+                    // requested `file_hash` before persisting. pyaleph only
+                    // fetches storage content through `StorageService`, which
+                    // calls `_verify_content_hash`; a raw `request_hash` peer
+                    // fetch must not write unverified content under a hash it
+                    // does not match (otherwise a malicious peer could make
+                    // this node serve corrupted content for that hash).
+                    if crate::storage::verify_content_hash_sha256(&bytes) != file_hash {
+                        self.incr_metric(failed_key).await;
+                        tracing::warn!(
+                            "store_fetch hash={file_hash} type={item_type:?} path=api-servers outcome=hash-mismatch",
+                        );
+                        return Err(MessageProcessingException::file_unavailable(file_hash));
+                    }
                     if self.store_files {
                         self.storage_engine
                             .write(&file_hash, &bytes)
@@ -495,10 +599,29 @@ impl ContentHandler for StoreMessageHandler {
         if item_type == ItemType::Ipfs && self.ipfs_enabled {
             if let Some(ipfs) = &self.ipfs_service {
                 let file_hash = store_item_hash(message)?;
-                let ipfs_size = ipfs
-                    .get_ipfs_size(&file_hash, Duration::from_secs(30), 2)
-                    .await
-                    .map_err(|_| MessageProcessingException::file_unavailable(file_hash.clone()))?;
+                // If we already have the file locally (e.g. from a prior
+                // add_file or add_car upload on this node), use the stored size
+                // instead of asking kubo. Avoids a redundant dag.get round-trip
+                // and the rejection risk when the daemon is busy right after
+                // upload. Mirrors pyaleph #1170.
+                let stored_file = get_file(client, &file_hash).await.map_err(|e| {
+                    MessageProcessingException::InternalError {
+                        errors: vec![format!("DB error fetching file: {e}")],
+                    }
+                })?;
+                let ipfs_size = match stored_file {
+                    Some(file) => Some(file.size as u64),
+                    None => ipfs
+                        .get_ipfs_size(
+                            &file_hash,
+                            Duration::from_secs(self.ipfs_stat_timeout_secs),
+                            3,
+                        )
+                        .await
+                        .map_err(|_| {
+                            MessageProcessingException::file_unavailable(file_hash.clone())
+                        })?,
+                };
                 if let Some(byte_size) = ipfs_size {
                     let storage_mib = rust_decimal::Decimal::from(byte_size as i64)
                         / rust_decimal::Decimal::from(MIB);
@@ -853,7 +976,7 @@ mod tests {
         // tokio-postgres so we cannot stub it for non-IO paths.
         let engine: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::default());
         let _handler =
-            StoreMessageHandler::new(engine.clone(), None, 24, 0, false, false, 30, Vec::new());
+            StoreMessageHandler::new(engine.clone(), None, 24, 0, false, false, 30, 0.0, Vec::new());
         let file_hash = "QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8";
         assert!(!engine.exists(file_hash).await.unwrap());
         engine.write(file_hash, b"data").await.unwrap();

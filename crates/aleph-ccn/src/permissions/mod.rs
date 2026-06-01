@@ -201,8 +201,17 @@ impl AuthorityLookup for DbAuthorityLookup {
     }
 }
 
-/// Direct delegation check (Python `_check_delegated_authorization`).
-async fn check_delegated_authorization<L: AuthorityLookup + ?Sized>(
+/// Check whether `sender` is authorized to act for `owner_address` per the
+/// `security` aggregate (Python `is_sender_authorized_for_owner`).
+///
+/// `message`'s attributes scope the authorization filters (`types`,
+/// `channels`, `chain`, `post_types`, `aggregate_keys`). Callers pass either
+/// an inbound message (authorize a submission on behalf of `owner_address`)
+/// or an existing target message (authorize an action against it, e.g. a
+/// FORGET, expressing that the right to forget content follows the right to
+/// create it). If `sender == owner_address` the sender acts for themselves
+/// and no aggregate lookup is needed.
+pub async fn is_sender_authorized_for_owner<L: AuthorityLookup + ?Sized>(
     lookup: &L,
     sender: &str,
     owner_address: &str,
@@ -295,7 +304,7 @@ pub async fn check_sender_authorization<L: AuthorityLookup + ?Sized>(
                 if !address.eq_ignore_ascii_case(original_addr) {
                     return false;
                 }
-                return check_delegated_authorization(
+                return is_sender_authorized_for_owner(
                     lookup,
                     sender,
                     original_addr,
@@ -306,7 +315,7 @@ pub async fn check_sender_authorization<L: AuthorityLookup + ?Sized>(
         }
     }
 
-    check_delegated_authorization(lookup, sender, address, message).await
+    is_sender_authorized_for_owner(lookup, sender, address, message).await
 }
 
 fn string_array(v: Option<&Value>) -> Vec<&str> {

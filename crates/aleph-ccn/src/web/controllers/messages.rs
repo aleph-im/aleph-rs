@@ -26,6 +26,7 @@ use crate::schemas::messages_query_params::{
     MessageHashesQueryParams, MessageQueryParams, WsMessageQueryParams,
 };
 use crate::toolkit::cursor::{decode_message_cursor, encode_message_cursor};
+use crate::types::content_format::ContentFormat;
 use crate::types::message_status::MessageStatus;
 use crate::types::sort_order::SortBy;
 use crate::web::AppState;
@@ -166,13 +167,70 @@ fn filters_from_query(q: &MessageQueryParams) -> MessageFilters {
     f
 }
 
-/// Format a single message row into the Python-API JSON shape.
+/// Reduced `content` for `contentFormat=headers`, built from denormalized
+/// columns. Mirrors `build_headers_content` in pyaleph.
+///
+/// `address` is always included (from `owner`); the per-type fields are
+/// included when their column value is not `None`:
+/// * POST       -> `type` (content_type), `ref` (content_ref)
+/// * AGGREGATE  -> `key` (content_key)
+/// * STORE      -> `item_hash` (content_item_hash), `ref` (content_ref)
+/// * PROGRAM / INSTANCE / FORGET -> address only
+fn build_headers_content(m: &crate::db::models::messages::MessageDb) -> Value {
+    use aleph_types::message::MessageType;
+
+    let mut content = Map::new();
+    content.insert(
+        "address".into(),
+        match &m.owner {
+            Some(o) => json!(o),
+            None => Value::Null,
+        },
+    );
+
+    let mut insert_if_some = |key: &str, value: &Option<String>| {
+        if let Some(v) = value {
+            content.insert(key.into(), json!(v));
+        }
+    };
+
+    match m.r#type {
+        MessageType::Post => {
+            insert_if_some("type", &m.content_type);
+            insert_if_some("ref", &m.content_ref);
+        }
+        MessageType::Aggregate => {
+            insert_if_some("key", &m.content_key);
+        }
+        MessageType::Store => {
+            insert_if_some("item_hash", &m.content_item_hash);
+            insert_if_some("ref", &m.content_ref);
+        }
+        MessageType::Program | MessageType::Instance | MessageType::Forget => {}
+    }
+
+    Value::Object(content)
+}
+
+/// Format a single message row into the Python-API JSON shape, honouring the
+/// requested [`ContentFormat`]. Mirrors `message_to_dict` in pyaleph: `full`
+/// returns the complete content; `none` omits it; `headers` omits the full
+/// content but injects the reduced per-type metadata subset.
 fn message_to_dict(
     m: &crate::db::models::messages::MessageDb,
     confirmations: &[(String, String, i64)],
-    exclude_content: bool,
+    content_format: ContentFormat,
 ) -> Value {
-    m.to_api_value(confirmations, exclude_content)
+    if content_format == ContentFormat::Full {
+        return m.to_api_value(confirmations, false);
+    }
+    let mut value = m.to_api_value(confirmations, true);
+    if content_format == ContentFormat::Headers
+        && let Some(obj) = value.as_object_mut()
+    {
+        obj.insert("content".into(), build_headers_content(m));
+    }
+    value
 }
 
 /// Fetch on-chain confirmations for a list of item hashes in one query.
@@ -237,7 +295,7 @@ async fn do_messages_list(
     if let Some(p) = url_page {
         q.page = p;
     }
-    let exclude_content = q.base.exclude_content;
+    let content_format = q.base.resolve_content_format();
     let pagination_per_page = q.pagination;
     let cursor_str = q.cursor.clone();
 
@@ -270,7 +328,7 @@ async fn do_messages_list(
             .map(|m| {
                 let empty = Vec::new();
                 let cs = confs.get(&m.item_hash).unwrap_or(&empty);
-                message_to_dict(m, cs, exclude_content)
+                message_to_dict(m, cs, content_format)
             })
             .collect();
         let next_cursor: Option<String> = if has_more && !messages.is_empty() {
@@ -305,7 +363,7 @@ async fn do_messages_list(
         .map(|m| {
             let empty = Vec::new();
             let cs = confs.get(&m.item_hash).unwrap_or(&empty);
-            message_to_dict(m, cs, exclude_content)
+            message_to_dict(m, cs, content_format)
         })
         .collect();
     let body = json!({
@@ -416,7 +474,7 @@ async fn build_message_with_status(
             let confs = fetch_confirmations(client, &[item_hash.clone()]).await?;
             let empty = Vec::new();
             let cs = confs.get(item_hash).unwrap_or(&empty);
-            let message_dict = message_to_dict(&msg, cs, false);
+            let message_dict = message_to_dict(&msg, cs, ContentFormat::Full);
             let status_s = serde_json::to_value(status_db.status).unwrap();
             let mut out = json!({
                 "status": status_s,
@@ -772,7 +830,14 @@ async fn handle_messages_ws(mut socket: WebSocket, state: AppState, raw: HashMap
             return;
         }
     };
-    let exclude_content = query.base.exclude_content;
+    // The websocket payload supports two states only: content present or
+    // absent. `headers` is not implemented here, so it degrades to `none`.
+    // Mirrors pyaleph's `_send_history_to_ws` / `messages_ws`.
+    let content_format = match query.base.resolve_content_format() {
+        ContentFormat::Full => ContentFormat::Full,
+        _ => ContentFormat::None,
+    };
+    let exclude_content = content_format != ContentFormat::Full;
 
     // Subscribe to the broadcast BEFORE history send so we don't miss any
     // messages that arrive during the catch-up read.
@@ -781,7 +846,7 @@ async fn handle_messages_ws(mut socket: WebSocket, state: AppState, raw: HashMap
     if let Some(history) = query.history {
         if history > 0 {
             if let Err(e) =
-                send_history(&mut socket, &state, &query, history, exclude_content).await
+                send_history(&mut socket, &state, &query, history, content_format).await
             {
                 tracing::info!(?e, "messages_ws: failed to send history");
                 return;
@@ -844,7 +909,7 @@ async fn send_history(
     state: &AppState,
     query: &WsMessageQueryParams,
     history: i64,
-    exclude_content: bool,
+    content_format: ContentFormat,
 ) -> Result<(), String> {
     let client = get_db(state).await.map_err(|e| format!("{e:?}"))?;
     let mut f = filters_from_ws_query(query);
@@ -861,7 +926,7 @@ async fn send_history(
     for m in messages.iter().rev() {
         let empty = Vec::new();
         let cs = confs.get(&m.item_hash).unwrap_or(&empty);
-        let payload = message_to_dict(m, cs, exclude_content);
+        let payload = message_to_dict(m, cs, content_format);
         let s = payload.to_string();
         socket
             .send(WsMessage::Text(s.into()))

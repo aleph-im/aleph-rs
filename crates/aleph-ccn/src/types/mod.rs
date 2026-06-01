@@ -5,6 +5,7 @@
 
 pub mod chain_sync;
 pub mod channel;
+pub mod content_format;
 pub mod cost;
 pub mod files;
 pub mod message_processing_result;

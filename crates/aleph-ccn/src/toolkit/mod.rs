@@ -12,6 +12,8 @@ pub mod costs;
 pub mod cursor;
 pub mod ecdsa;
 pub mod json;
+pub mod metrics_keys;
+pub mod partitions;
 pub mod rabbitmq;
 pub mod range;
 pub mod split;

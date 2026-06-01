@@ -86,20 +86,27 @@ impl CancelToken {
     }
 }
 
-/// Compute the time interval before the next retry attempt, in seconds.
+/// Compute the time interval before the next retry attempt.
 ///
-/// Doubles each attempt (`2^attempts`) and is capped at
-/// [`MAX_RETRY_INTERVAL`]. Mirrors Python `compute_next_retry_interval`.
+/// Uses exponential backoff with full jitter: the interval is drawn
+/// uniformly from `[0, min(2^attempts, MAX_RETRY_INTERVAL)]` seconds. The
+/// jitter decorrelates the next-attempt time across nodes that failed the
+/// same attempt at roughly the same moment, so a retry storm does not
+/// re-converge into the same instant. Mirrors Python
+/// `compute_next_retry_interval`.
 pub fn compute_next_retry_interval(attempts: i32) -> Duration {
-    let raw = if attempts < 0 {
+    use rand::Rng as _;
+    let cap = if attempts < 0 {
         1u64
     } else if attempts >= 9 {
         // 2^9 = 512 > 300, so anything from 9 onwards saturates.
         MAX_RETRY_INTERVAL
     } else {
         1u64 << (attempts as u32)
-    };
-    Duration::from_secs(raw.min(MAX_RETRY_INTERVAL))
+    }
+    .min(MAX_RETRY_INTERVAL);
+    let seconds = rand::thread_rng().gen_range(0.0..=cap as f64);
+    Duration::from_secs_f64(seconds)
 }
 
 /// Schedule the next attempt time for a failed pending message.
@@ -407,38 +414,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retry_interval_starts_at_one_second() {
-        assert_eq!(compute_next_retry_interval(0), Duration::from_secs(1));
+    fn retry_interval_zero_attempts_bounded_by_one_second() {
+        // First retry must fall within [0, 1] seconds (base = 2^0 = 1).
+        for _ in 0..50 {
+            let delay = compute_next_retry_interval(0);
+            assert!(delay <= Duration::from_secs(1));
+        }
     }
 
     #[test]
-    fn retry_interval_doubles_each_attempt() {
-        assert_eq!(compute_next_retry_interval(1), Duration::from_secs(2));
-        assert_eq!(compute_next_retry_interval(2), Duration::from_secs(4));
-        assert_eq!(compute_next_retry_interval(3), Duration::from_secs(8));
-        assert_eq!(compute_next_retry_interval(4), Duration::from_secs(16));
-        assert_eq!(compute_next_retry_interval(5), Duration::from_secs(32));
+    fn retry_interval_bounded_by_exponential_cap() {
+        // Each draw stays within [0, min(2^attempts, MAX_RETRY_INTERVAL)].
+        // attempts=9 is the first value where 2^attempts (512) exceeds the
+        // cap (300), so it doubles as a boundary check.
+        for attempts in [1, 2, 5, 8, 9] {
+            let cap_seconds = (1u64 << attempts).min(MAX_RETRY_INTERVAL);
+            let cap = Duration::from_secs(cap_seconds);
+            for _ in 0..50 {
+                let delay = compute_next_retry_interval(attempts);
+                assert!(delay <= cap, "attempts={attempts}: {delay:?} > {cap:?}");
+            }
+        }
     }
 
     #[test]
     fn retry_interval_caps_at_max() {
-        // 2^9 = 512 > 300, must clamp.
-        assert_eq!(
-            compute_next_retry_interval(9),
-            Duration::from_secs(MAX_RETRY_INTERVAL)
-        );
-        assert_eq!(
-            compute_next_retry_interval(100),
-            Duration::from_secs(MAX_RETRY_INTERVAL)
-        );
+        // Large attempt counts cannot exceed MAX_RETRY_INTERVAL.
+        let cap = Duration::from_secs(MAX_RETRY_INTERVAL);
+        for _ in 0..50 {
+            assert!(compute_next_retry_interval(20) <= cap);
+            assert!(compute_next_retry_interval(100) <= cap);
+        }
+    }
+
+    #[test]
+    fn retry_interval_is_jittered() {
+        // Successive calls at the same attempt count produce distinct values
+        // (the jitter actually decorrelates retries).
+        let samples: std::collections::HashSet<u128> = (0..50)
+            .map(|_| compute_next_retry_interval(5).as_nanos())
+            .collect();
+        assert!(samples.len() >= 5);
     }
 
     #[test]
     fn next_retry_datetime_uses_backoff() {
+        // attempts=2 caps the jitter window at 2^2 = 4 seconds.
         let now = Utc::now();
         let later = next_retry_datetime(now, 2);
         let delta = (later - now).num_seconds();
-        assert_eq!(delta, 4);
+        assert!((0..=4).contains(&delta), "delta={delta}");
     }
 
     #[test]

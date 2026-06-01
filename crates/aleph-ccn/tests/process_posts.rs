@@ -71,6 +71,9 @@ fn handler() -> PostMessageHandler {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        "aleph-scoring".into(),
+        "aleph-network-metrics".into(),
     )
 }
 
@@ -308,6 +311,9 @@ async fn process_post_balance_special_type_inserts_post_row() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        "aleph-scoring".into(),
+        "aleph-network-metrics".into(),
     );
     let item_hash = "77776ad67063b955869a7fa705ea2987add39486e1ed5951e9842291cf0f566c";
     let msg = post_message(
@@ -345,6 +351,9 @@ async fn process_post_balance_wrong_address_does_not_update() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        "aleph-scoring".into(),
+        "aleph-network-metrics".into(),
     );
     // sender != balances_addresses, so update is suppressed.
     let msg = post_message(

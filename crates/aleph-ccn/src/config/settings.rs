@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::defaults::{
     DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_UNAUTHENTICATED_UPLOAD_FILE_SIZE,
-    DEFAULT_MAX_UPLOAD_CAR_SIZE,
+    DEFAULT_MAX_UPLOAD_CAR_SIZE, DEFAULT_MAX_UPLOAD_FILE_SIZE,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +86,8 @@ pub struct AlephSettings {
     pub corechannel: CorechannelSettings,
     pub balances: BalancesSettings,
     pub credit_balances: CreditBalancesSettings,
+    #[serde(default)]
+    pub scoring: ScoringSettings,
     pub jobs: JobsSettings,
     pub cache: CacheSettings,
 }
@@ -99,6 +101,7 @@ impl Default for AlephSettings {
             corechannel: CorechannelSettings::default(),
             balances: BalancesSettings::default(),
             credit_balances: CreditBalancesSettings::default(),
+            scoring: ScoringSettings::default(),
             jobs: JobsSettings::default(),
             cache: CacheSettings::default(),
         }
@@ -166,6 +169,35 @@ impl Default for CreditBalancesSettings {
                 "aleph_credit_expense".into(),
             ],
             channels: vec!["ALEPH_CREDIT".into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoringSettings {
+    /// Addresses allowed to publish node scoring metrics.
+    pub addresses: Vec<String>,
+    /// Channel scoring messages are published on.
+    pub channel: String,
+    /// POST message type that carries the node metrics payload.
+    pub metrics_post_type: String,
+    /// Retention horizon for `crn_metrics` / `ccn_metrics`. Partitions whose
+    /// upper bound is older than this are detached and dropped by the
+    /// `metrics_partition` cron job.
+    pub retention_months: i32,
+    /// How many months ahead of "now" to keep partitions pre-created. Guards
+    /// against incoming scoring posts falling into the DEFAULT catch-all
+    /// partition.
+    pub partition_lookahead_months: i32,
+}
+impl Default for ScoringSettings {
+    fn default() -> Self {
+        Self {
+            addresses: vec!["0x4D52380D3191274a04846c89c069E6C3F2Ed94e4".into()],
+            channel: "aleph-scoring".into(),
+            metrics_post_type: "aleph-network-metrics".into(),
+            retention_months: 12,
+            partition_lookahead_months: 1,
         }
     }
 }
@@ -457,6 +489,10 @@ pub struct IpfsSettings {
     pub max_upload_car_size: u64,
     pub pinning: IpfsPinningSettings,
     pub stat_timeout: u64,
+    /// Randomized delay (in seconds, drawn uniformly from `[0, value]`) before
+    /// an IPFS file fetch starts, to spread the thundering herd of CCNs pulling
+    /// a newly-announced CID from the origin. Set to 0 to disable.
+    pub fetch_jitter_seconds: f64,
 }
 impl Default for IpfsSettings {
     fn default() -> Self {
@@ -471,11 +507,12 @@ impl Default for IpfsSettings {
                 "/ip4/51.159.57.71/tcp/4001/p2p/12D3KooWBH3JVSBwHLNzxv7EzniBP3tDmjJaoa3EJBF9wyhZtHt2".into(),
                 "/ip4/62.210.93.220/tcp/4001/p2p/12D3KooWLcmvqojHzUnR7rr8YhFKGDD8z7fmsPyBfAm2rT3sFGAF".into(),
             ],
-            max_upload_file_size: DEFAULT_MAX_FILE_SIZE,
+            max_upload_file_size: DEFAULT_MAX_UPLOAD_FILE_SIZE,
             max_unauthenticated_upload_file_size: DEFAULT_MAX_UNAUTHENTICATED_UPLOAD_FILE_SIZE,
             max_upload_car_size: DEFAULT_MAX_UPLOAD_CAR_SIZE,
             pinning: IpfsPinningSettings::default(),
             stat_timeout: 30,
+            fetch_jitter_seconds: 5.0,
         }
     }
 }

@@ -40,6 +40,20 @@ pub trait ApiServerCache: Send + Sync {
 #[async_trait::async_trait]
 pub trait ApiServerLookup: Send + Sync {
     async fn get_api_servers(&self) -> AlephResult<Vec<String>>;
+
+    /// Increment a shared metrics counter by 1. Mirrors `NodeCache.incr`.
+    /// Defaults to a no-op so in-memory test stubs need not implement it; the
+    /// Redis-backed [`crate::services::cache::node_cache::NodeCache`] overrides
+    /// it to persist cross-worker STORE file-fetch counters.
+    async fn incr_metric(&self, _key: &str) -> AlephResult<()> {
+        Ok(())
+    }
+
+    /// Increment a shared metrics counter by `amount`. Mirrors
+    /// `NodeCache.incrby`. Defaults to a no-op (see [`Self::incr_metric`]).
+    async fn incrby_metric(&self, _key: &str, _amount: i64) -> AlephResult<()> {
+        Ok(())
+    }
 }
 
 /// Reconnect to bootstrap + DB peers on a fixed cadence. Mirrors

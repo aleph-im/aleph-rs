@@ -328,19 +328,14 @@ impl ContentHandler for ForgetMessageHandler {
         lookup: &dyn crate::permissions::AuthorityLookup,
     ) -> Result<(), MessageProcessingException> {
         use crate::handlers::content::content_handler::{
-            MessageAuthView, check_authorization_local,
+            MessageAuthView, check_delegated_authorization_local,
         };
-        let view = MessageAuthView::from_message(message);
-        if !check_authorization_local(lookup, &view).await {
-            return Err(MessageProcessingException::PermissionDenied {
-                errors: vec![format!(
-                    "Sender {} is not authorized to post on behalf of address {}",
-                    message.sender, view.content_address
-                )],
-            });
-        }
 
-        // Check that the sender owns the objects it is attempting to forget.
+        // FORGET is authorized per-target: a sender can forget a target if
+        // they could have created it under the target owner's security
+        // aggregate. No base check on the FORGET's own content.address is
+        // performed; the FORGET's content.address is a signing convention,
+        // not an authorization gate.
         let targets = Self::list_target_messages(client, message).await?;
         for target_hash in &targets {
             let status = get_message_status(client, target_hash).await.map_err(|e| {
@@ -395,10 +390,25 @@ impl ContentHandler for ForgetMessageHandler {
                     target_hash: target_hash.clone(),
                 });
             }
-            if target.sender != message.sender {
+            // Authorize the sender against the target as if they were
+            // creating it: same owner aggregate, same type/channel/chain
+            // filters, evaluated against the target's attributes.
+            let target_view = MessageAuthView::from_message(&target);
+            let target_owner = target_view.content_address.clone();
+            if !check_delegated_authorization_local(
+                lookup,
+                &message.sender,
+                &target_owner,
+                &target_view,
+            )
+            .await
+            {
                 return Err(MessageProcessingException::PermissionDenied {
                     errors: vec![format!(
-                        "Cannot forget message {target_hash} because it belongs to another user"
+                        "Sender {} is not authorized to forget message {target_hash} owned by \
+                         {target_owner}: the sender could not have created this target under the \
+                         owner's security aggregate",
+                        message.sender
                     )],
                 });
             }

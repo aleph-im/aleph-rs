@@ -43,6 +43,12 @@ pub struct Metrics {
     pub pyaleph_ws_messages_connections_rejected_total: i64,
     pub pyaleph_ws_status_connections_rejected_total: i64,
     pub pyaleph_ws_broadcaster_consumer_restarts_total: i64,
+    pub pyaleph_store_fetch_ipfs_total: i64,
+    pub pyaleph_store_fetch_ipfs_failed_total: i64,
+    pub pyaleph_store_fetch_ipfs_duration_ms_sum: i64,
+    pub pyaleph_store_fetch_storage_total: i64,
+    pub pyaleph_store_fetch_storage_failed_total: i64,
+    pub pyaleph_store_fetch_storage_duration_ms_sum: i64,
 }
 
 /// Fetch metrics from the database (no Redis-backed WS counters).
@@ -108,6 +114,16 @@ pub async fn get_metrics(state: &AppState) -> WebResult<Metrics> {
         pyaleph_ws_messages_connections_rejected_total: 0,
         pyaleph_ws_status_connections_rejected_total: 0,
         pyaleph_ws_broadcaster_consumer_restarts_total: 0,
+        // STORE file-fetch counters live in Redis (written by the message
+        // processing workers via the node cache). The web layer does not yet
+        // hold a Redis handle — like the WS counters above, these are reported
+        // as 0 here. Mirrors the fields added in pyaleph #1164.
+        pyaleph_store_fetch_ipfs_total: 0,
+        pyaleph_store_fetch_ipfs_failed_total: 0,
+        pyaleph_store_fetch_ipfs_duration_ms_sum: 0,
+        pyaleph_store_fetch_storage_total: 0,
+        pyaleph_store_fetch_storage_failed_total: 0,
+        pyaleph_store_fetch_storage_duration_ms_sum: 0,
     })
 }
 

@@ -15,6 +15,7 @@ use aleph_types::message::execution::base::PaymentType;
 use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 
+use crate::types::content_format::ContentFormat;
 use crate::types::message_status::MessageStatus;
 use crate::types::sort_order::{SortBy, SortOrder};
 
@@ -523,8 +524,22 @@ pub struct BaseMessageQueryParams {
     )]
     pub payment_types: Option<Vec<PaymentType>>,
 
+    /// Deprecated: use `contentFormat=none` instead. If true (and
+    /// `contentFormat` is not set), omit the `content` field from each message.
     #[serde(rename = "excludeContent", alias = "exclude_content", default)]
     pub exclude_content: bool,
+
+    /// Level of content detail: `full` (default) returns the complete content;
+    /// `headers` returns a reduced per-type metadata subset (address, plus
+    /// type/ref for POST, key for AGGREGATE, item_hash/ref for STORE); `none`
+    /// omits content entirely. Takes precedence over `excludeContent` when set.
+    #[serde(
+        rename = "contentFormat",
+        alias = "content_format",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub content_format: Option<ContentFormat>,
 
     #[serde(rename = "startDate", alias = "start_date", default)]
     pub start_date: f64,
@@ -559,6 +574,7 @@ impl Default for BaseMessageQueryParams {
             hashes: None,
             payment_types: None,
             exclude_content: false,
+            content_format: None,
             start_date: 0.0,
             end_date: 0.0,
             start_block: 0,
@@ -568,6 +584,18 @@ impl Default for BaseMessageQueryParams {
 }
 
 impl BaseMessageQueryParams {
+    /// Resolve the effective [`ContentFormat`], collapsing the deprecated
+    /// `excludeContent` flag. Mirrors the `resolve_content_format` model
+    /// validator: explicit `contentFormat` always wins; otherwise
+    /// `excludeContent=true` maps to `none`, else `full`.
+    pub fn resolve_content_format(&self) -> ContentFormat {
+        self.content_format.unwrap_or(if self.exclude_content {
+            ContentFormat::None
+        } else {
+            ContentFormat::Full
+        })
+    }
+
     /// Mirrors the `validate_field_dependencies` model validator.
     pub fn validate(&self) -> Result<(), String> {
         if self.start_date < 0.0 {

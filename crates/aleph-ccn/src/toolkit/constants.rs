@@ -299,6 +299,7 @@ pub const CREDIT_PRECISION_MULTIPLIER: i64 = 10_000;
 // --- File size + cost limits ----------------------------------------------
 
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * MIB;
+pub const DEFAULT_MAX_UPLOAD_FILE_SIZE: u64 = GIB;
 pub const DEFAULT_MAX_UNAUTHENTICATED_UPLOAD_FILE_SIZE: u64 = 25 * MIB;
 /// Minimum MiB cost for pure STORE messages.
 pub const MIN_STORE_COST_MIB: u64 = 25;

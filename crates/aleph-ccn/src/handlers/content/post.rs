@@ -13,6 +13,7 @@ use crate::db::accessors::balances::{
     update_credit_balances_transfer as update_credit_balances_transfer_db,
     validate_credit_transfer_balance,
 };
+use crate::db::accessors::metrics::insert_node_metrics;
 use crate::db::accessors::posts::{
     delete_amends, delete_post, get_original_post, refresh_latest_amend,
 };
@@ -89,15 +90,22 @@ pub struct PostMessageHandler {
     pub credit_balances_addresses: Vec<String>,
     pub credit_balances_post_types: Vec<String>,
     pub credit_balances_channels: Vec<String>,
+    pub scoring_addresses: Vec<String>,
+    pub scoring_channel: String,
+    pub scoring_metrics_post_type: String,
 }
 
 impl PostMessageHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         balances_addresses: Vec<String>,
         balances_post_type: String,
         credit_balances_addresses: Vec<String>,
         credit_balances_post_types: Vec<String>,
         credit_balances_channels: Vec<String>,
+        scoring_addresses: Vec<String>,
+        scoring_channel: String,
+        scoring_metrics_post_type: String,
     ) -> Self {
         Self {
             balances_addresses,
@@ -105,6 +113,9 @@ impl PostMessageHandler {
             credit_balances_addresses,
             credit_balances_post_types,
             credit_balances_channels,
+            scoring_addresses,
+            scoring_channel,
+            scoring_metrics_post_type,
         }
     }
 
@@ -517,6 +528,25 @@ impl PostMessageHandler {
                 tracing::info!("Done updating credit balances");
             }
         }
+
+        // Persist node scoring metrics. Gated on (channel, sender, post_type)
+        // so the rows land in the same transaction that stores the message;
+        // the FK to messages with ON DELETE CASCADE means FORGETs cascade.
+        if ctype.as_deref() == Some(self.scoring_metrics_post_type.as_str())
+            && self
+                .scoring_addresses
+                .iter()
+                .any(|a| a == &content_address_str)
+            && channel.as_deref() == Some(self.scoring_channel.as_str())
+            && inner_content.is_object()
+        {
+            tracing::info!("Persisting scoring metrics from {}", message.item_hash);
+            insert_node_metrics(client, &message.item_hash, &inner_content)
+                .await
+                .map_err(|e| MessageProcessingException::InternalError {
+                    errors: vec![format!("DB error persisting scoring metrics: {e}")],
+                })?;
+        }
         Ok(())
     }
 }
@@ -739,6 +769,9 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
+            "aleph-scoring".into(),
+            "aleph-network-metrics".into(),
         );
     }
 

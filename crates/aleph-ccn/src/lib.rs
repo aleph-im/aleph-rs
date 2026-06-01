@@ -72,6 +72,9 @@ fn handlers_config(cfg: &config::Settings) -> handlers::message_handler::Handler
         credit_balances_addresses: cfg.aleph.credit_balances.addresses.clone(),
         credit_balances_post_types: cfg.aleph.credit_balances.post_types.clone(),
         credit_balances_channels: cfg.aleph.credit_balances.channels.clone(),
+        scoring_addresses: cfg.aleph.scoring.addresses.clone(),
+        scoring_channel: cfg.aleph.scoring.channel.clone(),
+        scoring_metrics_post_type: cfg.aleph.scoring.metrics_post_type.clone(),
         storage_grace_period_hours: cfg.storage.grace_period as i64,
         max_unauthenticated_upload_file_size: cfg
             .storage
@@ -79,6 +82,7 @@ fn handlers_config(cfg: &config::Settings) -> handlers::message_handler::Handler
         ipfs_enabled: cfg.ipfs.enabled,
         store_files: cfg.storage.store_files,
         ipfs_stat_timeout: cfg.ipfs.stat_timeout,
+        ipfs_fetch_jitter_seconds: cfg.ipfs.fetch_jitter_seconds,
         api_servers: Vec::new(),
     }
 }
@@ -138,7 +142,6 @@ pub async fn run_with_options(
 
     let pool = db::connect(&cfg.postgres).await?;
     db::migrate(&pool).await?;
-    repair::repair_credit_balances(&pool).await?;
     tracing::info!("database ready");
 
     let ipfs_service = if cfg.ipfs.enabled {
@@ -265,6 +268,10 @@ pub async fn run_with_options(
         .with_ipfs_enabled(cfg.ipfs.enabled)
         .with_http_p2p_enabled(cfg.p2p.clients.iter().any(|client| client == "http")),
     );
+    // Full startup repair, mirroring pyaleph's `repair_node`: fix negative
+    // file sizes (needs the storage service) and repair credit balances.
+    // Runs before jobs/web start.
+    repair::repair_node(&pool, &chain_storage_service).await?;
     let message_handler = Arc::new(handlers::message_handler::MessageHandler::new(
         Arc::new(chains::signature_verifier::SignatureVerifier::new()),
         job_storage_engine.clone(),
@@ -358,6 +365,10 @@ pub async fn run_with_options(
             )),
             Arc::new(jobs::cron::credit_balance_job::CreditBalanceCronJob::new(
                 cfg.storage.max_unauthenticated_upload_file_size as i64,
+            )),
+            Arc::new(jobs::cron::metrics_partition_job::MetricsPartitionCronJob::new(
+                cfg.aleph.scoring.retention_months,
+                cfg.aleph.scoring.partition_lookahead_months,
             )),
         ],
     ));

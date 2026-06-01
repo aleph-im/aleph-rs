@@ -33,11 +33,24 @@ use crate::web::controllers::utils::{broadcast_and_process_message, get_db, json
 
 pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/api/v0/ipfs/add_file", post(ipfs_add_file))
+        .route(
+            "/api/v0/ipfs/add_file",
+            post(ipfs_add_file).layer(DefaultBodyLimit::max(add_file_body_limit(&state))),
+        )
         .route(
             "/api/v0/ipfs/add_car",
             post(ipfs_add_car).layer(DefaultBodyLimit::max(car_body_limit(&state))),
         )
+}
+
+fn add_file_body_limit(state: &AppState) -> usize {
+    const MULTIPART_METADATA_HEADROOM: u64 = 1024 * 1024;
+    let configured = state
+        .config
+        .ipfs
+        .max_upload_file_size
+        .saturating_add(MULTIPART_METADATA_HEADROOM);
+    usize::try_from(configured).unwrap_or(usize::MAX)
 }
 
 fn car_body_limit(state: &AppState) -> usize {

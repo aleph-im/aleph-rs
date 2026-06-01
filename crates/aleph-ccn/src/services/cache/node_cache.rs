@@ -134,6 +134,14 @@ impl NodeCache {
         Ok(())
     }
 
+    /// Increment `key` by `amount`. Mirrors Python's `NodeCache.incrby` which
+    /// returns nothing.
+    pub async fn incrby(&self, key: &str, amount: i64) -> AlephResult<()> {
+        let mut conn = self.inner.lock().await;
+        let _: i64 = conn.incr(key, amount).await.map_err(map_redis_err)?;
+        Ok(())
+    }
+
     /// Decrement `key` by 1. Mirrors Python's `NodeCache.decr` which returns
     /// nothing.
     pub async fn decr(&self, key: &str) -> AlephResult<()> {
@@ -554,6 +562,14 @@ impl ApiServerLookup for NodeCache {
     async fn get_api_servers(&self) -> AlephResult<Vec<String>> {
         let set = NodeCache::get_api_servers(self).await?;
         Ok(set.into_iter().collect())
+    }
+
+    async fn incr_metric(&self, key: &str) -> AlephResult<()> {
+        NodeCache::incr(self, key).await
+    }
+
+    async fn incrby_metric(&self, key: &str, amount: i64) -> AlephResult<()> {
+        NodeCache::incrby(self, key, amount).await
     }
 }
 

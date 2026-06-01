@@ -218,9 +218,15 @@ impl IpfsService {
                     continue;
                 }
                 Err(_) => {
-                    return Err(AlephError::Ipfs(
-                        "Could not retrieve IPFS content at this time".into(),
-                    ));
+                    // A timeout already consumed the full `timeout` budget, so it
+                    // is its own backoff: retry immediately, or give up once the
+                    // try budget is exhausted. Mirrors pyaleph #1169.
+                    if try_count >= tries {
+                        return Err(AlephError::Ipfs(format!(
+                            "could not retrieve IPFS content at this time ({hash})"
+                        )));
+                    }
+                    continue;
                 }
             };
             if !dag.status().is_success() {
@@ -636,7 +642,7 @@ impl IpfsService {
         loop {
             match self._pin_add(cid, timeout).await {
                 Ok(()) => return Ok(()),
-                Err(AlephError::Ipfs(msg)) if msg.contains("Could not pin IPFS content") => {
+                Err(AlephError::Ipfs(msg)) if msg.contains("could not pin IPFS content") => {
                     remaining -= 1;
                     if remaining == 0 {
                         return Err(AlephError::Ipfs(msg));
@@ -685,13 +691,13 @@ impl IpfsService {
                 if progress == last_progress {
                     tick_remaining = tick_remaining.saturating_sub(1);
                     if tick_remaining == 0 {
-                        let details = if progress.is_none() {
+                        let reason = if progress.is_none() {
                             "file not found"
                         } else {
                             "could not fetch some blocks"
                         };
                         return Err(AlephError::Ipfs(format!(
-                            "Could not pin IPFS content at this time ({details})"
+                            "could not pin IPFS content: {reason}"
                         )));
                     }
                 } else {

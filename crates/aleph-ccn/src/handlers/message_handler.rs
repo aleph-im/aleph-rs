@@ -56,6 +56,9 @@ pub struct HandlersConfig {
     pub credit_balances_addresses: Vec<String>,
     pub credit_balances_post_types: Vec<String>,
     pub credit_balances_channels: Vec<String>,
+    pub scoring_addresses: Vec<String>,
+    pub scoring_channel: String,
+    pub scoring_metrics_post_type: String,
     pub storage_grace_period_hours: i64,
     pub max_unauthenticated_upload_file_size: i64,
     pub ipfs_enabled: bool,
@@ -63,6 +66,9 @@ pub struct HandlersConfig {
     /// IPFS `/files/stat` timeout, in seconds. Mirrors Python's
     /// `config.ipfs.stat_timeout` setting.
     pub ipfs_stat_timeout: u64,
+    /// Randomized delay window (seconds) before an IPFS fetch starts. Mirrors
+    /// Python's `config.ipfs.fetch_jitter_seconds` setting.
+    pub ipfs_fetch_jitter_seconds: f64,
     /// HTTP API servers used as a fallback when a `storage`-type file is not
     /// present locally. Mirrors Python's `api-servers` configuration.
     pub api_servers: Vec<String>,
@@ -93,6 +99,9 @@ pub fn build_content_handlers(
         cfg.credit_balances_addresses.clone(),
         cfg.credit_balances_post_types.clone(),
         cfg.credit_balances_channels.clone(),
+        cfg.scoring_addresses.clone(),
+        cfg.scoring_channel.clone(),
+        cfg.scoring_metrics_post_type.clone(),
     ));
     let mut store_handler = StoreMessageHandler::new(
         storage_engine,
@@ -102,6 +111,7 @@ pub fn build_content_handlers(
         cfg.ipfs_enabled,
         cfg.store_files,
         cfg.ipfs_stat_timeout,
+        cfg.ipfs_fetch_jitter_seconds,
         cfg.api_servers.clone(),
     );
     if let Some(storage_service) = storage_service {
@@ -355,6 +365,24 @@ impl MessagePublisher {
             }
         }
 
+        // 4b. Reject messages with a missing signature early when
+        //     `check_message` is set (P2P ingestion). On-chain ingestion
+        //     (`check_message = false`) still accepts a null signature.
+        //     Mirrors pyaleph: avoids reaching the INSERT and tripping the
+        //     `signature_not_null_if_check_message` CHECK constraint, which
+        //     would be misreported as a duplicate instead of producing a
+        //     proper REJECTED status with INVALID_SIGNATURE.
+        if check_message && pending.signature.as_deref().unwrap_or("").is_empty() {
+            tracing::warn!("Rejecting message {}: missing signature", pending.item_hash);
+            let exception = MessageProcessingException::InvalidSignature {
+                errors: vec!["Missing signature".to_string()],
+            };
+            let _ =
+                reject_new_pending_message(client, message_dict, &exception, tx_hash.as_deref())
+                    .await;
+            return Ok(None);
+        }
+
         // 5. Mirror pyaleph: every code path that inserts a pending row also
         //    writes the corresponding `message_status` PENDING row. The
         //    `WHERE message_status.status = 'rejected'` clause flips a
@@ -476,7 +504,10 @@ async fn fetch_message_content(
         .await
         .map_err(|e| match e {
             AlephError::NotFound(_) | AlephError::Ipfs(_) | AlephError::P2p(_) => {
-                MessageProcessingException::message_content_unavailable(pending.item_hash.clone())
+                MessageProcessingException::message_content_unavailable_with_details(
+                    pending.item_hash.clone(),
+                    "could not fetch message content",
+                )
             }
             AlephError::InvalidMessage(msg) => {
                 MessageProcessingException::InvalidMessageFormat { errors: vec![msg] }
@@ -944,11 +975,15 @@ mod tests {
             credit_balances_addresses: vec!["0xcredit".into()],
             credit_balances_post_types: vec!["aleph_credit_distribution".into()],
             credit_balances_channels: Vec::new(),
+            scoring_addresses: vec!["0xscoring".into()],
+            scoring_channel: "aleph-scoring".into(),
+            scoring_metrics_post_type: "aleph-network-metrics".into(),
             storage_grace_period_hours: 24,
             max_unauthenticated_upload_file_size: 0,
             ipfs_enabled: false,
             store_files: false,
             ipfs_stat_timeout: 30,
+            ipfs_fetch_jitter_seconds: 0.0,
             api_servers: Vec::new(),
         }
     }

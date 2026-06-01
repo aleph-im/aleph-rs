@@ -300,14 +300,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_backoff_grows_exponentially() {
+    async fn retry_backoff_bounded_by_exponential_cap() {
         use super::super::job_utils::compute_next_retry_interval;
-        let d0 = compute_next_retry_interval(0);
-        let d1 = compute_next_retry_interval(1);
-        let d2 = compute_next_retry_interval(2);
-        assert!(d1 > d0);
-        assert!(d2 > d1);
-        assert_eq!(d2, d0 * 4);
+        // Full jitter: each draw is bounded by its exponential cap.
+        for _ in 0..50 {
+            assert!(compute_next_retry_interval(0) <= Duration::from_secs(1));
+            assert!(compute_next_retry_interval(1) <= Duration::from_secs(2));
+            assert!(compute_next_retry_interval(2) <= Duration::from_secs(4));
+        }
     }
 
     #[test]

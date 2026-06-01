@@ -71,6 +71,7 @@ fn handler_with(storage: Arc<InMemoryStorageEngine>, store_files: bool) -> Store
         false,
         store_files,
         5,
+        0.0,
         Vec::new(),
     )
 }

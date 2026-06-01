@@ -42,9 +42,12 @@ fn build_forget_handler() -> ForgetMessageHandler {
         vec!["nope".into()],
         vec!["no-balances-in-tests".into()],
         vec!["nope".into()],
+        Vec::new(),
+        "aleph-scoring".into(),
+        "aleph-network-metrics".into(),
     ));
     let store: Arc<dyn ContentHandler> = Arc::new(StoreMessageHandler::new(
-        storage, None, 24, 25 * 1024 * 1024, false, false, 5, Vec::new(),
+        storage, None, 24, 25 * 1024 * 1024, false, false, 5, 0.0, Vec::new(),
     ));
     let aggregate: Arc<dyn ContentHandler> = Arc::new(AggregateMessageHandler::new());
     let table: ContentHandlerTable = vec![
@@ -132,6 +135,9 @@ async fn insert_post(pool: &aleph_ccn::db::DbPool, msg: &MessageDb) {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        "aleph-scoring".into(),
+        "aleph-network-metrics".into(),
     );
     let mut client = pool.get().await.unwrap();
     let tx = client.transaction().await.unwrap();

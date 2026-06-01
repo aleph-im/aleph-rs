@@ -11,6 +11,7 @@ pub mod cron_jobs;
 pub mod files;
 pub mod message_counts;
 pub mod messages;
+pub mod metrics;
 pub mod peers;
 pub mod pending_messages;
 pub mod pending_txs;
