@@ -191,15 +191,24 @@ pub async fn update_indexer_multirange(
 }
 
 /// Add a new datetime range to the indexer multirange, then persist it.
+///
+/// The read-modify-write (get + delete + reinsert) runs inside a single
+/// `tokio_postgres` transaction so a concurrent reader can never observe the
+/// transient empty/partial state left by `update_indexer_multirange`'s
+/// DELETE-then-INSERTs. This mirrors pyaleph's committed-session atomicity.
+/// Takes a mutable pooled client because starting a transaction requires
+/// `&mut`.
 pub async fn add_indexer_range(
-    client: &impl GenericClient,
+    client: &mut tokio_postgres::Client,
     chain: Chain,
     event_type: ChainEventType,
     datetime_range: Range<DateTime<Utc>>,
 ) -> AlephResult<()> {
-    let mut imr = get_indexer_multirange(client, chain.clone(), event_type).await?;
+    let txn = client.transaction().await?;
+    let mut imr = get_indexer_multirange(&txn, chain.clone(), event_type).await?;
     imr.datetime_multirange.add_range(datetime_range);
-    update_indexer_multirange(client, &imr).await?;
+    update_indexer_multirange(&txn, &imr).await?;
+    txn.commit().await?;
     Ok(())
 }
 

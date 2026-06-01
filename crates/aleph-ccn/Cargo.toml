@@ -83,6 +83,9 @@ thiserror = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# Error tracking / monitoring. Mirrors pyaleph `toolkit.monitoring.setup_sentry`.
+sentry = { version = "0.34" }
+
 clap = { workspace = true }
 config = { version = "0.15", default-features = false, features = ["yaml"] }
 

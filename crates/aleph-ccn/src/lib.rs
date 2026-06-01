@@ -255,6 +255,12 @@ pub async fn run_with_options(
         )
         .await?,
     );
+    // Mirror pyaleph commands.py: reset the node cache right after
+    // construction so a restart starts from a clean Redis cache.
+    node_cache.reset().await?;
+    // Hand the web layer a clone of the Redis-backed cache so the `/metrics`
+    // endpoint can read the STORE file-fetch + WS counters the workers write.
+    state.metrics_cache = Some(node_cache.clone());
     let chain_ipfs_service = match ipfs_service.clone() {
         Some(ipfs) => ipfs,
         None => Arc::new(services::ipfs::IpfsService::new(&cfg.ipfs)?),

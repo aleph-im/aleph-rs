@@ -19,6 +19,7 @@ use crate::config::Settings;
 use crate::db::DbPool;
 use crate::handlers::message_handler::MessagePublisher;
 use crate::services::cache::local::LocalCache;
+use crate::services::cache::node_cache::NodeCache;
 use crate::services::ipfs::IpfsService;
 use crate::services::p2p::protocol::AlephP2PClient;
 use crate::services::storage::engine::StorageEngine;
@@ -35,6 +36,12 @@ pub struct AppState {
     pub pool: DbPool,
     pub config: Arc<Settings>,
     pub node_cache: Arc<LocalCache>,
+    /// Redis-backed shared cache used by the `/metrics` endpoint to read the
+    /// STORE file-fetch counters and WS counters/gauges that the workers write
+    /// (mirrors `node_cache: NodeCache` in pyaleph's `get_metrics_with_ws`).
+    /// `None` in test/`no_jobs` builds that have no Redis — readers default the
+    /// affected metrics to 0 in that case.
+    pub metrics_cache: Option<Arc<NodeCache>>,
     pub signature_verifier: Arc<SignatureVerifier>,
     pub message_publisher: Arc<MessagePublisher>,
     pub ipfs_service: Option<Arc<IpfsService>>,
@@ -61,6 +68,7 @@ impl AppState {
             pool,
             config,
             node_cache: Arc::new(LocalCache::new()),
+            metrics_cache: None,
             signature_verifier: Arc::new(SignatureVerifier::new()),
             message_publisher: Arc::new(MessagePublisher::without_channel(pending_exchange)),
             ipfs_service: None,

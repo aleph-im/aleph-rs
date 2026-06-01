@@ -343,6 +343,30 @@ impl MessagePublisher {
                 return Ok(None);
             }
         };
+
+        // 2b. Reject messages with a missing signature early when
+        //     `check_message` is set (P2P ingestion). On-chain ingestion
+        //     (`check_message = false`) still accepts a null signature.
+        //     Mirrors pyaleph f9b0ff72: this rejection runs immediately after
+        //     parse/from_obj and BEFORE the fetched-content probe so that the
+        //     storage_engine.exists() lookup in `initial_fetched` (and any
+        //     wasted fetch work) is skipped for missing-signature messages. It
+        //     only needs `pending.signature`, available right after
+        //     `from_parsed`. Avoids reaching the INSERT and tripping the
+        //     `signature_not_null_if_check_message` CHECK constraint, which
+        //     would be misreported as a duplicate instead of producing a
+        //     proper REJECTED status with INVALID_SIGNATURE.
+        if check_message && pending.signature.as_deref().unwrap_or("").is_empty() {
+            tracing::warn!("Rejecting message {}: missing signature", pending.item_hash);
+            let exception = MessageProcessingException::InvalidSignature {
+                errors: vec!["Missing signature".to_string()],
+            };
+            let _ =
+                reject_new_pending_message(client, message_dict, &exception, tx_hash.as_deref())
+                    .await;
+            return Ok(None);
+        }
+
         pending.fetched = self.initial_fetched(&pending).await?;
 
         // 3. Load fetched content: inline payloads are immediately fetched,
@@ -363,24 +387,6 @@ impl MessagePublisher {
                 // Any non-REJECTED status: skip the insertion entirely.
                 return Ok(None);
             }
-        }
-
-        // 4b. Reject messages with a missing signature early when
-        //     `check_message` is set (P2P ingestion). On-chain ingestion
-        //     (`check_message = false`) still accepts a null signature.
-        //     Mirrors pyaleph: avoids reaching the INSERT and tripping the
-        //     `signature_not_null_if_check_message` CHECK constraint, which
-        //     would be misreported as a duplicate instead of producing a
-        //     proper REJECTED status with INVALID_SIGNATURE.
-        if check_message && pending.signature.as_deref().unwrap_or("").is_empty() {
-            tracing::warn!("Rejecting message {}: missing signature", pending.item_hash);
-            let exception = MessageProcessingException::InvalidSignature {
-                errors: vec!["Missing signature".to_string()],
-            };
-            let _ =
-                reject_new_pending_message(client, message_dict, &exception, tx_hash.as_deref())
-                    .await;
-            return Ok(None);
         }
 
         // 5. Mirror pyaleph: every code path that inserts a pending row also

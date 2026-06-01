@@ -3,7 +3,7 @@
 //! Talks to `https://multichain.api.aleph.cloud/` via GraphQL to pull
 //! `SyncEvent` / `MessageEvent` entries for a given smart contract address.
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -306,11 +306,12 @@ impl AlephIndexerReader {
             if nb == 0 {
                 let synced_range =
                     Range::new(start_datetime, end_datetime, true, true).expect("range bounds");
-                let client = pool
+                let mut client = pool
                     .get()
                     .await
                     .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
-                add_indexer_range(&**client, self.chain.clone(), event_type, synced_range).await?;
+                add_indexer_range(&mut client, self.chain.clone(), event_type, synced_range)
+                    .await?;
                 break;
             }
 
@@ -356,12 +357,17 @@ impl AlephIndexerReader {
             let synced_range =
                 Range::new(start_datetime, synced_upper, true, (nb as u32) < limit)
                     .expect("range bounds");
-            let client = pool
+            let mut client = pool
                 .get()
                 .await
                 .map_err(|e| crate::AlephError::Pool(format!("pool acquire: {e}")))?;
-            add_indexer_range(&**client, self.chain.clone(), event_type, synced_range.clone())
-                .await?;
+            add_indexer_range(
+                &mut client,
+                self.chain.clone(),
+                event_type,
+                synced_range.clone(),
+            )
+            .await?;
 
             if (nb as u32) < limit {
                 break;
@@ -458,36 +464,22 @@ impl AlephIndexerReader {
         }
     }
 
-    /// Loop forever fetching events. Mirrors `AlephIndexerReader.fetcher`.
+    /// Fallback entry point for connectors built without DB pool + publisher.
+    ///
+    /// The real fetch loop ([`AlephIndexerReader::run`]) requires a `DbPool`
+    /// (to persist synced ranges) and a `PendingTxPublisher` (to publish
+    /// fetched events). Without those, any events fetched here would be
+    /// silently discarded and no range progress would be recorded, so this
+    /// fails loudly instead of running a no-op discard loop.
     pub async fn fetcher(
         &self,
-        indexer_url: &str,
+        _indexer_url: &str,
         _smart_contract_address: &str,
-        event_type: ChainEventType,
+        _event_type: ChainEventType,
     ) -> AlephResult<()> {
-        let mut next_after: DateTime<Utc> = Utc.timestamp_opt(0, 0).single().unwrap();
-        loop {
-            let now = Utc::now();
-            match self
-                .fetch_events(indexer_url, event_type, Some((next_after, now)), None, 1000)
-                .await
-            {
-                Ok(data) => {
-                    let count = data.message_events.len() + data.sync_events.len();
-                    tracing::info!(
-                        chain = %self.chain,
-                        ?event_type,
-                        count,
-                        "indexer: fetched events"
-                    );
-                    next_after = now;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "indexer fetch failed; retrying");
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
+        Err(crate::AlephError::Chain(
+            "indexer reader requires DbPool + publisher".to_string(),
+        ))
     }
 }
 

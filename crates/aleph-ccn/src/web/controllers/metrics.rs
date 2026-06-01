@@ -10,6 +10,15 @@ use serde_json::{Value, json};
 
 use crate::db::accessors::chains::get_last_height;
 use crate::db::accessors::messages::count_matching_messages_fast;
+use crate::services::cache::node_cache::NodeCache;
+use crate::toolkit::metrics_keys::{
+    STORE_FETCH_IPFS_DURATION_MS_SUM_KEY, STORE_FETCH_IPFS_FAILED_KEY, STORE_FETCH_IPFS_TOTAL_KEY,
+    STORE_FETCH_STORAGE_DURATION_MS_SUM_KEY, STORE_FETCH_STORAGE_FAILED_KEY,
+    STORE_FETCH_STORAGE_TOTAL_KEY, WS_BROADCASTER_CONSUMER_RESTARTS_KEY,
+    WS_MESSAGES_BROADCAST_TOTAL_KEY, WS_MESSAGES_CONNECTIONS_ACTIVE_KEY,
+    WS_MESSAGES_CONNECTIONS_REJECTED_KEY, WS_STATUS_CONNECTIONS_ACTIVE_KEY,
+    WS_STATUS_CONNECTIONS_REJECTED_KEY,
+};
 use crate::types::chain_sync::ChainEventType;
 use crate::web::AppState;
 use crate::web::controllers::error::WebResult;
@@ -51,7 +60,22 @@ pub struct Metrics {
     pub pyaleph_store_fetch_storage_duration_ms_sum: i64,
 }
 
-/// Fetch metrics from the database (no Redis-backed WS counters).
+/// Read an integer Redis value, returning 0 if the key is missing or cannot be
+/// parsed. Mirrors `_read_int_key` in pyaleph's metrics controller. The value
+/// is stored by Redis `INCR`/`INCRBY` as an ASCII integer string.
+async fn read_int_key(cache: &NodeCache, key: &str) -> i64 {
+    match cache.get(key).await {
+        Ok(Some(bytes)) => std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Fetch metrics from the database, plus the STORE file-fetch and WS counters
+/// the workers write to Redis (when a Redis-backed cache is wired). Mirrors
+/// `get_metrics` + `get_metrics_with_ws` in pyaleph.
 pub async fn get_metrics(state: &AppState) -> WebResult<Metrics> {
     let client = get_db(state).await?;
 
@@ -90,6 +114,43 @@ pub async fn get_metrics(state: &AppState) -> WebResult<Metrics> {
     .await?
     .map(|v| v as i64);
 
+    // STORE file-fetch + WS counters live in Redis (written by the workers via
+    // the node cache). Read them when a Redis-backed cache is wired; otherwise
+    // (tests / `no_jobs`) default every Redis-backed counter to 0. The two WS
+    // *_active gauges and *_max gauges are also sourced here / from config so
+    // they mirror pyaleph's `get_metrics_with_ws`.
+    let (
+        ws_messages_broadcast_total,
+        ws_messages_connections_active,
+        ws_messages_connections_rejected_total,
+        ws_broadcaster_consumer_restarts_total,
+        ws_status_connections_active,
+        ws_status_connections_rejected_total,
+        store_fetch_ipfs_total,
+        store_fetch_ipfs_failed_total,
+        store_fetch_ipfs_duration_ms_sum,
+        store_fetch_storage_total,
+        store_fetch_storage_failed_total,
+        store_fetch_storage_duration_ms_sum,
+    ) = if let Some(cache) = state.metrics_cache.as_deref() {
+        (
+            read_int_key(cache, WS_MESSAGES_BROADCAST_TOTAL_KEY).await,
+            read_int_key(cache, WS_MESSAGES_CONNECTIONS_ACTIVE_KEY).await,
+            read_int_key(cache, WS_MESSAGES_CONNECTIONS_REJECTED_KEY).await,
+            read_int_key(cache, WS_BROADCASTER_CONSUMER_RESTARTS_KEY).await,
+            read_int_key(cache, WS_STATUS_CONNECTIONS_ACTIVE_KEY).await,
+            read_int_key(cache, WS_STATUS_CONNECTIONS_REJECTED_KEY).await,
+            read_int_key(cache, STORE_FETCH_IPFS_TOTAL_KEY).await,
+            read_int_key(cache, STORE_FETCH_IPFS_FAILED_KEY).await,
+            read_int_key(cache, STORE_FETCH_IPFS_DURATION_MS_SUM_KEY).await,
+            read_int_key(cache, STORE_FETCH_STORAGE_TOTAL_KEY).await,
+            read_int_key(cache, STORE_FETCH_STORAGE_FAILED_KEY).await,
+            read_int_key(cache, STORE_FETCH_STORAGE_DURATION_MS_SUM_KEY).await,
+        )
+    } else {
+        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    };
+
     Ok(Metrics {
         pyaleph_build_info: BuildInfo {
             python_version: "n/a".to_string(),
@@ -106,24 +167,23 @@ pub async fn get_metrics(state: &AppState) -> WebResult<Metrics> {
         pyaleph_status_sync_messages_remaining_total: None,
         pyaleph_status_chain_eth_height_reference_total: None,
         pyaleph_status_chain_eth_height_remaining_total: None,
-        pyaleph_ws_messages_connections_active: 0,
+        pyaleph_ws_messages_connections_active: ws_messages_connections_active,
         pyaleph_ws_messages_connections_max: state.config.websocket.max_message_connections as i64,
-        pyaleph_ws_status_connections_active: 0,
+        pyaleph_ws_status_connections_active: ws_status_connections_active,
         pyaleph_ws_status_connections_max: state.config.websocket.max_status_connections as i64,
-        pyaleph_ws_messages_broadcast_total: 0,
-        pyaleph_ws_messages_connections_rejected_total: 0,
-        pyaleph_ws_status_connections_rejected_total: 0,
-        pyaleph_ws_broadcaster_consumer_restarts_total: 0,
+        pyaleph_ws_messages_broadcast_total: ws_messages_broadcast_total,
+        pyaleph_ws_messages_connections_rejected_total: ws_messages_connections_rejected_total,
+        pyaleph_ws_status_connections_rejected_total: ws_status_connections_rejected_total,
+        pyaleph_ws_broadcaster_consumer_restarts_total: ws_broadcaster_consumer_restarts_total,
         // STORE file-fetch counters live in Redis (written by the message
-        // processing workers via the node cache). The web layer does not yet
-        // hold a Redis handle — like the WS counters above, these are reported
-        // as 0 here. Mirrors the fields added in pyaleph #1164.
-        pyaleph_store_fetch_ipfs_total: 0,
-        pyaleph_store_fetch_ipfs_failed_total: 0,
-        pyaleph_store_fetch_ipfs_duration_ms_sum: 0,
-        pyaleph_store_fetch_storage_total: 0,
-        pyaleph_store_fetch_storage_failed_total: 0,
-        pyaleph_store_fetch_storage_duration_ms_sum: 0,
+        // processing workers via the node cache), read above through
+        // `state.metrics_cache`. Mirrors the fields added in pyaleph #1164.
+        pyaleph_store_fetch_ipfs_total: store_fetch_ipfs_total,
+        pyaleph_store_fetch_ipfs_failed_total: store_fetch_ipfs_failed_total,
+        pyaleph_store_fetch_ipfs_duration_ms_sum: store_fetch_ipfs_duration_ms_sum,
+        pyaleph_store_fetch_storage_total: store_fetch_storage_total,
+        pyaleph_store_fetch_storage_failed_total: store_fetch_storage_failed_total,
+        pyaleph_store_fetch_storage_duration_ms_sum: store_fetch_storage_duration_ms_sum,
     })
 }
 

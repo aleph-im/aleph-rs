@@ -50,22 +50,21 @@ impl Default for BscConnector {
 #[async_trait]
 impl ChainReader for BscConnector {
     async fn fetcher(&self, cfg: &Settings) -> AlephResult<()> {
-        if let (Some(pool), Some(publisher)) = (&self.pool, &self.pending_tx_publisher) {
-            return self
-                .indexer_reader
-                .run(
-                    pool.clone(),
-                    publisher.clone(),
-                    cfg.aleph.indexer_url.clone(),
-                    cfg.bsc.sync_contract.clone(),
-                    ChainEventType::Message,
-                )
-                .await;
-        }
+        let (Some(pool), Some(publisher)) = (&self.pool, &self.pending_tx_publisher) else {
+            // Built without DB pool + publisher (e.g. `BscConnector::new`).
+            // The indexer reader cannot persist ranges or publish fetched
+            // events in that mode, so fail loudly rather than silently
+            // discarding events.
+            return Err(crate::AlephError::Chain(
+                "indexer reader requires DbPool + publisher".to_string(),
+            ));
+        };
         self.indexer_reader
-            .fetcher(
-                &cfg.aleph.indexer_url,
-                &cfg.bsc.sync_contract,
+            .run(
+                pool.clone(),
+                publisher.clone(),
+                cfg.aleph.indexer_url.clone(),
+                cfg.bsc.sync_contract.clone(),
                 ChainEventType::Message,
             )
             .await

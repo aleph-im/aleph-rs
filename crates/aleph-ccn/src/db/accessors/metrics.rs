@@ -49,13 +49,29 @@ fn now_seconds() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn resolve_window(start_date: Option<f64>, end_date: Option<f64>) -> Option<f64> {
+/// Mirror Python truthiness: `None` and non-positive (`<= 0.0`) epochs are
+/// "unset" because `0.0` is falsy in pyaleph's `if not start_date` checks.
+fn provided(value: Option<f64>) -> Option<f64> {
+    value.filter(|&v| v > 0.0)
+}
+
+/// Resolve the effective `(start, end)` window, mirroring pyaleph's
+/// `query_metric_*` defaulting:
+///   - both unset            -> start = now - 2 weeks
+///   - end set, start unset  -> start = end - 2 weeks
+///   - otherwise             -> keep start as provided
+///
+/// A `0.0` start/end is treated as falsy (unset), matching Python.
+fn resolve_window(start_date: Option<f64>, end_date: Option<f64>) -> (Option<f64>, Option<f64>) {
     let two_weeks = 60.0 * 60.0 * 24.0 * 14.0;
-    match (start_date, end_date) {
+    let start_date = provided(start_date);
+    let end_date = provided(end_date);
+    let start = match (start_date, end_date) {
         (None, None) => Some(now_seconds() - two_weeks),
         (None, Some(end)) => Some(end - two_weeks),
         (Some(s), _) => Some(s),
-    }
+    };
+    (start, end_date)
 }
 
 fn epoch_to_datetime(epoch: f64) -> Option<DateTime<Utc>> {
@@ -103,7 +119,7 @@ pub async fn query_metric_ccn(
     end_date: Option<f64>,
     sort_order: Option<SortOrder>,
 ) -> AlephResult<CcnMetricResult> {
-    let start_date = resolve_window(start_date, end_date);
+    let (start_date, end_date) = resolve_window(start_date, end_date);
     let start_dt = start_date.and_then(epoch_to_datetime);
     let end_dt = end_date.and_then(epoch_to_datetime);
 
@@ -150,7 +166,7 @@ pub async fn query_metric_crn(
     end_date: Option<f64>,
     sort_order: Option<SortOrder>,
 ) -> AlephResult<CrnMetricResult> {
-    let start_date = resolve_window(start_date, end_date);
+    let (start_date, end_date) = resolve_window(start_date, end_date);
     let start_dt = start_date.and_then(epoch_to_datetime);
     let end_dt = end_date.and_then(epoch_to_datetime);
 
@@ -214,18 +230,22 @@ fn coerce_measured_at(value: Option<&Value>) -> Option<DateTime<Utc>> {
 }
 
 fn entry_node_id(entry: &Value) -> Option<String> {
+    // Mirror Python `if not node_id`: reject any falsy node_id. That means a
+    // missing/null value, an empty string, `false`, and a numeric `0`/`0.0`
+    // are all rejected (Python truthiness), since none are usable for the
+    // (node_id, measured_at) lookups the API serves.
     match entry.get("node_id") {
-        // Reject missing-or-empty node_id: an empty string is unusable for
-        // the (node_id, measured_at) lookups the API serves.
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-        Some(v) if !v.is_null() => {
-            let s = v.to_string();
-            if s.is_empty() {
+        Some(Value::Number(n)) => {
+            // Falsy if the number is zero (matches `not 0` / `not 0.0`).
+            let is_zero = n.as_f64().map(|f| f == 0.0).unwrap_or(false);
+            if is_zero {
                 None
             } else {
-                Some(s)
+                Some(n.to_string())
             }
         }
+        Some(Value::Bool(b)) if *b => Some(true.to_string()),
         _ => None,
     }
 }

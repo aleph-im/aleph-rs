@@ -20,6 +20,19 @@ pub const STORE_FETCH_STORAGE_FAILED_KEY: &str = "pyaleph_store_fetch_storage_fa
 pub const STORE_FETCH_STORAGE_DURATION_MS_SUM_KEY: &str =
     "pyaleph_store_fetch_storage_duration_ms_sum";
 
+// WebSocket counters/gauges shared across workers via Redis. Mirror the
+// `_WS_*` constants in `aleph/web/controllers/metrics.py`. Names match the
+// Prometheus metric fields exactly so the reader can map them 1:1.
+pub const WS_MESSAGES_BROADCAST_TOTAL_KEY: &str = "pyaleph_ws_messages_broadcast_total";
+pub const WS_MESSAGES_CONNECTIONS_ACTIVE_KEY: &str = "pyaleph_ws_messages_connections_active";
+pub const WS_MESSAGES_CONNECTIONS_REJECTED_KEY: &str =
+    "pyaleph_ws_messages_connections_rejected_total";
+pub const WS_BROADCASTER_CONSUMER_RESTARTS_KEY: &str =
+    "pyaleph_ws_broadcaster_consumer_restarts_total";
+pub const WS_STATUS_CONNECTIONS_ACTIVE_KEY: &str = "pyaleph_ws_status_connections_active";
+pub const WS_STATUS_CONNECTIONS_REJECTED_KEY: &str =
+    "pyaleph_ws_status_connections_rejected_total";
+
 /// Return the `(total, failed, duration_ms_sum)` Redis keys for an item type.
 /// Mirrors `store_fetch_keys` in pyaleph.
 pub fn store_fetch_keys(item_type: ItemType) -> (&'static str, &'static str, &'static str) {

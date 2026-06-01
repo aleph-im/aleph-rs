@@ -382,9 +382,13 @@ pub fn make_tezos_status_query() -> &'static str {
 }
 
 /// Build the Tezos indexer GraphQL query. Mirrors `make_graphql_query` in pyaleph.
+///
+/// Requests `stats { totalEvents }` alongside the events page so the fetcher can
+/// drain the full backlog in one pass (advancing `skip` until it reaches the
+/// total event count).
 pub fn make_tezos_query(sync_contract: &str, event_type: &str, limit: u32, skip: u32) -> String {
     format!(
-        "{{\n  events(limit: {limit}, skip: {skip}, source: \"{sync_contract}\", type: \"{event_type}\") {{\n    _id\n    source\n    timestamp\n    blockLevel\n    operationHash\n    type\n    payload\n  }}\n}}"
+        "{{\n  indexStatus {{\n    oldestBlock\n    recentBlock\n    status\n  }}\n  stats(address: \"{sync_contract}\") {{\n    totalEvents\n  }}\n  events(limit: {limit}, skip: {skip}, source: \"{sync_contract}\", type: \"{event_type}\") {{\n    _id\n    source\n    timestamp\n    blockLevel\n    operationHash\n    type\n    payload\n  }}\n}}"
     )
 }
 
@@ -439,30 +443,36 @@ impl TezosConnector {
         Ok(parsed.data.index_status.status)
     }
 
-    /// Pull a single page of events from the Tezos indexer.
+    /// Pull a single page of events from the Tezos indexer, returning the page
+    /// of events together with the indexer-reported total event count
+    /// (`stats.totalEvents`). The total drives backlog draining in `fetcher()`.
     pub async fn fetch_events(
         &self,
         indexer_url: &str,
         sync_contract: &str,
         limit: u32,
         skip: u32,
-    ) -> AlephResult<Vec<TezosIndexerEvent>> {
+    ) -> AlephResult<(Vec<TezosIndexerEvent>, u64)> {
         let query = make_tezos_query(sync_contract, "MessageEvent", limit, skip);
         let body = serde_json::json!({ "query": query });
         let resp = self.http.post(indexer_url).json(&body).send().await?;
         let parsed: TezosIndexerResponse = resp.json().await?;
-        Ok(parsed.data.events)
+        let total_events = parsed.data.stats.unwrap_or_default().total_events;
+        Ok((parsed.data.events, total_events))
     }
 
     /// One-shot poll of the indexer. Publishes every new event via the
     /// `pending_tx_publisher`. Used both by `fetcher()` and tests.
+    ///
+    /// Returns the published txs alongside the indexer-reported total event
+    /// count, so callers can decide whether more pages remain.
     pub async fn poll_once(
         &self,
         indexer_url: &str,
         sync_contract: &str,
         skip: u32,
-    ) -> AlephResult<Vec<PendingChainTx>> {
-        let events = self
+    ) -> AlephResult<(Vec<PendingChainTx>, u64)> {
+        let (events, total_events) = self
             .fetch_events(indexer_url, sync_contract, 100, skip)
             .await?;
         let mut out = Vec::with_capacity(events.len());
@@ -471,7 +481,7 @@ impl TezosConnector {
             self.pending_tx_publisher.publish(&tx).await?;
             out.push(tx);
         }
-        Ok(out)
+        Ok((out, total_events))
     }
 }
 
@@ -529,12 +539,16 @@ impl ChainReader for TezosConnector {
                 }
             }
 
-            let skip = if let Some(pool) = &self.pool {
+            // Read the persisted cursor once at the start of the pass. Mirrors
+            // pyaleph's `get_last_height()`; the cursor counts indexer events
+            // already drained (it is an event offset, not a block height).
+            let mut height = if let Some(pool) = &self.pool {
                 match pool.get().await {
                     Ok(client) => get_last_height(&**client, Chain::Tezos, ChainEventType::Message)
                         .await
                         .ok()
                         .flatten()
+                        // Avoid an off-by-one at startup (-1 -> 0), like pyaleph.
                         .map(|h| h.max(0) as u32)
                         .unwrap_or(0),
                     Err(e) => {
@@ -545,24 +559,59 @@ impl ChainReader for TezosConnector {
             } else {
                 0
             };
-            match self.poll_once(&indexer_url, &sync_contract, skip).await {
-                Ok(txs) => {
-                    if let Some(pool) = &self.pool
-                        && !txs.is_empty()
-                    {
-                        let client = pool.get().await.map_err(|e| {
-                            crate::AlephError::Pool(format!("pool acquire: {e}"))
-                        })?;
-                        let next_skip = skip.saturating_add(txs.len() as u32);
-                        upsert_chain_sync_status(
+
+            // Drain the full backlog in one pass: page the indexer advancing the
+            // cursor by the requested limit each time, until we have reached the
+            // total event count reported by `stats`. Mirrors the inner loop of
+            // pyaleph `fetch_incoming_messages`.
+            const LIMIT: u32 = 100;
+            let pass_result: AlephResult<()> = loop {
+                match self.poll_once(&indexer_url, &sync_contract, height).await {
+                    Ok((txs, total_events)) => {
+                        tracing::info!(count = txs.len(), "Tezos fetcher: new txs");
+                        // Advance by the requested limit, not by the returned
+                        // count: the indexer may return fewer rows than asked
+                        // for, but the cursor must still progress so subsequent
+                        // pages do not re-fetch the same events.
+                        height = height.saturating_add(LIMIT);
+                        if u64::from(height) >= total_events {
+                            // Clamp to the total so we don't overshoot.
+                            height = total_events.min(i32::MAX as u64) as u32;
+                            break Ok(());
+                        }
+                    }
+                    // Stop the pass on error but keep the cursor we've reached so
+                    // progress is persisted (finally-equivalent below).
+                    Err(e) => break Err(e),
+                }
+            };
+
+            // Persist the cursor regardless of how the pass ended, so mid-pass
+            // failures still record progress (pyaleph's `finally` block).
+            if let Some(pool) = &self.pool {
+                match pool.get().await {
+                    Ok(client) => {
+                        if let Err(e) = upsert_chain_sync_status(
                             &**client,
                             Chain::Tezos,
                             ChainEventType::Message,
-                            next_skip.min(i32::MAX as u32) as i32,
+                            height.min(i32::MAX as u32) as i32,
                             chrono::Utc::now(),
                         )
-                        .await?;
+                        .await
+                        {
+                            tracing::warn!(error = %e, "Tezos fetcher: could not persist sync cursor");
+                        }
                     }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Tezos fetcher: could not persist sync cursor");
+                    }
+                }
+            }
+
+            match pass_result {
+                Ok(()) => {
+                    tracing::info!("Tezos fetcher: processed all transactions, waiting 10 seconds")
                 }
                 Err(e) => tracing::warn!(error = %e, "Tezos fetcher: poll failed"),
             }
@@ -647,6 +696,9 @@ mod tests {
         let mock = MockServer::start().await;
         let body = serde_json::json!({
             "data": {
+                "stats": {
+                    "totalEvents": 1
+                },
                 "events": [
                     {
                         "_id": "1",
@@ -672,7 +724,8 @@ mod tests {
 
         let publisher = Arc::new(PendingTxPublisher::new(Box::new(TracingPendingTxSink)));
         let connector = TezosConnector::new(publisher);
-        let txs = connector.poll_once(&mock.uri(), "KT1Foo", 0).await.unwrap();
+        let (txs, total_events) = connector.poll_once(&mock.uri(), "KT1Foo", 0).await.unwrap();
+        assert_eq!(total_events, 1);
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0].hash, "ophash1");
         assert_eq!(txs[0].chain, Chain::Tezos);

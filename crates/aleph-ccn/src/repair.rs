@@ -10,13 +10,22 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
+use serde_json::{Map, Value, json};
 use tokio_postgres::GenericClient;
 
 use crate::AlephError;
 use crate::AlephResult;
 use crate::db::accessors::files::upsert_file;
+use crate::db::accessors::messages::{
+    get_message_by_item_hash, upsert_message_status, upsert_rejected_message,
+};
+use crate::db::accessors::vms::{delete_vm, delete_vm_updates};
 use crate::db::models::files::StoredFileDb;
+use crate::db::models::messages::MessageDb;
 use crate::storage::StorageService;
+use crate::toolkit::timestamp::utc_now;
+use aleph_types::message::MessageType;
+use crate::types::message_status::{ErrorCode, MessageStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CreditLot {
@@ -221,6 +230,198 @@ pub async fn repair_credit_balances(pool: &Pool) -> AlephResult<()> {
     Ok(())
 }
 
+/// Reason attached to rejected PROGRAM messages with non-dict metadata.
+/// Mirrors `_INVALID_METADATA_REASON`.
+const INVALID_METADATA_REASON: &str =
+    "ExecutableContent.metadata must be a dict; legacy rows with a list value \
+     no longer parse and surfaced as 500s at the API.";
+
+/// Snapshot a [`MessageDb`] row as a JSON-serializable wire-format dict
+/// suitable for the `rejected_messages.message` JSONB column.
+///
+/// Mirrors `_wire_message_dict`: emits only canonical wire columns (excludes
+/// `MessageDb::DENORMALIZED_COLUMNS`), renders `time` as a POSIX timestamp,
+/// and renders enum columns (`chain`, `type`, `item_type`) as their wire
+/// `.value` strings.
+fn wire_message_dict(message: &MessageDb) -> Value {
+    let mut out = Map::new();
+    out.insert("item_hash".into(), json!(message.item_hash));
+    out.insert("type".into(), serde_json::to_value(message.r#type).unwrap());
+    out.insert("chain".into(), serde_json::to_value(&message.chain).unwrap());
+    out.insert("sender".into(), json!(message.sender));
+    out.insert(
+        "signature".into(),
+        match &message.signature {
+            Some(s) => json!(s),
+            None => Value::Null,
+        },
+    );
+    out.insert(
+        "item_type".into(),
+        serde_json::to_value(message.item_type).unwrap(),
+    );
+    out.insert(
+        "item_content".into(),
+        message
+            .item_content
+            .as_ref()
+            .map(|c| json!(c))
+            .unwrap_or(Value::Null),
+    );
+    out.insert("content".into(), message.content.clone());
+    let time = message.time.timestamp() as f64
+        + (message.time.timestamp_subsec_nanos() as f64) / 1_000_000_000.0;
+    out.insert("time".into(), json!(time));
+    out.insert(
+        "channel".into(),
+        serde_json::to_value(&message.channel).unwrap(),
+    );
+    out.insert("size".into(), json!(message.size));
+    Value::Object(out)
+}
+
+/// Transition a processed message into the REJECTED state.
+///
+/// Mirrors `mark_processed_message_as_rejected`: snapshots the row into
+/// `rejected_messages`, cleans up VM state for program/instance messages,
+/// flips `message_status` to REJECTED (only if not already rejected), and
+/// deletes the `messages` row. Runs inside the caller's transaction; does not
+/// commit.
+async fn mark_processed_message_as_rejected(
+    client: &impl GenericClient,
+    message: &MessageDb,
+    error_code: ErrorCode,
+    reason: &str,
+) -> AlephResult<()> {
+    let snapshot = wire_message_dict(message);
+
+    if matches!(message.r#type, MessageType::Program | MessageType::Instance) {
+        delete_vm(client, &message.item_hash).await?;
+        let _ = delete_vm_updates(client, &message.item_hash).await?;
+    }
+
+    let details = json!({ "errors": [reason] });
+    upsert_rejected_message(
+        client,
+        &message.item_hash,
+        &snapshot,
+        error_code as i32,
+        Some(&details),
+        Some(reason),
+        None,
+    )
+    .await?;
+
+    upsert_message_status(
+        client,
+        &message.item_hash,
+        MessageStatus::Rejected,
+        utc_now(),
+        Some("message_status.status != 'rejected'"),
+    )
+    .await?;
+
+    client
+        .execute(
+            "DELETE FROM messages WHERE item_hash = $1",
+            &[&message.item_hash],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Reject already-processed PROGRAM messages whose `content.metadata` is a
+/// JSON array. Mirrors `_reject_invalid_program_metadata`.
+///
+/// aleph-message historically accepted `ExecutableContent.metadata` as either
+/// a dict or a list; the current validator requires a dict. Rows accepted
+/// under the old rules trip `parsed_content` access and surface as 500s on
+/// `GET /api/v0/messages/<hash>`. Moving them to the rejected state lets the
+/// API render them the way nodes that rejected them up front do.
+///
+/// Per-message transaction so a single bad row does not roll back the rest.
+pub async fn reject_invalid_program_metadata(pool: &Pool) -> AlephResult<()> {
+    let item_hashes: Vec<String> = {
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| AlephError::Internal(anyhow::anyhow!(e)))?;
+        let rows = client
+            .query(
+                "SELECT item_hash FROM messages \
+                 WHERE type = 'PROGRAM' \
+                   AND status = 'processed' \
+                   AND jsonb_typeof(content -> 'metadata') = 'array'",
+                &[],
+            )
+            .await?;
+        rows.into_iter().map(|r| r.get::<_, String>(0)).collect()
+    };
+
+    if item_hashes.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Rejecting {} PROGRAM message(s) with non-dict metadata",
+        item_hashes.len()
+    );
+
+    let mut rejected = 0usize;
+    for item_hash in &item_hashes {
+        let mut client = pool
+            .get()
+            .await
+            .map_err(|e| AlephError::Internal(anyhow::anyhow!(e)))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| AlephError::Internal(anyhow::anyhow!(e)))?;
+
+        let result: AlephResult<bool> = async {
+            let message = match get_message_by_item_hash(&*tx, item_hash).await? {
+                Some(m) => m,
+                None => return Ok(false),
+            };
+            if message.status_value != MessageStatus::Processed {
+                return Ok(false);
+            }
+            mark_processed_message_as_rejected(
+                &*tx,
+                &message,
+                ErrorCode::InvalidFormat,
+                INVALID_METADATA_REASON,
+            )
+            .await?;
+            Ok(true)
+        }
+        .await;
+
+        match result {
+            Ok(true) => {
+                tx.commit()
+                    .await
+                    .map_err(|e| AlephError::Internal(anyhow::anyhow!(e)))?;
+                rejected += 1;
+            }
+            Ok(false) => {
+                let _ = tx.rollback().await;
+            }
+            Err(err) => {
+                tracing::error!("Failed to reject program {item_hash}: {err}");
+                let _ = tx.rollback().await;
+            }
+        }
+    }
+
+    tracing::info!(
+        "Done: rejected {} / {} PROGRAM message(s) with non-dict metadata",
+        rejected,
+        item_hashes.len()
+    );
+    Ok(())
+}
+
 /// Run all startup repairs in order. Mirrors `repair_node`.
 pub async fn repair_node(
     pool: &Pool,
@@ -230,6 +431,8 @@ pub async fn repair_node(
     fix_file_sizes(pool, storage_service, true).await?;
     tracing::info!("Repairing credit balances");
     repair_credit_balances(pool).await?;
+    tracing::info!("Rejecting PROGRAM messages with invalid metadata");
+    reject_invalid_program_metadata(pool).await?;
     Ok(())
 }
 

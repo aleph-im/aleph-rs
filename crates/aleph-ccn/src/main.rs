@@ -52,7 +52,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run the full Core Channel Node (default).
-    Run,
+    Run {
+        /// Path to the key directory holding `node-secret.pkcs8.der`.
+        #[arg(short = 'k', long = "key-dir", default_value = "keys")]
+        key_dir: PathBuf,
+    },
     /// Apply database migrations and exit.
     Migrate,
     /// Generate a node key, save it under `--key-dir`, and exit.
@@ -86,6 +90,22 @@ async fn main() -> AlephResult<()> {
         .init();
 
     let mut cfg = aleph_ccn::config::load(cli.config.as_deref())?;
+
+    // Initialize Sentry. Mirrors pyaleph `toolkit.monitoring.setup_sentry`:
+    // only init when a DSN is configured and `--disable-sentry` was not passed.
+    // The returned guard must live for the whole process lifetime, so bind it
+    // to a variable that stays in scope until the end of `main`.
+    let _sentry_guard = match cfg.sentry.dsn.as_deref() {
+        Some(dsn) if !cli.disable_sentry && !dsn.is_empty() => Some(sentry::init((
+            dsn.to_string(),
+            sentry::ClientOptions {
+                traces_sample_rate: cfg.sentry.traces_sample_rate.unwrap_or(0.0) as f32,
+                ..Default::default()
+            },
+        ))),
+        _ => None,
+    };
+
     if let Some(p) = cli.port {
         cfg.p2p.http_port = p;
     }
@@ -99,8 +119,23 @@ async fn main() -> AlephResult<()> {
         }
     }
 
-    match cli.command.unwrap_or(Command::Run) {
-        Command::Run => {
+    match cli
+        .command
+        .unwrap_or(Command::Run {
+            key_dir: PathBuf::from("keys"),
+        }) {
+        Command::Run { key_dir } => {
+            // Mirror pyaleph `commands.py`: refuse to start unless the node's
+            // serialized private key exists, because the external p2p service
+            // needs it. Equivalent to raising KeyNotFoundException.
+            let private_key_file_path = key_dir.join("node-secret.pkcs8.der");
+            if !private_key_file_path.is_file() {
+                return Err(aleph_ccn::AlephError::Config(format!(
+                    "Serialized node key ({}) not found. Run `aleph-ccn gen-keys` first.",
+                    private_key_file_path.display()
+                )));
+            }
+
             tracing::info!("starting aleph-ccn v{}", aleph_ccn::VERSION);
             aleph_ccn::run_with_options(
                 cfg,

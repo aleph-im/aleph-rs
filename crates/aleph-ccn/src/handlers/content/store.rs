@@ -342,14 +342,23 @@ impl StoreMessageHandler {
 
         let (total_key, failed_key, duration_key) = store_fetch_keys(item_type);
 
-        if item_type == ItemType::Ipfs && self.ipfs_enabled {
+        // Mirror pyaleph: jitter is applied at the top of the `item_type == ipfs`
+        // branch, BEFORE the `ipfs_enabled` gate, so every node that receives the
+        // STORE message participates in the rolling fetch wave even if local IPFS
+        // pinning is disabled (#1171/#1164).
+        if item_type == ItemType::Ipfs {
             apply_fetch_jitter(self.ipfs_fetch_jitter_seconds, &file_hash).await;
+        }
+
+        if item_type == ItemType::Ipfs && self.ipfs_enabled {
             if let Some(ipfs) = &self.ipfs_service {
                 let stat_timeout = Duration::from_secs(self.ipfs_stat_timeout_secs);
-                let stat = ipfs
-                    .stat(&file_hash, stat_timeout)
-                    .await
-                    .map_err(|_| MessageProcessingException::file_unavailable(file_hash.clone()))?;
+                let stat = ipfs.stat(&file_hash, stat_timeout).await.map_err(|_| {
+                    MessageProcessingException::file_unavailable_with_details(
+                        file_hash.clone(),
+                        "could not retrieve IPFS file stats at this time",
+                    )
+                })?;
                 let stats = IpfsFileStats {
                     size: stat.size as i64,
                     file_type: if stat.is_directory {
@@ -380,7 +389,10 @@ impl StoreMessageHandler {
                             stats.size,
                             timer.elapsed().as_secs_f64(),
                         );
-                        return Err(MessageProcessingException::file_unavailable(file_hash.clone()));
+                        return Err(MessageProcessingException::file_unavailable_with_details(
+                            file_hash.clone(),
+                            "could not pin IPFS content at this time",
+                        ));
                     }
                     let elapsed = timer.elapsed().as_secs_f64();
                     self.incrby_metric(duration_key, (elapsed * 1000.0).round() as i64)
@@ -400,6 +412,14 @@ impl StoreMessageHandler {
         }
 
         // Smaller files (or storage-type files) come from local storage.
+        //
+        // pyaleph unconditionally `node_cache.incr(total_key)` on the HTTP path:
+        // it always reaches `get_hash_content` for non-pinned items, even when the
+        // file is already present locally. Increment here — before the local-exists
+        // short-circuit and independent of `storage_service` presence — so the
+        // total count matches pyaleph (#1164). A no-op without a storage service.
+        self.incr_metric(total_key).await;
+
         let exists = self.storage_engine.exists(&file_hash).await.map_err(|e| {
             MessageProcessingException::InternalError {
                 errors: vec![format!("Storage engine exists() failed: {e}")],
@@ -408,9 +428,6 @@ impl StoreMessageHandler {
         if !exists {
             if let Some(storage_service) = &self.storage_service {
                 // Fetch content directly from the Aleph network storage API.
-                // Counted before the fetch so every attempt is represented.
-                // Mirrors pyaleph #1164.
-                self.incr_metric(total_key).await;
                 let timer = std::time::Instant::now();
                 match storage_service
                     .get_hash_content(
@@ -471,10 +488,16 @@ impl StoreMessageHandler {
                         .get_ipfs_content(&file_hash, Duration::from_secs(15), 4)
                         .await
                         .map_err(|_| {
-                            MessageProcessingException::file_unavailable(file_hash.clone())
+                            MessageProcessingException::file_unavailable_with_details(
+                                file_hash.clone(),
+                                "could not retrieve IPFS content at this time",
+                            )
                         })?;
                     let bytes = bytes.ok_or_else(|| {
-                        MessageProcessingException::file_unavailable(file_hash.clone())
+                        MessageProcessingException::file_unavailable_with_details(
+                            file_hash.clone(),
+                            "could not retrieve IPFS content at this time",
+                        )
                     })?;
                     if self.store_files {
                         self.storage_engine
@@ -534,7 +557,13 @@ impl StoreMessageHandler {
                     return Ok(());
                 }
             }
-            return Err(MessageProcessingException::file_unavailable(file_hash));
+            // All fetch paths exhausted. Mirrors pyaleph's
+            // `except AlephStorageException: raise FileUnavailable(file_hash,
+            // "could not retrieve file from storage at this time")`.
+            return Err(MessageProcessingException::file_unavailable_with_details(
+                file_hash,
+                "could not retrieve file from storage at this time",
+            ));
         }
 
         // Resolve the on-disk size.
@@ -619,7 +648,10 @@ impl ContentHandler for StoreMessageHandler {
                         )
                         .await
                         .map_err(|_| {
-                            MessageProcessingException::file_unavailable(file_hash.clone())
+                            MessageProcessingException::file_unavailable_with_details(
+                                file_hash.clone(),
+                                "could not retrieve IPFS file stats at this time",
+                            )
                         })?,
                 };
                 if let Some(byte_size) = ipfs_size {
