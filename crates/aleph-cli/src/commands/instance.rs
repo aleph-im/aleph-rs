@@ -450,6 +450,10 @@ pub async fn handle_instance_command(
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             super::instance_backup::dispatch(scheduler_url, json, sub).await?;
         }
+        InstanceCommand::Confidential(sub) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            super::confidential::dispatch(scheduler_url, json, sub).await?;
+        }
     }
     Ok(())
 }

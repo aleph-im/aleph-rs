@@ -8,6 +8,7 @@ members = [
 ]
 
 [workspace.dependencies]
+aes = { version = "0.8" }
 aleph-sdk = { path = "crates/aleph-sdk", version = "0.10.3" }
 aleph-types = { path = "crates/aleph-types", version = "0.10.3" }
 # Individual alloy sub-crates instead of the `alloy` umbrella so we can pin
@@ -60,7 +61,9 @@ rand = { version = "0.8" }
 toml = { version = "0.8" }
 tempfile = { version = "3" }
 static_assertions = { version = "1" }
+subtle = { version = "2" }
 walkdir = { version = "2" }
+which = { version = "6" }
 wiremock = { version = "0.6" }
 # `zeroize` is requested explicitly so that `SigningKey: ZeroizeOnDrop` (which
 # wipes the secret scalar on drop) follows from our own dependency declaration.
@@ -74,9 +77,11 @@ base64 = { version = "0.22" }
 p256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = { version = "0.10" }
 hex = { version = "0.4" }
+hmac = { version = "0.12" }
 zeroize = { version = "1" }
 coins-ledger = { version = "0.13" }
 dialoguer = { version = "0.11" }
+ctr = { version = "0.9" }
 ctrlc = { version = "3.4" }
 libc = { version = "0.2" }
 zip = { version = "2", default-features = false, features = ["deflate"] }

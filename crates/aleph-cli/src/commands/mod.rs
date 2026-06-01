@@ -1,6 +1,7 @@
 pub mod account;
 pub mod aggregate;
 pub mod authorization;
+pub mod confidential;
 pub mod config;
 pub mod credit;
 pub mod crn;

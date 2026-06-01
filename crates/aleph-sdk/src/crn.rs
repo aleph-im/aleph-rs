@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
+use crate::confidential::SEVMeasurement;
+
 use aleph_types::account::{Account, SignError};
 use aleph_types::item_hash::ItemHash;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -358,6 +360,122 @@ impl CrnClient {
         }
     }
 
+    /// GET /about/certificates - returns the platform certificate chain
+    /// bundle (PEM, matches `sevctl export` output). Unsigned; public endpoint.
+    pub async fn get_platform_certificate(&self) -> Result<Vec<u8>, CrnError> {
+        fetch_platform_certificate(&self.http_client, &self.crn_url).await
+    }
+
+    /// `POST /control/machine/<vm>/confidential/initialize`
+    ///
+    /// multipart/form-data body with two byte parts: `session` and `godh`.
+    /// Signed with the same ephemeral-key X-SignedPubKey / X-SignedOperation
+    /// headers as the other /control/machine endpoints.
+    pub async fn initialize_confidential(
+        &self,
+        vm_id: &ItemHash,
+        session: &[u8],
+        godh: &[u8],
+    ) -> Result<(), CrnError> {
+        let path = format!("/control/machine/{vm_id}/confidential/initialize");
+        let url = self.crn_url.join(&path).expect("valid path");
+        // The CRN reads each part via aiohttp's `post.get(...).file`, which only
+        // exists for parts carrying a filename in their Content-Disposition. A
+        // filename-less part decodes to a plain string server-side and the
+        // handler 500s with `'str' object has no attribute 'file'`. The server
+        // ignores the filename value (it writes to fixed vm_session.b64 /
+        // vm_godh.b64 paths), so the names below are only for the disposition.
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "session",
+                reqwest::multipart::Part::bytes(session.to_vec()).file_name("vm_session.b64"),
+            )
+            .part(
+                "godh",
+                reqwest::multipart::Part::bytes(godh.to_vec()).file_name("vm_godh.b64"),
+            );
+
+        let mut request = self.http_client.post(url).multipart(form);
+        for (name, value) in self.auth_headers("POST", &path) {
+            request = request.header(name, value);
+        }
+        let response = request.send().await?;
+
+        let status = response.status().as_u16();
+        match status {
+            200..=299 => Ok(()),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
+    /// `GET /control/machine/<vm>/confidential/measurement`
+    ///
+    /// Returns the SEV launch measurement (HMAC measure + nonce, plus sev_info).
+    /// Signed.
+    pub async fn get_measurement(&self, vm_id: &ItemHash) -> Result<SEVMeasurement, CrnError> {
+        let path = format!("/control/machine/{vm_id}/confidential/measurement");
+        let url = self.crn_url.join(&path).expect("valid path");
+
+        let mut request = self.http_client.get(url);
+        for (name, value) in self.auth_headers("GET", &path) {
+            request = request.header(name, value);
+        }
+        let response = request.send().await?;
+
+        let status = response.status().as_u16();
+        match status {
+            200..=299 => Ok(response.json::<SEVMeasurement>().await?),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
+    /// `POST /control/machine/<vm>/confidential/inject_secret`
+    ///
+    /// JSON body `{packet_header, secret}` (both base64 strings). Signed.
+    pub async fn inject_secret(
+        &self,
+        vm_id: &ItemHash,
+        packet_header: &str,
+        secret: &str,
+    ) -> Result<(), CrnError> {
+        let path = format!("/control/machine/{vm_id}/confidential/inject_secret");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let body = serde_json::json!({
+            "packet_header": packet_header,
+            "secret": secret,
+        });
+
+        let mut request = self.http_client.post(url).json(&body);
+        for (name, value) in self.auth_headers("POST", &path) {
+            request = request.header(name, value);
+        }
+        let response = request.send().await?;
+
+        let status = response.status().as_u16();
+        match status {
+            200..=299 => Ok(()),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
     /// List the VMs currently active on this CRN, indexed by item hash.
     ///
     /// Calls `GET /v2/about/executions/list`. The v1 fallback that the Python
@@ -645,6 +763,24 @@ pub async fn fetch_active_vms(
         return Err(CrnError::Api { status, body });
     }
     Ok(resp.json::<ActiveVmList>().await?)
+}
+
+/// Free-function variant of `CrnClient::get_platform_certificate`. Useful for
+/// tests that don't need to construct a full `CrnClient`.
+pub async fn fetch_platform_certificate(
+    http: &reqwest::Client,
+    crn_url: &Url,
+) -> Result<Vec<u8>, CrnError> {
+    let url = crn_url.join("/about/certificates").expect("valid path");
+    let response = http.get(url).send().await?;
+    let status = response.status().as_u16();
+    if !(200..=299).contains(&status) {
+        return Err(CrnError::Api {
+            status,
+            body: response.text().await?,
+        });
+    }
+    Ok(response.bytes().await?.to_vec())
 }
 
 /// Fetch the list of running VM executions from a CRN's
@@ -1243,5 +1379,233 @@ mod tests {
             }
             other => panic!("expected Api error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_platform_certificate_returns_bytes() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/about/certificates"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_bytes(b"PEM-bytes-here".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let url = url::Url::parse(&server.uri()).unwrap();
+        let bytes = super::fetch_platform_certificate(&http, &url)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"PEM-bytes-here");
+    }
+
+    #[tokio::test]
+    async fn fetch_platform_certificate_surfaces_non_200() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/about/certificates"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(503).set_body_string("temporarily unavailable"),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let url = url::Url::parse(&server.uri()).unwrap();
+        let err = super::fetch_platform_certificate(&http, &url)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::crn::CrnError::Api { status: 503, .. }));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn initialize_confidential_posts_signed_multipart() {
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        let captured_body = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let captured_ct = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_has_pubkey = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let captured_has_op = std::sync::Arc::new(std::sync::Mutex::new(false));
+
+        let body_handle = captured_body.clone();
+        let ct_handle = captured_ct.clone();
+        let pk_handle = captured_has_pubkey.clone();
+        let op_handle = captured_has_op.clone();
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/initialize",
+            ))
+            .respond_with(move |req: &wiremock::Request| {
+                *body_handle.lock().unwrap() = req.body.clone();
+                *ct_handle.lock().unwrap() = req
+                    .headers
+                    .get("content-type")
+                    .map(|v| v.to_str().unwrap_or_default().to_string())
+                    .unwrap_or_default();
+                *pk_handle.lock().unwrap() = req.headers.contains_key("x-signedpubkey");
+                *op_handle.lock().unwrap() = req.headers.contains_key("x-signedoperation");
+                wiremock::ResponseTemplate::new(200)
+            })
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        client
+            .initialize_confidential(&vm_id, b"session-bytes", b"godh-bytes")
+            .await
+            .unwrap();
+
+        assert!(
+            captured_ct
+                .lock()
+                .unwrap()
+                .starts_with("multipart/form-data")
+        );
+        assert!(*captured_has_pubkey.lock().unwrap());
+        assert!(*captured_has_op.lock().unwrap());
+        let body = captured_body.lock().unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap_or_default();
+        assert!(body_str.contains("name=\"session\""));
+        assert!(body_str.contains("name=\"godh\""));
+        assert!(body_str.contains("session-bytes"));
+        assert!(body_str.contains("godh-bytes"));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_measurement_deserializes_response() {
+        use crate::confidential::SEVInfo;
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/measurement",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sev_info": {
+                        "api_major": 1,
+                        "api_minor": 55,
+                        "build_id": 24,
+                        "policy": 1
+                    },
+                    "launch_measure": "ls2jv10V3HVShVI/RHCo/a43WO0soLZf0huU9ZZstIxRFA2okCqH/Z6nh2uPH9e8"
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        let measurement = client.get_measurement(&vm_id).await.unwrap();
+        assert_eq!(
+            measurement.sev_info,
+            SEVInfo {
+                api_major: 1,
+                api_minor: 55,
+                build_id: 24,
+                policy: 1
+            }
+        );
+        assert!(measurement.launch_measure.starts_with("ls2jv10"));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn get_measurement_returns_vm_not_found_on_404() {
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/measurement",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        let err = client.get_measurement(&vm_id).await.unwrap_err();
+        assert!(matches!(err, CrnError::VmNotFound(_)));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn inject_secret_posts_signed_json() {
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/inject_secret",
+            ))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "packet_header": "AAAA",
+                "secret": "BBBB"
+            })))
+            .and(wiremock::matchers::header_exists("x-signedpubkey"))
+            .and(wiremock::matchers::header_exists("x-signedoperation"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        client.inject_secret(&vm_id, "AAAA", "BBBB").await.unwrap();
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn inject_secret_surfaces_400_as_api_error() {
+        use aleph_types::account::EvmAccount;
+        use aleph_types::chain::Chain;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/control/machine/1111111111111111111111111111111111111111111111111111111111111111/confidential/inject_secret",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_string("invalid packet"))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, server.uri().parse().unwrap()).unwrap();
+        let vm_id: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+
+        let err = client
+            .inject_secret(&vm_id, "AAAA", "BBBB")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CrnError::Api { status: 400, .. }));
     }
 }

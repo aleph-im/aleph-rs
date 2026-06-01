@@ -3,6 +3,7 @@ pub mod authorization;
 pub mod builder;
 pub mod car;
 pub mod client;
+pub mod confidential;
 pub mod corechannel;
 #[cfg(feature = "credits")]
 pub mod credit;

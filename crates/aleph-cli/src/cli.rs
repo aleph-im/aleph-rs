@@ -1652,6 +1652,9 @@ Examples:
     /// Manage VM backups (create / info / download / delete / restore).
     #[command(subcommand)]
     Backup(InstanceBackupCommand),
+    /// Confidential VM workflow (init session, validate measurement, inject secret).
+    #[command(subcommand)]
+    Confidential(ConfidentialCommand),
 }
 
 #[derive(Args)]
@@ -3183,4 +3186,162 @@ pub struct PortForwardRefreshArgs {
     pub vm_id: String,
     #[command(flatten)]
     pub identity: IdentityArgs,
+}
+
+#[derive(Subcommand)]
+pub enum ConfidentialCommand {
+    /// Initialize a confidential session (fetch cert, verify chain, derive session keys, post to CRN).
+    InitSession(ConfidentialInitSessionArgs),
+    /// Validate the VM launch measurement and inject the disk-decryption secret.
+    Start(ConfidentialStartArgs),
+    /// All-in-one: create (optional), allocate, init session, then start.
+    Create(ConfidentialCreateArgs),
+}
+
+#[derive(Args)]
+pub struct ConfidentialInitSessionArgs {
+    /// VM item-hash. Accepts a unique prefix (e.g. the 12-char hash shown by
+    /// `aleph instance list`); the scheduler matches it server-side.
+    pub vm_id: String,
+    /// Override the CRN URL discovered via the scheduler.
+    #[arg(long)]
+    pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
+    /// SEV policy mask.
+    #[arg(long, default_value_t = 0x1)]
+    pub policy: u32,
+    /// Reuse existing session files if present (skip the overwrite prompt).
+    #[arg(long)]
+    pub keep_session: bool,
+    /// Enable debug logging.
+    #[arg(long)]
+    pub debug: bool,
+}
+
+#[derive(Args)]
+pub struct ConfidentialStartArgs {
+    /// VM item-hash. Accepts a unique prefix.
+    pub vm_id: String,
+    /// Override the CRN URL discovered via the scheduler.
+    #[arg(long)]
+    pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
+    /// Expected OVMF firmware hash (hex). Defaults to the active value from the
+    /// vm-images aggregate when omitted.
+    #[arg(long)]
+    pub firmware_hash: Option<String>,
+    /// Path to a local OVMF firmware blob; computes its SHA-256 and overrides
+    /// `--firmware-hash`.
+    #[arg(long)]
+    pub firmware_file: Option<std::path::PathBuf>,
+    /// VM disk-decryption secret. Prompts interactively if absent.
+    ///
+    /// Prefer the interactive prompt: a value passed here is visible to other
+    /// users via the process table (`ps aux`) and is recorded in shell history.
+    /// Only pass `--secret` in trusted, non-interactive contexts.
+    #[arg(long)]
+    pub secret: Option<String>,
+    /// Emit JSON-formatted success/failure.
+    #[arg(long)]
+    pub json: bool,
+    /// Enable debug logging.
+    #[arg(long)]
+    pub debug: bool,
+}
+
+#[derive(Args)]
+pub struct ConfidentialCreateArgs {
+    /// Existing VM hash. If omitted, runs `instance create --confidential ...`
+    /// first to allocate a fresh VM.
+    pub vm_id: Option<String>,
+    /// Override the CRN URL discovered via the scheduler.
+    #[arg(long)]
+    pub crn_url: Option<String>,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
+    /// SEV policy mask.
+    #[arg(long, default_value_t = 0x1)]
+    pub policy: u32,
+    /// Reuse existing session files if present.
+    #[arg(long)]
+    pub keep_session: bool,
+    /// Expected OVMF firmware hash (hex).
+    #[arg(long)]
+    pub firmware_hash: Option<String>,
+    /// Path to a local OVMF blob.
+    #[arg(long)]
+    pub firmware_file: Option<std::path::PathBuf>,
+    /// VM disk-decryption secret.
+    #[arg(long)]
+    pub secret: Option<String>,
+    // NB: forwarded `instance create` flags get flattened in Task 17.
+    /// Enable debug logging.
+    #[arg(long)]
+    pub debug: bool,
+}
+
+#[cfg(test)]
+mod confidential_parser_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("parse")
+    }
+
+    #[test]
+    fn init_session_accepts_hash_prefix() {
+        let cli = parse(&[
+            "aleph",
+            "instance",
+            "confidential",
+            "init-session",
+            "236328f6",
+        ]);
+        let Commands::Instance {
+            command: InstanceCommand::Confidential(ConfidentialCommand::InitSession(a)),
+        } = cli.command
+        else {
+            panic!("wrong subcommand");
+        };
+        assert_eq!(a.vm_id, "236328f6");
+        assert_eq!(a.policy, 0x1);
+        assert!(!a.keep_session);
+    }
+
+    #[test]
+    fn start_accepts_secret_and_json() {
+        let cli = parse(&[
+            "aleph",
+            "instance",
+            "confidential",
+            "start",
+            "236328f6",
+            "--secret",
+            "hunter2",
+            "--json",
+        ]);
+        let Commands::Instance {
+            command: InstanceCommand::Confidential(ConfidentialCommand::Start(a)),
+        } = cli.command
+        else {
+            panic!("wrong subcommand");
+        };
+        assert_eq!(a.secret.as_deref(), Some("hunter2"));
+        assert!(a.json);
+    }
+
+    #[test]
+    fn create_accepts_no_positional() {
+        let cli = parse(&["aleph", "instance", "confidential", "create"]);
+        let Commands::Instance {
+            command: InstanceCommand::Confidential(ConfidentialCommand::Create(a)),
+        } = cli.command
+        else {
+            panic!("wrong subcommand");
+        };
+        assert_eq!(a.vm_id, None);
+    }
 }

@@ -8,6 +8,7 @@ repository = "https://github.com/aleph-im/aleph-rs"
 homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
+aes = { workspace = true }
 aleph-types = { workspace = true }
 # alloy crates are only needed for the `credits` feature (EVM credit
 # purchases). Gated so downstream SDK consumers who don't use that flow
@@ -23,6 +24,7 @@ bs58 = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 cid = { workspace = true }
+ctr = { workspace = true }
 multihash = { workspace = true }
 multihash-codetable = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
@@ -46,6 +48,7 @@ tokio = { workspace = true }
 url = { workspace = true }
 walkdir = { workspace = true }
 hex = { workspace = true }
+hmac = { workspace = true }
 p256 = { workspace = true }
 prost = { workspace = true }
 tempfile = { workspace = true }

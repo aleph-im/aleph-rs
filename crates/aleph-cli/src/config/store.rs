@@ -355,6 +355,21 @@ impl ConfigStore {
         Ok(out)
     }
 
+    /// Returns the per-user directory where confidential VM session files
+    /// (`platform_certificate.pem`, `vm_godh.b64`, `vm_session.b64`,
+    /// `vm_tek.bin`, `vm_tik.bin`) are stored. Mirrors Python's
+    /// `~/.aleph-im/confidential_sessions/` layout so users can flip between
+    /// the Rust and Python CLIs.
+    pub fn confidential_sessions_dir() -> Result<std::path::PathBuf, ConfigError> {
+        let proj = directories::ProjectDirs::from("", "", "aleph").ok_or_else(|| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not determine home directory",
+            ))
+        })?;
+        Ok(proj.config_dir().join("confidential_sessions"))
+    }
+
     fn ensure_builtin(&self) -> Result<(), ConfigError> {
         let mut manifest = self.load_manifest()?;
         if !manifest.networks.is_empty() {
@@ -891,5 +906,13 @@ mod tests {
         let nets = store.list_networks().unwrap();
         assert_eq!(nets.len(), 1);
         assert_eq!(nets[0].name, "testnet");
+    }
+
+    #[test]
+    fn confidential_sessions_dir_returns_path_under_config_home() {
+        let dir = ConfigStore::confidential_sessions_dir().unwrap();
+        assert!(dir.ends_with("confidential_sessions"));
+        let parent = dir.parent().unwrap();
+        assert!(parent.to_string_lossy().contains("aleph"));
     }
 }
