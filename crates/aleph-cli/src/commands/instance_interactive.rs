@@ -10,6 +10,7 @@
 
 use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
 use crate::commands::instance::validate_ssh_pubkey;
+use aleph_sdk::aggregate_models::pricing::{GpuModel, PricingPerEntity};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::crns_list::{
@@ -44,7 +45,16 @@ pub async fn resolve_interactive(
             .vm_images;
         args.image = Some(prompt_image(&vm_images)?);
     }
-    if args.size.is_none() && args.disk_size.is_none() {
+
+    // GPU selection runs before sizing. When a GPU is chosen we size from the GPU
+    // minimum CU and set explicit vcpus/memory/disk, so we must not also run the
+    // regular (non-GPU) size prompt.
+    let mut gpu_selected = false;
+    if args.gpu.is_none() {
+        gpu_selected = prompt_gpu(args, aleph_client).await?;
+    }
+
+    if !gpu_selected && args.size.is_none() && args.disk_size.is_none() {
         args.size = Some(prompt_size(aleph_client).await?);
     }
 
@@ -141,6 +151,71 @@ async fn prompt_size(aleph_client: &AlephClient) -> Result<String> {
         .interact()?;
 
     Ok(instance_pricing.tier_slug(tiers[idx]))
+}
+
+/// Resolve (vcpus, memory_mib, disk_mib) for a GPU model at its minimum compute units.
+///
+/// `entity` is the GPU `PricingPerEntity` returned by `for_instance(false, Some(model.name))`.
+/// The minimum CU count is the GPU model's own tier (`model.compute_units`), and the
+/// per-CU resources come from `entity.compute_unit`. Pure: no I/O, no prompts.
+fn gpu_min_specs(model: &GpuModel, entity: &PricingPerEntity) -> (u32, u64, u64) {
+    let min_cu = model.compute_units;
+    let cu = &entity.compute_unit;
+    let vcpus = min_cu * cu.vcpus;
+    let memory_mib = min_cu as u64 * cu.memory_mib;
+    let disk_mib = min_cu as u64 * cu.disk_mib;
+    (vcpus, memory_mib, disk_mib)
+}
+
+/// Prompt for an optional GPU. Returns `true` if a GPU was chosen (in which case
+/// `args.gpu` and explicit `vcpus`/`memory`/`disk_size` are set and `args.size` is
+/// left `None`), or `false` for "No GPU" (the caller then runs the regular size prompt).
+async fn prompt_gpu(args: &mut InstanceCreateArgs, aleph_client: &AlephClient) -> Result<bool> {
+    let pricing = aleph_client
+        .get_pricing_aggregate()
+        .await
+        .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
+    let models = pricing.pricing.available_gpu_models();
+    if models.is_empty() {
+        // No GPU models on the network: silently fall back to the regular flow.
+        return Ok(false);
+    }
+
+    let mut items: Vec<String> = vec!["No GPU".to_string()];
+    items.extend(models.iter().map(|m| {
+        let vram = match m.vram_mib {
+            Some(v) => format!("{} MiB VRAM", v),
+            None => "VRAM n/a".to_string(),
+        };
+        format!("{}  ({}, {} tier)", m.name, vram, m.tier)
+    }));
+
+    let idx = Select::new()
+        .with_prompt("GPU")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    if idx == 0 {
+        return Ok(false);
+    }
+
+    let model = &models[idx - 1];
+    let entity = pricing.pricing.for_instance(false, Some(&model.name));
+    let (vcpus, memory_mib, disk_mib) = gpu_min_specs(model, entity);
+
+    args.gpu = Some(vec![model.slug()]);
+    args.vcpus = Some(vcpus);
+    args.memory = Some(memory_mib);
+    args.disk_size = Some(disk_mib);
+    args.size = None;
+
+    eprintln!(
+        "Selected GPU: {} ({} tier) -> {} vCPU, {} MiB RAM, {} MiB disk",
+        model.name, model.tier, vcpus, memory_mib, disk_mib,
+    );
+
+    Ok(true)
 }
 
 fn crn_list_url() -> Result<url::Url> {
@@ -524,5 +599,62 @@ mod tests {
             effective_tac_hash(&entry_with_tac(Some("  abc123  "))),
             Some("abc123")
         );
+    }
+
+    use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, PricingPerEntity, Tier};
+    use std::collections::HashMap;
+
+    fn gpu_entity(cu: ComputeUnitSpec, model_name: &str, compute_units: u32) -> PricingPerEntity {
+        PricingPerEntity {
+            compute_unit: cu,
+            tiers: vec![Tier {
+                id: "tier-1".into(),
+                compute_units,
+                model: Some(model_name.into()),
+                vram: Some(20480),
+            }],
+            price: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn gpu_min_specs_multiplies_min_cu_by_per_cu_resources() {
+        let entity = gpu_entity(
+            ComputeUnitSpec {
+                vcpus: 1,
+                memory_mib: 6144,
+                disk_mib: 61440,
+            },
+            "RTX 4000 ADA",
+            3,
+        );
+        let model = GpuModel {
+            name: "RTX 4000 ADA".into(),
+            vram_mib: Some(20480),
+            compute_units: 3,
+            tier: "standard".into(),
+        };
+        // 3 CU * (1 vcpu, 6144 MiB, 61440 MiB) per CU.
+        assert_eq!(gpu_min_specs(&model, &entity), (3, 18432, 184320));
+    }
+
+    #[test]
+    fn gpu_min_specs_premium_tier_larger_min_cu() {
+        let entity = gpu_entity(
+            ComputeUnitSpec {
+                vcpus: 1,
+                memory_mib: 6144,
+                disk_mib: 61440,
+            },
+            "A100",
+            16,
+        );
+        let model = GpuModel {
+            name: "A100".into(),
+            vram_mib: Some(81920),
+            compute_units: 16,
+            tier: "premium".into(),
+        };
+        assert_eq!(gpu_min_specs(&model, &entity), (16, 98304, 983040));
     }
 }
