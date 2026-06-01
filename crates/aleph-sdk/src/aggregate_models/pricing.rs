@@ -97,6 +97,19 @@ impl PricingData {
         }
         &self.instance
     }
+
+    /// Return the GPU namespace ("standard" or "premium") whose tiers expose a size matching
+    /// `slug`, or `None` if the slug is not a GPU size. Used to hint that a non-GPU `--size`
+    /// error is actually a GPU size living in another pricing namespace.
+    pub fn gpu_namespace_for_slug(&self, slug: &str) -> Option<&'static str> {
+        if self.instance_gpu_standard.find_tier_by_slug(slug).is_some() {
+            return Some("standard");
+        }
+        if self.instance_gpu_premium.find_tier_by_slug(slug).is_some() {
+            return Some("premium");
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -328,6 +341,30 @@ mod tests {
         }
     }
 
+    fn gpu_pricing_tier(memory_mib: u64, model: &str, compute_units: u32) -> PricingPerEntity {
+        PricingPerEntity {
+            compute_unit: ComputeUnitSpec {
+                vcpus: 1,
+                memory_mib,
+                disk_mib: 61440,
+            },
+            tiers: vec![Tier {
+                id: "gpu-tier".into(),
+                compute_units,
+                model: Some(model.into()),
+                vram: Some(20480),
+            }],
+            price: HashMap::from([(
+                "compute_unit".to_string(),
+                Price {
+                    payg: None,
+                    holding: None,
+                    credit: "0.28".to_string(),
+                },
+            )]),
+        }
+    }
+
     #[test]
     fn compute_units_for_slug_accepts_any_clean_multiple() {
         let gpu = gpu_pricing();
@@ -346,6 +383,23 @@ mod tests {
         assert_eq!(gpu.compute_units_for_slug("0vcpu-0gb"), None);
         assert_eq!(gpu.compute_units_for_slug("garbage"), None);
         assert_eq!(gpu.compute_units_for_slug(""), None);
+    }
+
+    #[test]
+    fn gpu_namespace_for_slug_classifies_slugs() {
+        // memory_mib 6144 => 6 GiB per CU; CU 4 => 4vcpu-24gb (standard), CU 16 => 16vcpu-96gb (premium)
+        let data = PricingData {
+            instance: test_pricing(),
+            instance_confidential: test_pricing(),
+            instance_gpu_standard: gpu_pricing_tier(6144, "RTX 4000 ADA", 4),
+            instance_gpu_premium: gpu_pricing_tier(6144, "A100", 16),
+        };
+
+        assert_eq!(data.gpu_namespace_for_slug("4vcpu-24gb"), Some("standard"));
+        assert_eq!(data.gpu_namespace_for_slug("16vcpu-96gb"), Some("premium"));
+        // A regular (non-GPU) size is not a GPU slug.
+        assert_eq!(data.gpu_namespace_for_slug("4vcpu-8gb"), None);
+        assert_eq!(data.gpu_namespace_for_slug("does-not-exist"), None);
     }
 
     #[test]

@@ -1172,7 +1172,14 @@ async fn handle_instance_price(
     } else if let Some(slug) = &args.size {
         let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
             let available = instance_pricing.available_slugs().join(", ");
-            anyhow!("invalid size '{slug}'. Available sizes: {available}")
+            let mut msg = format!("invalid size '{slug}'. Available sizes: {available}");
+            if pricing.pricing.gpu_namespace_for_slug(slug).is_some() {
+                msg.push_str(&format!(
+                    " Note: '{slug}' is a GPU size; add --gpu <model> \
+                     (see `aleph instance price --list-gpus`)."
+                ));
+            }
+            anyhow!(msg)
         })?;
         (
             Some(slug.clone()),
