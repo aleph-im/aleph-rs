@@ -24,8 +24,12 @@ pub async fn resolve_interactive(
     args: &mut InstanceCreateArgs,
     aleph_client: &AlephClient,
 ) -> Result<()> {
-    // Kick off the CRN list fetch in parallel with the early prompts.
-    let crn_list_fut = spawn_crn_list_fetch();
+    // Kick off the CRN list fetch in parallel with the early prompts, but only
+    // if a node isn't already pinned via `--crn-hash` (in which case the list is
+    // never needed). When the user later picks "Automatic" placement we drop the
+    // result; that's the cost of overlapping the fetch with the image/size
+    // prompts, since the placement choice isn't known until after them.
+    let crn_list_fut = args.crn_hash.is_none().then(spawn_crn_list_fetch);
 
     if args.image.is_none() {
         let vm_images = aleph_client
@@ -48,7 +52,10 @@ pub async fn resolve_interactive(
     // unset, like the non-interactive path), or pin to a specific CRN. If
     // `--crn-hash` was already passed on the command line, honor it and skip.
     if args.crn_hash.is_none() && prompt_pick_specific_crn()? {
+        // `crn_list_fut` is `Some` exactly when `crn_hash` was None, which is
+        // the branch we're in.
         let crn_list = crn_list_fut
+            .expect("CRN list fetch is spawned whenever crn_hash is None")
             .await
             .map_err(|e| anyhow!("background task error: {e}"))?
             .map_err(anyhow::Error::msg)?;
