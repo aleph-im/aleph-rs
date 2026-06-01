@@ -39,6 +39,8 @@ cargo install --path crates/aleph-ccn
 
 ## Quick start
 
+For a complete, verified walkthrough (backing services via docker-compose, node keys, an annotated `config.yaml` with every required field, migrations, and health checks) see [docs/NODE_SETUP.md](docs/NODE_SETUP.md).
+
 You need PostgreSQL, Redis, RabbitMQ, and (optionally) an IPFS daemon reachable. A YAML config file points at them.
 
 ```sh
@@ -59,14 +61,18 @@ postgres:
   host: localhost
   port: 5432
   user: aleph
-  password: aleph
+  password: decentralize-everything
   database: aleph
 
 redis:
-  url: redis://localhost:6379
+  host: localhost
+  port: 6379
 
 rabbitmq:
-  url: amqp://guest:guest@localhost:5672/
+  host: localhost
+  port: 5672
+  username: aleph-p2p
+  password: change-me!
 
 ipfs:
   enabled: true
