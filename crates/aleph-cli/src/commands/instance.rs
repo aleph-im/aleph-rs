@@ -934,12 +934,15 @@ fn resolve_gpu(name: &str) -> Result<GpuProperties> {
 ///
 /// `example_model` is a real model slug from the table (or a placeholder when
 /// none is available) so the example line is copy-pasteable.
-fn gpu_usage_footer(example_model: &str) -> String {
+fn gpu_usage_footer(example_model: &str, example_min: &str, example_larger: &str) -> String {
     format!(
-        "\nTo create a GPU instance, pass the model with --gpu (not the \"Min size\" slug with --size).\n\
-         The printed minimum size and its disk are applied automatically; to request more, add --vcpus / --memory.\n\
+        "\nEach GPU has its own compute unit (1 vCPU + 6 GiB RAM). \"Min size\" is the model's\n\
+         minimum number of those units; a GPU can be sized at any larger whole multiple too.\n\
+         Pass the model with --gpu: alone it uses the minimum (disk included), and --size scales\n\
+         in compute-unit steps (e.g. {example_min}, then {example_larger}, and so on). --vcpus / --memory work too.\n\
          Example:\n  \
-         aleph instance create my-vm --image ubuntu24 --gpu {example_model} --ssh-pubkey-file ~/.ssh/id_ed25519.pub"
+         aleph instance create my-vm --image ubuntu24 --gpu {example_model} --ssh-pubkey-file ~/.ssh/id_ed25519.pub\n  \
+         aleph instance create my-vm --image ubuntu24 --gpu {example_model} --size {example_larger} --ssh-pubkey-file ~/.ssh/id_ed25519.pub"
     )
 }
 
@@ -950,7 +953,7 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
         return;
     }
     eprintln!("  {:<20} {:<16} {:<16} Tier", "Model", "Min size", "VRAM");
-    let mut example_model: Option<String> = None;
+    let mut example: Option<(String, String, String)> = None;
     for gpu in &models {
         let entity = match gpu.tier.as_str() {
             "standard" => &pricing.instance_gpu_standard,
@@ -962,8 +965,11 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
             .vram_mib
             .map(|v| format!("{} GiB", v / 1024))
             .unwrap_or_default();
-        if example_model.is_none() {
-            example_model = Some(gpu.slug());
+        if example.is_none() {
+            // Capture the first model's minimum and the next compute-unit step
+            // up, for a concrete scaling example in the footer.
+            let larger = entity.slug_for_compute_units(gpu.compute_units + 1);
+            example = Some((gpu.slug(), min_size.clone(), larger));
         }
         eprintln!(
             "  {:<20} {:<16} {:<16} {}",
@@ -973,8 +979,17 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
             gpu.tier
         );
     }
-    let example_model = example_model.as_deref().unwrap_or("<model>");
-    eprintln!("{}", gpu_usage_footer(example_model));
+    let (example_model, example_min, example_larger) = example.unwrap_or_else(|| {
+        (
+            "<model>".to_string(),
+            "<min>".to_string(),
+            "<larger>".to_string(),
+        )
+    });
+    eprintln!(
+        "{}",
+        gpu_usage_footer(&example_model, &example_min, &example_larger)
+    );
 }
 
 async fn handle_instance_price(
@@ -1276,13 +1291,14 @@ mod tests {
 
     #[test]
     fn gpu_usage_footer_guides_to_create_command() {
-        let footer = gpu_usage_footer("rtx-4000-ada");
-        // Steers users to --gpu, not the "Min size" slug with --size.
+        let footer = gpu_usage_footer("rtx-4000-ada", "3vcpu-18gb", "4vcpu-24gb");
+        // Steers users to --gpu and explains the per-GPU compute unit.
         assert!(footer.contains("--gpu"));
-        assert!(footer.contains("not the \"Min size\" slug with --size"));
-        // Mentions how to request more resources.
-        assert!(footer.contains("--vcpus"));
-        assert!(footer.contains("--memory"));
+        assert!(footer.contains("compute unit"));
+        // Explains --size scales in CU steps, showing the min and next multiple.
+        assert!(footer.contains("--size"));
+        assert!(footer.contains("3vcpu-18gb"));
+        assert!(footer.contains("4vcpu-24gb"));
         // Includes a concrete, runnable example with the model substituted in.
         assert!(footer.contains("aleph instance create my-vm --image ubuntu24 --gpu rtx-4000-ada"));
         assert!(footer.contains("--ssh-pubkey-file"));
