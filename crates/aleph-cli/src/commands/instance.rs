@@ -929,6 +929,20 @@ fn resolve_gpu(name: &str) -> Result<GpuProperties> {
     ))
 }
 
+/// Guidance shown under the GPU table so users know how to actually create a
+/// GPU instance, and so they do not copy the "Min size" slug into `--size`.
+///
+/// `example_model` is a real model slug from the table (or a placeholder when
+/// none is available) so the example line is copy-pasteable.
+fn gpu_usage_footer(example_model: &str) -> String {
+    format!(
+        "\nTo create a GPU instance, pass the model with --gpu (not the \"Min size\" slug with --size).\n\
+         The printed minimum size and its disk are applied automatically; to request more, add --vcpus / --memory.\n\
+         Example:\n  \
+         aleph instance create my-vm --image ubuntu24 --gpu {example_model} --ssh-pubkey-file ~/.ssh/id_ed25519.pub"
+    )
+}
+
 fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingData) {
     let models = pricing.available_gpu_models();
     if models.is_empty() {
@@ -936,6 +950,7 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
         return;
     }
     eprintln!("  {:<20} {:<16} {:<16} Tier", "Model", "Min size", "VRAM");
+    let mut example_model: Option<String> = None;
     for gpu in &models {
         let entity = match gpu.tier.as_str() {
             "standard" => &pricing.instance_gpu_standard,
@@ -947,6 +962,9 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
             .vram_mib
             .map(|v| format!("{} GiB", v / 1024))
             .unwrap_or_default();
+        if example_model.is_none() {
+            example_model = Some(gpu.slug());
+        }
         eprintln!(
             "  {:<20} {:<16} {:<16} {}",
             gpu.slug(),
@@ -955,6 +973,8 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
             gpu.tier
         );
     }
+    let example_model = example_model.as_deref().unwrap_or("<model>");
+    eprintln!("{}", gpu_usage_footer(example_model));
 }
 
 async fn handle_instance_price(
@@ -1253,6 +1273,20 @@ async fn handle_instance_delete(
 mod tests {
     use super::*;
     use crate::cli::parse_size_to_mib;
+
+    #[test]
+    fn gpu_usage_footer_guides_to_create_command() {
+        let footer = gpu_usage_footer("rtx-4000-ada");
+        // Steers users to --gpu, not the "Min size" slug with --size.
+        assert!(footer.contains("--gpu"));
+        assert!(footer.contains("not the \"Min size\" slug with --size"));
+        // Mentions how to request more resources.
+        assert!(footer.contains("--vcpus"));
+        assert!(footer.contains("--memory"));
+        // Includes a concrete, runnable example with the model substituted in.
+        assert!(footer.contains("aleph instance create my-vm --image ubuntu24 --gpu rtx-4000-ada"));
+        assert!(footer.contains("--ssh-pubkey-file"));
+    }
 
     #[test]
     fn parse_kv_pairs_basic() {
