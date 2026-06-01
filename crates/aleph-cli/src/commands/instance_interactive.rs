@@ -2,9 +2,11 @@
 //!
 //! Runs before the normal build/submit path and fills in any `InstanceCreateArgs`
 //! fields not already provided on the command line. Prompts, in order:
-//! image → size → CRN → SSH public key path. CRN selection always runs
-//! (the instance gets pinned to the chosen CRN via `node_hash`). The instance
-//! name is a required positional argument and is never prompted for.
+//! image → size → node placement → SSH public key path. For node placement the
+//! user can let the scheduler pick a node automatically (leaving `crn_hash`
+//! unset, like the non-interactive path) or pin to a specific CRN via
+//! `node_hash`. The instance name is a required positional argument and is
+//! never prompted for.
 
 use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
 use crate::commands::instance::validate_ssh_pubkey;
@@ -42,43 +44,48 @@ pub async fn resolve_interactive(
         args.size = Some(prompt_size(aleph_client).await?);
     }
 
-    let crn_list = crn_list_fut
-        .await
-        .map_err(|e| anyhow!("background task error: {e}"))?
-        .map_err(anyhow::Error::msg)?;
-    let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aleph_client).await?;
-    // `ipv6: true` filters the CRN's own infrastructure. CRNs without working IPv6
-    // can't route traffic to their VMs, so they can't host usable instances. This is
-    // unrelated to the user's local IPv6 connectivity. Matches the Python CLI.
-    let filter = CrnFilter {
-        ipv6: true,
-        min_vcpus: Some(vcpus),
-        min_memory_mib: Some(memory_mib),
-        min_disk_mib: Some(disk_mib),
-        confidential: args.confidential,
-        gpu: args.gpu.is_some(),
-    };
-    let filtered = crn_list.filter(&filter);
-    if filtered.is_empty() {
-        bail!(
-            "No CRN matches the requirements (vcpus={}, memory_mib={}, disk_mib={}, confidential={}, gpu={}). \
-             Try a smaller size or wait for capacity.",
-            vcpus,
-            memory_mib,
-            disk_mib,
-            filter.confidential,
-            filter.gpu
-        );
+    // Node placement: let the scheduler pick automatically (leaving `crn_hash`
+    // unset, like the non-interactive path), or pin to a specific CRN. If
+    // `--crn-hash` was already passed on the command line, honor it and skip.
+    if args.crn_hash.is_none() && prompt_pick_specific_crn()? {
+        let crn_list = crn_list_fut
+            .await
+            .map_err(|e| anyhow!("background task error: {e}"))?
+            .map_err(anyhow::Error::msg)?;
+        let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aleph_client).await?;
+        // `ipv6: true` filters the CRN's own infrastructure. CRNs without working IPv6
+        // can't route traffic to their VMs, so they can't host usable instances. This is
+        // unrelated to the user's local IPv6 connectivity. Matches the Python CLI.
+        let filter = CrnFilter {
+            ipv6: true,
+            min_vcpus: Some(vcpus),
+            min_memory_mib: Some(memory_mib),
+            min_disk_mib: Some(disk_mib),
+            confidential: args.confidential,
+            gpu: args.gpu.is_some(),
+        };
+        let filtered = crn_list.filter(&filter);
+        if filtered.is_empty() {
+            bail!(
+                "No CRN matches the requirements (vcpus={}, memory_mib={}, disk_mib={}, confidential={}, gpu={}). \
+                 Try a smaller size or wait for capacity.",
+                vcpus,
+                memory_mib,
+                disk_mib,
+                filter.confidential,
+                filter.gpu
+            );
+        }
+        let chosen = prompt_crn(&filtered)?;
+        accept_terms_and_conditions(chosen).await?;
+        args.crn_hash = Some(chosen.hash.parse().map_err(|e| {
+            anyhow!(
+                "CRN list returned an invalid node hash '{}': {}",
+                chosen.hash,
+                e
+            )
+        })?);
     }
-    let chosen = prompt_crn(&filtered)?;
-    accept_terms_and_conditions(chosen).await?;
-    args.crn_hash = Some(chosen.hash.parse().map_err(|e| {
-        anyhow!(
-            "CRN list returned an invalid node hash '{}': {}",
-            chosen.hash,
-            e
-        )
-    })?);
 
     if args.ssh_pubkey_file.is_empty() {
         args.ssh_pubkey_file = vec![prompt_ssh_pubkey_path()?];
@@ -272,6 +279,23 @@ fn truncate(s: &str, max: usize) -> String {
         t.push('…');
         t
     }
+}
+
+/// Ask how the instance should be placed on the network.
+///
+/// Returns `true` if the user wants to pin the instance to a specific CRN
+/// (triggering the CRN list/filter/select flow), or `false` to let the
+/// scheduler choose a node automatically (leaving `crn_hash` unset).
+fn prompt_pick_specific_crn() -> Result<bool> {
+    let idx = Select::new()
+        .with_prompt("Node placement")
+        .items(&[
+            "Let the scheduler choose a node automatically",
+            "Choose a specific node",
+        ])
+        .default(0)
+        .interact()?;
+    Ok(idx == 1)
 }
 
 fn prompt_crn<'a>(entries: &'a [&CrnListEntry]) -> Result<&'a CrnListEntry> {
