@@ -36,7 +36,7 @@ async fn handle_create(
     use aleph_sdk::crn::CreateBackupOpts;
 
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     let opts = CreateBackupOpts {
         include_volumes: args.include_volumes,
@@ -156,7 +156,7 @@ where
 async fn handle_info(scheduler_url: Url, json: bool, args: InstanceBackupInfoArgs) -> Result<()> {
     use aleph_sdk::crn::BackupStatus;
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     let status = client.get_backup(&vm_id).await?;
 
@@ -573,7 +573,7 @@ async fn handle_download(
     }
 
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id_or_url, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id_or_url, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     let meta = match client.get_backup(&vm_id).await? {
         BackupStatus::Complete(m) => m,
@@ -603,7 +603,7 @@ async fn handle_delete(
     args: InstanceBackupDeleteArgs,
 ) -> Result<()> {
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     client.delete_backup(&vm_id, &args.backup_id).await?;
 
@@ -628,7 +628,7 @@ async fn handle_restore(
     args: InstanceBackupRestoreArgs,
 ) -> Result<()> {
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
 
     let response = match (&args.file, &args.volume_ref) {
@@ -755,11 +755,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        // scheduler_url is unused because args.crn_url is set + vm_id is full hash.
+        // scheduler_url is unused because args.crn is set + vm_id is full hash.
         let scheduler_url = Url::parse("http://unused.invalid/").unwrap();
         let args = InstanceBackupInfoArgs {
             vm_id: FULL_HASH.to_string(),
-            crn_url: Some(server.uri()),
+            crn: Some(server.uri()),
             signing: evm_signing_args(),
         };
         handle_info(scheduler_url, true, args).await.unwrap();
@@ -777,7 +777,7 @@ mod tests {
         let args = InstanceBackupDeleteArgs {
             vm_id: FULL_HASH.to_string(),
             backup_id: "abc_1".to_string(),
-            crn_url: Some(server.uri()),
+            crn: Some(server.uri()),
             signing: evm_signing_args(),
         };
         handle_delete(scheduler_url, true, args).await.unwrap();
@@ -797,7 +797,7 @@ mod tests {
             include_volumes: false,
             skip_fsfreeze: false,
             follow: false,
-            crn_url: Some(server.uri()),
+            crn: Some(server.uri()),
             signing: evm_signing_args(),
         };
         handle_create(scheduler_url, true, args).await.unwrap();
@@ -914,7 +914,7 @@ mod tests {
         let args = InstanceBackupDownloadArgs {
             vm_id_or_url: FULL_HASH.to_string(),
             output: Some(output.clone()),
-            crn_url: Some(crn_server.uri()),
+            crn: Some(crn_server.uri()),
             signing: evm_signing_args(),
         };
         handle_download(scheduler_url, true, args).await.unwrap();
@@ -952,7 +952,7 @@ mod tests {
         let args = InstanceBackupDownloadArgs {
             vm_id_or_url: FULL_HASH.to_string(),
             output: Some(output.clone()),
-            crn_url: Some(crn_server.uri()),
+            crn: Some(crn_server.uri()),
             signing: evm_signing_args(),
         };
         let err = handle_download(scheduler_url, true, args)
@@ -1000,7 +1000,7 @@ mod tests {
         let args = InstanceBackupDownloadArgs {
             vm_id_or_url: format!("{}/dl", server.uri()),
             output: Some(output.clone()),
-            crn_url: None,
+            crn: None,
             signing: evm_signing_args(),
         };
         handle_download(scheduler_url, true, args).await.unwrap();
@@ -1027,7 +1027,7 @@ mod tests {
         let args = InstanceBackupDownloadArgs {
             vm_id_or_url: format!("{}/dl", server.uri()),
             output: Some(output.clone()),
-            crn_url: None,
+            crn: None,
             signing: evm_signing_args(),
         };
         handle_download(scheduler_url, true, args).await.unwrap();
@@ -1085,7 +1085,7 @@ mod tests {
             vm_id: FULL_HASH.to_string(),
             file: Some(qcow.clone()),
             volume_ref: None,
-            crn_url: Some(server.uri()),
+            crn: Some(server.uri()),
             signing: evm_signing_args(),
         };
         handle_restore(scheduler_url, true, args).await.unwrap();
@@ -1121,7 +1121,7 @@ mod tests {
             vm_id: FULL_HASH.to_string(),
             file: Some(tar_path.clone()),
             volume_ref: None,
-            crn_url: Some(server.uri()),
+            crn: Some(server.uri()),
             signing: evm_signing_args(),
         };
         handle_restore(scheduler_url, true, args).await.unwrap();
@@ -1177,7 +1177,7 @@ mod tests {
             vm_id: FULL_HASH.to_string(),
             file: None,
             volume_ref: Some(volume_ref.to_string()),
-            crn_url: Some(server.uri()),
+            crn: Some(server.uri()),
             signing: evm_signing_args(),
         };
         handle_restore(scheduler_url, true, args).await.unwrap();

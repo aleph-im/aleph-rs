@@ -14,7 +14,7 @@ pub async fn handle_ssh(scheduler_url: Url, args: InstanceSshArgs) -> Result<()>
     let http = reqwest::Client::new();
 
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
 
     let executions = fetch_executions(&http, &crn_url)
         .await
@@ -53,7 +53,7 @@ fn resolve_target_ipv6(
     let info = executions.get(&vm_hash).ok_or_else(|| {
         anyhow!(
             "VM {vm_id} is not currently running on CRN {crn_url}. \
-             Use `aleph instance start --crn-url {crn_url} {vm_id}` to allocate it first."
+             Use `aleph instance start --crn {crn_url} {vm_id}` to allocate it first."
         )
     })?;
     let networking = info

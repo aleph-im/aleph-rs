@@ -14,7 +14,7 @@ fn build_client(crn_url: &Url, signing: &SigningArgs) -> Result<CrnClient> {
 
 pub async fn handle_start(scheduler_url: Url, json: bool, args: CrnStartArgs) -> Result<()> {
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     let response = client.start_instance(&vm_id).await?;
 
@@ -50,7 +50,7 @@ pub async fn handle_operation(
     operation: &str,
 ) -> Result<()> {
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
 
     match operation {
@@ -111,7 +111,7 @@ fn sanitize_log(s: &str) -> String {
 
 pub async fn handle_logs(scheduler_url: Url, json: bool, args: CrnArgs) -> Result<()> {
     let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     let mut stream = std::pin::pin!(client.stream_logs(&vm_id).await?);
 
