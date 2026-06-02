@@ -215,7 +215,10 @@ fn prompt_gpu_size(model: &GpuModel, entity: &PricingPerEntity) -> Result<u32> {
         .collect();
 
     let idx = Select::new()
-        .with_prompt(format!("Size for {} (min {} CU)", model.name, model.compute_units))
+        .with_prompt(format!(
+            "Size for {} (min {} CU)",
+            model.name, model.compute_units
+        ))
         .items(&items)
         .default(0)
         .interact()?;
