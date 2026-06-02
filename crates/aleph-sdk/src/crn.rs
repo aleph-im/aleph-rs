@@ -24,6 +24,36 @@ pub struct AllocationResponse {
     pub errors: HashMap<String, String>,
 }
 
+/// Parse the body of a `/control/allocation/notify` response.
+///
+/// aleph-vm tags several non-success paths with 200/207/503 but returns
+/// `{"error": "<message>"}` instead of the structured [`AllocationResponse`] -
+/// notably a 503 "Insufficient capacity" from its allocation admission gate.
+/// When the structured parse fails, surface that message (or the raw body) so
+/// callers get the real reason rather than an opaque serde `missing field`.
+fn parse_allocation_response(status: u16, body: String) -> Result<AllocationResponse, CrnError> {
+    match serde_json::from_str::<AllocationResponse>(&body) {
+        Ok(resp) => Ok(resp),
+        Err(_) => Err(CrnError::Api {
+            status,
+            body: crn_error_message(body),
+        }),
+    }
+}
+
+/// Pull the message out of an aleph-vm `{"error": "<message>"}` body, falling
+/// back to the raw body when it isn't shaped that way.
+fn crn_error_message(body: String) -> String {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        error: String,
+    }
+    match serde_json::from_str::<ErrorBody>(&body) {
+        Ok(parsed) => parsed.error,
+        Err(_) => body,
+    }
+}
+
 /// A log entry from the stream_logs WebSocket.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct LogEntry {
@@ -273,12 +303,11 @@ impl CrnClient {
 
         let status = response.status().as_u16();
         match status {
-            // 200 = all ok, 207 = partial success, 503 = all failed.
-            // All three return structured JSON with failure details.
-            200 | 207 | 503 => {
-                let body = response.text().await?;
-                Ok(serde_json::from_str(&body)?)
-            }
+            // 200 = all ok, 207 = partial success, 503 = all failed. These
+            // usually carry the structured AllocationResponse, but aleph-vm also
+            // returns `{"error": "..."}` for some paths it tags 503 (e.g. the
+            // "Insufficient capacity" admission gate), so fall back gracefully.
+            200 | 207 | 503 => parse_allocation_response(status, response.text().await?),
             402 => {
                 let body = response.text().await?;
                 Err(CrnError::PaymentRequired(body))
@@ -870,6 +899,40 @@ mod tests {
         assert!(!resp.success);
         assert_eq!(resp.failing, vec!["abc123"]);
         assert_eq!(resp.errors["abc123"], "RuntimeError('boom')");
+    }
+
+    #[test]
+    fn parse_allocation_response_accepts_structured_body() {
+        let body = r#"{"success":true,"successful":true,"failing":[],"errors":{}}"#;
+        let resp = parse_allocation_response(200, body.to_string()).unwrap();
+        assert!(resp.success);
+        assert!(resp.successful);
+    }
+
+    #[test]
+    fn parse_allocation_response_surfaces_error_body() {
+        // aleph-vm's allocation admission gate refuses with a 503 whose body is
+        // `{"error": "..."}`, not the structured object. The old code fed this
+        // to serde and produced an opaque `missing field \`success\`` error.
+        let body = r#"{"error": "This CRN cannot host the requested instance at this time."}"#;
+        let err = parse_allocation_response(503, body.to_string()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("This CRN cannot host the requested instance at this time."),
+            "expected the CRN's message, got: {msg}"
+        );
+        assert!(
+            !msg.contains("missing field"),
+            "should not leak a serde error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_allocation_response_falls_back_to_raw_body() {
+        // A body that is neither the structured object nor `{"error": ...}`
+        // (e.g. a plain-text gateway error) is surfaced verbatim.
+        let err = parse_allocation_response(502, "upstream timeout".to_string()).unwrap_err();
+        assert!(err.to_string().contains("upstream timeout"));
     }
 
     #[test]
