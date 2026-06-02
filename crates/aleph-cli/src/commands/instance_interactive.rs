@@ -10,7 +10,7 @@
 
 use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
 use crate::commands::instance::validate_ssh_pubkey;
-use aleph_sdk::aggregate_models::pricing::{GpuModel, PricingPerEntity};
+use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, GpuModel, PricingPerEntity};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::crns_list::{
@@ -153,18 +153,74 @@ async fn prompt_size(aleph_client: &AlephClient) -> Result<String> {
     Ok(instance_pricing.tier_slug(tiers[idx]))
 }
 
-/// Resolve (vcpus, memory_mib, disk_mib) for a GPU model at its minimum compute units.
+/// Eligible compute-unit counts for a GPU: unique `compute_units` from the GPU
+/// entity's tiers that are >= the chosen GPU model's minimum. Sorted ascending,
+/// so the first entry is always the minimum.
 ///
-/// `entity` is the GPU `PricingPerEntity` returned by `for_instance(false, Some(model.name))`.
-/// The minimum CU count is the GPU model's own tier (`model.compute_units`), and the
-/// per-CU resources come from `entity.compute_unit`. Pure: no I/O, no prompts.
-fn gpu_min_specs(model: &GpuModel, entity: &PricingPerEntity) -> (u32, u64, u64) {
-    let min_cu = model.compute_units;
-    let cu = &entity.compute_unit;
-    let vcpus = min_cu * cu.vcpus;
-    let memory_mib = min_cu as u64 * cu.memory_mib;
-    let disk_mib = min_cu as u64 * cu.disk_mib;
-    (vcpus, memory_mib, disk_mib)
+/// The GPU entity (`instance_gpu_standard` / `instance_gpu_premium`) lists one tier
+/// per GPU model; the model field is informational for sizing because
+/// `find_tier_by_slug` resolves a slug from `compute_units` alone. So any CU value
+/// >= the chosen GPU's minimum that exists in the same entity is a valid size.
+fn gpu_eligible_compute_units(entity: &PricingPerEntity, min_cu: u32) -> Vec<u32> {
+    let mut cus: Vec<u32> = entity
+        .tiers
+        .iter()
+        .map(|t| t.compute_units)
+        .filter(|&cu| cu >= min_cu)
+        .collect();
+    cus.sort_unstable();
+    cus.dedup();
+    cus
+}
+
+/// Resolve (vcpus, memory_mib, disk_mib) for a given CU count using a `ComputeUnitSpec`.
+fn specs_for_cu(cu: u32, spec: &ComputeUnitSpec) -> (u32, u64, u64) {
+    (
+        cu * spec.vcpus,
+        cu as u64 * spec.memory_mib,
+        cu as u64 * spec.disk_mib,
+    )
+}
+
+/// Prompt for the size (CU count) to allocate alongside the chosen GPU. The
+/// GPU's own `compute_units` is the minimum (and the default); larger CU values
+/// that also exist in the same GPU entity may be selected to scale up the VM
+/// resources beyond the GPU minimum.
+fn prompt_gpu_size(model: &GpuModel, entity: &PricingPerEntity) -> Result<u32> {
+    let cus = gpu_eligible_compute_units(entity, model.compute_units);
+    if cus.is_empty() {
+        // Should not happen in practice: the GPU's own tier is always present.
+        bail!(
+            "no compute-unit sizes >= GPU minimum ({}) found for '{}'",
+            model.compute_units,
+            model.name
+        );
+    }
+
+    let items: Vec<String> = cus
+        .iter()
+        .map(|&cu| {
+            let slug = entity.slug_for_compute_units(cu);
+            let (vcpus, memory_mib, disk_mib) = specs_for_cu(cu, &entity.compute_unit);
+            let suffix = if cu == model.compute_units {
+                "  (minimum)"
+            } else {
+                ""
+            };
+            format!(
+                "{:<14}  {} vCPU · {} MiB RAM · {} MiB disk{}",
+                slug, vcpus, memory_mib, disk_mib, suffix,
+            )
+        })
+        .collect();
+
+    let idx = Select::new()
+        .with_prompt(format!("Size for {} (min {} CU)", model.name, model.compute_units))
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    Ok(cus[idx])
 }
 
 /// Prompt for an optional GPU. Returns `true` if a GPU was chosen (in which case
@@ -202,7 +258,8 @@ async fn prompt_gpu(args: &mut InstanceCreateArgs, aleph_client: &AlephClient) -
 
     let model = &models[idx - 1];
     let entity = pricing.pricing.for_instance(false, Some(&model.name));
-    let (vcpus, memory_mib, disk_mib) = gpu_min_specs(model, entity);
+    let cu = prompt_gpu_size(model, entity)?;
+    let (vcpus, memory_mib, disk_mib) = specs_for_cu(cu, &entity.compute_unit);
 
     args.gpu = Some(vec![model.slug()]);
     args.vcpus = Some(vcpus);
@@ -604,57 +661,76 @@ mod tests {
     use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, PricingPerEntity, Tier};
     use std::collections::HashMap;
 
-    fn gpu_entity(cu: ComputeUnitSpec, model_name: &str, compute_units: u32) -> PricingPerEntity {
+    fn gpu_tier(model_name: &str, compute_units: u32) -> Tier {
+        Tier {
+            id: format!("tier-{model_name}"),
+            compute_units,
+            model: Some(model_name.into()),
+            vram: Some(20480),
+        }
+    }
+
+    fn standard_gpu_entity(tiers: Vec<Tier>) -> PricingPerEntity {
         PricingPerEntity {
-            compute_unit: cu,
-            tiers: vec![Tier {
-                id: "tier-1".into(),
-                compute_units,
-                model: Some(model_name.into()),
-                vram: Some(20480),
-            }],
+            compute_unit: ComputeUnitSpec {
+                vcpus: 1,
+                memory_mib: 6144,
+                disk_mib: 61440,
+            },
+            tiers,
             price: HashMap::new(),
         }
     }
 
     #[test]
-    fn gpu_min_specs_multiplies_min_cu_by_per_cu_resources() {
-        let entity = gpu_entity(
-            ComputeUnitSpec {
-                vcpus: 1,
-                memory_mib: 6144,
-                disk_mib: 61440,
-            },
-            "RTX 4000 ADA",
-            3,
-        );
-        let model = GpuModel {
-            name: "RTX 4000 ADA".into(),
-            vram_mib: Some(20480),
-            compute_units: 3,
-            tier: "standard".into(),
+    fn specs_for_cu_multiplies_cu_by_per_cu_resources() {
+        let spec = ComputeUnitSpec {
+            vcpus: 1,
+            memory_mib: 6144,
+            disk_mib: 61440,
         };
         // 3 CU * (1 vcpu, 6144 MiB, 61440 MiB) per CU.
-        assert_eq!(gpu_min_specs(&model, &entity), (3, 18432, 184320));
+        assert_eq!(specs_for_cu(3, &spec), (3, 18432, 184320));
+        // 16 CU at the same per-CU spec.
+        assert_eq!(specs_for_cu(16, &spec), (16, 98304, 983040));
     }
 
     #[test]
-    fn gpu_min_specs_premium_tier_larger_min_cu() {
-        let entity = gpu_entity(
-            ComputeUnitSpec {
-                vcpus: 1,
-                memory_mib: 6144,
-                disk_mib: 61440,
-            },
-            "A100",
-            16,
+    fn gpu_eligible_cus_includes_min_and_larger_only() {
+        // Mirror the standard GPU entity in production: several GPU model tiers
+        // with various compute_units. Pick "RTX 4000 ADA" (3 CU) as the min.
+        let entity = standard_gpu_entity(vec![
+            gpu_tier("RTX 4000 ADA", 3),
+            gpu_tier("RTX 3090", 4),
+            gpu_tier("RTX 4090", 6),
+            gpu_tier("RTX 5090", 8),
+            gpu_tier("L40S", 12),
+            gpu_tier("RTX A5000", 3),
+            gpu_tier("RTX A6000", 4),
+            gpu_tier("RTX 6000 ADA", 11),
+        ]);
+        // Min 3 → 3 (dedup with RTX A5000), 4 (dedup with RTX A6000), 6, 8, 11, 12.
+        assert_eq!(
+            gpu_eligible_compute_units(&entity, 3),
+            vec![3, 4, 6, 8, 11, 12]
         );
-        let model = GpuModel {
-            name: "A100".into(),
-            vram_mib: Some(81920),
-            compute_units: 16,
-            tier: "premium".into(),
-        };
-        assert_eq!(gpu_min_specs(&model, &entity), (16, 98304, 983040));
+    }
+
+    #[test]
+    fn gpu_eligible_cus_filters_out_smaller_models() {
+        let entity = standard_gpu_entity(vec![
+            gpu_tier("RTX 4000 ADA", 3),
+            gpu_tier("RTX 3090", 4),
+            gpu_tier("RTX 4090", 6),
+            gpu_tier("L40S", 12),
+        ]);
+        // Min 6 (e.g. RTX 4090) drops the smaller-CU tiers.
+        assert_eq!(gpu_eligible_compute_units(&entity, 6), vec![6, 12]);
+    }
+
+    #[test]
+    fn gpu_eligible_cus_minimum_alone_when_no_larger_tiers() {
+        let entity = standard_gpu_entity(vec![gpu_tier("RTX 4000 ADA", 3)]);
+        assert_eq!(gpu_eligible_compute_units(&entity, 3), vec![3]);
     }
 }
