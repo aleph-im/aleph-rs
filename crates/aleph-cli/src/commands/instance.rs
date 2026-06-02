@@ -636,9 +636,9 @@ pub(crate) fn resolve_gpu_compute_units(
             .compute_units_for_slug(slug)
             .ok_or_else(|| {
                 anyhow!(
-                    "invalid GPU size '{slug}'. GPU sizes scale in steps of {}vcpu + {} GiB RAM \
-                     (1 compute unit); use the minimum {min_slug} or a larger multiple \
-                     such as {} or {}.",
+                    "invalid size '{slug}' for GPU '{gpu_display_slug}'. GPU sizes scale in steps \
+                     of {}vcpu + {} GiB RAM (1 compute unit); use the minimum {min_slug} or a \
+                     larger multiple such as {} or {}.",
                     cu_spec.vcpus,
                     cu_spec.memory_mib / 1024,
                     instance_pricing.slug_for_compute_units(min_cu + 1),
@@ -823,7 +823,7 @@ async fn handle_instance_create(
 
         let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
             let available = instance_pricing.available_slugs().join(", ");
-            anyhow!("unknown size '{slug}'. Available sizes: {available}")
+            anyhow!("invalid size '{slug}'. Available sizes: {available}")
         })?;
 
         let vcpus = args.vcpus.unwrap_or(tier.vcpus);
@@ -1150,7 +1150,7 @@ async fn handle_instance_price(
     } else if let Some(slug) = &args.size {
         let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
             let available = instance_pricing.available_slugs().join(", ");
-            anyhow!("unknown size '{slug}'. Available sizes: {available}")
+            anyhow!("invalid size '{slug}'. Available sizes: {available}")
         })?;
         (
             Some(slug.clone()),
@@ -2285,7 +2285,10 @@ mod tests {
                 resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", Some("4vcpu-8gb"), None, None)
                     .unwrap_err()
                     .to_string();
-            assert!(err.contains("invalid GPU size '4vcpu-8gb'"), "{err}");
+            assert!(
+                err.contains("invalid size '4vcpu-8gb' for GPU 'rtx-4000-ada'"),
+                "{err}"
+            );
         }
 
         #[test]
