@@ -608,6 +608,67 @@ pub(crate) fn resolve_instance_specs_from_flags(
     Ok((vcpus.unwrap_or(1), memory_mib.unwrap_or(2048), disk_mib))
 }
 
+/// Resolve the number of compute units for a GPU instance.
+///
+/// The GPU model's compute-unit count (`min_cu`) is a lower bound. A GPU can be
+/// sized at any whole multiple of its compute unit at or above that minimum, so
+/// `--size` (e.g. `3vcpu-18gb`, `4vcpu-24gb`, `5vcpu-30gb`) or `--vcpus`/`--memory`
+/// can raise it but never lower it. With none of those flags, the minimum is used.
+///
+/// `gpu_display_slug` is only used in error messages. `instance_pricing` must
+/// be the GPU pricing entity (from `for_instance(false, Some(model))`).
+pub(crate) fn resolve_gpu_compute_units(
+    instance_pricing: &aleph_sdk::aggregate_models::pricing::PricingPerEntity,
+    min_cu: u32,
+    gpu_display_slug: &str,
+    size: Option<&str>,
+    vcpus: Option<u32>,
+    memory: Option<u64>,
+) -> Result<u32> {
+    let cu_spec = &instance_pricing.compute_unit;
+    let min_slug = instance_pricing.slug_for_compute_units(min_cu);
+
+    if let Some(slug) = size {
+        // A GPU is sized at any whole multiple of its compute unit at or above
+        // the model minimum, so the slug is parsed arithmetically rather than
+        // matched against an enumerated tier list.
+        let cu = instance_pricing
+            .compute_units_for_slug(slug)
+            .ok_or_else(|| {
+                anyhow!(
+                    "invalid size '{slug}' for GPU '{gpu_display_slug}'. GPU sizes scale in steps \
+                     of {}vcpu + {} GiB RAM (1 compute unit); use the minimum {min_slug} or a \
+                     larger multiple such as {} or {}.",
+                    cu_spec.vcpus,
+                    cu_spec.memory_mib / 1024,
+                    instance_pricing.slug_for_compute_units(min_cu + 1),
+                    instance_pricing.slug_for_compute_units(min_cu + 2),
+                )
+            })?;
+        if cu < min_cu {
+            bail!(
+                "size '{slug}' ({cu} CU) is below the minimum for GPU '{gpu_display_slug}' (min: {min_slug}, {min_cu} CU)",
+            );
+        }
+        Ok(cu)
+    } else if vcpus.is_some() || memory.is_some() {
+        // Compute CU count from raw resources, validate against GPU minimum
+        let cu_from_vcpus = vcpus.map(|v| v.div_ceil(cu_spec.vcpus)).unwrap_or(0);
+        let cu_from_mem = memory
+            .map(|m| m.div_ceil(cu_spec.memory_mib) as u32)
+            .unwrap_or(0);
+        let requested_cu = cu_from_vcpus.max(cu_from_mem);
+        if requested_cu < min_cu {
+            bail!(
+                "requested resources are below the minimum for GPU '{gpu_display_slug}' (min: {min_slug}, {min_cu} CU)",
+            );
+        }
+        Ok(requested_cu)
+    } else {
+        Ok(min_cu)
+    }
+}
+
 /// Output of `resolve_image_refs`. `confidential_firmware` is `Some` iff the
 /// caller requested a confidential VM.
 #[derive(Debug)]
@@ -702,8 +763,58 @@ async fn handle_instance_create(
         ssh_keys.push(key);
     }
 
-    // Resolve instance specs: either from --size (tier lookup) or explicit flags.
-    let (vcpus, memory_mib, disk_size_mib) = if let Some(slug) = &args.size {
+    // Resolve instance specs. GPU instances size from the GPU pricing namespace
+    // (the tier minimum is a lower bound); otherwise from --size or raw flags.
+    let gpu_requested = args.gpu.as_ref().is_some_and(|g| !g.is_empty());
+    let (vcpus, memory_mib, disk_size_mib) = if gpu_requested {
+        // When several GPUs are requested we size from the first model's minimum
+        // (we do not sum across models); the others share the same VM resources.
+        let gpu_slug = &args.gpu.as_ref().unwrap()[0];
+        let model_name = GPU_PRESETS
+            .iter()
+            .find(|(slug, ..)| slug.eq_ignore_ascii_case(gpu_slug))
+            .map(|(_, model, ..)| *model)
+            .ok_or_else(|| {
+                let available: Vec<&str> = GPU_PRESETS.iter().map(|(n, ..)| *n).collect();
+                anyhow!(
+                    "unknown GPU model '{gpu_slug}'. Available models: {}",
+                    available.join(", ")
+                )
+            })?;
+
+        let pricing = aleph_client
+            .get_pricing_aggregate()
+            .await
+            .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
+        let instance_pricing = pricing.pricing.for_instance(false, Some(model_name));
+
+        let tier = instance_pricing
+            .tiers
+            .iter()
+            .find(|t| t.model.as_deref() == Some(model_name))
+            .ok_or_else(|| anyhow!("GPU tier not found for '{model_name}'"))?;
+        let min_cu = tier.compute_units;
+        let cu_spec = &instance_pricing.compute_unit;
+
+        let cu = resolve_gpu_compute_units(
+            instance_pricing,
+            min_cu,
+            gpu_slug,
+            args.size.as_deref(),
+            args.vcpus,
+            args.memory,
+        )?;
+
+        let vcpus = cu * cu_spec.vcpus;
+        let memory_mib = cu as u64 * cu_spec.memory_mib;
+        let disk_size_mib = args.disk_size.unwrap_or(cu as u64 * cu_spec.disk_mib);
+
+        eprintln!(
+            "GPU '{gpu_slug}' ({cu} CU): {vcpus} vCPUs, {memory_mib} MiB memory, {disk_size_mib} MiB disk",
+        );
+
+        (vcpus, memory_mib, disk_size_mib)
+    } else if let Some(slug) = &args.size {
         let pricing = aleph_client
             .get_pricing_aggregate()
             .await
@@ -712,7 +823,7 @@ async fn handle_instance_create(
 
         let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
             let available = instance_pricing.available_slugs().join(", ");
-            anyhow!("unknown size '{slug}'. Available sizes: {available}")
+            anyhow!("invalid size '{slug}'. Available sizes: {available}")
         })?;
 
         let vcpus = args.vcpus.unwrap_or(tier.vcpus);
@@ -1040,48 +1151,15 @@ async fn handle_instance_price(
             .ok_or_else(|| anyhow!("GPU tier not found for '{}'", gpu.name))?;
         let min_cu = tier.compute_units;
         let cu_spec = &instance_pricing.compute_unit;
-        let min_slug = instance_pricing.slug_for_compute_units(min_cu);
 
-        let cu = if let Some(slug) = &args.size {
-            // Resolve size slug to CU count and validate against GPU minimum
-            let size_tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
-                let available: Vec<String> = instance_pricing
-                    .tiers
-                    .iter()
-                    .filter(|t| t.model.is_none() && t.compute_units >= min_cu)
-                    .map(|t| instance_pricing.tier_slug(t))
-                    .collect();
-                anyhow!(
-                    "unknown size '{slug}' for GPU tier. Available sizes: {}",
-                    available.join(", ")
-                )
-            })?;
-            if size_tier.compute_units < min_cu {
-                bail!(
-                    "size '{slug}' ({} CU) is below the minimum for GPU '{}' (min: {min_slug}, {min_cu} CU)",
-                    size_tier.compute_units,
-                    gpu.slug(),
-                );
-            }
-            size_tier.compute_units
-        } else if args.vcpus.is_some() || args.memory.is_some() {
-            // Compute CU count from raw resources, validate against GPU minimum
-            let cu_from_vcpus = args.vcpus.map(|v| v.div_ceil(cu_spec.vcpus)).unwrap_or(0);
-            let cu_from_mem = args
-                .memory
-                .map(|m| m.div_ceil(cu_spec.memory_mib) as u32)
-                .unwrap_or(0);
-            let requested_cu = cu_from_vcpus.max(cu_from_mem);
-            if requested_cu < min_cu {
-                bail!(
-                    "requested resources are below the minimum for GPU '{}' (min: {min_slug}, {min_cu} CU)",
-                    gpu.slug(),
-                );
-            }
-            requested_cu
-        } else {
-            min_cu
-        };
+        let cu = resolve_gpu_compute_units(
+            instance_pricing,
+            min_cu,
+            &gpu.slug(),
+            args.size.as_deref(),
+            args.vcpus,
+            args.memory,
+        )?;
 
         let disk = args.disk_size.unwrap_or(cu as u64 * cu_spec.disk_mib);
         (
@@ -1094,7 +1172,7 @@ async fn handle_instance_price(
     } else if let Some(slug) = &args.size {
         let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
             let available = instance_pricing.available_slugs().join(", ");
-            anyhow!("unknown size '{slug}'. Available sizes: {available}")
+            anyhow!("invalid size '{slug}'. Available sizes: {available}")
         })?;
         (
             Some(slug.clone()),
@@ -2146,6 +2224,135 @@ mod tests {
                 resolve_runtime_ref(Some(ImageRef::Hash(raw.clone())), &VmImagesData::default())
                     .unwrap();
             assert_eq!(r.to_string(), raw.to_string());
+        }
+    }
+
+    mod gpu_sizing {
+        use super::super::resolve_gpu_compute_units;
+        use aleph_sdk::aggregate_models::pricing::{
+            ComputeUnitSpec, Price, PricingPerEntity, Tier,
+        };
+        use std::collections::HashMap;
+
+        /// GPU pricing entity: 1 CU = 1 vcpu / 6144 MiB / 61440 MiB disk, with a
+        /// GPU tier at 3 CU (min) plus larger plain tiers at 4 and 8 CU.
+        fn gpu_pricing() -> PricingPerEntity {
+            PricingPerEntity {
+                compute_unit: ComputeUnitSpec {
+                    vcpus: 1,
+                    memory_mib: 6144,
+                    disk_mib: 61440,
+                },
+                tiers: vec![
+                    Tier {
+                        id: "gpu".into(),
+                        compute_units: 3,
+                        model: Some("RTX 4000 ADA".into()),
+                        vram: Some(20480),
+                    },
+                    Tier {
+                        id: "t4".into(),
+                        compute_units: 4,
+                        model: None,
+                        vram: None,
+                    },
+                    Tier {
+                        id: "t8".into(),
+                        compute_units: 8,
+                        model: None,
+                        vram: None,
+                    },
+                ],
+                price: HashMap::from([(
+                    "compute_unit".to_string(),
+                    Price {
+                        payg: None,
+                        holding: None,
+                        credit: "0.28".to_string(),
+                    },
+                )]),
+            }
+        }
+
+        #[test]
+        fn defaults_to_minimum() {
+            let p = gpu_pricing();
+            let cu = resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", None, None, None).unwrap();
+            assert_eq!(cu, 3);
+        }
+
+        #[test]
+        fn raise_via_size() {
+            let p = gpu_pricing();
+            // 8vcpu-48gb -> 8 CU at this cu spec
+            let cu =
+                resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", Some("8vcpu-48gb"), None, None)
+                    .unwrap();
+            assert_eq!(cu, 8);
+        }
+
+        #[test]
+        fn raise_via_size_accepts_multiple_without_matching_tier() {
+            let p = gpu_pricing();
+            // 5 CU has no enumerated tier (tiers are 3, 4, 8) yet is a valid GPU
+            // size: 5 vcpu + 30 GiB RAM at this 1vcpu/6gb-per-CU definition.
+            let cu =
+                resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", Some("5vcpu-30gb"), None, None)
+                    .unwrap();
+            assert_eq!(cu, 5);
+        }
+
+        #[test]
+        fn size_below_minimum_errors() {
+            let p = gpu_pricing();
+            // 1vcpu-6gb is a valid 1-CU size but below the 3-CU GPU minimum.
+            let err =
+                resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", Some("1vcpu-6gb"), None, None)
+                    .unwrap_err()
+                    .to_string();
+            assert!(err.contains("below the minimum"), "{err}");
+        }
+
+        #[test]
+        fn malformed_or_mismatched_size_errors() {
+            let p = gpu_pricing();
+            // Memory does not match the CU definition (4 CU is 24gb, not 8gb).
+            let err =
+                resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", Some("4vcpu-8gb"), None, None)
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                err.contains("invalid size '4vcpu-8gb' for GPU 'rtx-4000-ada'"),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn raise_via_vcpus() {
+            let p = gpu_pricing();
+            // 6 vcpus -> 6 CU (div_ceil against 1 vcpu/CU)
+            let cu = resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", None, Some(6), None).unwrap();
+            assert_eq!(cu, 6);
+        }
+
+        #[test]
+        fn raise_via_memory() {
+            let p = gpu_pricing();
+            // 30720 MiB / 6144 MiB = 5 CU
+            let cu =
+                resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", None, None, Some(30720)).unwrap();
+            assert_eq!(cu, 5);
+        }
+
+        #[test]
+        fn vcpus_below_minimum_errors() {
+            let p = gpu_pricing();
+            // 2 vcpus -> 2 CU, below the 3 CU GPU minimum.
+            let err = resolve_gpu_compute_units(&p, 3, "rtx-4000-ada", None, Some(2), None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("below the minimum"), "{err}");
+            assert!(err.contains("rtx-4000-ada"), "{err}");
         }
     }
 }
