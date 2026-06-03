@@ -316,9 +316,12 @@ mod tests {
     async fn resolve_crn_parses_raw_url_without_scheduler() {
         // No mocks mounted: a URL override must not touch the scheduler.
         let server = MockServer::start().await;
-        let url = resolve_crn(&Url::parse(&server.uri()).unwrap(), "https://crn.example.io/")
-            .await
-            .unwrap();
+        let url = resolve_crn(
+            &Url::parse(&server.uri()).unwrap(),
+            "https://crn.example.io/",
+        )
+        .await
+        .unwrap();
         assert_eq!(url.as_str(), "https://crn.example.io/");
     }
 
@@ -338,10 +341,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (hash, url) =
-            resolve_target(&Url::parse(&server.uri()).unwrap(), FULL_HASH, Some(NODE_HASH))
-                .await
-                .unwrap();
+        let (hash, url) = resolve_target(
+            &Url::parse(&server.uri()).unwrap(),
+            FULL_HASH,
+            Some(NODE_HASH),
+        )
+        .await
+        .unwrap();
         assert_eq!(hash.to_string(), FULL_HASH);
         assert_eq!(url.as_str(), "https://crn.example.io/");
     }

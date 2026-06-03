@@ -13,8 +13,7 @@ use crate::commands::instance_target::resolve_target;
 pub async fn handle_ssh(scheduler_url: Url, args: InstanceSshArgs) -> Result<()> {
     let http = reqwest::Client::new();
 
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
 
     let executions = fetch_executions(&http, &crn_url)
         .await

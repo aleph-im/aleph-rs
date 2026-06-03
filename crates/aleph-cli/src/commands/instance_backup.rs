@@ -35,8 +35,7 @@ async fn handle_create(
 ) -> Result<()> {
     use aleph_sdk::crn::CreateBackupOpts;
 
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     let opts = CreateBackupOpts {
         include_volumes: args.include_volumes,
@@ -155,8 +154,7 @@ where
 
 async fn handle_info(scheduler_url: Url, json: bool, args: InstanceBackupInfoArgs) -> Result<()> {
     use aleph_sdk::crn::BackupStatus;
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     let status = client.get_backup(&vm_id).await?;
 
@@ -602,8 +600,7 @@ async fn handle_delete(
     json: bool,
     args: InstanceBackupDeleteArgs,
 ) -> Result<()> {
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
     client.delete_backup(&vm_id, &args.backup_id).await?;
 
@@ -627,8 +624,7 @@ async fn handle_restore(
     json: bool,
     args: InstanceBackupRestoreArgs,
 ) -> Result<()> {
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
     let client = build_client(&crn_url, &args.signing)?;
 
     let response = match (&args.file, &args.volume_ref) {
