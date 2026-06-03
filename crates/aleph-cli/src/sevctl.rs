@@ -115,6 +115,30 @@ impl Sevctl {
 mod tests {
     use super::*;
 
+    /// Spawning a binary that was just written can intermittently fail with
+    /// `ETXTBSY` ("text file busy") on Linux: a `fork` on another runtime
+    /// thread (e.g. tokio's blocking/reactor pool) can momentarily hold a
+    /// writable fd to the file open across the child's `exec`. The fix the
+    /// kernel expects is to retry, so absorb the race here rather than letting
+    /// it flake the suite under load.
+    #[cfg(unix)]
+    async fn retry_text_file_busy<F, Fut, T>(mut op: F) -> Result<T, SevctlError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, SevctlError>>,
+    {
+        use std::io::ErrorKind;
+        for _ in 0..20 {
+            match op().await {
+                Err(SevctlError::Io(e)) if e.kind() == ErrorKind::ExecutableFileBusy => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                result => return result,
+            }
+        }
+        op().await
+    }
+
     #[test]
     fn find_reports_not_found_when_path_is_empty() {
         let prev = std::env::var_os("PATH");
@@ -154,7 +178,7 @@ mod tests {
         let sevctl = Sevctl { path: fake };
         let cert = dir.path().join("cert.pem");
         std::fs::write(&cert, b"dummy").unwrap();
-        sevctl.verify(&cert).await.unwrap();
+        retry_text_file_busy(|| sevctl.verify(&cert)).await.unwrap();
 
         let argv = std::fs::read_to_string(&argv_log).unwrap();
         let args: Vec<&str> = argv.lines().collect();
@@ -176,7 +200,9 @@ mod tests {
         let sevctl = Sevctl { path: fake };
         let cert = dir.path().join("cert.pem");
         std::fs::write(&cert, b"dummy").unwrap();
-        let err = sevctl.verify(&cert).await.unwrap_err();
+        let err = retry_text_file_busy(|| sevctl.verify(&cert))
+            .await
+            .unwrap_err();
         let SevctlError::NonZeroExit {
             code,
             stderr,
@@ -210,7 +236,9 @@ mod tests {
         let cert = dir.path().join("cert.pem");
         std::fs::write(&cert, b"dummy").unwrap();
         let prefix = dir.path().join("vm");
-        let files = sevctl.session(&prefix, &cert, 1).await.unwrap();
+        let files = retry_text_file_busy(|| sevctl.session(&prefix, &cert, 1))
+            .await
+            .unwrap();
 
         assert!(files.godh.exists());
         assert!(files.session.exists());
@@ -238,7 +266,9 @@ mod tests {
         let cert = dir.path().join("cert.pem");
         std::fs::write(&cert, b"dummy").unwrap();
         let prefix = dir.path().join("vm");
-        let err = sevctl.session(&prefix, &cert, 1).await.unwrap_err();
+        let err = retry_text_file_busy(|| sevctl.session(&prefix, &cert, 1))
+            .await
+            .unwrap_err();
         let SevctlError::NonZeroExit { code, command, .. } = err else {
             panic!("expected NonZeroExit");
         };
