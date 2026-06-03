@@ -110,6 +110,23 @@ impl PricingData {
         }
         None
     }
+
+    /// User-facing error message for a non-GPU `--size` value that does not match
+    /// any regular instance tier. Lists the available regular sizes and, when the
+    /// slug actually belongs to a GPU namespace, appends a hint to add `--gpu`.
+    /// Shared by every command that resolves a regular `--size` so the wording and
+    /// the cross-namespace hint stay consistent.
+    pub fn invalid_instance_size_message(&self, slug: &str) -> String {
+        let available = self.instance.available_slugs().join(", ");
+        let mut msg = format!("invalid size '{slug}'. Available sizes: {available}");
+        if self.gpu_namespace_for_slug(slug).is_some() {
+            msg.push_str(&format!(
+                " Note: '{slug}' is a GPU size; add --gpu <model> \
+                 (see `aleph instance price --list-gpus`)."
+            ));
+        }
+        msg
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -400,6 +417,26 @@ mod tests {
         // A regular (non-GPU) size is not a GPU slug.
         assert_eq!(data.gpu_namespace_for_slug("4vcpu-8gb"), None);
         assert_eq!(data.gpu_namespace_for_slug("does-not-exist"), None);
+    }
+
+    #[test]
+    fn invalid_instance_size_message_hints_at_gpu_namespace() {
+        let data = PricingData {
+            instance: test_pricing(),
+            instance_confidential: test_pricing(),
+            instance_gpu_standard: gpu_pricing_tier(6144, "RTX 4000 ADA", 4),
+            instance_gpu_premium: gpu_pricing_tier(6144, "A100", 16),
+        };
+
+        // A GPU size gets the cross-namespace hint appended.
+        let gpu_msg = data.invalid_instance_size_message("4vcpu-24gb");
+        assert!(gpu_msg.contains("Available sizes:"), "{gpu_msg}");
+        assert!(gpu_msg.contains("is a GPU size; add --gpu"), "{gpu_msg}");
+
+        // A truly unknown size lists the available sizes without a GPU hint.
+        let plain_msg = data.invalid_instance_size_message("does-not-exist");
+        assert!(plain_msg.contains("Available sizes:"), "{plain_msg}");
+        assert!(!plain_msg.contains("GPU size"), "{plain_msg}");
     }
 
     #[test]

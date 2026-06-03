@@ -821,10 +821,9 @@ async fn handle_instance_create(
             .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
         let instance_pricing = &pricing.pricing.instance;
 
-        let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
-            let available = instance_pricing.available_slugs().join(", ");
-            anyhow!("invalid size '{slug}'. Available sizes: {available}")
-        })?;
+        let tier = instance_pricing
+            .find_tier_by_slug(slug)
+            .ok_or_else(|| anyhow!(pricing.pricing.invalid_instance_size_message(slug)))?;
 
         let vcpus = args.vcpus.unwrap_or(tier.vcpus);
         let memory_mib = args.memory.unwrap_or(tier.memory_mib);
@@ -1170,17 +1169,9 @@ async fn handle_instance_price(
             disk,
         )
     } else if let Some(slug) = &args.size {
-        let tier = instance_pricing.find_tier_by_slug(slug).ok_or_else(|| {
-            let available = instance_pricing.available_slugs().join(", ");
-            let mut msg = format!("invalid size '{slug}'. Available sizes: {available}");
-            if pricing.pricing.gpu_namespace_for_slug(slug).is_some() {
-                msg.push_str(&format!(
-                    " Note: '{slug}' is a GPU size; add --gpu <model> \
-                     (see `aleph instance price --list-gpus`)."
-                ));
-            }
-            anyhow!(msg)
-        })?;
+        let tier = instance_pricing
+            .find_tier_by_slug(slug)
+            .ok_or_else(|| anyhow!(pricing.pricing.invalid_instance_size_message(slug)))?;
         (
             Some(slug.clone()),
             tier.compute_units,
