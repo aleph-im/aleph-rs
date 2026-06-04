@@ -18,6 +18,10 @@ pub const VAULT_RELAYER: Address = address!("C92E8bdf79f0507f65a392b0ab4667716BF
 /// Minimal appData document. CoW accepts the keccak256 of this JSON as the
 /// order's appData hash. Kept byte-stable (no whitespace) so the hash is
 /// reproducible.
+///
+/// The `"version":"1.3.0"` field is the **CoW appData document schema
+/// version** (from <https://github.com/cowprotocol/app-data>), not the
+/// aleph-cli or crate version. It must not be bumped on CLI releases.
 pub const APP_DATA_JSON: &str = r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{}}"#;
 
 sol! {
@@ -66,7 +70,7 @@ pub fn sign_order(
 ) -> Result<String, SwapError> {
     let digest = order_digest(order, chain_id);
     let sig = signer.sign_hash_sync(&digest).map_err(SwapError::Sign)?;
-    Ok(format!("0x{}", hex::encode(sig.as_bytes())))
+    Ok(sig.to_string())
 }
 
 #[cfg(test)]
@@ -93,11 +97,14 @@ mod tests {
 
     #[test]
     fn app_data_hash_is_stable() {
-        // Locks the constant: if APP_DATA_JSON changes, this must be updated
-        // deliberately.
-        let h = app_data_hash();
-        assert_eq!(h, keccak256(APP_DATA_JSON.as_bytes()));
-        assert_eq!(h.len(), 32);
+        // Pinned hash of APP_DATA_JSON. If the constant changes, update this
+        // literal deliberately - do not re-derive it from the constant.
+        assert_eq!(
+            app_data_hash(),
+            alloy_primitives::b256!(
+                "c26dc5fb52bdd81b9218532e71a8919ada11e5da152fbd437aabe8236cbeec73"
+            )
+        );
     }
 
     #[test]
@@ -121,6 +128,10 @@ mod tests {
         assert!(sig.starts_with("0x"));
         // 65 bytes => 130 hex chars + "0x".
         assert_eq!(sig.len(), 132);
+        assert!(
+            sig.ends_with("1b") || sig.ends_with("1c"),
+            "v must be 27 or 28"
+        );
     }
 
     #[test]
