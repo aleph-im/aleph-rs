@@ -66,17 +66,6 @@ pub struct SwapQuote {
     pub fee_amount: U256,
 }
 
-/// An accepted order's identifier (CoW order UID, 56-byte hex; or an
-/// ETH-flow on-chain order hash).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrderUid(pub String);
-
-impl std::fmt::Display for OrderUid {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum SwapError {
     #[error("network (chainId {0}) is not supported by CoW Swap")]
