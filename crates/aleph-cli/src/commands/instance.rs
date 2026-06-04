@@ -34,8 +34,9 @@ use url::Url;
 ///
 /// CCN queries are run separately for `addresses=` (sender) and `owners=`
 /// (resource owner). A row may be in one set, the other, or both. Used to
-/// decide whether the per-VM scheduler fallback should fire (only for rows
-/// that came from the sender filter and were not enriched by the bulk call).
+/// decide whether the second bulk scheduler call (by sender) is needed: only
+/// rows that came from the sender filter and were not already enriched by the
+/// owner-filtered call require it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SourceFlags {
     pub owner: bool,
@@ -221,30 +222,45 @@ async fn fetch_scheduler_map(
     }
 }
 
-/// For rows the bulk owner-filtered call did not enrich (the rare
-/// "sender but not owner" case), fire one per-VM call to fill in the gap.
-/// Errors and 404s are silent: the row simply stays unenriched.
+/// Does any row still need the by-sender scheduler call? True when a row came
+/// only from the CCN sender filter (`sender && !owner`) and the owner-filtered
+/// bulk call did not already enrich it. Pure, so the decision is unit-testable.
+fn needs_sender_enrichment(
+    rows: &[InstanceRow],
+    scheduler_map: &std::collections::HashMap<ItemHash, VmEntry>,
+) -> bool {
+    rows.iter().any(|row| {
+        row.source_flags.sender
+            && !row.source_flags.owner
+            && !scheduler_map.contains_key(&row.item_hash)
+    })
+}
+
+/// Enrich rows the owner-filtered bulk call missed (the "sender but not owner"
+/// case, i.e. VMs created via permission delegation where sender != owner)
+/// with a single second bulk call filtered by sender. The scheduler's `sender`
+/// filter shipped in v0.1.1, replacing the previous per-VM fallback loop.
 ///
-/// This is replaced by a single second bulk call once the scheduler ships
-/// its `created_by` filter.
-async fn enrich_with_fallback(
+/// Only fires when at least one row actually needs it. Entries already in the
+/// map are left as-is (same data). Degrades gracefully on error: a stderr
+/// warning is printed and rows simply stay unenriched.
+async fn enrich_by_sender(
     scheduler: &SchedulerClient,
+    address: &Address,
     rows: &[InstanceRow],
     scheduler_map: &mut std::collections::HashMap<ItemHash, VmEntry>,
 ) {
-    for row in rows {
-        let needs_fallback = !scheduler_map.contains_key(&row.item_hash)
-            && row.source_flags.sender
-            && !row.source_flags.owner;
-        if !needs_fallback {
-            continue;
-        }
-        match scheduler.get_vm(&row.item_hash).await {
-            Ok(Some(entry)) => {
-                scheduler_map.insert(row.item_hash.clone(), entry);
+    if !needs_sender_enrichment(rows, scheduler_map) {
+        return;
+    }
+    match scheduler.list_vms_by_sender(address).await {
+        Ok(entries) => {
+            for entry in entries {
+                scheduler_map.entry(entry.vm_hash.clone()).or_insert(entry);
             }
-            Ok(None) => {} // 404: scheduler has no record; row stays unenriched.
-            Err(_) => {}   // silent per spec; bulk-call warning already printed.
+        }
+        Err(err) => {
+            eprintln!("warning: scheduler unreachable, status/allocation unavailable: {err}");
         }
     }
 }
@@ -274,7 +290,7 @@ async fn handle_instance_list(
 
     let scheduler = SchedulerClient::new(scheduler_url);
     let mut scheduler_map = fetch_scheduler_map(&scheduler, &address).await;
-    enrich_with_fallback(&scheduler, &rows, &mut scheduler_map).await;
+    enrich_by_sender(&scheduler, &address, &rows, &mut scheduler_map).await;
     merge_scheduler_into_rows(&mut rows, &scheduler_map);
 
     render_rows(&rows, json)
@@ -1989,6 +2005,142 @@ mod tests {
         );
         merge_scheduler_into_rows(&mut rows, &map);
         assert!(rows.is_empty());
+    }
+
+    fn sample_row_with_flags(hash: &str, flags: SourceFlags) -> InstanceRow {
+        let mut row = sample_row(hash, None, None, 0.0);
+        row.source_flags = flags;
+        row
+    }
+
+    #[test]
+    fn needs_sender_enrichment_true_for_sender_only_row_not_in_map() {
+        const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+        let rows = vec![sample_row_with_flags(
+            HASH,
+            SourceFlags {
+                sender: true,
+                owner: false,
+            },
+        )];
+        let map = std::collections::HashMap::<ItemHash, VmEntry>::new();
+        assert!(needs_sender_enrichment(&rows, &map));
+    }
+
+    #[test]
+    fn needs_sender_enrichment_false_when_row_also_came_from_owner() {
+        const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+        let rows = vec![sample_row_with_flags(
+            HASH,
+            SourceFlags {
+                sender: true,
+                owner: true,
+            },
+        )];
+        let map = std::collections::HashMap::<ItemHash, VmEntry>::new();
+        assert!(!needs_sender_enrichment(&rows, &map));
+    }
+
+    #[test]
+    fn needs_sender_enrichment_false_when_already_in_map() {
+        const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+        let rows = vec![sample_row_with_flags(
+            HASH,
+            SourceFlags {
+                sender: true,
+                owner: false,
+            },
+        )];
+        let mut map = std::collections::HashMap::new();
+        let hash: ItemHash = HASH.parse().unwrap();
+        map.insert(
+            hash.clone(),
+            make_vm_entry(&hash.to_string(), "dispatched", None),
+        );
+        assert!(!needs_sender_enrichment(&rows, &map));
+    }
+
+    #[test]
+    fn needs_sender_enrichment_false_for_empty_rows() {
+        let rows: Vec<InstanceRow> = vec![];
+        let map = std::collections::HashMap::<ItemHash, VmEntry>::new();
+        assert!(!needs_sender_enrichment(&rows, &map));
+    }
+
+    #[tokio::test]
+    async fn enrich_by_sender_skips_call_when_no_row_needs_it() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Server that would error on any request: if the bulk-sender call fired,
+        // the 500 warning path would run. We assert it is never hit.
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let scheduler = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let address = Address::from("0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072".to_string());
+        // Owner-sourced row: no sender enrichment needed.
+        let rows = vec![sample_row_with_flags(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            SourceFlags {
+                sender: false,
+                owner: true,
+            },
+        )];
+        let mut map = std::collections::HashMap::new();
+        enrich_by_sender(&scheduler, &address, &rows, &mut map).await;
+        assert!(map.is_empty());
+        // MockServer verifies expect(0) on drop.
+    }
+
+    #[tokio::test]
+    async fn enrich_by_sender_fills_map_from_bulk_call() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const SENDER_HASH: &str =
+            "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        let address = "0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072";
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param("sender", address))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{
+                    "vm_hash": SENDER_HASH,
+                    "vm_type": "instance",
+                    "allocated_node": "alloc-node",
+                    "status": "dispatched",
+                    "scheduling_status": "scheduled",
+                    "migration_target": null,
+                    "owner": "0xsomeotherowner"
+                }],
+                "pagination": { "page": 1, "page_size": 200, "total_items": 1, "total_pages": 1 }
+            })))
+            .mount(&server)
+            .await;
+
+        let scheduler = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let addr = Address::from(address.to_string());
+        let rows = vec![sample_row_with_flags(
+            SENDER_HASH,
+            SourceFlags {
+                sender: true,
+                owner: false,
+            },
+        )];
+        let mut map = std::collections::HashMap::new();
+        enrich_by_sender(&scheduler, &addr, &rows, &mut map).await;
+
+        let hash: ItemHash = SENDER_HASH.parse().unwrap();
+        let entry = map.get(&hash).expect("sender entry merged into map");
+        assert_eq!(entry.status, "dispatched");
+        assert_eq!(entry.allocated_node.as_deref(), Some("alloc-node"));
     }
 
     #[test]
