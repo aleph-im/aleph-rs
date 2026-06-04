@@ -40,7 +40,7 @@ pub(crate) async fn await_receipt<N: Network>(
 /// CoW orderbook REST client for a single network.
 pub struct CowApi {
     http: reqwest::Client,
-    /// Base, e.g. "https://api.cow.fi/mainnet/api/v1".
+    /// Base, e.g. `https://api.cow.fi/mainnet/api/v1`.
     base_url: String,
 }
 
