@@ -238,17 +238,14 @@ fn resolve_swap_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
     }
 }
 
+/// Common quote fields shared by the dry-run and result JSON outputs.
 fn quote_json(sell_token: SwapToken, quote: &SwapQuote) -> serde_json::Value {
-    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
-    let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
-    let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
-    let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
     serde_json::json!({
         "sell_token": sell_token.symbol(),
-        "sell_amount": sell_display,
-        "expected_aleph": buy_display,
-        "min_aleph": min_display,
-        "fee": fee_display,
+        "sell_amount": format_token_amount(quote.sell_amount, sell_token.decimals()),
+        "expected_aleph": format_token_amount(quote.buy_amount, ALEPH_DECIMALS),
+        "min_aleph": format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS),
+        "fee": format_token_amount(quote.fee_amount, sell_token.decimals()),
     })
 }
 
@@ -257,33 +254,15 @@ fn result_json_usdc(
     quote: &SwapQuote,
     order_uid: &str,
 ) -> serde_json::Value {
-    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
-    let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
-    let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
-    let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
-    serde_json::json!({
-        "sell_token": sell_token.symbol(),
-        "sell_amount": sell_display,
-        "expected_aleph": buy_display,
-        "min_aleph": min_display,
-        "fee": fee_display,
-        "order_id": order_uid,
-    })
+    let mut v = quote_json(sell_token, quote);
+    v["order_id"] = order_uid.into();
+    v
 }
 
 fn result_json_eth(sell_token: SwapToken, quote: &SwapQuote, tx_hash: &str) -> serde_json::Value {
-    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
-    let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
-    let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
-    let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
-    serde_json::json!({
-        "sell_token": sell_token.symbol(),
-        "sell_amount": sell_display,
-        "expected_aleph": buy_display,
-        "min_aleph": min_display,
-        "fee": fee_display,
-        "tx_hash": tx_hash,
-    })
+    let mut v = quote_json(sell_token, quote);
+    v["tx_hash"] = tx_hash.into();
+    v
 }
 
 #[cfg(test)]
