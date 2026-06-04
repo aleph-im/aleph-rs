@@ -32,6 +32,7 @@ impl From<CreditTokenCli> for CreditToken {
         match v {
             CreditTokenCli::Aleph => CreditToken::Aleph,
             CreditTokenCli::Usdc => CreditToken::Usdc,
+            CreditTokenCli::Eth => CreditToken::Eth,
         }
     }
 }
@@ -234,11 +235,11 @@ async fn handle_buy(json: bool, args: BuyCreditArgs, cli_network: Option<&str>) 
         return Ok(());
     }
 
-    ensure_token_balance(
+    ensure_balance(
         &provider,
         alloy_address,
         token,
-        ethereum.token_address(token),
+        &ethereum,
         amount_raw,
         &args.amount,
     )
@@ -252,13 +253,20 @@ async fn handle_buy(json: bool, args: BuyCreditArgs, cli_network: Option<&str>) 
         }
     }
 
-    let receipt = credit::buy_credits(
-        &provider,
-        ethereum.token_address(token),
-        ethereum.credit_contract,
-        amount_raw,
-    )
-    .await?;
+    // Native ETH is a plain value transfer to the credit contract; ERC20
+    // tokens (ALEPH, USDC) call `transfer` on the token contract.
+    let receipt = match ethereum.token_address(token) {
+        Some(token_address) => {
+            credit::buy_credits(
+                &provider,
+                token_address,
+                ethereum.credit_contract,
+                amount_raw,
+            )
+            .await?
+        }
+        None => credit::buy_credits_eth(&provider, ethereum.credit_contract, amount_raw).await?,
+    };
     print_submission_result(json, &args.amount, &estimate, &ethereum, &receipt)?;
     Ok(())
 }
@@ -347,15 +355,19 @@ fn build_signer_provider(
     Ok((provider, address))
 }
 
-async fn ensure_token_balance(
+async fn ensure_balance(
     provider: &impl Provider,
     owner: Address,
     token: CreditToken,
-    token_address: Address,
+    ethereum: &EthereumConfig,
     amount_raw: U256,
     amount_display: &str,
 ) -> Result<()> {
-    let balance = credit::check_balance(provider, owner, token, token_address).await?;
+    // ERC20 tokens read `balanceOf`; native ETH reads the account balance.
+    let balance = match ethereum.token_address(token) {
+        Some(token_address) => credit::check_balance(provider, owner, token, token_address).await?,
+        None => credit::check_eth_balance(provider, owner).await?,
+    };
     if balance < amount_raw {
         let have = format_token_amount(balance, token.decimals());
         bail!(
@@ -396,24 +408,23 @@ fn print_human_estimate(
     estimate: &CreditEstimate,
     ethereum: &EthereumConfig,
 ) {
-    eprintln!(
-        "Buying credits with {amount_display} {}",
-        estimate.token.symbol()
-    );
-    match (
-        estimate.token,
-        estimate.estimated_credits,
-        estimate.price_usd,
-    ) {
-        (CreditToken::Aleph, Some(credits), Some(price)) => eprintln!(
-            "Estimated credits: ~{credits:.0} (at ${price:.2}/{symbol}, +{bonus:.0}% bonus)",
-            symbol = estimate.token.symbol(),
-            bonus = estimate.bonus_ratio * 100.0,
-        ),
-        (CreditToken::Usdc, Some(credits), _) => {
+    let symbol = estimate.token.symbol();
+    eprintln!("Buying credits with {amount_display} {symbol}");
+    match (estimate.estimated_credits, estimate.price_usd) {
+        // USDC is pegged at $1, so the price line adds no information.
+        (Some(credits), _) if matches!(estimate.token, CreditToken::Usdc) => {
             eprintln!("Estimated credits: ~{credits:.0}")
         }
-        _ => eprintln!("Estimated credits: unknown (network has no ALEPH price source)"),
+        // Market-priced tokens (ALEPH, ETH): show the price, and the bonus
+        // only when one applies.
+        (Some(credits), Some(price)) if estimate.bonus_ratio > 0.0 => eprintln!(
+            "Estimated credits: ~{credits:.0} (at ${price:.2}/{symbol}, +{bonus:.0}% bonus)",
+            bonus = estimate.bonus_ratio * 100.0,
+        ),
+        (Some(credits), Some(price)) => {
+            eprintln!("Estimated credits: ~{credits:.0} (at ${price:.2}/{symbol})")
+        }
+        _ => eprintln!("Estimated credits: unknown (network has no {symbol} price source)"),
     }
     eprintln!("Recipient: {}", ethereum.credit_contract);
 }
@@ -469,6 +480,10 @@ mod tests {
         assert!(matches!(
             CreditToken::from(CreditTokenCli::Usdc),
             CreditToken::Usdc
+        ));
+        assert!(matches!(
+            CreditToken::from(CreditTokenCli::Eth),
+            CreditToken::Eth
         ));
     }
 

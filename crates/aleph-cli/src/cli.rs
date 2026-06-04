@@ -2232,11 +2232,12 @@ pub struct NetworkSetArgs {
 
 #[derive(Subcommand)]
 pub enum CreditCommand {
-    /// Buy Aleph credits by transferring ALEPH or USDC tokens
+    /// Buy Aleph credits by transferring ALEPH, USDC, or ETH
     #[command(long_about = "\
-Buy Aleph credits by transferring ALEPH or USDC tokens from your EVM \
-account. The transfer goes to the network's credit purchase address; the \
-protocol mints credits to your address once the transfer is confirmed.
+Buy Aleph credits by transferring ALEPH, USDC, or native ETH from your EVM \
+account. ALEPH and USDC are ERC20 transfers; ETH is a plain value transfer to \
+the network's credit purchase address. Either way the protocol mints credits \
+to your address once the transfer is confirmed.
 
 `--amount` is in human-readable token units (decimals OK), not credits. \
 1 USD purchases 1,000,000 credits. Use `aleph account balance` afterwards \
@@ -2245,6 +2246,7 @@ to confirm the credits arrived.
 Examples:
   aleph credit buy --token aleph --amount 100
   aleph credit buy --token usdc  --amount 50.5
+  aleph credit buy --token eth   --amount 0.05
   aleph credit buy --token usdc  --amount 25 --yes      # skip confirmation
   aleph credit buy --token aleph --amount 10 --rpc-url https://my-node.example")]
     Buy(BuyCreditArgs),
@@ -2288,6 +2290,8 @@ pub struct CreditHistoryArgs {
 pub enum CreditTokenCli {
     Aleph,
     Usdc,
+    /// Native mainnet ETH (paid by a value transfer to the credit contract).
+    Eth,
 }
 
 #[derive(Args)]

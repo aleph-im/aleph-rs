@@ -4,7 +4,7 @@
 //! are `#[ignore]`d by default so `cargo test` works on machines without
 //! foundry installed; CI runs them with `--include-ignored`.
 
-use aleph_sdk::credit::buy_credits;
+use aleph_sdk::credit::{buy_credits, buy_credits_eth};
 use alloy_network::EthereumWallet;
 use alloy_node_bindings::Anvil;
 use alloy_primitives::{Address, U256, address};
@@ -147,5 +147,46 @@ async fn buy_credits_errors_when_sender_has_insufficient_balance() {
         result.is_err(),
         "buy_credits must fail when the transfer would revert; got {:?}",
         result.as_ref().map(|r| r.transaction_hash)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires anvil in PATH (install via foundry)"]
+async fn buy_credits_eth_sends_native_value_to_contract() {
+    let anvil = Anvil::new().try_spawn().expect("failed to spawn anvil");
+    let signer: PrivateKeySigner = (&anvil.keys()[0]).into();
+    let sender = signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(anvil.endpoint_url());
+
+    let amount = U256::from(10u64).pow(U256::from(18)); // 1 ETH
+
+    let before = provider
+        .get_balance(CREDIT_CONTRACT)
+        .await
+        .expect("get_balance should succeed");
+
+    let receipt = buy_credits_eth(&provider, CREDIT_CONTRACT, amount)
+        .await
+        .expect("buy_credits_eth should succeed");
+
+    assert!(receipt.status(), "receipt should report success");
+    assert_eq!(receipt.from, sender, "tx.from should be our signer");
+    assert_eq!(
+        receipt.to,
+        Some(CREDIT_CONTRACT),
+        "tx.to should be the credit contract (native value transfer)"
+    );
+
+    // The ETH actually landed at the credit contract.
+    let after = provider
+        .get_balance(CREDIT_CONTRACT)
+        .await
+        .expect("get_balance should succeed");
+    assert_eq!(
+        after - before,
+        amount,
+        "credit contract balance should increase by the sent amount"
     );
 }

@@ -41,7 +41,7 @@ Run `aleph completions <bash|zsh|fish|powershell>` to generate shell completions
 aleph account create my-account
 aleph account use my-account
 
-# 2. Buy credits with ALEPH or USDC (requires funds on Ethereum mainnet)
+# 2. Buy credits with ALEPH, USDC, or ETH (requires funds on Ethereum mainnet)
 aleph credit buy --token usdc --amount 10
 
 # 3. Upload a file (paid for in credits)

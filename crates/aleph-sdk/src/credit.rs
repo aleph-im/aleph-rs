@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
-use alloy_primitives::{Address, U256, address};
+use alloy_primitives::{Address, TxKind, U256, address};
 use alloy_provider::Provider;
+use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::sol;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -47,14 +49,14 @@ pub enum ParseAmountError {
     Overflow(String),
 }
 
-/// Errors fetching the ALEPH/USD price from a remote source.
+/// Errors fetching a token's USD price from a remote source.
 #[derive(Debug, Error)]
 pub enum PriceFetchError {
     /// `reqwest::Client::builder()` failed to construct (e.g. TLS init).
     #[error("failed to build HTTP client")]
     HttpClientBuild(#[source] reqwest::Error),
     /// The HTTP request itself failed (network, DNS, timeout).
-    #[error("failed to fetch ALEPH price from CoinGecko")]
+    #[error("failed to fetch price from CoinGecko")]
     Request(#[source] reqwest::Error),
     /// CoinGecko replied with a non-2xx status.
     #[error("CoinGecko API returned HTTP {0}")]
@@ -62,6 +64,9 @@ pub enum PriceFetchError {
     /// The response body did not deserialize as expected.
     #[error("failed to parse CoinGecko response")]
     Parse(#[source] reqwest::Error),
+    /// The response parsed but contained no price for the requested coin id.
+    #[error("CoinGecko response did not include a price for '{0}'")]
+    MissingPrice(String),
 }
 
 /// Errors from on-chain credit operations: balance reads, price fetches, and
@@ -81,9 +86,12 @@ pub enum CreditError {
     /// RPC error reading the native ETH balance.
     #[error("failed to check ETH balance")]
     CheckEthBalance(#[source] alloy_provider::transport::TransportError),
-    /// Failed to broadcast the credit-buy transaction.
+    /// Failed to broadcast the ERC20 credit-buy transaction.
     #[error("failed to send transaction")]
     SendTransaction(#[source] alloy_contract::Error),
+    /// Failed to broadcast the native-ETH credit-buy transaction.
+    #[error("failed to send transaction")]
+    SendEthTransaction(#[source] alloy_provider::transport::TransportError),
     /// The transaction was broadcast but no receipt arrived in time.
     #[error("timed out after {timeout_secs}s waiting for transaction receipt")]
     ReceiptTimeout { timeout_secs: u64 },
@@ -188,19 +196,28 @@ impl EthereumConfig {
     }
 
     /// Resolve the ERC20 token address for a given [`CreditToken`] variant.
-    pub fn token_address(&self, token: CreditToken) -> Address {
+    ///
+    /// Returns `None` for [`CreditToken::Eth`], which is native and has no
+    /// ERC20 contract address: payment is a plain value transfer to the
+    /// credit contract rather than an ERC20 `transfer` call.
+    pub fn token_address(&self, token: CreditToken) -> Option<Address> {
         match token {
-            CreditToken::Aleph => self.aleph_token,
-            CreditToken::Usdc => self.usdc_token,
+            CreditToken::Aleph => Some(self.aleph_token),
+            CreditToken::Usdc => Some(self.usdc_token),
+            CreditToken::Eth => None,
         }
     }
 }
 
 /// Token types accepted for credit purchase.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub enum CreditToken {
     Aleph,
     Usdc,
+    /// Native mainnet ETH. Paid by a plain value transfer to the credit
+    /// contract (no ERC20 contract); the contract emits a `Transfer` event on
+    /// receipt that the off-chain indexer credits.
+    Eth,
 }
 
 impl CreditToken {
@@ -209,6 +226,7 @@ impl CreditToken {
         match self {
             CreditToken::Aleph => 18,
             CreditToken::Usdc => 6,
+            CreditToken::Eth => 18,
         }
     }
 
@@ -217,6 +235,7 @@ impl CreditToken {
         match self {
             CreditToken::Aleph => 0.2,
             CreditToken::Usdc => 0.0,
+            CreditToken::Eth => 0.0,
         }
     }
 
@@ -224,6 +243,23 @@ impl CreditToken {
         match self {
             CreditToken::Aleph => "ALEPH",
             CreditToken::Usdc => "USDC",
+            CreditToken::Eth => "ETH",
+        }
+    }
+
+    /// Whether this token is the chain's native currency (paid by value
+    /// transfer) rather than an ERC20 token.
+    pub fn is_native(&self) -> bool {
+        matches!(self, CreditToken::Eth)
+    }
+
+    /// CoinGecko coin id used to price the token in USD, or `None` for tokens
+    /// that don't go through CoinGecko (USDC is pegged at $1).
+    pub fn coingecko_id(&self) -> Option<&'static str> {
+        match self {
+            CreditToken::Aleph => Some("aleph"),
+            CreditToken::Eth => Some("ethereum"),
+            CreditToken::Usdc => None,
         }
     }
 }
@@ -249,13 +285,7 @@ sol! {
     }
 }
 
-const COINGECKO_PRICE_URL: &str =
-    "https://api.coingecko.com/api/v3/simple/price?ids=aleph&vs_currencies=usd";
-
-#[derive(Deserialize)]
-struct CoinGeckoPriceResponse {
-    aleph: CoinGeckoPriceEntry,
-}
+const COINGECKO_PRICE_BASE: &str = "https://api.coingecko.com/api/v3/simple/price";
 
 #[derive(Deserialize)]
 struct CoinGeckoPriceEntry {
@@ -318,19 +348,25 @@ pub fn parse_token_amount(amount_str: &str, decimals: u8) -> Result<U256, ParseA
     Ok(result)
 }
 
-/// Resolve the ALEPH/USD price according to the configured [`PriceSource`].
+/// Resolve a token's USD price according to the configured [`PriceSource`].
+///
+/// `coingecko_id` is the coin id queried when the source is
+/// [`PriceSource::CoinGecko`] (e.g. `"aleph"`, `"ethereum"`).
 ///
 /// Returns `Ok(None)` for `PriceSource::None` (caller will render an
 /// unknown-estimate state); `Ok(Some(_))` otherwise.
-async fn resolve_aleph_price_usd(source: &PriceSource) -> Result<Option<f64>, PriceFetchError> {
+async fn resolve_price_usd(
+    source: &PriceSource,
+    coingecko_id: &str,
+) -> Result<Option<f64>, PriceFetchError> {
     match source {
-        PriceSource::CoinGecko => fetch_aleph_price_usd_from_coingecko().await.map(Some),
+        PriceSource::CoinGecko => fetch_price_usd_from_coingecko(coingecko_id).await.map(Some),
         PriceSource::Fixed { usd } => Ok(Some(*usd)),
         PriceSource::None => Ok(None),
     }
 }
 
-async fn fetch_aleph_price_usd_from_coingecko() -> Result<f64, PriceFetchError> {
+async fn fetch_price_usd_from_coingecko(coingecko_id: &str) -> Result<f64, PriceFetchError> {
     // Cloudflare (CoinGecko's CDN) 403s reqwest's default UA as a suspicious
     // programmatic client. Any non-default UA string passes through.
     let client = reqwest::Client::builder()
@@ -339,7 +375,8 @@ async fn fetch_aleph_price_usd_from_coingecko() -> Result<f64, PriceFetchError> 
         .build()
         .map_err(PriceFetchError::HttpClientBuild)?;
     let resp = client
-        .get(COINGECKO_PRICE_URL)
+        .get(COINGECKO_PRICE_BASE)
+        .query(&[("ids", coingecko_id), ("vs_currencies", "usd")])
         .send()
         .await
         .map_err(PriceFetchError::Request)?;
@@ -348,9 +385,13 @@ async fn fetch_aleph_price_usd_from_coingecko() -> Result<f64, PriceFetchError> 
         return Err(PriceFetchError::BadStatus(resp.status()));
     }
 
-    let body: CoinGeckoPriceResponse = resp.json().await.map_err(PriceFetchError::Parse)?;
+    // Response shape is `{ "<id>": { "usd": <price> } }`.
+    let body: HashMap<String, CoinGeckoPriceEntry> =
+        resp.json().await.map_err(PriceFetchError::Parse)?;
 
-    Ok(body.aleph.usd)
+    body.get(coingecko_id)
+        .map(|entry| entry.usd)
+        .ok_or_else(|| PriceFetchError::MissingPrice(coingecko_id.to_string()))
 }
 
 /// Convert a raw token amount to f64 via U256 arithmetic.
@@ -368,17 +409,19 @@ pub(crate) fn u256_to_f64(amount_raw: U256, decimals: u8) -> f64 {
 
 /// Estimate how many credits will be received for a given token amount.
 ///
-/// For USDC the price is always $1.00. For ALEPH the price comes from the
-/// network's [`PriceSource`] — CoinGecko, a fixed USD value, or `None`
-/// (estimate cannot be computed; result carries `price_usd: None`).
+/// For USDC the price is always $1.00. For ALEPH and ETH the price comes from
+/// the network's [`PriceSource`] - CoinGecko (per the token's coin id), a
+/// fixed USD value, or `None` (estimate cannot be computed; result carries
+/// `price_usd: None`).
 pub async fn estimate_credits(
     token: CreditToken,
     amount_raw: U256,
     price_source: &PriceSource,
 ) -> Result<CreditEstimate, PriceFetchError> {
-    let price_usd = match token {
-        CreditToken::Usdc => Some(1.0),
-        CreditToken::Aleph => resolve_aleph_price_usd(price_source).await?,
+    let price_usd = match token.coingecko_id() {
+        // USDC is pegged at $1 and never hits a price feed.
+        None => Some(1.0),
+        Some(id) => resolve_price_usd(price_source, id).await?,
     };
 
     let bonus = token.bonus_ratio();
@@ -454,6 +497,44 @@ pub async fn buy_credits(
     let contract = IERC20::new(token_address, provider);
     let tx = contract.transfer(credit_contract, amount_raw);
     let pending = tx.send().await.map_err(CreditError::SendTransaction)?;
+
+    let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| CreditError::ReceiptTimeout {
+            timeout_secs: RECEIPT_TIMEOUT.as_secs(),
+        })?
+        .map_err(CreditError::Receipt)?;
+
+    if !receipt.status() {
+        return Err(CreditError::Reverted);
+    }
+
+    Ok(receipt)
+}
+
+/// Buy credits with native ETH: a plain value transfer to the credit contract.
+///
+/// Unlike [`buy_credits`] (which calls ERC20 `transfer`), this sends ETH
+/// directly to the contract. The contract's payable `receive()` accepts it and
+/// emits a `Transfer(sender, contract, value)` event that the off-chain indexer
+/// credits, exactly as for ERC20 transfers.
+///
+/// The provider must include a signer (e.g. built with `ProviderBuilder::wallet()`).
+/// Returns the transaction receipt after confirmation.
+pub async fn buy_credits_eth(
+    provider: &impl Provider,
+    credit_contract: Address,
+    amount_raw: U256,
+) -> Result<alloy_rpc_types_eth::TransactionReceipt, CreditError> {
+    let tx = TransactionRequest {
+        to: Some(TxKind::Call(credit_contract)),
+        value: Some(amount_raw),
+        ..Default::default()
+    };
+    let pending = provider
+        .send_transaction(tx)
+        .await
+        .map_err(CreditError::SendEthTransaction)?;
 
     let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
         .await
@@ -623,8 +704,51 @@ mod tests {
     #[test]
     fn ethereum_config_token_address_dispatch() {
         let cfg = EthereumConfig::mainnet_defaults();
-        assert_eq!(cfg.token_address(CreditToken::Aleph), cfg.aleph_token);
-        assert_eq!(cfg.token_address(CreditToken::Usdc), cfg.usdc_token);
+        assert_eq!(cfg.token_address(CreditToken::Aleph), Some(cfg.aleph_token));
+        assert_eq!(cfg.token_address(CreditToken::Usdc), Some(cfg.usdc_token));
+        // ETH is native: no ERC20 address.
+        assert_eq!(cfg.token_address(CreditToken::Eth), None);
+    }
+
+    #[test]
+    fn eth_token_properties() {
+        assert_eq!(CreditToken::Eth.decimals(), 18);
+        assert_eq!(CreditToken::Eth.symbol(), "ETH");
+        assert_eq!(CreditToken::Eth.bonus_ratio(), 0.0);
+        assert!(CreditToken::Eth.is_native());
+        assert!(!CreditToken::Aleph.is_native());
+        assert!(!CreditToken::Usdc.is_native());
+        assert_eq!(CreditToken::Eth.coingecko_id(), Some("ethereum"));
+        assert_eq!(CreditToken::Aleph.coingecko_id(), Some("aleph"));
+        assert_eq!(CreditToken::Usdc.coingecko_id(), None);
+    }
+
+    #[tokio::test]
+    async fn estimate_eth_with_fixed_price() {
+        let one_eth = U256::from(10u64).pow(U256::from(18u64));
+        let estimate = estimate_credits(
+            CreditToken::Eth,
+            one_eth,
+            &PriceSource::Fixed { usd: 2_000.0 },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(estimate.price_usd, Some(2_000.0));
+        // ETH gets no bonus.
+        assert_eq!(estimate.bonus_ratio, 0.0);
+        // 1 ETH * $2000 * 1.0 * 1_000_000 = 2_000_000_000.
+        assert_eq!(estimate.estimated_credits, Some(2_000_000_000.0));
+    }
+
+    #[tokio::test]
+    async fn estimate_eth_with_none_price_source_leaves_estimate_empty() {
+        let one_eth = U256::from(10u64).pow(U256::from(18u64));
+        let estimate = estimate_credits(CreditToken::Eth, one_eth, &PriceSource::None)
+            .await
+            .unwrap();
+        assert_eq!(estimate.price_usd, None);
+        assert_eq!(estimate.estimated_credits, None);
     }
 
     #[test]
