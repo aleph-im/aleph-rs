@@ -28,8 +28,7 @@ pub async fn dispatch(scheduler_url: Url, json: bool, cmd: ConfidentialCommand) 
 
 async fn handle_init_session(scheduler_url: Url, args: ConfidentialInitSessionArgs) -> Result<()> {
     // 1. Resolve target (hash + CRN URL).
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
 
     // 2. Confirm sevctl is on PATH before any CRN call.
     let sevctl = Sevctl::find()?;
@@ -99,8 +98,7 @@ async fn handle_init_session(scheduler_url: Url, args: ConfidentialInitSessionAr
 
 async fn handle_start(scheduler_url: Url, json: bool, args: ConfidentialStartArgs) -> Result<()> {
     // 1. Resolve target.
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, &args.vm_id, args.crn_url.as_deref()).await?;
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
 
     // 2. Session dir must exist.
     let session_dir = ConfigStore::confidential_sessions_dir()?.join(vm_id.to_string());
@@ -219,8 +217,7 @@ async fn handle_create(scheduler_url: Url, json: bool, args: ConfidentialCreateA
              then call `aleph instance confidential create <vm-hash>`."
         )
     })?;
-    let (vm_id, crn_url) =
-        resolve_target(&scheduler_url, vm_id_input, args.crn_url.as_deref()).await?;
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, vm_id_input, args.crn.as_deref()).await?;
 
     // 2. Allocate on the CRN (the "start" step in Python parlance).
     let account = resolve_account(&args.identity)?;
@@ -232,7 +229,7 @@ async fn handle_create(scheduler_url: Url, json: bool, args: ConfidentialCreateA
     // 3. Initialize the confidential session.
     let init_args = ConfidentialInitSessionArgs {
         vm_id: vm_id.to_string(),
-        crn_url: Some(crn_url.to_string()),
+        crn: Some(crn_url.to_string()),
         identity: args.identity.clone(),
         policy: args.policy,
         keep_session: args.keep_session,
@@ -248,7 +245,7 @@ async fn handle_create(scheduler_url: Url, json: bool, args: ConfidentialCreateA
     // 5. Validate measurement + inject secret.
     let start_args = ConfidentialStartArgs {
         vm_id: vm_id.to_string(),
-        crn_url: Some(crn_url.to_string()),
+        crn: Some(crn_url.to_string()),
         identity: args.identity,
         firmware_hash: args.firmware_hash,
         firmware_file: args.firmware_file,

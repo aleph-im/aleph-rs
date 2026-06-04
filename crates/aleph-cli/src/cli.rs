@@ -1641,7 +1641,7 @@ which CRN owns it, then the CRN's `/about/executions/list` endpoint is
 consulted to discover the VM's IPv6 address. SSH is then exec'd with that
 target.
 
-Pass `--crn-url` to skip scheduler discovery. Extra arguments after `--`
+Pass `--crn` (a node hash or URL) to skip scheduler discovery. Extra arguments after `--`
 are forwarded verbatim to `ssh` (e.g. to run a remote command).
 
 Examples:
@@ -1907,12 +1907,14 @@ pub struct AuthorizationRevokeArgs {
 
 #[derive(Args)]
 pub struct CrnArgs {
-    /// CRN endpoint URL. Optional emergency override: if omitted, the CRN is
-    /// discovered via the scheduler. Pass this only to bypass the scheduler's
-    /// choice (e.g. when an instance is reported as `duplicated` and you want
-    /// to target a specific node).
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    /// CRN to target: either a node hash (resolved to its URL via the
+    /// scheduler) or a raw endpoint URL (anything containing `://`).
+    ///
+    /// Optional override: if omitted, the CRN is discovered via the scheduler.
+    /// Pass this to bypass the scheduler's choice (e.g. when an instance is
+    /// reported as `duplicated` and you want to target a specific node).
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
 
     /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
     /// shown by `aleph instance list`); the scheduler matches it server-side.
@@ -1926,12 +1928,14 @@ pub struct CrnArgs {
 /// required to construct the CrnClient but no auth headers are sent.
 #[derive(Args)]
 pub struct CrnStartArgs {
-    /// CRN endpoint URL. Optional emergency override: if omitted, the CRN is
-    /// discovered via the scheduler. Pass this only to bypass the scheduler's
-    /// choice (e.g. when an instance is reported as `duplicated` and you want
-    /// to target a specific node).
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    /// CRN to target: either a node hash (resolved to its URL via the
+    /// scheduler) or a raw endpoint URL (anything containing `://`).
+    ///
+    /// Optional override: if omitted, the CRN is discovered via the scheduler.
+    /// Pass this to bypass the scheduler's choice (e.g. when an instance is
+    /// reported as `duplicated` and you want to target a specific node).
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
 
     /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
     /// shown by `aleph instance list`); the scheduler matches it server-side.
@@ -1969,10 +1973,10 @@ pub struct InstanceBackupCreateArgs {
     /// Poll the CRN until the backup completes (or times out after 30 min).
     #[arg(long)]
     pub follow: bool,
-    /// Optional CRN URL override. The CRN is normally discovered via the
-    /// scheduler.
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    /// CRN to target: a node hash (resolved via the scheduler) or a raw URL.
+    /// Optional override; the CRN is normally discovered via the scheduler.
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -1980,8 +1984,8 @@ pub struct InstanceBackupCreateArgs {
 #[derive(Args)]
 pub struct InstanceBackupInfoArgs {
     pub vm_id: String,
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -1993,9 +1997,10 @@ pub struct InstanceBackupDownloadArgs {
     /// Output path. Defaults to ./backup-<vm_id_short>.tar.
     #[arg(short, long)]
     pub output: Option<std::path::PathBuf>,
-    /// Optional CRN URL override (ignored when arg is already a URL).
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    /// CRN to target: a node hash (resolved via the scheduler) or a raw URL
+    /// (ignored when the positional arg is already a presigned URL).
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2004,8 +2009,8 @@ pub struct InstanceBackupDownloadArgs {
 pub struct InstanceBackupDeleteArgs {
     pub vm_id: String,
     pub backup_id: String,
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2024,8 +2029,8 @@ pub struct InstanceBackupRestoreArgs {
     /// Item hash of an Aleph volume to restore from (server-side download).
     #[arg(long, group = "restore_source")]
     pub volume_ref: Option<String>,
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2036,10 +2041,10 @@ pub struct InstanceSshArgs {
     /// shown by `aleph instance list`); the scheduler matches it server-side.
     pub vm_id: String,
 
-    /// CRN endpoint URL. If omitted, the dispatched CRN is discovered via
-    /// the scheduler and the public CRN list.
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    /// CRN to target: a node hash (resolved via the scheduler) or a raw URL.
+    /// If omitted, the dispatched CRN is discovered via the scheduler.
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
 
     /// SSH user to connect as.
     #[arg(long, default_value = "root")]
@@ -3214,9 +3219,10 @@ pub struct ConfidentialInitSessionArgs {
     /// VM item-hash. Accepts a unique prefix (e.g. the 12-char hash shown by
     /// `aleph instance list`); the scheduler matches it server-side.
     pub vm_id: String,
-    /// Override the CRN URL discovered via the scheduler.
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    /// CRN to target: a node hash (resolved via the scheduler) or a raw URL.
+    /// Overrides the CRN otherwise discovered via the scheduler.
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
     #[command(flatten)]
     pub identity: IdentityArgs,
     /// SEV policy mask.
@@ -3234,9 +3240,10 @@ pub struct ConfidentialInitSessionArgs {
 pub struct ConfidentialStartArgs {
     /// VM item-hash. Accepts a unique prefix.
     pub vm_id: String,
-    /// Override the CRN URL discovered via the scheduler.
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    /// CRN to target: a node hash (resolved via the scheduler) or a raw URL.
+    /// Overrides the CRN otherwise discovered via the scheduler.
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
     #[command(flatten)]
     pub identity: IdentityArgs,
     /// Expected OVMF firmware hash (hex). Defaults to the active value from the
@@ -3267,9 +3274,10 @@ pub struct ConfidentialCreateArgs {
     /// Existing VM hash. If omitted, runs `instance create --confidential ...`
     /// first to allocate a fresh VM.
     pub vm_id: Option<String>,
-    /// Override the CRN URL discovered via the scheduler.
-    #[arg(long)]
-    pub crn_url: Option<String>,
+    /// CRN to target: a node hash (resolved via the scheduler) or a raw URL.
+    /// Overrides the CRN otherwise discovered via the scheduler.
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
     #[command(flatten)]
     pub identity: IdentityArgs,
     /// SEV policy mask.

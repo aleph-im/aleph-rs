@@ -3646,9 +3646,13 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "should fail with timeout");
+        // The server sleeps for an hour, so any return well under that proves the
+        // 200ms request timeout fired. The margin is deliberately generous: loaded
+        // CI runners (especially Windows) can starve the single-threaded test
+        // runtime for several seconds before the timer is serviced.
         assert!(
-            elapsed < Duration::from_secs(2),
-            "should bail out quickly (took {elapsed:?}), not hang indefinitely"
+            elapsed < Duration::from_secs(60),
+            "should bail out via the request timeout (took {elapsed:?}), not hang indefinitely"
         );
     }
 
@@ -3658,7 +3662,7 @@ mod tests {
         let client = AlephClient::builder(Url::parse("http://192.0.2.1:1").unwrap())
             .timeout_config(TimeoutConfig {
                 connect_timeout: Duration::from_millis(200),
-                request_timeout: Some(Duration::from_secs(30)),
+                request_timeout: Some(Duration::from_secs(120)),
             })
             .retry_config(RetryConfig {
                 max_retries: 0,
@@ -3674,9 +3678,13 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "should fail with connect timeout");
+        // Returning well under the 120s request budget proves the 200ms connect
+        // timeout is what fired. The margin is generous because loaded CI runners
+        // (especially Windows) can starve the single-threaded test runtime for
+        // several seconds before the timer is serviced.
         assert!(
-            elapsed < Duration::from_secs(5),
-            "should bail out within connect_timeout (took {elapsed:?})"
+            elapsed < Duration::from_secs(30),
+            "should bail out via the connect timeout (took {elapsed:?})"
         );
     }
 

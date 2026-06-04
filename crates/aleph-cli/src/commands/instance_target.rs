@@ -1,12 +1,14 @@
 //! Resolves a user-supplied VM id (full item hash or prefix) and an optional
-//! `--crn-url` override into the `(ItemHash, Url)` pair needed to address a
+//! `--crn` override into the `(ItemHash, Url)` pair needed to address a
 //! specific VM on a specific CRN.
 //!
 //! Used by `aleph instance ssh` and by the lifecycle subcommands (`start`,
 //! `stop`, `reboot`, `erase`, `logs`). The CRN URL is normally discovered via
 //! the scheduler's `/api/v1/nodes/<hash>` endpoint; the override is reserved
 //! for emergency debugging (e.g. a duplicated allocation that the user wants
-//! to address explicitly).
+//! to address explicitly). The override accepts either a node hash (resolved
+//! through that same endpoint, like `--ccn` accepts an alias) or a raw CRN
+//! URL (anything containing `://`).
 
 use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
 use aleph_types::item_hash::ItemHash;
@@ -57,11 +59,30 @@ pub fn pick_unique_match(input: &str, matches: Vec<VmEntry>) -> Result<(ItemHash
     }
 }
 
+/// Resolve a CRN node hash to its endpoint URL via the scheduler's
+/// `/api/v1/nodes/<hash>` endpoint (the same source used for placement
+/// lookups, not the third-party crns-list aggregator).
+async fn node_hash_to_url(scheduler_url: &Url, node_hash: &str) -> Result<Url> {
+    let scheduler = SchedulerClient::new(scheduler_url.clone());
+    let node = scheduler
+        .get_node(node_hash)
+        .await
+        .with_context(|| format!("looking up node {node_hash} in the scheduler"))?
+        .ok_or_else(|| anyhow!("the scheduler has no record of node {node_hash}"))?;
+    let address = node.address.as_deref().ok_or_else(|| {
+        anyhow!(
+            "scheduler knows node {node_hash} (status: {}) but has no reachable address for it",
+            node.status.as_deref().unwrap_or("unknown")
+        )
+    })?;
+    Url::parse(address).with_context(|| format!("invalid CRN address `{address}`"))
+}
+
 /// Translate a `VmEntry` to the URL of the CRN it's allocated to.
 /// `dispatched` and `scheduled` proceed silently (the scheduler has already
 /// placed the VM on a node, so its CRN is known); `duplicated` emits a stderr
 /// warning before following the scheduler's canonical pick. Any other status
-/// is an error pointing the user at `--crn-url`.
+/// is an error pointing the user at `--crn`.
 ///
 /// Looks the CRN up via the scheduler's `/api/v1/nodes/<hash>` endpoint
 /// rather than the third-party crns-list aggregator.
@@ -81,57 +102,54 @@ pub async fn crn_url_from_entry(
             })?;
             eprintln!(
                 "warning: instance {vm_id} is reported as duplicated (allocated to multiple \
-                 CRNs). Defaulting to scheduler's canonical pick {node}. Pass --crn-url to \
+                 CRNs). Defaulting to scheduler's canonical pick {node}. Pass --crn to \
                  target a different one."
             );
             node
         }
         _ => bail!(
             "instance {vm_id} cannot be reached: scheduler reports status `{status}`. \
-             Pass --crn-url to target a CRN directly."
+             Pass --crn to target a CRN directly."
         ),
     };
 
-    let scheduler = SchedulerClient::new(scheduler_url.clone());
-    let node = scheduler
-        .get_node(allocated_node)
+    node_hash_to_url(scheduler_url, allocated_node)
         .await
-        .with_context(|| format!("looking up node {allocated_node} in the scheduler"))?
-        .ok_or_else(|| {
-            anyhow!(
-                "instance {vm_id} is allocated to node {allocated_node}, but the scheduler has \
-                 no record of that node. Pass `--crn-url` to override."
-            )
-        })?;
-    let address = node.address.as_deref().ok_or_else(|| {
-        anyhow!(
-            "scheduler knows node {allocated_node} (status: {}) but has no reachable address \
-             for it. Pass `--crn-url` to override.",
-            node.status.as_deref().unwrap_or("unknown")
-        )
-    })?;
+        .with_context(|| format!("resolving the CRN for instance {vm_id}"))
+}
 
-    Url::parse(address).with_context(|| format!("invalid CRN address `{address}`"))
+/// Resolve a user-supplied `--crn` override to a URL. Anything containing
+/// `://` is treated as a raw URL and parsed directly; otherwise it's taken as
+/// a node hash and resolved through the scheduler — mirroring how `--ccn`
+/// accepts either a URL or a named alias.
+async fn resolve_crn(scheduler_url: &Url, crn: &str) -> Result<Url> {
+    if crn.contains("://") {
+        return Url::parse(crn).context("invalid --crn URL");
+    }
+    node_hash_to_url(scheduler_url, crn)
+        .await
+        .with_context(|| format!("resolving --crn node hash `{crn}`"))
 }
 
 /// Resolve `(vm_id, crn_url)` for any lifecycle subcommand.
 ///
 /// Three cases:
-/// 1. Override + full hash: skip the scheduler entirely.
-/// 2. Override + prefix: ask the scheduler to expand the prefix, but use the
-///    override URL.
+/// 1. Override + full hash: resolve the override (a URL is parsed directly; a
+///    node hash is looked up in the scheduler) without fetching the VM entry.
+/// 2. Override + prefix: ask the scheduler to expand the prefix for the VM
+///    hash, but take the CRN from the override.
 /// 3. No override: ask the scheduler for the entry and derive the URL from
 ///    its `allocated_node`.
 pub async fn resolve_target(
     scheduler_url: &Url,
     vm_id_input: &str,
-    crn_url_override: Option<&str>,
+    crn_override: Option<&str>,
 ) -> Result<(ItemHash, Url)> {
-    match (crn_url_override, ItemHash::try_from(vm_id_input)) {
-        (Some(url), Ok(hash)) => Ok((hash, Url::parse(url).context("invalid --crn-url")?)),
-        (Some(url), Err(_)) => {
+    match (crn_override, ItemHash::try_from(vm_id_input)) {
+        (Some(crn), Ok(hash)) => Ok((hash, resolve_crn(scheduler_url, crn).await?)),
+        (Some(crn), Err(_)) => {
             let (hash, _) = resolve_vm(scheduler_url, vm_id_input).await?;
-            Ok((hash, Url::parse(url).context("invalid --crn-url")?))
+            Ok((hash, resolve_crn(scheduler_url, crn).await?))
         }
         (None, _) => {
             let (hash, entry) = resolve_vm(scheduler_url, vm_id_input).await?;
@@ -254,7 +272,7 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("status `unscheduled`"));
-        assert!(msg.contains("--crn-url"));
+        assert!(msg.contains("--crn"));
     }
 
     #[tokio::test]
@@ -290,6 +308,46 @@ mod tests {
         let (hash, url) = resolve_target(&scheduler, FULL_HASH, Some("https://crn.example.io/"))
             .await
             .unwrap();
+        assert_eq!(hash.to_string(), FULL_HASH);
+        assert_eq!(url.as_str(), "https://crn.example.io/");
+    }
+
+    #[tokio::test]
+    async fn resolve_crn_parses_raw_url_without_scheduler() {
+        // No mocks mounted: a URL override must not touch the scheduler.
+        let server = MockServer::start().await;
+        let url = resolve_crn(
+            &Url::parse(&server.uri()).unwrap(),
+            "https://crn.example.io/",
+        )
+        .await
+        .unwrap();
+        assert_eq!(url.as_str(), "https://crn.example.io/");
+    }
+
+    #[tokio::test]
+    async fn resolve_target_override_with_node_hash_resolves_via_scheduler() {
+        // A node-hash override (no `://`) is resolved through the scheduler's
+        // node endpoint; the VM itself is not looked up because vm_id is a
+        // full hash.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{NODE_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_hash": NODE_HASH,
+                "address": "https://crn.example.io/",
+                "status": "ok",
+            })))
+            .mount(&server)
+            .await;
+
+        let (hash, url) = resolve_target(
+            &Url::parse(&server.uri()).unwrap(),
+            FULL_HASH,
+            Some(NODE_HASH),
+        )
+        .await
+        .unwrap();
         assert_eq!(hash.to_string(), FULL_HASH);
         assert_eq!(url.as_str(), "https://crn.example.io/");
     }
