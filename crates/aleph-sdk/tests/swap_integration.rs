@@ -3,6 +3,7 @@
 //! USDC-path tests use a wiremock server (no network). ETH-flow tests use a
 //! spawned anvil node and are `#[ignore]`d (require foundry in PATH).
 
+use aleph_sdk::swap::cow::order::APP_DATA_JSON;
 use aleph_sdk::swap::cow::{CowApi, place_usdc_order, quote_usdc};
 use aleph_sdk::swap::{SwapRequest, SwapToken};
 use alloy_primitives::{Address, U256, address};
@@ -59,7 +60,8 @@ async fn usdc_quote_then_place_order_round_trip() {
             "feeAmount": "0",
             "kind": "sell",
             "signingScheme": "eip712",
-            "quoteId": 42
+            "quoteId": 42,
+            "appData": APP_DATA_JSON
         })))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!(
             "0xabc0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000abcd"

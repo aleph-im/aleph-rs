@@ -17,6 +17,9 @@ use crate::swap::{SwapError, SwapQuote, SwapRequest};
 /// CoW quote endpoint computes prices server-side and can be slower than simple REST reads.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Maximum wait for an approve transaction receipt before giving up.
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// CoW orderbook REST client for a single network.
 pub struct CowApi {
     http: reqwest::Client,
@@ -175,6 +178,10 @@ sol! {
 
 /// Ensure `owner` has at least `amount` allowance for the vault relayer on
 /// `token`; submit an `approve` tx and await its receipt if not.
+///
+/// Approves exactly `amount` rather than an unlimited allowance, so a fresh
+/// approval transaction may be needed per swap. This is a deliberate tradeoff
+/// to minimise standing approval exposure.
 pub async fn ensure_allowance(
     provider: &impl Provider,
     token: Address,
@@ -182,6 +189,8 @@ pub async fn ensure_allowance(
     amount: U256,
 ) -> Result<(), SwapError> {
     let erc20 = IERC20Allowance::new(token, provider);
+    // The allowance read and the subsequent approve are not atomic (inherent
+    // ERC20 approve race); CoW pulls at settlement time.
     let current = erc20
         .allowance(owner, order::VAULT_RELAYER)
         .call()
@@ -195,7 +204,12 @@ pub async fn ensure_allowance(
         .send()
         .await
         .map_err(SwapError::SendTransaction)?;
-    let receipt = pending.get_receipt().await.map_err(SwapError::Receipt)?;
+    let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| SwapError::ReceiptTimeout {
+            timeout_secs: RECEIPT_TIMEOUT.as_secs(),
+        })?
+        .map_err(SwapError::Receipt)?;
     if !receipt.status() {
         return Err(SwapError::Reverted("approve"));
     }
@@ -232,7 +246,9 @@ pub async fn quote_sell(
     let min_buy_amount = apply_slippage(buy_amount, req.slippage);
     Ok((
         SwapQuote {
-            sell_amount: quoted_sell + fee_amount,
+            sell_amount: quoted_sell.checked_add(fee_amount).ok_or_else(|| {
+                SwapError::InvalidAmount("sellAmount + feeAmount overflows U256".to_string())
+            })?,
             buy_amount,
             min_buy_amount,
             fee_amount,
@@ -284,6 +300,8 @@ pub async fn place_usdc_order(
         buyTokenBalance: "erc20".to_string(),
     };
     let signature = order::sign_order(&order, chain_id, signer)?;
+    // Keep in sync with the signed `Order` above: same amounts and appData (body
+    // carries the full JSON document; the signed struct carries its keccak256 hash).
     let body = OrderCreation {
         sell_token: addr_hex(usdc_token),
         buy_token: addr_hex(req.buy_token),

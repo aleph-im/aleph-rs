@@ -98,6 +98,8 @@ pub enum SwapError {
     ReadAllowance(#[source] alloy_contract::Error),
     #[error("failed to send transaction")]
     SendTransaction(#[source] alloy_contract::Error),
+    #[error("timed out after {timeout_secs}s waiting for transaction receipt")]
+    ReceiptTimeout { timeout_secs: u64 },
     #[error("failed to confirm transaction")]
     Receipt(#[source] alloy_provider::PendingTransactionError),
     #[error("{0} transaction reverted")]
