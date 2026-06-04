@@ -61,8 +61,8 @@ pub enum SchedulerError {
 const PAGE_SIZE: u32 = 200;
 
 #[derive(Deserialize)]
-struct PageEnvelope {
-    items: Vec<VmEntry>,
+struct PageEnvelope<T> {
+    items: Vec<T>,
     pagination: PaginationMeta,
 }
 
@@ -85,33 +85,33 @@ impl SchedulerClient {
         }
     }
 
-    /// Returns every VM the scheduler knows about for the given owner address.
-    /// Paginates internally over `/api/v1/vms?owners=<owner>&page_size=200`.
-    pub async fn list_vms_by_owner(&self, owner: &Address) -> Result<Vec<VmEntry>, SchedulerError> {
+    /// Fetch every item of a paginated listing endpoint, following
+    /// `pagination.total_items` across pages. `query` is appended to the
+    /// `page_size`/`page` parameters on every request.
+    async fn fetch_all_pages<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Vec<T>, SchedulerError> {
         let url = self
             .base_url
-            .join("/api/v1/vms")
+            .join(path)
             .map_err(|e| SchedulerError::InvalidResponse(format!("URL join error: {e}")))?;
 
         let mut all = Vec::new();
         let mut page = 1u32;
         loop {
-            let response = self
-                .http
-                .get(url.clone())
-                .query(&[
-                    ("owners", owner.to_string()),
-                    ("page_size", PAGE_SIZE.to_string()),
-                    ("page", page.to_string()),
-                ])
-                .send()
-                .await?;
+            let mut params: Vec<(&str, String)> =
+                query.iter().map(|(k, v)| (*k, v.to_string())).collect();
+            params.push(("page_size", PAGE_SIZE.to_string()));
+            params.push(("page", page.to_string()));
+            let response = self.http.get(url.clone()).query(&params).send().await?;
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
                 return Err(SchedulerError::Status { status, body });
             }
-            let envelope: PageEnvelope = response
+            let envelope: PageEnvelope<T> = response
                 .json()
                 .await
                 .map_err(|e| SchedulerError::InvalidResponse(format!("decode failed: {e}")))?;
@@ -126,6 +126,14 @@ impl SchedulerClient {
         Ok(all)
     }
 
+    /// Returns every VM the scheduler knows about for the given owner address.
+    /// Paginates internally over `/api/v1/vms?owners=<owner>&page_size=200`.
+    pub async fn list_vms_by_owner(&self, owner: &Address) -> Result<Vec<VmEntry>, SchedulerError> {
+        let owner = owner.to_string();
+        self.fetch_all_pages("/api/v1/vms", &[("owners", owner.as_str())])
+            .await
+    }
+
     /// Find every VM whose hash starts with `prefix`. The scheduler's
     /// `/api/v1/vms?vm_hash=<prefix>` endpoint matches prefixes server-side,
     /// so this is O(matches) on the wire regardless of how many VMs exist
@@ -134,42 +142,25 @@ impl SchedulerClient {
         &self,
         prefix: &str,
     ) -> Result<Vec<VmEntry>, SchedulerError> {
-        let url = self
-            .base_url
-            .join("/api/v1/vms")
-            .map_err(|e| SchedulerError::InvalidResponse(format!("URL join error: {e}")))?;
+        self.fetch_all_pages("/api/v1/vms", &[("vm_hash", prefix)])
+            .await
+    }
 
-        let mut all = Vec::new();
-        let mut page = 1u32;
-        loop {
-            let response = self
-                .http
-                .get(url.clone())
-                .query(&[
-                    ("vm_hash", prefix.to_string()),
-                    ("page_size", PAGE_SIZE.to_string()),
-                    ("page", page.to_string()),
-                ])
-                .send()
-                .await?;
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(SchedulerError::Status { status, body });
-            }
-            let envelope: PageEnvelope = response
-                .json()
-                .await
-                .map_err(|e| SchedulerError::InvalidResponse(format!("decode failed: {e}")))?;
-            let items_returned = envelope.items.len();
-            let total = envelope.pagination.total_items;
-            all.extend(envelope.items);
-            if all.len() as u32 >= total || items_returned == 0 {
-                break;
-            }
-            page += 1;
-        }
-        Ok(all)
+    /// Find every node whose hash matches `fragment`. The scheduler's
+    /// `/api/v1/nodes?hash=<fragment>` endpoint matches anchored prefixes OR
+    /// suffixes server-side (a middle fragment does not match); see
+    /// aleph-vm-scheduler v0.1.1 feature #182. The parameter is named `hash`
+    /// here, unlike `vm_hash` on `/api/v1/vms`. The shorthand node IDs printed
+    /// by `aleph instance list` are the last 10 characters of the node hash,
+    /// i.e. suffixes, so they resolve through this endpoint. Paginates
+    /// defensively for short fragments, though the node population is small
+    /// (~500 as of writing).
+    pub async fn find_nodes_by_hash_fragment(
+        &self,
+        fragment: &str,
+    ) -> Result<Vec<NodeEntry>, SchedulerError> {
+        self.fetch_all_pages("/api/v1/nodes", &[("hash", fragment)])
+            .await
     }
 
     /// Fetch one node by its hash. Returns `Ok(None)` on HTTP 404.
@@ -423,6 +414,94 @@ mod tests {
         let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
         let vms = client.find_vms_by_hash_prefix("deadbeef").await.unwrap();
         assert!(vms.is_empty());
+    }
+
+    fn sample_node_page(hashes: &[&str], total: u32) -> serde_json::Value {
+        let items: Vec<serde_json::Value> = hashes
+            .iter()
+            .map(|hash| {
+                json!({
+                    "node_hash": hash,
+                    "address": format!("https://{}.example.io/", &hash[..8]),
+                    "status": "Healthy",
+                })
+            })
+            .collect();
+        json!({
+            "items": items,
+            "pagination": {
+                "page": 1,
+                "page_size": PAGE_SIZE,
+                "total_items": total,
+                "total_pages": 1,
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn find_nodes_by_hash_fragment_matches_anchored_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", "bb0a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_node_page(
+                &[
+                    "bb0aa1a9fc7566286c0db32cd5c660066017430390ca779da4d3a241fa07c337",
+                    "bb0ab44bf1252a8ce0a06b0526fac39da80e07b35c6dbb4d9e93264489ab6a05",
+                ],
+                2,
+            )))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let nodes = client.find_nodes_by_hash_fragment("bb0a").await.unwrap();
+        assert_eq!(nodes.len(), 2);
+        // Matching is anchored at either end (prefix or suffix).
+        assert!(
+            nodes
+                .iter()
+                .all(|n| n.node_hash.starts_with("bb0a") || n.node_hash.ends_with("bb0a"))
+        );
+    }
+
+    #[tokio::test]
+    async fn find_nodes_by_hash_fragment_matches_anchored_suffix() {
+        // The shorthand node IDs printed by `aleph instance list` are the last
+        // 10 characters of the node hash, i.e. suffixes. The scheduler matches
+        // those server-side (v0.1.1 #182); the client just forwards the value.
+        let full = "bb0aa1a9fc7566286c0db32cd5c660066017430390ca779da4d3a241fa07c337";
+        let suffix = &full[full.len() - 10..];
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", suffix))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_node_page(&[full], 1)))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let nodes = client.find_nodes_by_hash_fragment(suffix).await.unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].node_hash.ends_with(suffix));
+    }
+
+    #[tokio::test]
+    async fn find_nodes_by_hash_fragment_empty_on_no_match() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", "deadbeef"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_node_page(&[], 0)))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let nodes = client
+            .find_nodes_by_hash_fragment("deadbeef")
+            .await
+            .unwrap();
+        assert!(nodes.is_empty());
     }
 
     #[tokio::test]
