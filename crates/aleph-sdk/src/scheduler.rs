@@ -134,6 +134,23 @@ impl SchedulerClient {
             .await
     }
 
+    /// Returns every VM the scheduler knows about for the given sender address
+    /// (`message.sender`). This differs from the owner
+    /// (`message.content.address`) for VMs created through Aleph's
+    /// permission-delegation system, where sender != owner. Paginates
+    /// internally over `/api/v1/vms?sender=<sender>&page_size=200`.
+    ///
+    /// Requires scheduler v0.1.1 or newer: older releases ignore the `sender`
+    /// parameter and return the full VM set.
+    pub async fn list_vms_by_sender(
+        &self,
+        sender: &Address,
+    ) -> Result<Vec<VmEntry>, SchedulerError> {
+        let sender = sender.to_string();
+        self.fetch_all_pages("/api/v1/vms", &[("sender", sender.as_str())])
+            .await
+    }
+
     /// Find every VM whose hash starts with `prefix`. The scheduler's
     /// `/api/v1/vms?vm_hash=<prefix>` endpoint matches prefixes server-side,
     /// so this is O(matches) on the wire regardless of how many VMs exist
@@ -304,6 +321,70 @@ mod tests {
         let addr = Address::from("0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072".to_string());
         let vms = client.list_vms_by_owner(&addr).await.unwrap();
         assert!(vms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_vms_by_sender_paginates_until_total_items_reached() {
+        let server = MockServer::start().await;
+        let sender = "0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072";
+        // 250 total: page 1 = 100, page 2 = 100, page 3 = 50.
+        for (page, items) in [(1u32, 100usize), (2, 100), (3, 50)] {
+            Mock::given(method("GET"))
+                .and(path("/api/v1/vms"))
+                .and(query_param("sender", sender))
+                .and(query_param("page_size", "200"))
+                .and(query_param("page", page.to_string()))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(sample_page(items, page, 200, 250)),
+                )
+                .mount(&server)
+                .await;
+        }
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let addr = Address::from(sender.to_string());
+        let vms = client.list_vms_by_sender(&addr).await.unwrap();
+        assert_eq!(vms.len(), 250);
+    }
+
+    #[tokio::test]
+    async fn list_vms_by_sender_returns_empty_when_total_is_zero() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param(
+                "sender",
+                "0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_page(0, 1, 200, 0)))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let addr = Address::from("0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072".to_string());
+        let vms = client.list_vms_by_sender(&addr).await.unwrap();
+        assert!(vms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_vms_by_sender_returns_status_error_on_5xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param(
+                "sender",
+                "0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072",
+            ))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let addr = Address::from("0xaAf798d5F80dAEE72AEe8557B890809E9f5B6072".to_string());
+        match client.list_vms_by_sender(&addr).await.unwrap_err() {
+            SchedulerError::Status { status, .. } => assert_eq!(status.as_u16(), 503),
+            other => panic!("expected Status, got {other:?}"),
+        }
     }
 
     fn sample_vm_json() -> serde_json::Value {
