@@ -181,6 +181,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?
         }
+        cli::Commands::Token {
+            command: token_command,
+        } => {
+            commands::token::handle_token_command(json, token_command, cli.network.as_deref())
+                .await?
+        }
         cli::Commands::Domain {
             command: domain_command,
         } => {
