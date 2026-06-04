@@ -19,6 +19,7 @@ alloy-sol-types = { version = "1.5" }
 alloy-contract = { version = "1.8" }
 alloy-provider = { version = "1.8" }
 alloy-network = { version = "1.8" }
+alloy-signer = { version = "1.8" }
 alloy-signer-local = { version = "1.8" }
 alloy-rpc-types-eth = { version = "1.8" }
 alloy-node-bindings = { version = "1.8" }
