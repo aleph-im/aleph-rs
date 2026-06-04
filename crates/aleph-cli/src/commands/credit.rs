@@ -5,7 +5,8 @@ use crate::cli::{
     TransferCreditArgs,
 };
 use crate::common::{
-    format_address, resolve_account, resolve_address, resolve_network, submit_or_preview,
+    confirm_submission, format_address, resolve_account, resolve_address, resolve_network,
+    submit_or_preview,
 };
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephAccountClient, AlephClient};
@@ -247,7 +248,7 @@ async fn handle_buy(json: bool, args: BuyCreditArgs, cli_network: Option<&str>) 
 
     if !json {
         print_human_estimate(&args.amount, &estimate, &ethereum);
-        if !args.yes && !confirm_submission()? {
+        if !args.yes && !confirm_submission("Proceed?")? {
             eprintln!("Cancelled.");
             return Ok(());
         }
@@ -307,7 +308,7 @@ async fn handle_transfer(
 
     if !json && !dry_run {
         print_transfer_summary(&args.to, &recipient, args.amount, args.expiration);
-        if !args.yes && !confirm_submission()? {
+        if !args.yes && !confirm_submission("Proceed?")? {
             eprintln!("Cancelled.");
             return Ok(());
         }
@@ -376,15 +377,6 @@ async fn ensure_balance(
         );
     }
     Ok(())
-}
-
-fn confirm_submission() -> Result<bool> {
-    eprintln!();
-    dialoguer::Confirm::new()
-        .with_prompt("Proceed?")
-        .default(false)
-        .interact()
-        .map_err(|e| anyhow!("failed to read confirmation: {e}"))
 }
 
 /// JSON envelope shared by dry-run and post-submit output.

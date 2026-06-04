@@ -185,6 +185,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: CreditCommand,
     },
+    /// Acquire ALEPH tokens by swapping ETH or USDC via CoW Swap
+    Token {
+        #[clap(subcommand)]
+        command: TokenCommand,
+    },
     /// Generate shell completion script
     Completions {
         /// Target shell.
@@ -2357,6 +2362,68 @@ pub struct TransferCreditArgs {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Subcommand)]
+pub enum TokenCommand {
+    /// Swap ETH or USDC for ALEPH via CoW Swap
+    #[command(long_about = "\
+Swap native ETH or USDC for ALEPH using CoW Swap, leaving the ALEPH in your \
+wallet. --amount is in human-readable units of the sell token.
+
+The order is submitted fire-and-forget: the command prints the CoW order UID \
+and an explorer link, then exits. Check fill status on the explorer.
+
+Examples:
+  aleph token swap --sell-token usdc --amount 100
+  aleph token swap --sell-token eth  --amount 0.5 --slippage 1.0
+  aleph token swap --sell-token usdc --amount 50 --yes")]
+    Swap(TokenSwapArgs),
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum SwapTokenCli {
+    Eth,
+    Usdc,
+}
+
+#[derive(Args)]
+pub struct TokenSwapArgs {
+    /// Token to sell (native ETH or USDC)
+    #[arg(long, value_enum)]
+    pub sell_token: SwapTokenCli,
+
+    /// Amount of the sell token to spend, in human-readable units
+    #[arg(long)]
+    pub amount: String,
+
+    /// Max slippage percent for the minimum-received floor
+    #[arg(long, default_value_t = 0.5)]
+    pub slippage: f64,
+
+    /// Where the bought ALEPH lands (defaults to the signer's address).
+    /// Hex (0x...), local account name, or alias.
+    #[arg(long)]
+    pub receiver: Option<String>,
+
+    /// Order validity window in seconds
+    #[arg(long, default_value_t = 1200)]
+    pub valid_for: u32,
+
+    /// Ethereum JSON-RPC endpoint - overrides the network's configured rpc_url
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+
+    /// Skip the confirmation prompt and submit immediately
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    // NOTE: the inherited --dry-run help text says "Build and sign the message
+    // but don't submit it." For swap that means quote-only (no on-chain
+    // submission). Clap does not allow overriding help text of flattened
+    // fields, so the mismatch is accepted as a known limitation.
     #[command(flatten)]
     pub signing: SigningArgs,
 }

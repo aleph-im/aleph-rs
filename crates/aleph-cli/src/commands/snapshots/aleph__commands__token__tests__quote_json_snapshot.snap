@@ -1,0 +1,11 @@
+---
+source: crates/aleph-cli/src/commands/token.rs
+expression: "quote_json(SwapToken::Eth, &sample_quote())"
+---
+{
+  "expected_aleph": "1",
+  "fee": "0.0000000000001",
+  "min_aleph": "0.995",
+  "sell_amount": "0.00000000005",
+  "sell_token": "ETH"
+}

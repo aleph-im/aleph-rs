@@ -19,6 +19,7 @@ alloy-sol-types = { version = "1.5" }
 alloy-contract = { version = "1.8" }
 alloy-provider = { version = "1.8" }
 alloy-network = { version = "1.8" }
+alloy-signer = { version = "1.8" }
 alloy-signer-local = { version = "1.8" }
 alloy-rpc-types-eth = { version = "1.8" }
 alloy-node-bindings = { version = "1.8" }
@@ -45,7 +46,7 @@ serde_with = "3.15.1"
 sha2 = { version = "0.10.9" }
 tar = { version = "0.4" }
 thiserror = { version = "2.0.17" }
-tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "macros", "fs", "sync"]  }
+tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "macros", "fs", "sync", "time"]  }
 tokio-stream = { version = "0.1" }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 tokio-util = { version = "0.7", features = ["io"] }

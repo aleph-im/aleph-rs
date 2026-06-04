@@ -16,6 +16,8 @@ pub mod messages;
 pub mod progress;
 mod proto;
 pub mod scheduler;
+#[cfg(feature = "swap")]
+pub mod swap;
 pub mod verify;
 pub mod ws;
 

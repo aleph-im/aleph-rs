@@ -1,0 +1,12 @@
+---
+source: crates/aleph-cli/src/commands/token.rs
+expression: "result_json_usdc(\"50\", SwapToken::Usdc, &sample_quote(), \"0xUID\")"
+---
+{
+  "expected_aleph": "1",
+  "fee": "0.1",
+  "min_aleph": "0.995",
+  "order_id": "0xUID",
+  "sell_amount": "50",
+  "sell_token": "USDC"
+}

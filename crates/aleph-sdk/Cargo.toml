@@ -10,13 +10,16 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 [dependencies]
 aes = { workspace = true }
 aleph-types = { workspace = true }
-# alloy crates are only needed for the `credits` feature (EVM credit
-# purchases). Gated so downstream SDK consumers who don't use that flow
-# avoid the whole alloy dependency tree.
+# alloy crates are only needed for the `credits` and `swap` features (EVM
+# credit purchases and token swaps). Gated so downstream SDK consumers who
+# don't use those flows avoid the whole alloy dependency tree.
 alloy-contract = { workspace = true, optional = true }
+alloy-network = { workspace = true, optional = true }
 alloy-primitives = { workspace = true, optional = true }
 alloy-provider = { workspace = true, optional = true }
 alloy-rpc-types-eth = { workspace = true, optional = true }
+alloy-signer = { workspace = true, optional = true }
+alloy-signer-local = { workspace = true, optional = true }
 alloy-sol-types = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
@@ -56,6 +59,7 @@ tempfile = { workspace = true }
 [dev-dependencies]
 alloy-network = { workspace = true }
 alloy-node-bindings = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
 alloy-signer-local = { workspace = true }
 wiremock = { workspace = true }
 
@@ -69,6 +73,14 @@ credits = [
     "dep:alloy-provider",
     "dep:alloy-rpc-types-eth",
     "dep:alloy-sol-types",
+]
+# EVM token swaps via CoW Swap. Reuses the credit module's amount helpers,
+# so it pulls in `credits`.
+swap = [
+    "credits",
+    "dep:alloy-network",
+    "dep:alloy-signer",
+    "dep:alloy-signer-local",
 ]
 # Exposes test-only helpers; not for production use.
 test-helpers = []
@@ -92,3 +104,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "car_roundtrip"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "swap_integration"
+required-features = ["swap"]
