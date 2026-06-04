@@ -2055,7 +2055,7 @@ pub struct InstanceSshArgs {
     pub port: u16,
 
     /// Path to an SSH private key (forwarded to `ssh -i`).
-    #[arg(long)]
+    #[arg(short = 'i', long)]
     pub identity: Option<std::path::PathBuf>,
 
     /// Extra arguments forwarded verbatim to `ssh` (after the host).
