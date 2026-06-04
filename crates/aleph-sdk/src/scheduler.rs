@@ -127,10 +127,10 @@ impl SchedulerClient {
     }
 
     /// Returns every VM the scheduler knows about for the given owner address.
-    /// Paginates internally over `/api/v1/vms?owners=<owner>&page_size=200`.
+    /// Paginates internally over `/api/v1/vms?owner=<owner>&page_size=200`.
     pub async fn list_vms_by_owner(&self, owner: &Address) -> Result<Vec<VmEntry>, SchedulerError> {
         let owner = owner.to_string();
-        self.fetch_all_pages("/api/v1/vms", &[("owners", owner.as_str())])
+        self.fetch_all_pages("/api/v1/vms", &[("owner", owner.as_str())])
             .await
     }
 
@@ -258,7 +258,7 @@ mod tests {
         for (page, items) in [(1u32, 100usize), (2, 100), (3, 50)] {
             Mock::given(method("GET"))
                 .and(path("/api/v1/vms"))
-                .and(query_param("owners", owner))
+                .and(query_param("owner", owner))
                 .and(query_param("page_size", "200"))
                 .and(query_param("page", page.to_string()))
                 .respond_with(
