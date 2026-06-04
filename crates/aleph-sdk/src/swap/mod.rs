@@ -26,6 +26,7 @@ impl SwapToken {
         }
     }
 
+    /// Display ticker for the sell token.
     pub fn symbol(self) -> &'static str {
         match self {
             SwapToken::Eth => "ETH",
@@ -70,6 +71,12 @@ pub struct SwapQuote {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderUid(pub String);
 
+impl std::fmt::Display for OrderUid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SwapError {
     #[error("network (chainId {0}) is not supported by CoW Swap")]
@@ -86,9 +93,15 @@ pub enum SwapError {
     #[error("failed to parse CoW API response")]
     Parse(#[source] reqwest::Error),
     #[error("failed to sign order")]
-    Sign(String),
-    #[error("on-chain transaction failed")]
-    Transaction(String),
+    Sign(#[source] alloy_signer::Error),
+    #[error("failed to read ERC20 allowance")]
+    ReadAllowance(#[source] alloy_contract::Error),
+    #[error("failed to send transaction")]
+    SendTransaction(#[source] alloy_contract::Error),
+    #[error("failed to confirm transaction")]
+    Receipt(#[source] alloy_provider::PendingTransactionError),
+    #[error("{0} transaction reverted")]
+    Reverted(&'static str),
 }
 
 #[cfg(test)]

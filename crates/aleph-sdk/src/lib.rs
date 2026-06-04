@@ -7,8 +7,6 @@ pub mod confidential;
 pub mod corechannel;
 #[cfg(feature = "credits")]
 pub mod credit;
-#[cfg(feature = "swap")]
-pub mod swap;
 pub mod credit_transfer;
 pub mod crn;
 pub mod crns_list;
@@ -18,6 +16,8 @@ pub mod messages;
 pub mod progress;
 mod proto;
 pub mod scheduler;
+#[cfg(feature = "swap")]
+pub mod swap;
 pub mod verify;
 pub mod ws;
 

@@ -10,9 +10,9 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 [dependencies]
 aes = { workspace = true }
 aleph-types = { workspace = true }
-# alloy crates are only needed for the `credits` feature (EVM credit
-# purchases). Gated so downstream SDK consumers who don't use that flow
-# avoid the whole alloy dependency tree.
+# alloy crates are only needed for the `credits` and `swap` features (EVM
+# credit purchases and token swaps). Gated so downstream SDK consumers who
+# don't use those flows avoid the whole alloy dependency tree.
 alloy-contract = { workspace = true, optional = true }
 alloy-network = { workspace = true, optional = true }
 alloy-primitives = { workspace = true, optional = true }
