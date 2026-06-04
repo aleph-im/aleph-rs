@@ -65,13 +65,14 @@ fn build_swap_provider(
     Ok((provider, address, signer))
 }
 
-fn print_swap_quote(sell_amount_display: &str, sell_token: SwapToken, quote: &SwapQuote) {
+fn print_swap_quote(sell_token: SwapToken, quote: &SwapQuote) {
+    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
     let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
     let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
     let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
     eprintln!(
         "Swapping {} {} for ALEPH via CoW Swap",
-        sell_amount_display,
+        sell_display,
         sell_token.symbol()
     );
     eprintln!("  Expected:     ~{buy_display} ALEPH");
@@ -111,7 +112,7 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
             aleph_addr
                 .to_string()
                 .parse::<Address>()
-                .map_err(|e| anyhow!("invalid receiver address: {e}"))?
+                .map_err(|e| anyhow!("invalid receiver address '{}': {e} (the receiver must be an EVM 0x... address)", r))?
         }
         None => owner,
     };
@@ -152,13 +153,13 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
 
     // Print quote summary to stderr (human mode).
     if !json {
-        print_swap_quote(&args.amount, sell_token, &quote);
+        print_swap_quote(sell_token, &quote);
     }
 
     // Dry-run: stop after printing the quote.
     if args.signing.dry_run {
         if json {
-            let mut output = quote_json(&args.amount, sell_token, &quote);
+            let mut output = quote_json(sell_token, &quote);
             output["dry_run"] = serde_json::Value::Bool(true);
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
@@ -192,7 +193,7 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
             .map_err(|e| anyhow!("failed to place CoW order: {e}"))?;
 
             if json {
-                let output = result_json_usdc(&args.amount, sell_token, &quote, &order_uid);
+                let output = result_json_usdc(sell_token, &quote, &order_uid);
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 eprintln!("Order submitted: {order_uid}");
@@ -215,7 +216,7 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
             let tx_hash_str = format!("{:#x}", tx_hash);
 
             if json {
-                let output = result_json_eth(&args.amount, sell_token, &quote, &tx_hash_str);
+                let output = result_json_eth(sell_token, &quote, &tx_hash_str);
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 eprintln!("Transaction submitted: {tx_hash_str}");
@@ -237,13 +238,14 @@ fn resolve_swap_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
     }
 }
 
-fn quote_json(amount_display: &str, sell_token: SwapToken, quote: &SwapQuote) -> serde_json::Value {
+fn quote_json(sell_token: SwapToken, quote: &SwapQuote) -> serde_json::Value {
+    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
     let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
     let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
     let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
     serde_json::json!({
         "sell_token": sell_token.symbol(),
-        "sell_amount": amount_display,
+        "sell_amount": sell_display,
         "expected_aleph": buy_display,
         "min_aleph": min_display,
         "fee": fee_display,
@@ -251,17 +253,17 @@ fn quote_json(amount_display: &str, sell_token: SwapToken, quote: &SwapQuote) ->
 }
 
 fn result_json_usdc(
-    amount_display: &str,
     sell_token: SwapToken,
     quote: &SwapQuote,
     order_uid: &str,
 ) -> serde_json::Value {
+    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
     let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
     let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
     let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
     serde_json::json!({
         "sell_token": sell_token.symbol(),
-        "sell_amount": amount_display,
+        "sell_amount": sell_display,
         "expected_aleph": buy_display,
         "min_aleph": min_display,
         "fee": fee_display,
@@ -269,18 +271,14 @@ fn result_json_usdc(
     })
 }
 
-fn result_json_eth(
-    amount_display: &str,
-    sell_token: SwapToken,
-    quote: &SwapQuote,
-    tx_hash: &str,
-) -> serde_json::Value {
+fn result_json_eth(sell_token: SwapToken, quote: &SwapQuote, tx_hash: &str) -> serde_json::Value {
+    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
     let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
     let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
     let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
     serde_json::json!({
         "sell_token": sell_token.symbol(),
-        "sell_amount": amount_display,
+        "sell_amount": sell_display,
         "expected_aleph": buy_display,
         "min_aleph": min_display,
         "fee": fee_display,
@@ -350,8 +348,9 @@ mod tests {
 
     #[test]
     fn result_json_usdc_shape() {
-        let v = result_json_usdc("50", SwapToken::Usdc, &sample_quote(), "0xUID");
+        let v = result_json_usdc(SwapToken::Usdc, &sample_quote(), "0xUID");
         assert_eq!(v["sell_token"], "USDC");
+        // sell_amount: 50_000_000 atoms / 10^6 = 50 USDC
         assert_eq!(v["sell_amount"], "50");
         assert_eq!(v["expected_aleph"], "1");
         assert_eq!(v["min_aleph"], "0.995");
@@ -368,9 +367,10 @@ mod tests {
 
     #[test]
     fn result_json_eth_shape() {
-        let v = result_json_eth("0.5", SwapToken::Eth, &sample_quote(), "0xdeadbeef");
+        let v = result_json_eth(SwapToken::Eth, &sample_quote(), "0xdeadbeef");
         assert_eq!(v["sell_token"], "ETH");
-        assert_eq!(v["sell_amount"], "0.5");
+        // sell_amount: 50_000_000 atoms / 10^18 = 0.00000000005 ETH
+        assert_eq!(v["sell_amount"], "0.00000000005");
         assert_eq!(v["tx_hash"], "0xdeadbeef");
         assert!(
             v.get("order_id").is_none(),
@@ -382,8 +382,9 @@ mod tests {
 
     #[test]
     fn quote_json_has_fee_and_no_order_id() {
-        let v = quote_json("50", SwapToken::Usdc, &sample_quote());
+        let v = quote_json(SwapToken::Usdc, &sample_quote());
         assert_eq!(v["sell_token"], "USDC");
+        // sell_amount: 50_000_000 atoms / 10^6 = 50 USDC
         assert_eq!(v["sell_amount"], "50");
         assert_eq!(v["expected_aleph"], "1");
         assert_eq!(v["min_aleph"], "0.995");
@@ -395,7 +396,7 @@ mod tests {
 
     #[test]
     fn quote_json_dry_run_flag_set_by_caller() {
-        let mut v = quote_json("50", SwapToken::Usdc, &sample_quote());
+        let mut v = quote_json(SwapToken::Usdc, &sample_quote());
         v["dry_run"] = serde_json::Value::Bool(true);
         assert_eq!(v["dry_run"], true);
     }
@@ -404,26 +405,16 @@ mod tests {
 
     #[test]
     fn result_json_usdc_snapshot() {
-        insta::assert_json_snapshot!(result_json_usdc(
-            "50",
-            SwapToken::Usdc,
-            &sample_quote(),
-            "0xUID"
-        ));
+        insta::assert_json_snapshot!(result_json_usdc(SwapToken::Usdc, &sample_quote(), "0xUID"));
     }
 
     #[test]
     fn result_json_eth_snapshot() {
-        insta::assert_json_snapshot!(result_json_eth(
-            "0.5",
-            SwapToken::Eth,
-            &sample_quote(),
-            "0xfeed"
-        ));
+        insta::assert_json_snapshot!(result_json_eth(SwapToken::Eth, &sample_quote(), "0xfeed"));
     }
 
     #[test]
     fn quote_json_snapshot() {
-        insta::assert_json_snapshot!(quote_json("0.5", SwapToken::Eth, &sample_quote()));
+        insta::assert_json_snapshot!(quote_json(SwapToken::Eth, &sample_quote()));
     }
 }
