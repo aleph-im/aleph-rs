@@ -6,11 +6,12 @@
 //! `stop`, `reboot`, `erase`, `logs`). The CRN URL is normally discovered via
 //! the scheduler's `/api/v1/nodes/<hash>` endpoint; the override is reserved
 //! for emergency debugging (e.g. a duplicated allocation that the user wants
-//! to address explicitly). The override accepts either a node hash (resolved
-//! through that same endpoint, like `--ccn` accepts an alias) or a raw CRN
-//! URL (anything containing `://`).
+//! to address explicitly). The override accepts a node hash or hash prefix
+//! (resolved through the scheduler like `--ccn` accepts an alias, matching
+//! the shorthand IDs printed by `aleph instance list`) or a raw CRN URL
+//! (anything containing `://`).
 
-use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
+use aleph_sdk::scheduler::{NodeEntry, SchedulerClient, VmEntry};
 use aleph_types::item_hash::ItemHash;
 use anyhow::{Context, Result, anyhow, bail};
 use url::Url;
@@ -69,13 +70,41 @@ async fn node_hash_to_url(scheduler_url: &Url, node_hash: &str) -> Result<Url> {
         .await
         .with_context(|| format!("looking up node {node_hash} in the scheduler"))?
         .ok_or_else(|| anyhow!("the scheduler has no record of node {node_hash}"))?;
+    node_entry_to_url(&node)
+}
+
+/// Extract and parse a node's reachable endpoint URL.
+fn node_entry_to_url(node: &NodeEntry) -> Result<Url> {
     let address = node.address.as_deref().ok_or_else(|| {
         anyhow!(
-            "scheduler knows node {node_hash} (status: {}) but has no reachable address for it",
+            "scheduler knows node {} (status: {}) but has no reachable address for it",
+            node.node_hash,
             node.status.as_deref().unwrap_or("unknown")
         )
     })?;
     Url::parse(address).with_context(|| format!("invalid CRN address `{address}`"))
+}
+
+/// Resolve a node-hash prefix to the node's endpoint URL. Errors when the
+/// prefix matches no node or more than one.
+async fn node_prefix_to_url(scheduler_url: &Url, prefix: &str) -> Result<Url> {
+    let scheduler = SchedulerClient::new(scheduler_url.clone());
+    let matches = scheduler
+        .find_nodes_by_hash_prefix(prefix)
+        .await
+        .with_context(|| format!("looking up nodes matching prefix `{prefix}` in the scheduler"))?;
+    match matches.len() {
+        0 => bail!("no CRN node matches `{prefix}`. Pass a full node hash or the CRN's URL."),
+        1 => node_entry_to_url(&matches[0]),
+        n => {
+            let mut hashes: Vec<&str> = matches.iter().map(|m| m.node_hash.as_str()).collect();
+            hashes.sort_unstable();
+            bail!(
+                "prefix `{prefix}` is ambiguous, matches {n} nodes:\n  {}",
+                hashes.join("\n  ")
+            )
+        }
+    }
 }
 
 /// Translate a `VmEntry` to the URL of the CRN it's allocated to.
@@ -119,23 +148,31 @@ pub async fn crn_url_from_entry(
 }
 
 /// Resolve a user-supplied `--crn` override to a URL. Anything containing
-/// `://` is treated as a raw URL and parsed directly; otherwise it's taken as
-/// a node hash and resolved through the scheduler — mirroring how `--ccn`
-/// accepts either a URL or a named alias.
+/// `://` is treated as a raw URL and parsed directly; a full 64-char hash is
+/// looked up via the scheduler's node endpoint; anything else is treated as
+/// a node-hash prefix (matching the shorthand IDs printed by `aleph instance
+/// list`) and must identify exactly one node, mirroring how a VM id accepts
+/// either a full hash or a prefix.
 async fn resolve_crn(scheduler_url: &Url, crn: &str) -> Result<Url> {
     if crn.contains("://") {
         return Url::parse(crn).context("invalid --crn URL");
     }
-    node_hash_to_url(scheduler_url, crn)
+    if ItemHash::try_from(crn).is_ok() {
+        return node_hash_to_url(scheduler_url, crn)
+            .await
+            .with_context(|| format!("resolving --crn node hash `{crn}`"));
+    }
+    node_prefix_to_url(scheduler_url, crn)
         .await
-        .with_context(|| format!("resolving --crn node hash `{crn}`"))
+        .with_context(|| format!("resolving --crn node prefix `{crn}`"))
 }
 
 /// Resolve `(vm_id, crn_url)` for any lifecycle subcommand.
 ///
 /// Three cases:
 /// 1. Override + full hash: resolve the override (a URL is parsed directly; a
-///    node hash is looked up in the scheduler) without fetching the VM entry.
+///    node hash or prefix is looked up in the scheduler) without fetching the
+///    VM entry.
 /// 2. Override + prefix: ask the scheduler to expand the prefix for the VM
 ///    hash, but take the CRN from the override.
 /// 3. No override: ask the scheduler for the entry and derive the URL from
@@ -163,7 +200,7 @@ pub async fn resolve_target(
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn vm_entry(hash_hex: &str) -> VmEntry {
@@ -350,6 +387,82 @@ mod tests {
         .unwrap();
         assert_eq!(hash.to_string(), FULL_HASH);
         assert_eq!(url.as_str(), "https://crn.example.io/");
+    }
+
+    fn node_page(hashes: &[&str]) -> serde_json::Value {
+        let items: Vec<serde_json::Value> = hashes
+            .iter()
+            .map(|hash| {
+                json!({
+                    "node_hash": hash,
+                    "address": "https://crn.example.io/",
+                    "status": "ok",
+                })
+            })
+            .collect();
+        json!({
+            "items": items,
+            "pagination": {
+                "page": 1, "page_size": 200, "total_items": hashes.len(), "total_pages": 1,
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn resolve_crn_with_node_prefix_resolves_via_scheduler() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", "d704"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(node_page(&[NODE_HASH])))
+            .mount(&server)
+            .await;
+
+        let url = resolve_crn(&Url::parse(&server.uri()).unwrap(), "d704")
+            .await
+            .unwrap();
+        assert_eq!(url.as_str(), "https://crn.example.io/");
+    }
+
+    #[tokio::test]
+    async fn resolve_crn_with_ambiguous_node_prefix_errors() {
+        let other_hash = "d704c0ffee2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d88";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", "d704"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(node_page(&[NODE_HASH, other_hash])),
+            )
+            .mount(&server)
+            .await;
+
+        let err = resolve_crn(&Url::parse(&server.uri()).unwrap(), "d704")
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ambiguous"));
+        assert!(msg.contains("matches 2 nodes"));
+        assert!(msg.contains(NODE_HASH));
+        assert!(msg.contains(other_hash));
+    }
+
+    #[tokio::test]
+    async fn resolve_crn_with_unknown_node_prefix_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", "beef"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(node_page(&[])))
+            .mount(&server)
+            .await;
+
+        let err = resolve_crn(&Url::parse(&server.uri()).unwrap(), "beef")
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no CRN node matches `beef`"));
+        assert!(msg.contains("full node hash"));
     }
 
     #[tokio::test]
