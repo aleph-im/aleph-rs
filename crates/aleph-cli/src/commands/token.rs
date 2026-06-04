@@ -1,6 +1,6 @@
 use crate::account::CliAccount;
 use crate::cli::{SigningArgs, SwapTokenCli, TokenCommand, TokenSwapArgs};
-use crate::common::{resolve_account, resolve_address, resolve_network};
+use crate::common::{confirm_submission, resolve_account, resolve_address, resolve_network};
 use aleph_sdk::credit::{format_token_amount, parse_token_amount};
 use aleph_sdk::swap::SwapQuote;
 use aleph_sdk::swap::SwapRequest;
@@ -38,15 +38,52 @@ pub async fn handle_token_command(
     }
 }
 
-async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>) -> Result<()> {
-    // Validate slippage: 0..=50 percent.
-    if !(0.0..=50.0).contains(&args.slippage) {
+/// Validate that `percent` is in the range `0.0..=50.0` (inclusive) and is
+/// not NaN. Returns the fractional form (`percent / 100`) on success.
+fn validate_slippage(percent: f64) -> Result<f64> {
+    if percent.is_nan() || !(0.0..=50.0).contains(&percent) {
         return Err(anyhow!(
             "--slippage must be between 0 and 50 (percent); got {}",
-            args.slippage
+            percent
         ));
     }
-    let slippage_frac = args.slippage / 100.0;
+    Ok(percent / 100.0)
+}
+
+fn build_swap_provider(
+    evm_account: &EvmAccount,
+    rpc_url: &str,
+) -> Result<(impl Provider, Address, PrivateKeySigner)> {
+    let signer = PrivateKeySigner::from_signing_key(evm_account.signing_key().clone());
+    let address = signer.address();
+    let url = rpc_url
+        .parse()
+        .map_err(|e| anyhow!("invalid RPC URL: {e}"))?;
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer.clone()))
+        .connect_http(url);
+    Ok((provider, address, signer))
+}
+
+fn print_swap_quote(sell_amount_display: &str, sell_token: SwapToken, quote: &SwapQuote) {
+    let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
+    let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
+    let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
+    eprintln!(
+        "Swapping {} {} for ALEPH via CoW Swap",
+        sell_amount_display,
+        sell_token.symbol()
+    );
+    eprintln!("  Expected:     ~{buy_display} ALEPH");
+    eprintln!("  Min received: {min_display} ALEPH");
+    eprintln!(
+        "  Fee:          {fee_display} {} (informational, taken from sell amount)",
+        sell_token.symbol()
+    );
+}
+
+async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>) -> Result<()> {
+    let slippage_frac = validate_slippage(args.slippage)?;
 
     let evm_account = resolve_swap_evm_account(&args.signing)?;
     let network = resolve_network(cli_network)?;
@@ -66,8 +103,7 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
     let sell_amount_raw = parse_token_amount(&args.amount, sell_token.decimals())
         .map_err(|e| anyhow!("invalid amount: {e}"))?;
 
-    let signer = PrivateKeySigner::from_signing_key(evm_account.signing_key().clone());
-    let owner: Address = signer.address();
+    let (provider, owner, signer) = build_swap_provider(&evm_account, rpc_url)?;
 
     let receiver: Address = match &args.receiver {
         Some(r) => {
@@ -80,12 +116,6 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
         None => owner,
     };
 
-    let url = rpc_url
-        .parse()
-        .map_err(|e| anyhow!("invalid RPC URL: {e}"))?;
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer.clone()))
-        .connect_http(url);
     let chain_id = provider
         .get_chain_id()
         .await
@@ -99,7 +129,7 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
         )
     })?;
 
-    let api = CowApi::new(chain_id).map_err(|e| anyhow!("{e}"))?;
+    let api = CowApi::new(chain_id).map_err(|e| anyhow!("failed to build CoW API client: {e}"))?;
 
     let req = SwapRequest {
         sell_token,
@@ -114,36 +144,21 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
     let (quote, resp) = match sell_token {
         SwapToken::Usdc => quote_usdc(&api, ethereum.usdc_token, &req)
             .await
-            .map_err(|e| anyhow!("{e}"))?,
+            .map_err(|e| anyhow!("failed to fetch CoW quote: {e}"))?,
         SwapToken::Eth => quote_eth(&api, chain.weth, &req)
             .await
-            .map_err(|e| anyhow!("{e}"))?,
+            .map_err(|e| anyhow!("failed to fetch CoW quote: {e}"))?,
     };
 
     // Print quote summary to stderr (human mode).
     if !json {
-        let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
-        let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
-        let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
-        let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
-        eprintln!(
-            "Swapping {} {} for ALEPH via CoW Swap",
-            sell_display,
-            sell_token.symbol()
-        );
-        eprintln!("  Expected:     ~{buy_display} ALEPH");
-        eprintln!("  Min received: {min_display} ALEPH");
-        eprintln!(
-            "  Fee:          {fee_display} {} (informational, taken from sell amount)",
-            sell_token.symbol()
-        );
+        print_swap_quote(&args.amount, sell_token, &quote);
     }
 
     // Dry-run: stop after printing the quote.
     if args.signing.dry_run {
         if json {
-            let v = quote_json(&args.amount, sell_token, &quote);
-            let mut output = v;
+            let mut output = quote_json(&args.amount, sell_token, &quote);
             output["dry_run"] = serde_json::Value::Bool(true);
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
@@ -153,26 +168,18 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
     }
 
     // Confirmation: only prompt in human mode (mirror credit.rs: no prompt when --json).
-    if !json && !args.yes {
-        eprintln!();
-        let confirmed = dialoguer::Confirm::new()
-            .with_prompt("Proceed?")
-            .default(false)
-            .interact()
-            .map_err(|e| anyhow!("failed to read confirmation: {e}"))?;
-        if !confirmed {
-            eprintln!("Cancelled.");
-            return Ok(());
-        }
+    if !json && !args.yes && !confirm_submission("Proceed?")? {
+        eprintln!("Cancelled.");
+        return Ok(());
     }
 
     // Submit the order.
-    let order_id = match sell_token {
+    match sell_token {
         SwapToken::Usdc => {
             ensure_allowance(&provider, ethereum.usdc_token, owner, quote.sell_amount)
                 .await
-                .map_err(|e| anyhow!("{e}"))?;
-            place_usdc_order(
+                .map_err(|e| anyhow!("failed to ensure USDC allowance: {e}"))?;
+            let order_uid = place_usdc_order(
                 &api,
                 chain_id,
                 ethereum.usdc_token,
@@ -182,7 +189,15 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
                 &signer,
             )
             .await
-            .map_err(|e| anyhow!("{e}"))?
+            .map_err(|e| anyhow!("failed to place CoW order: {e}"))?;
+
+            if json {
+                let output = result_json_usdc(&args.amount, sell_token, &quote, &order_uid);
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                eprintln!("Order submitted: {order_uid}");
+                eprintln!("https://explorer.cow.fi/orders/{order_uid}");
+            }
         }
         SwapToken::Eth => {
             let tx_hash = create_eth_order(
@@ -196,22 +211,17 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
                 resp.id.unwrap_or(0),
             )
             .await
-            .map_err(|e| anyhow!("{e}"))?;
-            format!("{:#x}", tx_hash)
-        }
-    };
+            .map_err(|e| anyhow!("failed to submit ETH-flow order: {e}"))?;
+            let tx_hash_str = format!("{:#x}", tx_hash);
 
-    // Output result.
-    if json {
-        let output = result_json(&args.amount, sell_token, &quote, &order_id);
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        eprintln!("Order submitted: {order_id}");
-        let explorer_url = match sell_token {
-            SwapToken::Usdc => format!("https://explorer.cow.fi/orders/{order_id}"),
-            SwapToken::Eth => format!("https://explorer.cow.fi/tx/{order_id}"),
-        };
-        eprintln!("{explorer_url}");
+            if json {
+                let output = result_json_eth(&args.amount, sell_token, &quote, &tx_hash_str);
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                eprintln!("Transaction submitted: {tx_hash_str}");
+                eprintln!("https://explorer.cow.fi/tx/{tx_hash_str}");
+            }
+        }
     }
 
     Ok(())
@@ -230,28 +240,51 @@ fn resolve_swap_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
 fn quote_json(amount_display: &str, sell_token: SwapToken, quote: &SwapQuote) -> serde_json::Value {
     let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
     let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
+    let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
     serde_json::json!({
         "sell_token": sell_token.symbol(),
         "sell_amount": amount_display,
         "expected_aleph": buy_display,
         "min_aleph": min_display,
+        "fee": fee_display,
     })
 }
 
-fn result_json(
+fn result_json_usdc(
     amount_display: &str,
     sell_token: SwapToken,
     quote: &SwapQuote,
-    order_id: &str,
+    order_uid: &str,
 ) -> serde_json::Value {
     let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
     let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
+    let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
     serde_json::json!({
         "sell_token": sell_token.symbol(),
         "sell_amount": amount_display,
         "expected_aleph": buy_display,
         "min_aleph": min_display,
-        "order_id": order_id,
+        "fee": fee_display,
+        "order_id": order_uid,
+    })
+}
+
+fn result_json_eth(
+    amount_display: &str,
+    sell_token: SwapToken,
+    quote: &SwapQuote,
+    tx_hash: &str,
+) -> serde_json::Value {
+    let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
+    let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
+    let fee_display = format_token_amount(quote.fee_amount, sell_token.decimals());
+    serde_json::json!({
+        "sell_token": sell_token.symbol(),
+        "sell_amount": amount_display,
+        "expected_aleph": buy_display,
+        "min_aleph": min_display,
+        "fee": fee_display,
+        "tx_hash": tx_hash,
     })
 }
 
@@ -265,7 +298,7 @@ mod tests {
             sell_amount: U256::from(50_000_000u64),
             buy_amount: U256::from(1_000_000_000_000_000_000u128), // 1e18
             min_buy_amount: U256::from(995_000_000_000_000_000u128), // 0.995e18
-            fee_amount: U256::ZERO,
+            fee_amount: U256::from(100_000u64),                    // 0.1 USDC (6 dec)
         }
     }
 
@@ -278,13 +311,92 @@ mod tests {
         ));
     }
 
+    // --- validate_slippage ---
+
     #[test]
-    fn result_json_shape() {
-        let v = result_json("50", SwapToken::Usdc, &sample_quote(), "0xUID");
+    fn validate_slippage_accepts_zero() {
+        let frac = validate_slippage(0.0).unwrap();
+        assert_eq!(frac, 0.0);
+    }
+
+    #[test]
+    fn validate_slippage_accepts_midrange() {
+        let frac = validate_slippage(0.5).unwrap();
+        assert!((frac - 0.005).abs() < 1e-12);
+    }
+
+    #[test]
+    fn validate_slippage_accepts_fifty() {
+        let frac = validate_slippage(50.0).unwrap();
+        assert!((frac - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn validate_slippage_rejects_negative() {
+        assert!(validate_slippage(-0.1).is_err());
+    }
+
+    #[test]
+    fn validate_slippage_rejects_above_fifty() {
+        assert!(validate_slippage(50.1).is_err());
+    }
+
+    #[test]
+    fn validate_slippage_rejects_nan() {
+        assert!(validate_slippage(f64::NAN).is_err());
+    }
+
+    // --- result_json_usdc ---
+
+    #[test]
+    fn result_json_usdc_shape() {
+        let v = result_json_usdc("50", SwapToken::Usdc, &sample_quote(), "0xUID");
         assert_eq!(v["sell_token"], "USDC");
         assert_eq!(v["sell_amount"], "50");
         assert_eq!(v["expected_aleph"], "1");
         assert_eq!(v["min_aleph"], "0.995");
         assert_eq!(v["order_id"], "0xUID");
+        // fee: 100_000 / 10^6 = 0.1 USDC
+        assert_eq!(v["fee"], "0.1");
+        assert!(
+            v.get("tx_hash").is_none(),
+            "USDC result must not have tx_hash"
+        );
+    }
+
+    // --- result_json_eth ---
+
+    #[test]
+    fn result_json_eth_shape() {
+        let v = result_json_eth("0.5", SwapToken::Eth, &sample_quote(), "0xdeadbeef");
+        assert_eq!(v["sell_token"], "ETH");
+        assert_eq!(v["sell_amount"], "0.5");
+        assert_eq!(v["tx_hash"], "0xdeadbeef");
+        assert!(
+            v.get("order_id").is_none(),
+            "ETH result must not have order_id"
+        );
+    }
+
+    // --- quote_json ---
+
+    #[test]
+    fn quote_json_has_fee_and_no_order_id() {
+        let v = quote_json("50", SwapToken::Usdc, &sample_quote());
+        assert_eq!(v["sell_token"], "USDC");
+        assert_eq!(v["sell_amount"], "50");
+        assert_eq!(v["expected_aleph"], "1");
+        assert_eq!(v["min_aleph"], "0.995");
+        assert_eq!(v["fee"], "0.1");
+        assert!(v.get("order_id").is_none());
+        assert!(v.get("tx_hash").is_none());
+        assert!(v.get("dry_run").is_none(), "dry_run only set by caller");
+    }
+
+    #[test]
+    fn quote_json_dry_run_flag_set_by_caller() {
+        let mut v = quote_json("50", SwapToken::Usdc, &sample_quote());
+        v["dry_run"] = serde_json::Value::Bool(true);
+        assert_eq!(v["dry_run"], true);
     }
 }

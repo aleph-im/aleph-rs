@@ -2414,6 +2414,10 @@ pub struct TokenSwapArgs {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
+    // NOTE: the inherited --dry-run help text says "Build and sign the message
+    // but don't submit it." For swap that means quote-only (no on-chain
+    // submission). Clap does not allow overriding help text of flattened
+    // fields, so the mismatch is accepted as a known limitation.
     #[command(flatten)]
     pub signing: SigningArgs,
 }

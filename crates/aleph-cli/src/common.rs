@@ -649,6 +649,24 @@ pub fn resolve_address(value: &str) -> Result<Address> {
     resolve_address_with_store(&store, value)
 }
 
+/// Interactive "Proceed?" confirmation used before submitting on-chain transactions.
+///
+/// Prints a blank line, then shows a dialoguer `y/N` prompt with `prompt` as
+/// the question text. Returns `Ok(true)` on `y`/`yes`, `Ok(false)` on any
+/// other answer. Errors only on stdin-read failure.
+///
+/// Pass the same `prompt` text here that you would display to the user (e.g.
+/// `"Proceed?"`). Use this instead of duplicating the dialoguer boilerplate
+/// in every command handler.
+pub(crate) fn confirm_submission(prompt: &str) -> Result<bool> {
+    eprintln!();
+    dialoguer::Confirm::new()
+        .with_prompt(prompt)
+        .default(false)
+        .interact()
+        .map_err(|e| anyhow!("failed to read confirmation: {e}"))
+}
+
 /// Prompt the user for `y/N` confirmation on a TTY.
 ///
 /// Returns `Ok(true)` if the user types `y` / `yes` (case-insensitive),
