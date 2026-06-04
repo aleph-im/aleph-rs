@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::swap::SwapError;
 
+/// CoW quote endpoint computes prices server-side and can be slower than simple REST reads.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// CoW orderbook REST client for a single network.
@@ -48,6 +49,7 @@ pub struct QuoteResponse {
     pub id: Option<i64>,
 }
 
+/// The priced order parameters inside a quote response.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuoteParams {
@@ -103,6 +105,7 @@ impl CowApi {
         Self { http, base_url }
     }
 
+    /// POSTs to {base}/quote, returns the priced quote.
     pub async fn quote(&self, req: &QuoteRequest) -> Result<QuoteResponse, SwapError> {
         let resp = self
             .http
@@ -114,6 +117,7 @@ impl CowApi {
         Self::parse_json(resp).await
     }
 
+    /// POSTs to {base}/orders, returns the order UID string.
     pub async fn place_order(&self, body: &OrderCreation) -> Result<String, SwapError> {
         let resp = self
             .http
@@ -140,7 +144,14 @@ impl CowApi {
 }
 
 /// Apply slippage to a buy amount: `floor(buy * (1 - slippage))`.
+///
+/// `slippage` is a fraction and must be in `[0.0, 1.0)`; callers validate
+/// user input before reaching this point.
 pub fn apply_slippage(buy_amount: U256, slippage: f64) -> U256 {
+    debug_assert!(
+        slippage.is_finite() && (0.0..1.0).contains(&slippage),
+        "slippage must be in [0, 1); got {slippage}"
+    );
     // Scale by 1e9 to keep precision without floats on U256.
     let scale = ((1.0 - slippage) * 1_000_000_000.0).round() as u64;
     buy_amount * U256::from(scale) / U256::from(1_000_000_000u64)
@@ -167,6 +178,13 @@ mod unit_tests {
     fn apply_slippage_zero_is_identity() {
         let buy = U256::from(12_345u64);
         assert_eq!(apply_slippage(buy, 0.0), buy);
+    }
+
+    #[test]
+    fn apply_slippage_max_fraction() {
+        // 0.5 (50%) is the largest slippage the CLI accepts.
+        let buy = U256::from(1_000_000u64);
+        assert_eq!(apply_slippage(buy, 0.5), U256::from(500_000u64));
     }
 
     #[test]
