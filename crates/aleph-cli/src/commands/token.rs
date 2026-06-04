@@ -399,4 +399,31 @@ mod tests {
         v["dry_run"] = serde_json::Value::Bool(true);
         assert_eq!(v["dry_run"], true);
     }
+
+    // --- Snapshot tests ---
+
+    #[test]
+    fn result_json_usdc_snapshot() {
+        insta::assert_json_snapshot!(result_json_usdc(
+            "50",
+            SwapToken::Usdc,
+            &sample_quote(),
+            "0xUID"
+        ));
+    }
+
+    #[test]
+    fn result_json_eth_snapshot() {
+        insta::assert_json_snapshot!(result_json_eth(
+            "0.5",
+            SwapToken::Eth,
+            &sample_quote(),
+            "0xfeed"
+        ));
+    }
+
+    #[test]
+    fn quote_json_snapshot() {
+        insta::assert_json_snapshot!(quote_json("0.5", SwapToken::Eth, &sample_quote()));
+    }
 }
