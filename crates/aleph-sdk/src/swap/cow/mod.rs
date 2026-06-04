@@ -6,8 +6,9 @@ pub mod order;
 
 use std::time::Duration;
 
+use alloy_network::Network;
 use alloy_primitives::{Address, U256};
-use alloy_provider::Provider;
+use alloy_provider::{PendingTransactionBuilder, Provider};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::sol;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,22 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Maximum wait for an approve transaction receipt before giving up.
 pub(crate) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Wait for `pending` to be mined and return its receipt, failing on timeout
+/// or RPC error.
+///
+/// The Reverted check is left to the caller so each use site can name the
+/// offending operation in the error message.
+pub(crate) async fn await_receipt<N: Network>(
+    pending: PendingTransactionBuilder<N>,
+) -> Result<N::ReceiptResponse, SwapError> {
+    tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| SwapError::ReceiptTimeout {
+            timeout_secs: RECEIPT_TIMEOUT.as_secs(),
+        })?
+        .map_err(SwapError::Receipt)
+}
 
 /// CoW orderbook REST client for a single network.
 pub struct CowApi {
@@ -204,12 +221,7 @@ pub async fn ensure_allowance(
         .send()
         .await
         .map_err(SwapError::SendTransaction)?;
-    let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| SwapError::ReceiptTimeout {
-            timeout_secs: RECEIPT_TIMEOUT.as_secs(),
-        })?
-        .map_err(SwapError::Receipt)?;
+    let receipt = await_receipt(pending).await?;
     if !receipt.status() {
         return Err(SwapError::Reverted("approve"));
     }
@@ -273,7 +285,8 @@ pub async fn quote_usdc(
 
 /// Quote a native-ETH sell. The sell token is the chain's WETH (the ETH-flow
 /// contract wraps ETH, so CoW prices the WETH leg) and the quote is flagged
-/// as an on-chain (eip1271) order.
+/// as an on-chain (eip1271) order. The caller must pass the chain's canonical
+/// WETH address; there is no sentinel or zero-address shortcut.
 pub async fn quote_eth(
     api: &CowApi,
     weth_token: Address,

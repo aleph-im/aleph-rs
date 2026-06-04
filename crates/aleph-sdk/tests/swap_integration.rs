@@ -143,9 +143,23 @@ async fn eth_flow_create_order_sends_value_with_calldata() {
         .expect("tx exists");
     // Value attached must equal sell_amount (fee-in-price: no fee on top).
     assert_eq!(tx.value(), sell_amount);
-    // Calldata starts with the createOrder selector (at least 4 bytes).
+    // Calldata must encode exactly: 4-byte selector + 9 ABI words (one
+    // tuple argument whose 9 fields are each padded to 32 bytes).
     let input = tx.input().clone();
-    assert!(input.len() > 4, "calldata must carry the encoded order");
+    let selector = &alloy_primitives::keccak256(
+        "createOrder((address,address,uint256,uint256,bytes32,uint256,uint32,bool,int64))"
+            .as_bytes(),
+    )[..4];
+    assert_eq!(
+        &input[..4],
+        selector,
+        "first 4 bytes must be the createOrder selector"
+    );
+    assert_eq!(
+        input.len(),
+        4 + 9 * 32,
+        "calldata must be selector + 9 ABI words"
+    );
 }
 
 #[tokio::test]

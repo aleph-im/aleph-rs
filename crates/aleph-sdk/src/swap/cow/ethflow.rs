@@ -11,7 +11,7 @@ use alloy_provider::Provider;
 use alloy_sol_types::sol;
 
 use crate::swap::SwapError;
-use crate::swap::cow::RECEIPT_TIMEOUT;
+use crate::swap::cow::await_receipt;
 use crate::swap::cow::order::app_data_hash;
 
 sol! {
@@ -68,12 +68,7 @@ pub async fn create_eth_order(
         .send()
         .await
         .map_err(SwapError::SendTransaction)?;
-    let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| SwapError::ReceiptTimeout {
-            timeout_secs: RECEIPT_TIMEOUT.as_secs(),
-        })?
-        .map_err(SwapError::Receipt)?;
+    let receipt = await_receipt(pending).await?;
     if !receipt.status() {
         return Err(SwapError::Reverted("createOrder"));
     }
@@ -88,8 +83,8 @@ mod tests {
 
     #[test]
     fn create_order_selector_matches_deployed_abi() {
-        // Independent derivation: canonical signature string built from the
-        // verified EthFlowOrder.Data layout in cowprotocol/ethflowcontract.
+        // Cross-checks the sol!-generated selector against the canonical ABI
+        // signature string from cowprotocol/ethflowcontract.
         let sig =
             "createOrder((address,address,uint256,uint256,bytes32,uint256,uint32,bool,int64))";
         let expected = &keccak256(sig.as_bytes())[..4];
