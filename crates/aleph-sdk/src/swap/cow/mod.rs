@@ -7,9 +7,12 @@ pub mod order;
 use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
+use alloy_provider::Provider;
+use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::sol;
 use serde::{Deserialize, Serialize};
 
-use crate::swap::SwapError;
+use crate::swap::{SwapError, SwapQuote, SwapRequest};
 
 /// CoW quote endpoint computes prices server-side and can be slower than simple REST reads.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -160,6 +163,146 @@ pub fn apply_slippage(buy_amount: U256, slippage: f64) -> U256 {
 /// Format an `Address` as a lowercase `0x`-prefixed hex string for the API.
 pub fn addr_hex(a: Address) -> String {
     format!("{a:#x}")
+}
+
+sol! {
+    #[sol(rpc)]
+    interface IERC20Allowance {
+        function allowance(address owner, address spender) external view returns (uint256);
+        function approve(address spender, uint256 amount) external returns (bool);
+    }
+}
+
+/// Ensure `owner` has at least `amount` allowance for the vault relayer on
+/// `token`; submit an `approve` tx and await its receipt if not.
+pub async fn ensure_allowance(
+    provider: &impl Provider,
+    token: Address,
+    owner: Address,
+    amount: U256,
+) -> Result<(), SwapError> {
+    let erc20 = IERC20Allowance::new(token, provider);
+    let current = erc20
+        .allowance(owner, order::VAULT_RELAYER)
+        .call()
+        .await
+        .map_err(SwapError::ReadAllowance)?;
+    if current >= amount {
+        return Ok(());
+    }
+    let pending = erc20
+        .approve(order::VAULT_RELAYER, amount)
+        .send()
+        .await
+        .map_err(SwapError::SendTransaction)?;
+    let receipt = pending.get_receipt().await.map_err(SwapError::Receipt)?;
+    if !receipt.status() {
+        return Err(SwapError::Reverted("approve"));
+    }
+    Ok(())
+}
+
+/// Fetch a CoW sell quote and translate it into a [`SwapQuote`] with the
+/// slippage floor applied.
+///
+/// Per CoW's fee-in-price model, the returned `sell_amount` is
+/// `quote.sellAmount + quote.feeAmount`: the total the order consumes, which
+/// the order carries with `feeAmount = 0`.
+pub async fn quote_sell(
+    api: &CowApi,
+    sell_token: Address,
+    req: &SwapRequest,
+    onchain: bool,
+) -> Result<(SwapQuote, QuoteResponse), SwapError> {
+    let q = QuoteRequest {
+        sell_token: addr_hex(sell_token),
+        buy_token: addr_hex(req.buy_token),
+        from: addr_hex(req.from),
+        receiver: addr_hex(req.receiver),
+        kind: "sell".to_string(),
+        sell_amount_before_fee: req.sell_amount.to_string(),
+        valid_for: req.valid_for_secs,
+        onchain_order: onchain.then_some(true),
+        signing_scheme: onchain.then(|| "eip1271".to_string()),
+    };
+    let resp = api.quote(&q).await?;
+    let quoted_sell = parse_atoms(&resp.quote.sell_amount)?;
+    let buy_amount = parse_atoms(&resp.quote.buy_amount)?;
+    let fee_amount = parse_atoms(&resp.quote.fee_amount)?;
+    let min_buy_amount = apply_slippage(buy_amount, req.slippage);
+    Ok((
+        SwapQuote {
+            sell_amount: quoted_sell + fee_amount,
+            buy_amount,
+            min_buy_amount,
+            fee_amount,
+        },
+        resp,
+    ))
+}
+
+fn parse_atoms(s: &str) -> Result<U256, SwapError> {
+    s.parse::<U256>()
+        .map_err(|e| SwapError::InvalidAmount(format!("'{s}': {e}")))
+}
+
+/// Quote a USDC sell (off-chain signed order path).
+pub async fn quote_usdc(
+    api: &CowApi,
+    usdc_token: Address,
+    req: &SwapRequest,
+) -> Result<(SwapQuote, QuoteResponse), SwapError> {
+    quote_sell(api, usdc_token, req, false).await
+}
+
+/// Build, sign (EIP-712) and submit a USDC sell order. Returns the order UID.
+///
+/// The order follows CoW's fee-in-price model: `sellAmount` is the quoted
+/// sell + fee total and `feeAmount` is zero. The body carries the full
+/// appData JSON document; the signed order carries its keccak256 hash.
+pub async fn place_usdc_order(
+    api: &CowApi,
+    chain_id: u64,
+    usdc_token: Address,
+    req: &SwapRequest,
+    quote: &SwapQuote,
+    quote_resp: &QuoteResponse,
+    signer: &PrivateKeySigner,
+) -> Result<String, SwapError> {
+    let order = order::Order {
+        sellToken: usdc_token,
+        buyToken: req.buy_token,
+        receiver: req.receiver,
+        sellAmount: quote.sell_amount,
+        buyAmount: quote.min_buy_amount,
+        validTo: quote_resp.quote.valid_to,
+        appData: order::app_data_hash(),
+        feeAmount: U256::ZERO,
+        kind: "sell".to_string(),
+        partiallyFillable: false,
+        sellTokenBalance: "erc20".to_string(),
+        buyTokenBalance: "erc20".to_string(),
+    };
+    let signature = order::sign_order(&order, chain_id, signer)?;
+    let body = OrderCreation {
+        sell_token: addr_hex(usdc_token),
+        buy_token: addr_hex(req.buy_token),
+        receiver: addr_hex(req.receiver),
+        sell_amount: quote.sell_amount.to_string(),
+        buy_amount: quote.min_buy_amount.to_string(),
+        valid_to: quote_resp.quote.valid_to,
+        app_data: order::APP_DATA_JSON.to_string(),
+        fee_amount: "0".to_string(),
+        kind: "sell".to_string(),
+        partially_fillable: false,
+        sell_token_balance: "erc20".to_string(),
+        buy_token_balance: "erc20".to_string(),
+        signing_scheme: "eip712".to_string(),
+        signature,
+        from: addr_hex(req.from),
+        quote_id: quote_resp.id,
+    };
+    api.place_order(&body).await
 }
 
 #[cfg(test)]

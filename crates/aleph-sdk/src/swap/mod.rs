@@ -102,6 +102,8 @@ pub enum SwapError {
     Receipt(#[source] alloy_provider::PendingTransactionError),
     #[error("{0} transaction reverted")]
     Reverted(&'static str),
+    #[error("invalid amount in CoW response: {0}")]
+    InvalidAmount(String),
 }
 
 #[cfg(test)]
