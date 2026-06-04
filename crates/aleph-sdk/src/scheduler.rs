@@ -146,16 +146,20 @@ impl SchedulerClient {
             .await
     }
 
-    /// Find every node whose hash starts with `prefix`. The scheduler's
-    /// `/api/v1/nodes?hash=<prefix>` endpoint matches prefixes server-side
-    /// (the parameter is named `hash` there, unlike `vm_hash` on
-    /// `/api/v1/vms`). Paginates defensively for short prefixes, though the
-    /// node population is small (~500 as of writing).
-    pub async fn find_nodes_by_hash_prefix(
+    /// Find every node whose hash matches `fragment`. The scheduler's
+    /// `/api/v1/nodes?hash=<fragment>` endpoint matches anchored prefixes OR
+    /// suffixes server-side (a middle fragment does not match); see
+    /// aleph-vm-scheduler v0.1.1 feature #182. The parameter is named `hash`
+    /// here, unlike `vm_hash` on `/api/v1/vms`. The shorthand node IDs printed
+    /// by `aleph instance list` are the last 10 characters of the node hash,
+    /// i.e. suffixes, so they resolve through this endpoint. Paginates
+    /// defensively for short fragments, though the node population is small
+    /// (~500 as of writing).
+    pub async fn find_nodes_by_hash_fragment(
         &self,
-        prefix: &str,
+        fragment: &str,
     ) -> Result<Vec<NodeEntry>, SchedulerError> {
-        self.fetch_all_pages("/api/v1/nodes", &[("hash", prefix)])
+        self.fetch_all_pages("/api/v1/nodes", &[("hash", fragment)])
             .await
     }
 
@@ -435,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_nodes_by_hash_prefix_returns_matches() {
+    async fn find_nodes_by_hash_fragment_matches_anchored_prefix() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/nodes"))
@@ -451,13 +455,39 @@ mod tests {
             .await;
 
         let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
-        let nodes = client.find_nodes_by_hash_prefix("bb0a").await.unwrap();
+        let nodes = client.find_nodes_by_hash_fragment("bb0a").await.unwrap();
         assert_eq!(nodes.len(), 2);
-        assert!(nodes.iter().all(|n| n.node_hash.starts_with("bb0a")));
+        // Matching is anchored at either end (prefix or suffix).
+        assert!(
+            nodes
+                .iter()
+                .all(|n| n.node_hash.starts_with("bb0a") || n.node_hash.ends_with("bb0a"))
+        );
     }
 
     #[tokio::test]
-    async fn find_nodes_by_hash_prefix_empty_on_no_match() {
+    async fn find_nodes_by_hash_fragment_matches_anchored_suffix() {
+        // The shorthand node IDs printed by `aleph instance list` are the last
+        // 10 characters of the node hash, i.e. suffixes. The scheduler matches
+        // those server-side (v0.1.1 #182); the client just forwards the value.
+        let full = "bb0aa1a9fc7566286c0db32cd5c660066017430390ca779da4d3a241fa07c337";
+        let suffix = &full[full.len() - 10..];
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", suffix))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_node_page(&[full], 1)))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let nodes = client.find_nodes_by_hash_fragment(suffix).await.unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].node_hash.ends_with(suffix));
+    }
+
+    #[tokio::test]
+    async fn find_nodes_by_hash_fragment_empty_on_no_match() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/nodes"))
@@ -467,7 +497,10 @@ mod tests {
             .await;
 
         let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
-        let nodes = client.find_nodes_by_hash_prefix("deadbeef").await.unwrap();
+        let nodes = client
+            .find_nodes_by_hash_fragment("deadbeef")
+            .await
+            .unwrap();
         assert!(nodes.is_empty());
     }
 

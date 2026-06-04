@@ -1641,7 +1641,7 @@ which CRN owns it, then the CRN's `/about/executions/list` endpoint is
 consulted to discover the VM's IPv6 address. SSH is then exec'd with that
 target.
 
-Pass `--crn` (a node hash, unique hash prefix, or URL) to skip scheduler discovery. Extra arguments after `--`
+Pass `--crn` (a node hash, unique hash prefix or suffix, or URL) to skip scheduler discovery. Extra arguments after `--`
 are forwarded verbatim to `ssh` (e.g. to run a remote command).
 
 Examples:
@@ -1907,9 +1907,10 @@ pub struct AuthorizationRevokeArgs {
 
 #[derive(Args)]
 pub struct CrnArgs {
-    /// CRN to target: either a node hash or unique hash prefix (resolved to
-    /// its URL via the scheduler) or a raw endpoint URL (anything containing
-    /// `://`).
+    /// CRN to target: either a node hash or unique hash prefix or suffix
+    /// (resolved to its URL via the scheduler; a suffix matches the shorthand
+    /// IDs shown by `aleph instance list`) or a raw endpoint URL (anything
+    /// containing `://`).
     ///
     /// Optional override: if omitted, the CRN is discovered via the scheduler.
     /// Pass this to bypass the scheduler's choice (e.g. when an instance is
@@ -1929,9 +1930,10 @@ pub struct CrnArgs {
 /// required to construct the CrnClient but no auth headers are sent.
 #[derive(Args)]
 pub struct CrnStartArgs {
-    /// CRN to target: either a node hash or unique hash prefix (resolved to
-    /// its URL via the scheduler) or a raw endpoint URL (anything containing
-    /// `://`).
+    /// CRN to target: either a node hash or unique hash prefix or suffix
+    /// (resolved to its URL via the scheduler; a suffix matches the shorthand
+    /// IDs shown by `aleph instance list`) or a raw endpoint URL (anything
+    /// containing `://`).
     ///
     /// Optional override: if omitted, the CRN is discovered via the scheduler.
     /// Pass this to bypass the scheduler's choice (e.g. when an instance is
@@ -1975,8 +1977,8 @@ pub struct InstanceBackupCreateArgs {
     /// Poll the CRN until the backup completes (or times out after 30 min).
     #[arg(long)]
     pub follow: bool,
-    /// CRN to target: a node hash or unique hash prefix (resolved via the
-    /// scheduler) or a raw URL.
+    /// CRN to target: a node hash or unique hash prefix or suffix (resolved via
+    /// the scheduler) or a raw URL.
     /// Optional override; the CRN is normally discovered via the scheduler.
     #[arg(long, alias = "crn-url")]
     pub crn: Option<String>,
@@ -2000,8 +2002,8 @@ pub struct InstanceBackupDownloadArgs {
     /// Output path. Defaults to ./backup-<vm_id_short>.tar.
     #[arg(short, long)]
     pub output: Option<std::path::PathBuf>,
-    /// CRN to target: a node hash or unique hash prefix (resolved via the
-    /// scheduler) or a raw URL (ignored when the positional arg is already a
+    /// CRN to target: a node hash or unique hash prefix or suffix (resolved via
+    /// the scheduler) or a raw URL (ignored when the positional arg is already a
     /// presigned URL).
     #[arg(long, alias = "crn-url")]
     pub crn: Option<String>,

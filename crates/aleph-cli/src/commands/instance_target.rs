@@ -6,10 +6,11 @@
 //! `stop`, `reboot`, `erase`, `logs`). The CRN URL is normally discovered via
 //! the scheduler's `/api/v1/nodes/<hash>` endpoint; the override is reserved
 //! for emergency debugging (e.g. a duplicated allocation that the user wants
-//! to address explicitly). The override accepts a node hash or hash prefix
-//! (resolved through the scheduler like `--ccn` accepts an alias, matching
-//! the shorthand IDs printed by `aleph instance list`) or a raw CRN URL
-//! (anything containing `://`).
+//! to address explicitly). The override accepts a node hash, a hash prefix or
+//! suffix (resolved through the scheduler like `--ccn` accepts an alias; the
+//! scheduler matches anchored prefixes or suffixes, so this includes the
+//! shorthand IDs printed by `aleph instance list`, which are hash suffixes),
+//! or a raw CRN URL (anything containing `://`).
 
 use aleph_sdk::scheduler::{NodeEntry, SchedulerClient, VmEntry};
 use aleph_types::item_hash::ItemHash;
@@ -85,22 +86,22 @@ fn node_entry_to_url(node: &NodeEntry) -> Result<Url> {
     Url::parse(address).with_context(|| format!("invalid CRN address `{address}`"))
 }
 
-/// Resolve a node-hash prefix to the node's endpoint URL. Errors when the
-/// prefix matches no node or more than one.
-async fn node_prefix_to_url(scheduler_url: &Url, prefix: &str) -> Result<Url> {
+/// Resolve a node-hash fragment (an anchored prefix or suffix) to the node's
+/// endpoint URL. Errors when the fragment matches no node or more than one.
+async fn node_fragment_to_url(scheduler_url: &Url, fragment: &str) -> Result<Url> {
     let scheduler = SchedulerClient::new(scheduler_url.clone());
     let matches = scheduler
-        .find_nodes_by_hash_prefix(prefix)
+        .find_nodes_by_hash_fragment(fragment)
         .await
-        .with_context(|| format!("looking up nodes matching prefix `{prefix}` in the scheduler"))?;
+        .with_context(|| format!("looking up nodes matching `{fragment}` in the scheduler"))?;
     match matches.len() {
-        0 => bail!("no CRN node matches `{prefix}`. Pass a full node hash or the CRN's URL."),
+        0 => bail!("`{fragment}` matches no CRN node. Pass a full node hash or the CRN's URL."),
         1 => node_entry_to_url(&matches[0]),
         n => {
             let mut hashes: Vec<&str> = matches.iter().map(|m| m.node_hash.as_str()).collect();
             hashes.sort_unstable();
             bail!(
-                "prefix `{prefix}` is ambiguous, matches {n} nodes:\n  {}",
+                "`{fragment}` is ambiguous, matches {n} nodes:\n  {}",
                 hashes.join("\n  ")
             )
         }
@@ -149,10 +150,12 @@ pub async fn crn_url_from_entry(
 
 /// Resolve a user-supplied `--crn` override to a URL. Anything containing
 /// `://` is treated as a raw URL and parsed directly; a full 64-char hash is
-/// looked up via the scheduler's node endpoint; anything else is treated as
-/// a node-hash prefix (matching the shorthand IDs printed by `aleph instance
-/// list`) and must identify exactly one node, mirroring how a VM id accepts
-/// either a full hash or a prefix.
+/// looked up via the scheduler's node endpoint; anything else is treated as a
+/// node-hash fragment (an anchored prefix or suffix). The scheduler matches
+/// prefixes or suffixes server-side, so this includes the shorthand IDs
+/// printed by `aleph instance list`, which are hash suffixes. The fragment
+/// must identify exactly one node, mirroring how a VM id accepts either a full
+/// hash or a prefix.
 async fn resolve_crn(scheduler_url: &Url, crn: &str) -> Result<Url> {
     if crn.contains("://") {
         return Url::parse(crn).context("invalid --crn URL");
@@ -162,17 +165,17 @@ async fn resolve_crn(scheduler_url: &Url, crn: &str) -> Result<Url> {
             .await
             .with_context(|| format!("resolving --crn node hash `{crn}`"));
     }
-    node_prefix_to_url(scheduler_url, crn)
+    node_fragment_to_url(scheduler_url, crn)
         .await
-        .with_context(|| format!("resolving --crn node prefix `{crn}`"))
+        .with_context(|| format!("resolving --crn node hash fragment `{crn}`"))
 }
 
 /// Resolve `(vm_id, crn_url)` for any lifecycle subcommand.
 ///
 /// Three cases:
 /// 1. Override + full hash: resolve the override (a URL is parsed directly; a
-///    node hash or prefix is looked up in the scheduler) without fetching the
-///    VM entry.
+///    node hash or a hash fragment - prefix or suffix - is looked up in the
+///    scheduler) without fetching the VM entry.
 /// 2. Override + prefix: ask the scheduler to expand the prefix for the VM
 ///    hash, but take the CRN from the override.
 /// 3. No override: ask the scheduler for the entry and derive the URL from
@@ -425,6 +428,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_crn_with_node_suffix_resolves_via_scheduler() {
+        // The shorthand node IDs printed by `aleph instance list` are the last
+        // 10 chars of the node hash. The scheduler matches suffixes server-side
+        // (v0.1.1 #182); resolve_crn forwards the fragment verbatim.
+        let suffix = &NODE_HASH[NODE_HASH.len() - 10..];
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", suffix))
+            .respond_with(ResponseTemplate::new(200).set_body_json(node_page(&[NODE_HASH])))
+            .mount(&server)
+            .await;
+
+        let url = resolve_crn(&Url::parse(&server.uri()).unwrap(), suffix)
+            .await
+            .unwrap();
+        assert_eq!(url.as_str(), "https://crn.example.io/");
+    }
+
+    #[tokio::test]
     async fn resolve_crn_with_ambiguous_node_prefix_errors() {
         let other_hash = "d704c0ffee2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d88";
         let server = MockServer::start().await;
@@ -461,7 +484,7 @@ mod tests {
             .await
             .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("no CRN node matches `beef`"));
+        assert!(msg.contains("`beef` matches no CRN node"));
         assert!(msg.contains("full node hash"));
     }
 
