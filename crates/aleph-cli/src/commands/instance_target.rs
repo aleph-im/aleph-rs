@@ -58,9 +58,10 @@ pub fn pick_unique_match(input: &str, matches: Vec<VmEntry>) -> Result<(ItemHash
 }
 
 /// Translate a `VmEntry` to the URL of the CRN it's allocated to.
-/// `dispatched` proceeds silently; `duplicated` emits a stderr warning
-/// before following the scheduler's canonical pick. Any other status is
-/// an error pointing the user at `--crn-url`.
+/// `dispatched` and `scheduled` proceed silently (the scheduler has already
+/// placed the VM on a node, so its CRN is known); `duplicated` emits a stderr
+/// warning before following the scheduler's canonical pick. Any other status
+/// is an error pointing the user at `--crn-url`.
 ///
 /// Looks the CRN up via the scheduler's `/api/v1/nodes/<hash>` endpoint
 /// rather than the third-party crns-list aggregator.
@@ -71,8 +72,8 @@ pub async fn crn_url_from_entry(
 ) -> Result<Url> {
     let status = entry.status.as_str();
     let allocated_node = match status {
-        "dispatched" => entry.allocated_node.as_deref().ok_or_else(|| {
-            anyhow!("instance {vm_id} has status `dispatched` but no allocated_node")
+        "dispatched" | "scheduled" => entry.allocated_node.as_deref().ok_or_else(|| {
+            anyhow!("instance {vm_id} has status `{status}` but no allocated_node")
         })?,
         "duplicated" => {
             let node = entry.allocated_node.as_deref().ok_or_else(|| {
@@ -221,16 +222,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn crn_url_from_entry_returns_node_address_when_scheduled() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{NODE_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_hash": NODE_HASH,
+                "address": "https://crn.example.io/",
+                "status": "ok",
+            })))
+            .mount(&server)
+            .await;
+
+        let vm_id: ItemHash = FULL_HASH.parse().unwrap();
+        let mut entry = dispatched_entry();
+        entry.status = "scheduled".to_string();
+        let url = crn_url_from_entry(&Url::parse(&server.uri()).unwrap(), &vm_id, &entry)
+            .await
+            .unwrap();
+        assert_eq!(url.as_str(), "https://crn.example.io/");
+    }
+
+    #[tokio::test]
     async fn crn_url_from_entry_refuses_unfit_status() {
         let server = MockServer::start().await;
         let vm_id: ItemHash = FULL_HASH.parse().unwrap();
         let mut entry = dispatched_entry();
-        entry.status = "scheduled".to_string();
+        entry.status = "unscheduled".to_string();
         let err = crn_url_from_entry(&Url::parse(&server.uri()).unwrap(), &vm_id, &entry)
             .await
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("status `scheduled`"));
+        assert!(msg.contains("status `unscheduled`"));
         assert!(msg.contains("--crn-url"));
     }
 
