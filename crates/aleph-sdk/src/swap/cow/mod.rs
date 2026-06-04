@@ -18,7 +18,7 @@ use crate::swap::{SwapError, SwapQuote, SwapRequest};
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Maximum wait for an approve transaction receipt before giving up.
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// CoW orderbook REST client for a single network.
 pub struct CowApi {
@@ -269,6 +269,17 @@ pub async fn quote_usdc(
     req: &SwapRequest,
 ) -> Result<(SwapQuote, QuoteResponse), SwapError> {
     quote_sell(api, usdc_token, req, false).await
+}
+
+/// Quote a native-ETH sell. The sell token is the chain's WETH (the ETH-flow
+/// contract wraps ETH, so CoW prices the WETH leg) and the quote is flagged
+/// as an on-chain (eip1271) order.
+pub async fn quote_eth(
+    api: &CowApi,
+    weth_token: Address,
+    req: &SwapRequest,
+) -> Result<(SwapQuote, QuoteResponse), SwapError> {
+    quote_sell(api, weth_token, req, true).await
 }
 
 /// Build, sign (EIP-712) and submit a USDC sell order. Returns the order UID.

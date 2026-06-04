@@ -101,6 +101,54 @@ async fn usdc_quote_then_place_order_round_trip() {
 }
 
 #[tokio::test]
+#[ignore = "requires anvil in PATH (install via foundry)"]
+async fn eth_flow_create_order_sends_value_with_calldata() {
+    use aleph_sdk::swap::cow::ethflow::create_eth_order;
+    use alloy_network::EthereumWallet;
+    use alloy_node_bindings::Anvil;
+    use alloy_provider::{Provider, ProviderBuilder};
+    use alloy_rpc_types_eth::TransactionTrait;
+    use alloy_signer_local::PrivateKeySigner;
+
+    let anvil = Anvil::new().try_spawn().expect("spawn anvil");
+    let signer: PrivateKeySigner = (&anvil.keys()[0]).into();
+    let owner = signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(anvil.endpoint_url());
+
+    // No ETH-flow contract exists on a fresh anvil; a tx to an EOA with
+    // calldata + value still succeeds (it is a plain transfer), so this
+    // exercises the encoding/value plumbing end to end and then inspects
+    // the mined transaction.
+    let recipient = anvil.addresses()[1];
+    let sell_amount = U256::from(1_000_000_000_000_000u128); // 0.001 ETH
+    let tx_hash = create_eth_order(
+        &provider,
+        recipient, // stand-in for the ethflow contract address
+        ALEPH,
+        owner,
+        sell_amount,
+        U256::from(1u64),
+        2_000_000_000,
+        42,
+    )
+    .await
+    .expect("send createOrder tx");
+
+    let tx = provider
+        .get_transaction_by_hash(tx_hash)
+        .await
+        .expect("fetch tx")
+        .expect("tx exists");
+    // Value attached must equal sell_amount (fee-in-price: no fee on top).
+    assert_eq!(tx.value(), sell_amount);
+    // Calldata starts with the createOrder selector (at least 4 bytes).
+    let input = tx.input().clone();
+    assert!(input.len() > 4, "calldata must carry the encoded order");
+}
+
+#[tokio::test]
 async fn quote_error_is_surfaced() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
