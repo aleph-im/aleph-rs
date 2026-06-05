@@ -46,9 +46,10 @@ sol! {
 ///
 /// Single-hop routes use `exactInputSingle`, multi-hop routes `exactInput`;
 /// either is wrapped in `multicall(deadline, ...)` for deadline enforcement.
-/// `value` is the native ETH to attach: the full `sell_amount` when selling
-/// ETH (the router wraps it), zero for ERC20 sells (which require a prior
-/// allowance to the router).
+/// When `native_sell` is true the full `sell_amount` is attached as
+/// `msg.value` (the router wraps it to WETH); ERC20 sells attach no value
+/// and require a prior allowance to the router. `min_buy_amount` must be
+/// the slippage-adjusted quote: zero would disable slippage protection.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_swap(
     provider: &impl Provider,
@@ -58,9 +59,43 @@ pub async fn execute_swap(
     min_buy_amount: U256,
     receiver: Address,
     deadline_secs: u64,
-    value: U256,
+    native_sell: bool,
 ) -> Result<B256, SwapError> {
-    let call: Vec<u8> = match route.single_fee() {
+    debug_assert!(
+        !min_buy_amount.is_zero(),
+        "min_buy_amount must come from a slippage-adjusted quote"
+    );
+
+    // Deriving msg.value here (rather than taking it as a parameter) makes
+    // it impossible to attach ETH that diverges from amountIn; any excess
+    // would be wrapped by the router and stranded (no refundETH in the call).
+    let value = if native_sell { sell_amount } else { U256::ZERO };
+
+    let call = encode_swap_call(route, sell_amount, min_buy_amount, receiver);
+
+    let contract = IV3SwapRouter::new(router, provider);
+    let pending = contract
+        .multicall(U256::from(deadline_secs), vec![call.into()])
+        .value(value)
+        .send()
+        .await
+        .map_err(SwapError::SendTransaction)?;
+    let receipt = await_receipt(pending).await?;
+    if !receipt.status() {
+        return Err(SwapError::Reverted("swap"));
+    }
+    Ok(receipt.transaction_hash)
+}
+
+/// ABI-encode the inner swap call: `exactInputSingle` for one-hop routes,
+/// `exactInput` for multi-hop.
+fn encode_swap_call(
+    route: &UniswapRoute,
+    sell_amount: U256,
+    min_buy_amount: U256,
+    receiver: Address,
+) -> Vec<u8> {
+    match route.single_fee() {
         Some(fee) => IV3SwapRouter::exactInputSingleCall {
             params: IV3SwapRouter::ExactInputSingleParams {
                 tokenIn: route.token_in(),
@@ -82,20 +117,7 @@ pub async fn execute_swap(
             },
         }
         .abi_encode(),
-    };
-
-    let contract = IV3SwapRouter::new(router, provider);
-    let pending = contract
-        .multicall(U256::from(deadline_secs), vec![call.into()])
-        .value(value)
-        .send()
-        .await
-        .map_err(SwapError::SendTransaction)?;
-    let receipt = await_receipt(pending).await?;
-    if !receipt.status() {
-        return Err(SwapError::Reverted("swap"));
     }
-    Ok(receipt.transaction_hash)
 }
 
 #[cfg(test)]
@@ -125,5 +147,24 @@ mod tests {
             let expected = &keccak256(sig.as_bytes())[..4];
             assert_eq!(selector, expected, "selector mismatch for {sig}");
         }
+    }
+
+    #[test]
+    fn encode_swap_call_picks_branch_by_hop_count() {
+        use crate::swap::uniswap::route::{FEE_1_PERCENT, FEE_005_PERCENT};
+        use alloy_primitives::address;
+
+        let a = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        let b = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        let c = address!("27702a26126e0B3702af63Ee09aC4d1A084EF628");
+        let recv = address!("1111111111111111111111111111111111111111");
+
+        let single = UniswapRoute::new(vec![b, c], vec![FEE_1_PERCENT]);
+        let call = encode_swap_call(&single, U256::from(1u64), U256::from(1u64), recv);
+        assert_eq!(&call[..4], IV3SwapRouter::exactInputSingleCall::SELECTOR);
+
+        let multi = UniswapRoute::new(vec![a, b, c], vec![FEE_005_PERCENT, FEE_1_PERCENT]);
+        let call = encode_swap_call(&multi, U256::from(1u64), U256::from(1u64), recv);
+        assert_eq!(&call[..4], IV3SwapRouter::exactInputCall::SELECTOR);
     }
 }
