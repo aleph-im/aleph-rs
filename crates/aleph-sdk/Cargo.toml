@@ -108,3 +108,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "swap_integration"
 required-features = ["swap"]
+
+[[test]]
+name = "uniswap_integration"
+required-features = ["swap"]
