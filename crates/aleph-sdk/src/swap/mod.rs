@@ -1,9 +1,11 @@
 //! Token swaps for acquiring ALEPH from within the CLI.
 //!
 //! The swap types abstract the venue; [`cow`] is the CoW Swap
-//! implementation. v1 supports selling native ETH or USDC for ALEPH.
+//! implementation and [`uniswap`] the Uniswap V3 one. v1 supports selling
+//! native ETH or USDC for ALEPH.
 
 pub mod cow;
+pub mod uniswap;
 
 use std::time::Duration;
 
