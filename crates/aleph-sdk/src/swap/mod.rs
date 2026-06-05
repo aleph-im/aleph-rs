@@ -16,9 +16,9 @@ use thiserror::Error;
 /// What the user pays with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapToken {
-    /// Native ETH (sold via CoW's on-chain ETH-flow contract).
+    /// Native ETH.
     Eth,
-    /// USDC (sold via an off-chain signed order).
+    /// USD Coin (USDC).
     Usdc,
 }
 
