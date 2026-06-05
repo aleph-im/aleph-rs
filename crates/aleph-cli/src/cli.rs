@@ -2426,8 +2426,8 @@ pub struct TokenSwapArgs {
     #[arg(long)]
     pub receiver: Option<String>,
 
-    /// Order validity window in seconds (CoW) or transaction deadline
-    /// (Uniswap)
+    /// Order validity window (CoW) or transaction deadline (Uniswap),
+    /// in seconds from submission
     #[arg(long, default_value_t = 1200)]
     pub valid_for: u32,
 
