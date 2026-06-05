@@ -11,7 +11,7 @@ use alloy_provider::Provider;
 use alloy_sol_types::sol;
 
 use crate::swap::SwapError;
-use crate::swap::cow::await_receipt;
+use crate::swap::await_receipt;
 use crate::swap::cow::order::app_data_hash;
 
 sol! {

@@ -8,7 +8,9 @@ use aleph_sdk::swap::SwapToken;
 use aleph_sdk::swap::cow::CowApi;
 use aleph_sdk::swap::cow::chains::cow_chain;
 use aleph_sdk::swap::cow::ethflow::create_eth_order;
-use aleph_sdk::swap::cow::{ensure_allowance, place_usdc_order, quote_eth, quote_usdc};
+use aleph_sdk::swap::cow::order::VAULT_RELAYER;
+use aleph_sdk::swap::cow::{place_usdc_order, quote_eth, quote_usdc};
+use aleph_sdk::swap::ensure_allowance;
 use aleph_types::account::EvmAccount;
 use alloy_network::EthereumWallet;
 use alloy_primitives::Address;
@@ -177,9 +179,15 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
     // Submit the order.
     match sell_token {
         SwapToken::Usdc => {
-            ensure_allowance(&provider, ethereum.usdc_token, owner, quote.sell_amount)
-                .await
-                .map_err(|e| anyhow!("failed to ensure USDC allowance: {e}"))?;
+            ensure_allowance(
+                &provider,
+                ethereum.usdc_token,
+                owner,
+                VAULT_RELAYER,
+                quote.sell_amount,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to ensure USDC allowance: {e}"))?;
             let order_uid = place_usdc_order(
                 &api,
                 chain_id,
