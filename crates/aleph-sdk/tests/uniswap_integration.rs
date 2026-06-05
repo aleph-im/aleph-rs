@@ -48,6 +48,8 @@ async fn usdc_quote_picks_best_route() {
 
     // Candidates are quoted in declaration order: direct USDC|0.3%|ALEPH
     // first, then USDC|0.05%|WETH|1%|ALEPH. Make the two-hop quote better.
+    // The push order relies on quote_usdc quoting candidates SEQUENTIALLY in
+    // usdc_candidate_routes order; parallelizing it would break these mocks.
     asserter.push_success(&quote_return(U256::from(1_000_000_000_000_000_000u128)));
     asserter.push_success(&quote_return(U256::from(2_000_000_000_000_000_000u128)));
 
@@ -74,7 +76,8 @@ async fn usdc_quote_tolerates_one_reverting_route() {
     let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
     let chain = uniswap_chain(1).expect("mainnet");
 
-    // Direct pool quote reverts (e.g. no pool); two-hop succeeds.
+    // Direct pool quote reverts (e.g. no pool); two-hop succeeds. Push
+    // order mirrors the sequential usdc_candidate_routes quoting order.
     asserter.push_failure_msg("execution reverted");
     asserter.push_success(&quote_return(U256::from(3_000_000_000_000_000_000u128)));
 
@@ -161,4 +164,12 @@ async fn execute_swap_sends_value_with_multicall_calldata() {
         IV3SwapRouter::exactInputSingleCall::SELECTOR,
         "wrapped call must be exactInputSingle"
     );
+    // The inner call must carry the route and amounts as passed in.
+    let inner = IV3SwapRouter::exactInputSingleCall::abi_decode(&decoded.data[0])
+        .expect("decode exactInputSingle");
+    assert_eq!(inner.params.tokenIn, weth);
+    assert_eq!(inner.params.tokenOut, ALEPH);
+    assert_eq!(inner.params.amountIn, sell_amount);
+    assert_eq!(inner.params.amountOutMinimum, U256::from(1u64));
+    assert_eq!(inner.params.recipient, owner);
 }
