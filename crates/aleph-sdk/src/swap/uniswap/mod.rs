@@ -69,8 +69,10 @@ async fn quote_route(
 
 /// Pick the route with the highest non-zero output.
 ///
-/// Per-route errors are tolerated as long as one candidate succeeds (a
-/// missing pool reverts the quote); if none does, the last error is
+/// Any per-route error (a missing pool reverts the quote, but transport
+/// failures land here too) is tolerated as long as one candidate succeeds;
+/// the swap's `amountOutMinimum` still bounds the damage if the surviving
+/// quote was the worse route. If no candidate succeeds, the last error is
 /// surfaced, or [`SwapError::NoRoute`] when every quote returned zero.
 fn pick_best_route(
     outcomes: Vec<(UniswapRoute, Result<U256, SwapError>)>,
