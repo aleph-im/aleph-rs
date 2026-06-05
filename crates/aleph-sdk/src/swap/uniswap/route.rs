@@ -32,10 +32,12 @@ impl UniswapRoute {
         Self { tokens, fees }
     }
 
+    /// The token the route sells (first in the path).
     pub fn token_in(&self) -> Address {
         self.tokens[0]
     }
 
+    /// The token the route buys (last in the path).
     pub fn token_out(&self) -> Address {
         *self.tokens.last().expect("route has tokens")
     }
@@ -139,6 +141,7 @@ mod tests {
     fn fee_display_formats() {
         let single = UniswapRoute::new(vec![WETH, ALEPH], vec![FEE_1_PERCENT]);
         assert_eq!(single.fee_display(), "1%");
+        assert_eq!(single.fees_percent(), vec!["1%"]);
         let multi = UniswapRoute::new(
             vec![USDC, WETH, ALEPH],
             vec![FEE_005_PERCENT, FEE_1_PERCENT],
