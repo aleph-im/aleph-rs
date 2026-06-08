@@ -826,7 +826,7 @@ pub struct AggregateCreateArgs {
     #[arg(long)]
     pub key: String,
 
-    /// JSON object content. If absent, reads from stdin.
+    /// JSON content (object, array, or scalar). If absent, reads from stdin.
     #[arg(long)]
     pub content: Option<String>,
 
