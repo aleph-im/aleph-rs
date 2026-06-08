@@ -11,12 +11,17 @@ use std::time::Duration;
 
 #[test]
 fn sigint_death_reports_signal_status() {
-    // `post create` without --content blocks reading stdin. Keep the write
-    // end of the pipe open so the process is still alive when the signal
-    // arrives.
+    // `post create` without --content blocks reading stdin, keeping the
+    // process alive until the signal arrives. A raw `--ccn` URL keeps the
+    // test hermetic: `run()`'s URL resolution short-circuits on the raw URL
+    // instead of depending on whatever default network the machine happens
+    // to have configured. The URL is never contacted (--dry-run, and the
+    // process blocks on stdin before any network call).
     let private_key_hex = hex::encode([1u8; 32]);
     let mut child = Command::new(env!("CARGO_BIN_EXE_aleph"))
         .args([
+            "--ccn",
+            "http://127.0.0.1:1/",
             "post",
             "create",
             "--type",
@@ -32,6 +37,13 @@ fn sigint_death_reports_signal_status() {
         .stderr(Stdio::null())
         .spawn()
         .expect("failed to spawn aleph binary");
+
+    // Take the stdin handle and hold it open. Child::wait() otherwise closes
+    // the parent's stdin before waiting, which makes the child read EOF and
+    // exit 1 from the stdin read - racing our SIGINT. On a slow runner that
+    // EOF path can win (observed on macOS CI), masking the regression. With
+    // stdin held open, the only way out for the child is the signal we send.
+    let _stdin = child.stdin.take().expect("child stdin was piped");
 
     // Give the binary time to install its Ctrl+C handler and reach the
     // blocking stdin read; a SIGINT delivered before the handler exists
