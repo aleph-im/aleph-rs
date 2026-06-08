@@ -763,6 +763,8 @@ pub enum AggregateCommand {
     Create(AggregateCreateArgs),
     /// Edit an existing aggregate: set a subkey, replace whole content, or open $EDITOR
     Edit(AggregateEditArgs),
+    /// Delete subkeys from an existing aggregate (soft delete via merge-null)
+    Unset(AggregateUnsetArgs),
     /// Fetch a single aggregate by key
     Get(AggregateGetArgs),
     /// List every aggregate owned by an address
@@ -855,6 +857,32 @@ pub struct AggregateEditArgs {
     /// If both --subkey and --content are omitted, $EDITOR is opened.
     #[arg(long)]
     pub content: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    /// Skip the confirmation prompt and submit immediately.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct AggregateUnsetArgs {
+    /// Aggregate key to modify. The key must already exist.
+    #[arg(long)]
+    pub key: String,
+
+    /// Subkeys to delete (comma-separated). Each is set to null via merge.
+    #[arg(long, value_delimiter = ',')]
+    pub subkey: Vec<String>,
 
     /// Channel name.
     #[arg(long)]

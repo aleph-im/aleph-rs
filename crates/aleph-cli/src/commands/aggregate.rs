@@ -1,7 +1,7 @@
 use crate::account::store::AccountStore;
 use crate::cli::{
     AggregateCommand, AggregateCreateArgs, AggregateEditArgs, AggregateForgetArgs, AggregateGetArgs,
-    AggregateListArgs,
+    AggregateListArgs, AggregateUnsetArgs,
 };
 use crate::common::{
     confirm_action, read_content, resolve_account, resolve_address, submit_or_preview,
@@ -227,6 +227,9 @@ pub async fn handle_aggregate_command(
         AggregateCommand::Edit(args) => {
             handle_aggregate_edit(aleph_client, ccn_url, json, args).await?;
         }
+        AggregateCommand::Unset(args) => {
+            handle_aggregate_unset(aleph_client, ccn_url, json, args).await?;
+        }
         AggregateCommand::Get(args) => {
             handle_aggregate_get(aleph_client, json, args).await?;
         }
@@ -437,6 +440,70 @@ fn resolve_owner_address(args_address: Option<&str>) -> Result<Address> {
     Ok(Address::from(entry.address))
 }
 
+/// Build the merge patch that deletes each named subkey (sets it to null).
+fn unset_patch(subkeys: &[String]) -> Map<String, Value> {
+    subkeys
+        .iter()
+        .map(|s| (s.clone(), Value::Null))
+        .collect()
+}
+
+async fn handle_aggregate_unset(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: AggregateUnsetArgs,
+) -> Result<()> {
+    reject_security_key(&args.key)?;
+    if args.subkey.is_empty() {
+        bail!("at least one --subkey is required");
+    }
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+    let on_behalf_of = args
+        .on_behalf_of
+        .as_deref()
+        .map(resolve_address)
+        .transpose()?;
+    let owner = on_behalf_of
+        .clone()
+        .unwrap_or_else(|| account.address().clone());
+
+    if fetch_aggregate_content(aleph_client, &owner, &args.key)
+        .await?
+        .is_none()
+    {
+        bail!(
+            "aggregate `{}` does not exist for {owner}; nothing to unset.",
+            args.key
+        );
+    }
+
+    let patch = unset_patch(&args.subkey);
+
+    if !dry_run {
+        let prompt = format!(
+            "Delete subkey(s) {:?} from `{}` for {owner}?",
+            args.subkey, args.key
+        );
+        if !confirm_action(&prompt, args.yes)? {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let envelope = serde_json::json!({ "key": args.key, "content": Value::Object(patch) });
+    let mut builder = MessageBuilder::new(&account, MessageType::Aggregate, envelope);
+    if let Some(addr) = on_behalf_of {
+        builder = builder.on_behalf_of(addr);
+    }
+    if let Some(ch) = args.channel {
+        builder = builder.channel(Channel::from(ch));
+    }
+    let pending = builder.build()?;
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{diff_to_patch, parse_content_json, reject_security_key};
@@ -497,5 +564,13 @@ mod tests {
         assert!(envelope["hashes"].as_array().unwrap().is_empty());
         assert_eq!(envelope["aggregates"][0], "abc123");
         assert_eq!(envelope["reason"], "cleanup");
+    }
+
+    #[test]
+    fn unset_builds_null_patch() {
+        let patch = super::unset_patch(&["a".to_string(), "b".to_string()]);
+        assert_eq!(patch.get("a"), Some(&Value::Null));
+        assert_eq!(patch.get("b"), Some(&Value::Null));
+        assert_eq!(patch.len(), 2);
     }
 }
