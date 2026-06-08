@@ -1,6 +1,7 @@
 use crate::account::store::AccountStore;
 use crate::cli::{
-    AggregateCommand, AggregateCreateArgs, AggregateForgetArgs, AggregateGetArgs, AggregateListArgs,
+    AggregateCommand, AggregateCreateArgs, AggregateEditArgs, AggregateForgetArgs, AggregateGetArgs,
+    AggregateListArgs,
 };
 use crate::common::{
     confirm_action, read_content, resolve_account, resolve_address, submit_or_preview,
@@ -78,6 +79,139 @@ async fn fetch_aggregate_content(
     }
 }
 
+/// Resolve the user's editor: $VISUAL, then $EDITOR, then `vi`.
+fn resolve_editor() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string())
+}
+
+/// Write `initial` to a temp file, open it in the resolved editor, and parse the
+/// saved result as JSON. On a parse failure, the temp file is kept and its path
+/// reported so the user's edits are not lost.
+fn edit_via_editor(initial: &str) -> Result<Value> {
+    use std::io::Write;
+    let mut file = tempfile::Builder::new().suffix(".json").tempfile()?;
+    file.write_all(initial.as_bytes())?;
+    file.flush()?;
+    let editor = resolve_editor();
+    // `sh -c '<editor> "$1"' sh <path>` so compound editors (e.g. `code --wait`)
+    // work and the path is passed safely as a positional argument.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh")
+        .arg(file.path())
+        .status()?;
+    if !status.success() {
+        bail!("editor `{editor}` exited with a non-zero status; aborting");
+    }
+    let edited = std::fs::read_to_string(file.path())?;
+    match serde_json::from_str(&edited) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            let kept = file.into_temp_path().keep()?;
+            bail!(
+                "edited content is not valid JSON: {e}. Your edits were saved to {}",
+                kept.display()
+            );
+        }
+    }
+}
+
+/// Diff `current` vs `desired` into the content to POST.
+///
+/// When both are JSON objects we emit a minimal merge patch (added/changed
+/// subkeys, plus `null` for removed ones). When `desired` is not an object
+/// (a key holding a scalar/array), we post it verbatim; there are no subkeys
+/// to diff.
+fn content_to_post(current: &Value, desired: &Value) -> Value {
+    match (current.as_object(), desired.as_object()) {
+        (Some(old), Some(new)) => Value::Object(diff_to_patch(old, new)),
+        _ => desired.clone(),
+    }
+}
+
+async fn handle_aggregate_edit(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: AggregateEditArgs,
+) -> Result<()> {
+    reject_security_key(&args.key)?;
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+    let on_behalf_of = args
+        .on_behalf_of
+        .as_deref()
+        .map(resolve_address)
+        .transpose()?;
+    let owner = on_behalf_of
+        .clone()
+        .unwrap_or_else(|| account.address().clone());
+
+    let current = fetch_aggregate_content(aleph_client, &owner, &args.key)
+        .await?
+        .ok_or_else(|| {
+            anyhow!(
+                "aggregate `{}` does not exist for {owner}. Use `aleph aggregate \
+                 create --key {}` to create it.",
+                args.key,
+                args.key
+            )
+        })?;
+
+    // Build the content to post (a merge patch).
+    let patch: Value = match (args.subkey.as_deref(), args.content.as_deref()) {
+        // Targeted subkey: post {subkey: content} verbatim (content may be null).
+        (Some(subkey), Some(raw)) => {
+            let value = parse_content_json(raw)?;
+            let mut map = Map::new();
+            map.insert(subkey.to_string(), value);
+            Value::Object(map)
+        }
+        (Some(_), None) => bail!("--subkey requires --content (use `--content null` to delete it)"),
+        // Whole-content replace: diff against current, nulling removed subkeys.
+        (None, Some(raw)) => {
+            let desired = parse_content_json(raw)?;
+            content_to_post(&current, &desired)
+        }
+        // Interactive: open the current content in $EDITOR, then diff.
+        (None, None) => {
+            let initial = serde_json::to_string_pretty(&current)?;
+            let edited = edit_via_editor(&initial)?;
+            content_to_post(&current, &edited)
+        }
+    };
+
+    // Only an empty *object* patch means "no changes"; a non-object replace
+    // (a key holding a scalar/array) is always a real post.
+    if matches!(&patch, Value::Object(m) if m.is_empty()) {
+        eprintln!("No changes; nothing to submit.");
+        return Ok(());
+    }
+
+    if !dry_run {
+        let preview = serde_json::to_string_pretty(&patch)?;
+        let prompt = format!("Apply this patch to `{}` for {owner}?\n{preview}", args.key);
+        if !confirm_action(&prompt, args.yes)? {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let envelope = serde_json::json!({ "key": args.key, "content": patch });
+    let mut builder = MessageBuilder::new(&account, MessageType::Aggregate, envelope);
+    if let Some(addr) = on_behalf_of {
+        builder = builder.on_behalf_of(addr);
+    }
+    if let Some(ch) = args.channel {
+        builder = builder.channel(Channel::from(ch));
+    }
+    let pending = builder.build()?;
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
 pub async fn handle_aggregate_command(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -87,6 +221,9 @@ pub async fn handle_aggregate_command(
     match command {
         AggregateCommand::Create(args) => {
             handle_aggregate_create(aleph_client, ccn_url, json, args).await?;
+        }
+        AggregateCommand::Edit(args) => {
+            handle_aggregate_edit(aleph_client, ccn_url, json, args).await?;
         }
         AggregateCommand::Get(args) => {
             handle_aggregate_get(aleph_client, json, args).await?;

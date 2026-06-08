@@ -761,6 +761,8 @@ pub struct PostAmendArgs {
 pub enum AggregateCommand {
     /// Create a new aggregate message
     Create(AggregateCreateArgs),
+    /// Edit an existing aggregate: set a subkey, replace whole content, or open $EDITOR
+    Edit(AggregateEditArgs),
     /// Fetch a single aggregate by key
     Get(AggregateGetArgs),
     /// List every aggregate owned by an address
@@ -833,6 +835,38 @@ pub struct AggregateCreateArgs {
     /// Sign on behalf of another address (requires an authorization from that address).
     #[arg(long)]
     pub on_behalf_of: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct AggregateEditArgs {
+    /// Aggregate key to edit. The key must already exist (use `create` for a new one).
+    #[arg(long)]
+    pub key: String,
+
+    /// Edit only this subkey. Requires --content (use `--content null` to delete it).
+    #[arg(long)]
+    pub subkey: Option<String>,
+
+    /// New content as JSON. With --subkey it is the subkey's value; without it,
+    /// the desired full content for the key (removed subkeys are nulled).
+    /// If both --subkey and --content are omitted, $EDITOR is opened.
+    #[arg(long)]
+    pub content: Option<String>,
+
+    /// Channel name.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    /// Skip the confirmation prompt and submit immediately.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 
     #[command(flatten)]
     pub signing: SigningArgs,
