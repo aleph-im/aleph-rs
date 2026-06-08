@@ -110,14 +110,17 @@ async fn handle_aggregate_create(
     reject_security_key(&args.key)?;
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
-    let owner = match &args.on_behalf_of {
-        Some(o) => resolve_address(o)?,
-        None => account.address().clone(),
-    };
+    let on_behalf_of = args
+        .on_behalf_of
+        .as_deref()
+        .map(resolve_address)
+        .transpose()?;
+    let owner = on_behalf_of
+        .clone()
+        .unwrap_or_else(|| account.address().clone());
 
-    // `create` is create-only: refuse if the key already exists so users do not
-    // silently merge over an existing aggregate. Whole-key updates go through
-    // `aleph aggregate edit`.
+    // The existence check runs even for --dry-run: we want to catch "already
+    // exists" before the user commits to the operation, not after.
     if fetch_aggregate_content(aleph_client, &owner, &args.key)
         .await?
         .is_some()
@@ -130,16 +133,14 @@ async fn handle_aggregate_create(
         );
     }
 
-    // `read_content` already guarantees valid JSON (or reads it from stdin); we
-    // no longer require the top-level value to be an object.
     let content = read_content(args.content)?;
     let envelope = serde_json::json!({
         "key": args.key,
         "content": content,
     });
     let mut builder = MessageBuilder::new(&account, MessageType::Aggregate, envelope);
-    if let Some(owner) = args.on_behalf_of {
-        builder = builder.on_behalf_of(resolve_address(&owner)?);
+    if let Some(addr) = on_behalf_of {
+        builder = builder.on_behalf_of(addr);
     }
     if let Some(ch) = args.channel {
         builder = builder.channel(Channel::from(ch));
