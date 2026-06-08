@@ -96,7 +96,9 @@ fn edit_via_editor(initial: &str) -> Result<Value> {
     file.flush()?;
     let editor = resolve_editor();
     // `sh -c '<editor> "$1"' sh <path>` so compound editors (e.g. `code --wait`)
-    // work and the path is passed safely as a positional argument.
+    // work and the path is passed safely as a positional argument. The editor
+    // value is intentionally word-split by sh; an editor path containing spaces
+    // is unsupported (the same limitation as git's $EDITOR handling).
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!("{editor} \"$1\""))
