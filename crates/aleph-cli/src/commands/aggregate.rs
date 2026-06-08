@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 use url::Url;
 
 /// Parse `--content` (or edited buffer) and validate it is well-formed JSON.
-/// Any JSON value is accepted — a key's content is typically an object, but a
+/// Any JSON value is accepted; a key's content is typically an object, but a
 /// subkey value may be a scalar, array, or `null`.
 fn parse_content_json(raw: &str) -> Result<Value> {
     serde_json::from_str(raw).map_err(|e| anyhow!("invalid JSON content: {e}"))
@@ -49,8 +49,8 @@ fn diff_to_patch(old: &Map<String, Value>, new: &Map<String, Value>) -> Map<Stri
 fn reject_security_key(key: &str) -> Result<()> {
     if key == "security" {
         bail!(
-            "the `security` aggregate holds account authorizations and is \
-             protected here. Use `aleph authorization` to manage it."
+            "the `security` aggregate holds account authorizations and cannot be \
+             edited directly. Use `aleph authorization` to manage it."
         );
     }
     Ok(())
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn parse_content_accepts_non_object_json() {
-        // valid JSON, not a dict — must be accepted (e.g. a subkey value)
+        // valid JSON, not a dict, must be accepted (e.g. a subkey value)
         assert_eq!(parse_content_json("42").unwrap(), json!(42));
         assert_eq!(parse_content_json("\"hi\"").unwrap(), json!("hi"));
         assert_eq!(parse_content_json("null").unwrap(), Value::Null);
