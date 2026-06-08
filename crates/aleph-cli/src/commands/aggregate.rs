@@ -483,8 +483,9 @@ async fn handle_aggregate_unset(
 
     if !dry_run {
         let prompt = format!(
-            "Delete subkey(s) {:?} from `{}` for {owner}?",
-            args.subkey, args.key
+            "Delete subkey(s) {} from `{}` for {owner}?",
+            args.subkey.join(", "),
+            args.key
         );
         if !confirm_action(&prompt, args.yes)? {
             eprintln!("Aborted.");
