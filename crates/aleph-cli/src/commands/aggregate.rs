@@ -12,7 +12,49 @@ use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
 use anyhow::{Result, anyhow, bail};
+use serde_json::{Map, Value};
 use url::Url;
+
+/// Parse `--content` (or edited buffer) and validate it is well-formed JSON.
+/// Any JSON value is accepted — a key's content is typically an object, but a
+/// subkey value may be a scalar, array, or `null`.
+fn parse_content_json(raw: &str) -> Result<Value> {
+    serde_json::from_str(raw).map_err(|e| anyhow!("invalid JSON content: {e}"))
+}
+
+/// Compute the minimal merge patch turning `old` into `new`:
+/// added/changed subkeys carry their new value; subkeys present in `old` but
+/// absent from `new` are set to `null` (the network's delete-by-merge). Keys
+/// unchanged between the two are omitted. An empty result means "no changes".
+fn diff_to_patch(old: &Map<String, Value>, new: &Map<String, Value>) -> Map<String, Value> {
+    let mut patch = Map::new();
+    for (key, value) in new {
+        match old.get(key) {
+            Some(existing) if existing == value => {}
+            _ => {
+                patch.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    for key in old.keys() {
+        if !new.contains_key(key) {
+            patch.insert(key.clone(), Value::Null);
+        }
+    }
+    patch
+}
+
+/// Refuse to touch the `security` aggregate, which holds account
+/// authorizations; hand-editing it can lock an account out.
+fn reject_security_key(key: &str) -> Result<()> {
+    if key == "security" {
+        bail!(
+            "the `security` aggregate holds account authorizations and is \
+             protected here. Use `aleph authorization` to manage it."
+        );
+    }
+    Ok(())
+}
 
 pub async fn handle_aggregate_command(
     aleph_client: &AlephClient,
@@ -216,6 +258,53 @@ fn resolve_owner_address(args_address: Option<&str>) -> Result<Address> {
 
 #[cfg(test)]
 mod tests {
+    use super::{diff_to_patch, parse_content_json, reject_security_key};
+    use serde_json::{Map, Value, json};
+
+    fn obj(v: Value) -> Map<String, Value> {
+        match v {
+            Value::Object(m) => m,
+            _ => panic!("not an object"),
+        }
+    }
+
+    #[test]
+    fn diff_adds_changes_and_nulls_removed() {
+        let old = obj(json!({"a": 1, "keep": "x", "gone": true}));
+        let new = obj(json!({"a": 2, "keep": "x", "added": 9}));
+        let patch = diff_to_patch(&old, &new);
+        // changed
+        assert_eq!(patch.get("a"), Some(&json!(2)));
+        // added
+        assert_eq!(patch.get("added"), Some(&json!(9)));
+        // removed -> explicit null
+        assert_eq!(patch.get("gone"), Some(&Value::Null));
+        // unchanged omitted
+        assert!(!patch.contains_key("keep"));
+    }
+
+    #[test]
+    fn diff_of_identical_is_empty() {
+        let old = obj(json!({"a": 1}));
+        let new = obj(json!({"a": 1}));
+        assert!(diff_to_patch(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn parse_content_accepts_non_object_json() {
+        // valid JSON, not a dict — must be accepted (e.g. a subkey value)
+        assert_eq!(parse_content_json("42").unwrap(), json!(42));
+        assert_eq!(parse_content_json("\"hi\"").unwrap(), json!("hi"));
+        assert_eq!(parse_content_json("null").unwrap(), Value::Null);
+        assert!(parse_content_json("not json").is_err());
+    }
+
+    #[test]
+    fn security_key_is_rejected() {
+        assert!(reject_security_key("security").is_err());
+        assert!(reject_security_key("vm_images").is_ok());
+    }
+
     #[test]
     fn aggregate_content_must_be_object() {
         assert!(!serde_json::json!("not an object").is_object());
