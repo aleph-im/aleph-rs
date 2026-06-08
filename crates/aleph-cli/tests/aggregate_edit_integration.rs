@@ -177,6 +177,7 @@ fn edit_whole_content_nulls_removed_subkey() {
 }
 
 #[test]
+#[cfg(unix)]
 fn edit_interactive_uses_editor() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("fake-editor.sh");
@@ -233,7 +234,11 @@ fn security_key_is_rejected_by_create() {
         false,
         None,
     );
-    assert!(!out.status.success());
+    assert!(
+        !out.status.success(),
+        "expected failure for 'security' key, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("authorization"), "{stderr}");
 }
