@@ -7,6 +7,7 @@ use crate::common::{
 };
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageWithStatus};
+use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
@@ -56,6 +57,27 @@ fn reject_security_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fetch the current content stored at `(owner, key)`.
+///
+/// Returns `Some(content)` when the key exists, `None` when it does not
+/// (`get_aggregate` returns the `{key: content}` data map; a missing key, a
+/// `null` value, or a 404 all mean "does not exist").
+async fn fetch_aggregate_content(
+    aleph_client: &AlephClient,
+    owner: &Address,
+    key: &str,
+) -> Result<Option<Value>> {
+    match aleph_client.get_aggregate::<Value>(owner, key).await {
+        Ok(Value::Object(mut data)) => match data.remove(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(content) => Ok(Some(content)),
+        },
+        Ok(_) => Ok(None),
+        Err(e) if e.is_not_found() => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub async fn handle_aggregate_command(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -85,16 +107,35 @@ async fn handle_aggregate_create(
     json: bool,
     args: AggregateCreateArgs,
 ) -> Result<()> {
+    reject_security_key(&args.key)?;
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
-    let content = read_content(args.content)?;
-    let map = match content {
-        serde_json::Value::Object(map) => map,
-        _ => bail!("aggregate content must be a JSON object"),
+    let owner = match &args.on_behalf_of {
+        Some(o) => resolve_address(o)?,
+        None => account.address().clone(),
     };
+
+    // `create` is create-only: refuse if the key already exists so users do not
+    // silently merge over an existing aggregate. Whole-key updates go through
+    // `aleph aggregate edit`.
+    if fetch_aggregate_content(aleph_client, &owner, &args.key)
+        .await?
+        .is_some()
+    {
+        bail!(
+            "aggregate `{}` already exists for {owner}. Use `aleph aggregate edit \
+             --key {}` to change it.",
+            args.key,
+            args.key
+        );
+    }
+
+    // `read_content` already guarantees valid JSON (or reads it from stdin); we
+    // no longer require the top-level value to be an object.
+    let content = read_content(args.content)?;
     let envelope = serde_json::json!({
         "key": args.key,
-        "content": serde_json::Value::Object(map),
+        "content": content,
     });
     let mut builder = MessageBuilder::new(&account, MessageType::Aggregate, envelope);
     if let Some(owner) = args.on_behalf_of {
@@ -303,12 +344,6 @@ mod tests {
     fn security_key_is_rejected() {
         assert!(reject_security_key("security").is_err());
         assert!(reject_security_key("vm_images").is_ok());
-    }
-
-    #[test]
-    fn aggregate_content_must_be_object() {
-        assert!(!serde_json::json!("not an object").is_object());
-        assert!(serde_json::json!({"setting": "value"}).is_object());
     }
 
     #[test]
