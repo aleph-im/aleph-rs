@@ -1,7 +1,7 @@
 use crate::account::store::AccountStore;
 use crate::cli::{
-    AggregateCommand, AggregateCreateArgs, AggregateEditArgs, AggregateForgetArgs, AggregateGetArgs,
-    AggregateListArgs, AggregateUnsetArgs,
+    AggregateCommand, AggregateCreateArgs, AggregateEditArgs, AggregateForgetArgs,
+    AggregateGetArgs, AggregateListArgs, AggregateUnsetArgs,
 };
 use crate::common::{
     confirm_action, read_content, resolve_account, resolve_address, submit_or_preview,
@@ -442,10 +442,7 @@ fn resolve_owner_address(args_address: Option<&str>) -> Result<Address> {
 
 /// Build the merge patch that deletes each named subkey (sets it to null).
 fn unset_patch(subkeys: &[String]) -> Map<String, Value> {
-    subkeys
-        .iter()
-        .map(|s| (s.clone(), Value::Null))
-        .collect()
+    subkeys.iter().map(|s| (s.clone(), Value::Null)).collect()
 }
 
 async fn handle_aggregate_unset(

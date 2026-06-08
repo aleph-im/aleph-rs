@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::process::Command;
 
-use actix_web::{web, App, HttpResponse, HttpServer};
+use actix_web::{App, HttpResponse, HttpServer, web};
 use serde::Deserialize;
 
 const PRIVATE_KEY_HEX: &str = "4242424242424242424242424242424242424242424242424242424242424242";
@@ -74,7 +74,13 @@ fn run_aggregate(
     let mut cmd = Command::new(bin);
     cmd.args(["--ccn", ccn, "--json", "aggregate"])
         .args(extra)
-        .args(["--private-key", PRIVATE_KEY_HEX, "--chain", "eth", "--dry-run"]);
+        .args([
+            "--private-key",
+            PRIVATE_KEY_HEX,
+            "--chain",
+            "eth",
+            "--dry-run",
+        ]);
     if yes {
         cmd.arg("-y");
     }
