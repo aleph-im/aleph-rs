@@ -1594,8 +1594,9 @@ sizes the VM at the GPU's minimum. GPU sizes scale in compute-unit steps \
 is optional for GPU instances.
 
 Required: NAME (positional), `--image`, and at least one \
-`--ssh-pubkey-file`. Image accepts a preset name (`ubuntu22`, `ubuntu24`, \
-`debian12`) or an item hash (hex or IPFS CID).
+`--ssh-pubkey-file`. Image accepts a preset name from the network's \
+`vm-images` aggregate (e.g. `ubuntu26`, `debian12`) or an item hash \
+(hex or IPFS CID).
 
 Pin to a specific compute node with `--crn-hash <HASH>`. For an \
 interactive walkthrough that prompts for any missing fields and lets you \
@@ -1605,13 +1606,13 @@ Volumes can be added with `--persistent-volume`, `--ephemeral-volume`, or \
 `--immutable-volume` (each can be repeated).
 
 Examples:
-  aleph instance create web --image ubuntu24 --size 1vcpu-2gb \\
+  aleph instance create web --image ubuntu26 --size 1vcpu-2gb \\
                             --ssh-pubkey-file ~/.ssh/id_ed25519.pub
 
-  aleph instance create gpu-job --image ubuntu24 --gpu h100 \\
+  aleph instance create gpu-job --image ubuntu26 --gpu h100 \\
                                 --ssh-pubkey-file ~/.ssh/id_ed25519.pub
 
-  aleph instance create db --image ubuntu24 --size 4vcpu-8gb \\
+  aleph instance create db --image ubuntu26 --size 4vcpu-8gb \\
       --persistent-volume name=data,mount=/data,size=100GB \\
       --ssh-pubkey-file ~/.ssh/id_ed25519.pub
 
@@ -2542,7 +2543,7 @@ pub struct ProgramCreateArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Runtime: preset slug from the vm-images aggregate (e.g. `python312`) or a
+    /// Runtime: preset slug from the vm-images aggregate (e.g. `python3.12`) or a
     /// 64-char item hash. When omitted, resolves against the aggregate's
     /// `defaults.runtime`.
     #[arg(long, value_parser = parse_image_ref)]
