@@ -38,6 +38,20 @@ fn install_terminal_restore_handler() {
                 libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, t);
             }
         }
+        // Die by re-raised SIGINT rather than exit(130): bash only prints a
+        // newline to compensate for the kernel's "^C" echo when the child is
+        // killed by SIGINT. After a normal exit the next prompt starts
+        // mid-line (right after "^C") and readline garbles the next typed
+        // command's display.
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGINT);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            libc::raise(libc::SIGINT);
+        }
         std::process::exit(130);
     });
 }
