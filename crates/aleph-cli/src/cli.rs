@@ -2511,6 +2511,7 @@ pub struct TokenSwapArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProgramCommand {
     /// Deploy a new serverless program. Auto-uploads PATH as a STORE message,
     /// then publishes the PROGRAM message referencing it.
@@ -2521,12 +2522,6 @@ pub enum ProgramCommand {
     Delete(ProgramDeleteArgs),
     /// List programs owned by an address.
     List(ProgramListArgs),
-    /// Recreate a program with persistent=true. New item hash.
-    Persist(ProgramPersistArgs),
-    /// Recreate a program with persistent=false. New item hash.
-    Unpersist(ProgramPersistArgs),
-    /// Fetch logs from one CRN running this program.
-    Logs(ProgramLogsArgs),
     /// Show full information about a single program (creation time,
     /// ownership, per-ref freshness for code / runtime / data / volumes).
     Show(ProgramShowArgs),
@@ -2626,6 +2621,10 @@ pub struct ProgramUpdateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
+    /// Sign on behalf of another address (requires authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2663,36 +2662,6 @@ pub struct ProgramListArgs {
 pub struct ProgramShowArgs {
     /// Item hash of the program to inspect.
     pub item_hash: ItemHash,
-}
-
-#[derive(Args)]
-pub struct ProgramPersistArgs {
-    /// Item hash of the program to convert.
-    pub item_hash: ItemHash,
-
-    /// Keep the previous program message instead of forgetting it.
-    #[arg(long)]
-    pub keep_prev: bool,
-
-    /// Skip the confirmation prompt for the forget step.
-    #[arg(short = 'y', long)]
-    pub yes: bool,
-
-    #[command(flatten)]
-    pub signing: SigningArgs,
-}
-
-#[derive(Args)]
-pub struct ProgramLogsArgs {
-    /// Item hash of the program.
-    pub item_hash: ItemHash,
-
-    /// CRN URL (e.g. `https://crn.example.com`).
-    #[arg(long)]
-    pub crn: Url,
-
-    #[command(flatten)]
-    pub signing: SigningArgs,
 }
 
 #[cfg(test)]

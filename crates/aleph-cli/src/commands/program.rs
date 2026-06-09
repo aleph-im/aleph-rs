@@ -1,6 +1,6 @@
 use crate::cli::{
     ImageRef, PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs,
-    ProgramListArgs, ProgramShowArgs, StorageEngineCli,
+    ProgramListArgs, ProgramShowArgs, ProgramUpdateArgs, StorageEngineCli,
 };
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes, resolve_runtime_ref,
@@ -43,18 +43,7 @@ pub async fn handle_program_command(
         ProgramCommand::Create(args) => handle_create(aleph_client, ccn_url, json, args).await,
         ProgramCommand::List(args) => handle_list(aleph_client, json, args).await,
         ProgramCommand::Delete(args) => handle_delete(aleph_client, ccn_url, json, args).await,
-        ProgramCommand::Update(_) => {
-            bail!("`aleph program update` lands in PR 2 of the program CLI work")
-        }
-        ProgramCommand::Persist(_) => {
-            bail!("`aleph program persist` lands in PR 2 of the program CLI work")
-        }
-        ProgramCommand::Unpersist(_) => {
-            bail!("`aleph program unpersist` lands in PR 2 of the program CLI work")
-        }
-        ProgramCommand::Logs(_) => {
-            bail!("`aleph program logs` lands in PR 2 of the program CLI work")
-        }
+        ProgramCommand::Update(args) => handle_update(aleph_client, ccn_url, json, args).await,
         ProgramCommand::Show(args) => handle_show(aleph_client, json, args).await,
     }
 }
@@ -828,6 +817,156 @@ async fn handle_list(aleph_client: &AlephClient, json: bool, args: ProgramListAr
     render_program_rows(&rows, json)
 }
 
+async fn handle_update(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: ProgramUpdateArgs,
+) -> Result<()> {
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+
+    // Resolve the effective owner: the address whose program we're updating
+    // and whose name the new STORE will be signed in. When --on-behalf-of is
+    // set this differs from the signing account (delegated authoring).
+    let owner_address = match &args.on_behalf_of {
+        Some(value) => resolve_address(value)?,
+        None => account.address().clone(),
+    };
+
+    // 1. Fetch the existing program message and verify ownership / amend flag.
+    // Compare against `owner()` (= content.address), not `sender`: when the
+    // program was created via delegation, `sender` is the delegate's key.
+    let program = fetch_program_message(aleph_client, &args.item_hash).await?;
+    if program.owner() != &owner_address {
+        bail!(
+            "address {owner_address} does not own program {} (owner: {})",
+            args.item_hash,
+            program.owner()
+        );
+    }
+    let MessageContentEnum::Program(program_content) = program.content() else {
+        bail!("expected PROGRAM message, got {:?}", program.message_type);
+    };
+    if !program_content.base.allow_amend {
+        bail!(
+            "program {} is not updatable; was it created without --updatable?",
+            args.item_hash
+        );
+    }
+    let original_code_ref = program_content.code.reference.clone();
+
+    // 2. Prepare the new archive and ensure its encoding matches the existing program.
+    let (archive, encoding) = prepare_archive(&args.path)?;
+    check_update_encoding(&program, encoding.clone())?;
+
+    // 3. Storage engine is derived from the original code's hash variant: an
+    //    IPFS-hosted code STORE must be amended with another IPFS STORE, and
+    //    likewise for native (storage) backed codes.
+    let storage_engine = match &original_code_ref {
+        ItemHash::Ipfs(_) => StorageEngine::Ipfs,
+        ItemHash::Native(_) => StorageEngine::Storage,
+    };
+
+    if !json {
+        eprintln!("Hashing {}...", archive.path().display());
+    }
+    let file_hash = match storage_engine {
+        StorageEngine::Storage => hash_file(archive.path(), Hasher::for_storage()).await?,
+        StorageEngine::Ipfs => hash_file(archive.path(), Hasher::for_ipfs()).await?,
+    };
+    if !json {
+        eprintln!("  Code hash: {file_hash}");
+    }
+
+    // 4. Build the amending STORE. `reference_hash` records the previous code
+    //    STORE so the network can chain amendments back to the original.
+    let mut store_builder = StoreBuilder::new(&account, file_hash.clone(), storage_engine)
+        .reference_hash(original_code_ref)
+        .payment(Payment::credits());
+    if args.on_behalf_of.is_some() {
+        store_builder = store_builder.on_behalf_of(owner_address);
+    }
+    if let Some(ch) = &args.channel {
+        store_builder = store_builder.channel(Channel::from(ch.clone()));
+    }
+    let store_pending = store_builder.build()?;
+
+    // 5. Dry run: print the STORE envelope and stop. No PROGRAM is emitted on
+    //    update because the program item hash is unchanged - only the code
+    //    STORE changes.
+    if dry_run {
+        if !json {
+            eprintln!("Dry run - message not submitted.\n");
+        }
+        println!("{}", serde_json::to_string_pretty(&store_pending)?);
+        return Ok(());
+    }
+
+    // 6. Upload the new archive (mirrors handle_create).
+    if !json {
+        eprintln!("Uploading new code archive...");
+    }
+    let on_tick: fn(u64, u64) = if json {
+        |_, _| {}
+    } else {
+        crate::common::render_upload_progress
+    };
+    let upload = match storage_engine {
+        StorageEngine::Storage => {
+            aleph_client
+                .upload_file_to_storage_with_progress(
+                    archive.path(),
+                    Some(&store_pending),
+                    true,
+                    on_tick,
+                )
+                .await
+        }
+        StorageEngine::Ipfs => {
+            aleph_client
+                .upload_file_to_ipfs_with_progress(
+                    archive.path(),
+                    Some(&store_pending),
+                    true,
+                    on_tick,
+                )
+                .await
+        }
+    };
+    if !json {
+        eprintln!();
+    }
+    upload?;
+    print_submission_result(ccn_url, &store_pending, "success", "processed", json)?;
+
+    if !json {
+        eprintln!(
+            "Program {} updated. Code amended to {}.",
+            args.item_hash, file_hash
+        );
+    }
+    Ok(())
+}
+
+/// Pure helper: verify that a candidate new archive's encoding matches the
+/// existing program's `code.encoding`. The PROGRAM message records the
+/// encoding once at creation, and the network expects subsequent code
+/// amendments to keep it stable.
+fn check_update_encoding(program: &Message, new_encoding: Encoding) -> Result<()> {
+    let MessageContentEnum::Program(content) = program.content() else {
+        bail!("expected PROGRAM message");
+    };
+    if content.code.encoding != new_encoding {
+        bail!(
+            "new code encoding `{:?}` does not match existing program encoding `{:?}`",
+            new_encoding,
+            content.code.encoding
+        );
+    }
+    Ok(())
+}
+
 async fn handle_delete(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -1483,6 +1622,25 @@ mod tests {
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].as_str().unwrap(), program.item_hash.to_string());
         assert_eq!(value["reason"], "User deletion");
+    }
+
+    #[test]
+    fn check_update_encoding_accepts_matching() {
+        let program: Message = serde_json::from_str(PROGRAM_FIXTURE).unwrap();
+        // Fixture's code.encoding is Encoding::Zip
+        check_update_encoding(&program, Encoding::Zip).unwrap();
+    }
+
+    #[test]
+    fn check_update_encoding_rejects_mismatch() {
+        let program: Message = serde_json::from_str(PROGRAM_FIXTURE).unwrap();
+        // Fixture's code.encoding is Encoding::Zip; pass a different one.
+        let err = check_update_encoding(&program, Encoding::Squashfs).unwrap_err();
+        let msg = format!("{err:#}");
+        // The error must name both the rejected new encoding and the existing
+        // one, so a swapped-argument regression would fail this assertion.
+        assert!(msg.contains("Squashfs"), "missing new encoding: {msg}");
+        assert!(msg.contains("Zip"), "missing existing encoding: {msg}");
     }
 
     #[test]
