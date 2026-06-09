@@ -1634,8 +1634,13 @@ mod tests {
     #[test]
     fn check_update_encoding_rejects_mismatch() {
         let program: Message = serde_json::from_str(PROGRAM_FIXTURE).unwrap();
+        // Fixture's code.encoding is Encoding::Zip; pass a different one.
         let err = check_update_encoding(&program, Encoding::Squashfs).unwrap_err();
-        assert!(format!("{err:#}").contains("encoding"));
+        let msg = format!("{err:#}");
+        // The error must name both the rejected new encoding and the existing
+        // one, so a swapped-argument regression would fail this assertion.
+        assert!(msg.contains("Squashfs"), "missing new encoding: {msg}");
+        assert!(msg.contains("Zip"), "missing existing encoding: {msg}");
     }
 
     #[test]
