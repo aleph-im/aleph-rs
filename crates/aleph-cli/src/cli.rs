@@ -3365,8 +3365,9 @@ pub enum ConfidentialCommand {
     InitSession(ConfidentialInitSessionArgs),
     /// Validate the VM launch measurement and inject the disk-decryption secret.
     Start(ConfidentialStartArgs),
-    /// All-in-one: create (optional), allocate, init session, then start.
-    Create(ConfidentialCreateArgs),
+    /// All-in-one: allocate, init session, then start an existing confidential VM.
+    #[command(alias = "create")]
+    Launch(ConfidentialLaunchArgs),
 }
 
 #[derive(Args)]
@@ -3425,7 +3426,7 @@ pub struct ConfidentialStartArgs {
 }
 
 #[derive(Args)]
-pub struct ConfidentialCreateArgs {
+pub struct ConfidentialLaunchArgs {
     /// Existing VM hash. If omitted, runs `instance create --confidential ...`
     /// first to allocate a fresh VM.
     pub vm_id: Option<String>,
@@ -3508,14 +3509,25 @@ mod confidential_parser_tests {
     }
 
     #[test]
-    fn create_accepts_no_positional() {
-        let cli = parse(&["aleph", "instance", "confidential", "create"]);
+    fn launch_accepts_no_positional() {
+        let cli = parse(&["aleph", "instance", "confidential", "launch"]);
         let Commands::Instance {
-            command: InstanceCommand::Confidential(ConfidentialCommand::Create(a)),
+            command: InstanceCommand::Confidential(ConfidentialCommand::Launch(a)),
         } = cli.command
         else {
             panic!("wrong subcommand");
         };
         assert_eq!(a.vm_id, None);
+    }
+
+    #[test]
+    fn launch_accepts_create_alias() {
+        let cli = parse(&["aleph", "instance", "confidential", "create"]);
+        let Commands::Instance {
+            command: InstanceCommand::Confidential(ConfidentialCommand::Launch(_)),
+        } = cli.command
+        else {
+            panic!("wrong subcommand");
+        };
     }
 }

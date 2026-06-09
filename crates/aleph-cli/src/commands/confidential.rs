@@ -1,7 +1,7 @@
 //! `aleph instance confidential` command tree.
 
 use crate::cli::{
-    ConfidentialCommand, ConfidentialCreateArgs, ConfidentialInitSessionArgs, ConfidentialStartArgs,
+    ConfidentialCommand, ConfidentialInitSessionArgs, ConfidentialLaunchArgs, ConfidentialStartArgs,
 };
 use crate::commands::instance_target::resolve_target;
 use crate::common::{confirm_action, resolve_account};
@@ -22,7 +22,7 @@ pub async fn dispatch(scheduler_url: Url, json: bool, cmd: ConfidentialCommand) 
     match cmd {
         ConfidentialCommand::InitSession(args) => handle_init_session(scheduler_url, args).await,
         ConfidentialCommand::Start(args) => handle_start(scheduler_url, json, args).await,
-        ConfidentialCommand::Create(args) => handle_create(scheduler_url, json, args).await,
+        ConfidentialCommand::Launch(args) => handle_launch(scheduler_url, json, args).await,
     }
 }
 
@@ -205,16 +205,16 @@ async fn handle_start(scheduler_url: Url, json: bool, args: ConfidentialStartArg
     Ok(())
 }
 
-async fn handle_create(scheduler_url: Url, json: bool, args: ConfidentialCreateArgs) -> Result<()> {
+async fn handle_launch(scheduler_url: Url, json: bool, args: ConfidentialLaunchArgs) -> Result<()> {
     // 0. Sevctl available? Fail fast before doing anything.
     let _sevctl = Sevctl::find()?;
 
     // 1. Determine vm_id + crn_url.
     let vm_id_input = args.vm_id.as_deref().ok_or_else(|| {
         anyhow!(
-            "creating a new VM from `confidential create` requires `instance create` flag forwarding, \
+            "creating a new VM from `confidential launch` requires `instance create` flag forwarding, \
              which lands in a follow-up. For now, run `aleph instance create --confidential ...` first, \
-             then call `aleph instance confidential create <vm-hash>`."
+             then call `aleph instance confidential launch <vm-hash>`."
         )
     })?;
     let (vm_id, crn_url) = resolve_target(&scheduler_url, vm_id_input, args.crn.as_deref()).await?;
