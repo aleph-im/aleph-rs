@@ -1,13 +1,15 @@
 ---
 source: crates/aleph-cli/src/commands/token.rs
-expression: "result_json_usdc(SwapToken::Usdc, &sample_quote(), \"0xUID\")"
+expression: "quote_json_uniswap(SwapToken::Usdc, &sample_uniswap_quote())"
 ---
 {
   "expected_aleph": "1",
-  "fee": "0.1",
   "min_aleph": "0.995",
-  "order_id": "0xUID",
+  "pool_fees": [
+    "0.05%",
+    "1%"
+  ],
   "sell_amount": "50",
   "sell_token": "USDC",
-  "venue": "cow"
+  "venue": "uniswap"
 }

@@ -7,5 +7,6 @@ expression: "quote_json(SwapToken::Eth, &sample_quote())"
   "fee": "0.0000000000001",
   "min_aleph": "0.995",
   "sell_amount": "0.00000000005",
-  "sell_token": "ETH"
+  "sell_token": "ETH",
+  "venue": "cow"
 }

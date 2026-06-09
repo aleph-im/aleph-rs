@@ -185,7 +185,7 @@ pub enum Commands {
         #[clap(subcommand)]
         command: CreditCommand,
     },
-    /// Acquire ALEPH tokens by swapping ETH or USDC via CoW Swap
+    /// Acquire ALEPH tokens by swapping ETH or USDC via CoW Swap or Uniswap
     Token {
         #[clap(subcommand)]
         command: TokenCommand,
@@ -2430,17 +2430,23 @@ pub struct TransferCreditArgs {
 
 #[derive(Subcommand)]
 pub enum TokenCommand {
-    /// Swap ETH or USDC for ALEPH via CoW Swap
+    /// Swap ETH or USDC for ALEPH via CoW Swap or Uniswap
     #[command(long_about = "\
-Swap native ETH or USDC for ALEPH using CoW Swap, leaving the ALEPH in your \
-wallet. --amount is in human-readable units of the sell token.
+Swap native ETH or USDC for ALEPH, leaving the ALEPH in your wallet.
+--amount is in human-readable units of the sell token.
 
-The order is submitted fire-and-forget: the command prints the CoW order UID \
-and an explorer link, then exits. Check fill status on the explorer.
+Two venues (--venue):
+  cow (default): gasless off-chain order filled by solvers; may expire
+                 unfilled on a thin pair. Prints the order UID and exits;
+                 check fill status on the explorer.
+  uniswap:       immediate on-chain swap against Uniswap v3 pools; you pay
+                 gas and the pool fee is embedded in the price. Useful when
+                 a CoW order expired unfilled.
 
 Examples:
   aleph token swap --sell-token usdc --amount 100
   aleph token swap --sell-token eth  --amount 0.5 --slippage 1.0
+  aleph token swap --sell-token eth  --amount 0.5 --venue uniswap
   aleph token swap --sell-token usdc --amount 50 --yes")]
     Swap(TokenSwapArgs),
 }
@@ -2451,11 +2457,23 @@ pub enum SwapTokenCli {
     Usdc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SwapVenueCli {
+    Cow,
+    Uniswap,
+}
+
 #[derive(Args)]
 pub struct TokenSwapArgs {
     /// Token to sell (native ETH or USDC)
     #[arg(long, value_enum)]
     pub sell_token: SwapTokenCli,
+
+    /// Swap venue. CoW submits a gasless off-chain order that solvers fill
+    /// (may expire unfilled); Uniswap executes immediately on-chain and you
+    /// pay gas.
+    #[arg(long, value_enum, default_value = "cow")]
+    pub venue: SwapVenueCli,
 
     /// Amount of the sell token to spend, in human-readable units
     #[arg(long)]
@@ -2470,7 +2488,8 @@ pub struct TokenSwapArgs {
     #[arg(long)]
     pub receiver: Option<String>,
 
-    /// Order validity window in seconds
+    /// Order validity window (CoW) or transaction deadline (Uniswap),
+    /// in seconds from submission
     #[arg(long, default_value_t = 1200)]
     pub valid_for: u32,
 

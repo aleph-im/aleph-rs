@@ -8,5 +8,6 @@ expression: "result_json_eth(SwapToken::Eth, &sample_quote(), \"0xfeed\")"
   "min_aleph": "0.995",
   "sell_amount": "0.00000000005",
   "sell_token": "ETH",
-  "tx_hash": "0xfeed"
+  "tx_hash": "0xfeed",
+  "venue": "cow"
 }

@@ -1,14 +1,17 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::account::CliAccount;
-use crate::cli::{SigningArgs, SwapTokenCli, TokenCommand, TokenSwapArgs};
+use crate::cli::{SigningArgs, SwapTokenCli, SwapVenueCli, TokenCommand, TokenSwapArgs};
 use crate::common::{confirm_submission, resolve_account, resolve_address, resolve_network};
-use aleph_sdk::credit::{format_token_amount, parse_token_amount};
-use aleph_sdk::swap::SwapQuote;
-use aleph_sdk::swap::SwapRequest;
-use aleph_sdk::swap::SwapToken;
+use aleph_sdk::credit::{EthereumConfig, format_token_amount, parse_token_amount};
 use aleph_sdk::swap::cow::CowApi;
 use aleph_sdk::swap::cow::chains::cow_chain;
 use aleph_sdk::swap::cow::ethflow::create_eth_order;
-use aleph_sdk::swap::cow::{ensure_allowance, place_usdc_order, quote_eth, quote_usdc};
+use aleph_sdk::swap::cow::order::VAULT_RELAYER;
+use aleph_sdk::swap::uniswap::chains::uniswap_chain;
+use aleph_sdk::swap::uniswap::router::execute_swap;
+use aleph_sdk::swap::uniswap::{self, UniswapQuote};
+use aleph_sdk::swap::{SwapQuote, SwapRequest, SwapToken, cow, ensure_allowance};
 use aleph_types::account::EvmAccount;
 use alloy_network::EthereumWallet;
 use alloy_primitives::Address;
@@ -83,6 +86,23 @@ fn print_swap_quote(sell_token: SwapToken, quote: &SwapQuote) {
     );
 }
 
+fn print_uniswap_quote(sell_token: SwapToken, quote: &UniswapQuote) {
+    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
+    let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
+    let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
+    eprintln!(
+        "Swapping {} {} for ALEPH via Uniswap",
+        sell_display,
+        sell_token.symbol()
+    );
+    eprintln!("  Expected:     ~{buy_display} ALEPH");
+    eprintln!("  Min received: {min_display} ALEPH");
+    eprintln!(
+        "  Pool fee:     {} (taken in the pool price; gas paid separately)",
+        quote.route.fee_display()
+    );
+}
+
 async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>) -> Result<()> {
     let slippage_frac = validate_slippage(args.slippage)?;
 
@@ -122,16 +142,6 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
         .await
         .map_err(|e| anyhow!("failed to get chain ID: {e}"))?;
 
-    let chain = cow_chain(chain_id).ok_or_else(|| {
-        anyhow!(
-            "CoW Swap is not available on chainId {} (network '{}')",
-            chain_id,
-            network.name
-        )
-    })?;
-
-    let api = CowApi::new(chain_id).map_err(|e| anyhow!("failed to build CoW API client: {e}"))?;
-
     let req = SwapRequest {
         sell_token,
         sell_amount: sell_amount_raw,
@@ -142,11 +152,69 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
         valid_for_secs: args.valid_for,
     };
 
+    match args.venue {
+        SwapVenueCli::Cow => {
+            swap_via_cow(
+                json,
+                &args,
+                &network.name,
+                &ethereum,
+                chain_id,
+                &provider,
+                owner,
+                receiver,
+                &signer,
+                &req,
+            )
+            .await
+        }
+        SwapVenueCli::Uniswap => {
+            swap_via_uniswap(
+                json,
+                &args,
+                &network.name,
+                &ethereum,
+                chain_id,
+                &provider,
+                owner,
+                receiver,
+                &req,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn swap_via_cow(
+    json: bool,
+    args: &TokenSwapArgs,
+    network_name: &str,
+    ethereum: &EthereumConfig,
+    chain_id: u64,
+    provider: &impl Provider,
+    owner: Address,
+    receiver: Address,
+    signer: &PrivateKeySigner,
+    req: &SwapRequest,
+) -> Result<()> {
+    let sell_token = req.sell_token;
+
+    let chain = cow_chain(chain_id).ok_or_else(|| {
+        anyhow!(
+            "CoW Swap is not available on chainId {} (network '{}')",
+            chain_id,
+            network_name
+        )
+    })?;
+
+    let api = CowApi::new(chain_id).map_err(|e| anyhow!("failed to build CoW API client: {e}"))?;
+
     let (quote, resp) = match sell_token {
-        SwapToken::Usdc => quote_usdc(&api, ethereum.usdc_token, &req)
+        SwapToken::Usdc => cow::quote_usdc(&api, ethereum.usdc_token, req)
             .await
             .map_err(|e| anyhow!("failed to fetch CoW quote: {e}"))?,
-        SwapToken::Eth => quote_eth(&api, chain.weth, &req)
+        SwapToken::Eth => cow::quote_eth(&api, chain.weth, req)
             .await
             .map_err(|e| anyhow!("failed to fetch CoW quote: {e}"))?,
     };
@@ -177,17 +245,23 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
     // Submit the order.
     match sell_token {
         SwapToken::Usdc => {
-            ensure_allowance(&provider, ethereum.usdc_token, owner, quote.sell_amount)
-                .await
-                .map_err(|e| anyhow!("failed to ensure USDC allowance: {e}"))?;
-            let order_uid = place_usdc_order(
+            ensure_allowance(
+                provider,
+                ethereum.usdc_token,
+                owner,
+                VAULT_RELAYER,
+                quote.sell_amount,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to ensure USDC allowance: {e}"))?;
+            let order_uid = cow::place_usdc_order(
                 &api,
                 chain_id,
                 ethereum.usdc_token,
-                &req,
+                req,
                 &quote,
                 &resp,
-                &signer,
+                signer,
             )
             .await
             .map_err(|e| anyhow!("failed to place CoW order: {e}"))?;
@@ -202,7 +276,7 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
         }
         SwapToken::Eth => {
             let tx_hash = create_eth_order(
-                &provider,
+                provider,
                 chain.ethflow,
                 ethereum.aleph_token,
                 receiver,
@@ -228,6 +302,110 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn swap_via_uniswap(
+    json: bool,
+    args: &TokenSwapArgs,
+    network_name: &str,
+    ethereum: &EthereumConfig,
+    chain_id: u64,
+    provider: &impl Provider,
+    owner: Address,
+    receiver: Address,
+    req: &SwapRequest,
+) -> Result<()> {
+    let sell_token = req.sell_token;
+
+    let chain = uniswap_chain(chain_id).ok_or_else(|| {
+        anyhow!(
+            "Uniswap is not available on chainId {} (network '{}')",
+            chain_id,
+            network_name
+        )
+    })?;
+
+    let quote = match sell_token {
+        SwapToken::Eth => uniswap::quote_eth(provider, &chain, req)
+            .await
+            .map_err(|e| anyhow!("failed to fetch Uniswap quote: {e}"))?,
+        SwapToken::Usdc => uniswap::quote_usdc(provider, &chain, ethereum.usdc_token, req)
+            .await
+            .map_err(|e| anyhow!("failed to fetch Uniswap quote: {e}"))?,
+    };
+
+    // Print quote summary to stderr (human mode).
+    if !json {
+        print_uniswap_quote(sell_token, &quote);
+    }
+
+    // Dry-run: stop after printing the quote.
+    if args.signing.dry_run {
+        if json {
+            let mut output = quote_json_uniswap(sell_token, &quote);
+            output["dry_run"] = serde_json::Value::Bool(true);
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            eprintln!("\nDry run - swap not submitted.");
+        }
+        return Ok(());
+    }
+
+    // Confirmation: only prompt in human mode (mirror credit.rs: no prompt when --json).
+    if !json && !args.yes && !confirm_submission("Proceed?")? {
+        eprintln!("Cancelled.");
+        return Ok(());
+    }
+
+    let deadline_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| anyhow!("system clock is before the unix epoch: {e}"))?
+        .as_secs()
+        + u64::from(args.valid_for);
+
+    // Native ETH rides along as msg.value; USDC needs a router allowance.
+    let native_sell = match sell_token {
+        SwapToken::Eth => true,
+        SwapToken::Usdc => {
+            ensure_allowance(
+                provider,
+                ethereum.usdc_token,
+                owner,
+                chain.swap_router02,
+                quote.sell_amount,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to ensure USDC allowance: {e}"))?;
+            false
+        }
+    };
+
+    let tx_hash = execute_swap(
+        provider,
+        chain.swap_router02,
+        &quote.route,
+        quote.sell_amount,
+        quote.min_buy_amount,
+        receiver,
+        deadline_secs,
+        native_sell,
+    )
+    .await
+    .map_err(|e| anyhow!("failed to submit Uniswap swap: {e}"))?;
+    let tx_hash_str = format!("{:#x}", tx_hash);
+
+    if json {
+        let output = result_json_uniswap(sell_token, &quote, &tx_hash_str);
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        eprintln!("Transaction submitted: {tx_hash_str}");
+        if let Some(base) = &ethereum.explorer_tx_base {
+            eprintln!("{base}{tx_hash_str}");
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_swap_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
     match resolve_account(&signing.identity)? {
         CliAccount::Evm(a) => Ok(a),
@@ -241,6 +419,7 @@ fn resolve_swap_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
 /// Common quote fields shared by the dry-run and result JSON outputs.
 fn quote_json(sell_token: SwapToken, quote: &SwapQuote) -> serde_json::Value {
     serde_json::json!({
+        "venue": "cow",
         "sell_token": sell_token.symbol(),
         "sell_amount": format_token_amount(quote.sell_amount, sell_token.decimals()),
         "expected_aleph": format_token_amount(quote.buy_amount, ALEPH_DECIMALS),
@@ -265,6 +444,29 @@ fn result_json_eth(sell_token: SwapToken, quote: &SwapQuote, tx_hash: &str) -> s
     v
 }
 
+/// Common quote fields for the Uniswap venue. No `fee` amount: the pool fee
+/// is embedded in the price, so `pool_fees` names the tiers instead.
+fn quote_json_uniswap(sell_token: SwapToken, quote: &UniswapQuote) -> serde_json::Value {
+    serde_json::json!({
+        "venue": "uniswap",
+        "sell_token": sell_token.symbol(),
+        "sell_amount": format_token_amount(quote.sell_amount, sell_token.decimals()),
+        "expected_aleph": format_token_amount(quote.buy_amount, ALEPH_DECIMALS),
+        "min_aleph": format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS),
+        "pool_fees": quote.route.fees_percent(),
+    })
+}
+
+fn result_json_uniswap(
+    sell_token: SwapToken,
+    quote: &UniswapQuote,
+    tx_hash: &str,
+) -> serde_json::Value {
+    let mut v = quote_json_uniswap(sell_token, quote);
+    v["tx_hash"] = tx_hash.into();
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +478,24 @@ mod tests {
             buy_amount: U256::from(1_000_000_000_000_000_000u128), // 1e18
             min_buy_amount: U256::from(995_000_000_000_000_000u128), // 0.995e18
             fee_amount: U256::from(100_000u64),                    // 0.1 USDC (6 dec)
+        }
+    }
+
+    fn sample_uniswap_quote() -> UniswapQuote {
+        use aleph_sdk::swap::uniswap::route::{FEE_1_PERCENT, FEE_005_PERCENT, UniswapRoute};
+        use alloy_primitives::address;
+        UniswapQuote {
+            sell_amount: U256::from(50_000_000u64),
+            buy_amount: U256::from(1_000_000_000_000_000_000u128), // 1e18
+            min_buy_amount: U256::from(995_000_000_000_000_000u128), // 0.995e18
+            route: UniswapRoute::new(
+                vec![
+                    address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"), // USDC
+                    address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
+                    address!("27702a26126e0B3702af63Ee09aC4d1A084EF628"), // ALEPH
+                ],
+                vec![FEE_005_PERCENT, FEE_1_PERCENT],
+            ),
         }
     }
 
@@ -328,6 +548,7 @@ mod tests {
     #[test]
     fn result_json_usdc_shape() {
         let v = result_json_usdc(SwapToken::Usdc, &sample_quote(), "0xUID");
+        assert_eq!(v["venue"], "cow");
         assert_eq!(v["sell_token"], "USDC");
         // sell_amount: 50_000_000 atoms / 10^6 = 50 USDC
         assert_eq!(v["sell_amount"], "50");
@@ -347,6 +568,7 @@ mod tests {
     #[test]
     fn result_json_eth_shape() {
         let v = result_json_eth(SwapToken::Eth, &sample_quote(), "0xdeadbeef");
+        assert_eq!(v["venue"], "cow");
         assert_eq!(v["sell_token"], "ETH");
         // sell_amount: 50_000_000 atoms / 10^18 = 0.00000000005 ETH
         assert_eq!(v["sell_amount"], "0.00000000005");
@@ -362,6 +584,7 @@ mod tests {
     #[test]
     fn quote_json_has_fee_and_no_order_id() {
         let v = quote_json(SwapToken::Usdc, &sample_quote());
+        assert_eq!(v["venue"], "cow");
         assert_eq!(v["sell_token"], "USDC");
         // sell_amount: 50_000_000 atoms / 10^6 = 50 USDC
         assert_eq!(v["sell_amount"], "50");
@@ -378,6 +601,44 @@ mod tests {
         let mut v = quote_json(SwapToken::Usdc, &sample_quote());
         v["dry_run"] = serde_json::Value::Bool(true);
         assert_eq!(v["dry_run"], true);
+    }
+
+    // --- Uniswap JSON helpers ---
+
+    #[test]
+    fn quote_json_uniswap_shape() {
+        let v = quote_json_uniswap(SwapToken::Usdc, &sample_uniswap_quote());
+        assert_eq!(v["venue"], "uniswap");
+        assert_eq!(v["sell_token"], "USDC");
+        assert_eq!(v["sell_amount"], "50");
+        assert_eq!(v["expected_aleph"], "1");
+        assert_eq!(v["min_aleph"], "0.995");
+        assert_eq!(v["pool_fees"], serde_json::json!(["0.05%", "1%"]));
+        assert!(v.get("fee").is_none(), "uniswap has no separate fee amount");
+        assert!(v.get("tx_hash").is_none());
+        assert!(v.get("order_id").is_none());
+    }
+
+    #[test]
+    fn result_json_uniswap_shape() {
+        let v = result_json_uniswap(SwapToken::Usdc, &sample_uniswap_quote(), "0xdeadbeef");
+        assert_eq!(v["venue"], "uniswap");
+        assert_eq!(v["tx_hash"], "0xdeadbeef");
+        assert!(v.get("order_id").is_none());
+    }
+
+    #[test]
+    fn result_json_uniswap_snapshot() {
+        insta::assert_json_snapshot!(result_json_uniswap(
+            SwapToken::Usdc,
+            &sample_uniswap_quote(),
+            "0xfeed"
+        ));
+    }
+
+    #[test]
+    fn quote_json_uniswap_snapshot() {
+        insta::assert_json_snapshot!(quote_json_uniswap(SwapToken::Usdc, &sample_uniswap_quote()));
     }
 
     // --- Snapshot tests ---
