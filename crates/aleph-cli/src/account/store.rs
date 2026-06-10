@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 const KEYRING_SERVICE: &str = "cloud.aleph.cli";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountKind {
     Local,
     Ledger, // Phase 2
     /// Password-protected Ethereum keystore V3 file (no keyring).
+    /// Serialized as "keystore" in the manifest; displayed as "encrypted".
     Keystore,
 }
 
@@ -302,8 +303,14 @@ impl AccountStore {
 
     /// Add a keystore (password-encrypted file) account.
     ///
-    /// Manifest first, file second, mirroring `add_local_account`: if the
-    /// file write fails the manifest entry is rolled back.
+    /// File first, manifest second — the reverse of `add_local_account`.
+    ///
+    /// The keyring flow writes the manifest first because an orphaned
+    /// keyring secret would be undiscoverable. A keystore file lives at a
+    /// deterministic path derived from the name, so an orphaned file is
+    /// discoverable and harmless; a manifest entry pointing at a missing
+    /// file would instead be a broken account. Writing the file first means
+    /// any single failure leaves at worst an orphaned file.
     pub fn add_keystore_account(
         &self,
         name: &str,
@@ -320,6 +327,15 @@ impl AccountStore {
             return Err(StoreError::AlreadyExists(name.to_string()));
         }
 
+        let dir = self.keystores_dir();
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        self.write_restricted(&self.keystore_path(name), keystore_json)?;
+
         manifest.accounts.push(AccountEntry {
             name: name.to_string(),
             chain,
@@ -330,30 +346,10 @@ impl AccountStore {
         if manifest.default.is_none() {
             manifest.default = Some(name.to_string());
         }
-        self.save_manifest(&manifest)?;
-
-        let write_result = (|| {
-            let dir = self.keystores_dir();
-            std::fs::create_dir_all(&dir)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-            }
-            self.write_restricted(&self.keystore_path(name), keystore_json)
-        })();
-
-        if let Err(io_err) = write_result {
-            manifest.accounts.retain(|a| a.name != name);
-            if manifest.default.as_deref() == Some(name) {
-                manifest.default = manifest.accounts.first().map(|a| a.name.clone());
-            }
-            if let Err(rollback_err) = self.save_manifest(&manifest) {
-                eprintln!(
-                    "warning: failed to roll back manifest after keystore write error: {rollback_err}"
-                );
-            }
-            return Err(StoreError::Io(io_err));
+        if let Err(save_err) = self.save_manifest(&manifest) {
+            // Best-effort cleanup; an orphaned file would be harmless anyway.
+            let _ = std::fs::remove_file(self.keystore_path(name));
+            return Err(save_err);
         }
 
         Ok(())
@@ -433,7 +429,7 @@ impl AccountStore {
             .position(|a| a.name == name)
             .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
 
-        let kind = manifest.accounts[idx].kind.clone();
+        let kind = manifest.accounts[idx].kind;
 
         // 1. Update manifest first — remove the entry
         manifest.accounts.remove(idx);
@@ -805,6 +801,22 @@ mod tests {
         store.delete_account("enc").unwrap();
         assert!(!path.exists());
         assert!(store.load_manifest().unwrap().accounts.is_empty());
+    }
+
+    #[test]
+    fn failed_keystore_write_leaves_no_manifest_entry() {
+        let (dir, store) = temp_store();
+        // A *file* named "keystores" makes create_dir_all fail deterministically.
+        std::fs::write(dir.path().join("keystores"), b"not a dir").unwrap();
+
+        let err = store
+            .add_keystore_account("enc", Chain::Ethereum, "0x1234".to_string(), KEYSTORE_JSON)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Io(_)));
+
+        let manifest = store.load_manifest().unwrap();
+        assert!(manifest.accounts.is_empty());
+        assert!(manifest.default.is_none());
     }
 
     #[test]
