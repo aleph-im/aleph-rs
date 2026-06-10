@@ -35,19 +35,61 @@ pub async fn handle_account_command(
 
 fn handle_create(store: &AccountStore, args: AccountCreateArgs, json: bool) -> Result<()> {
     let chain: aleph_types::chain::Chain = args.chain.into();
+
+    if args.encrypted {
+        return handle_create_encrypted(store, &args.name, chain, json);
+    }
+
     let (key_hex, address) = generate_key(chain.clone())?;
 
     store.add_local_account(&args.name, chain.clone(), address.clone(), &key_hex)?;
 
+    print_account_created(&args.name, &chain, &address, "local", json)
+}
+
+fn handle_create_encrypted(
+    store: &AccountStore,
+    name: &str,
+    chain: aleph_types::chain::Chain,
+    json: bool,
+) -> Result<()> {
+    use crate::account::{keystore, password};
+
+    if !chain.is_evm() {
+        anyhow::bail!("--encrypted accounts are only supported for EVM chains");
+    }
+    // Fail on invalid/taken names before prompting for a password.
+    store.check_name_available(name)?;
+
+    let (key_hex, address) = generate_key(chain.clone())?;
+    let passphrase = password::read_new_password()?;
+    let key_bytes = keystore::decode_key_hex(&key_hex)?;
+    let ks = keystore::encrypt_key(&key_bytes, &passphrase, &address)?;
+    let ks_json = serde_json::to_string_pretty(&ks)?;
+
+    store.add_keystore_account(name, chain.clone(), address.clone(), &ks_json)?;
+
+    print_account_created(name, &chain, &address, "encrypted", json)
+}
+
+fn print_account_created(
+    name: &str,
+    chain: &aleph_types::chain::Chain,
+    address: &str,
+    kind: &str,
+    json: bool,
+) -> Result<()> {
     if json {
         let output = serde_json::json!({
-            "name": args.name,
+            "name": name,
             "chain": chain,
             "address": address,
+            "kind": kind,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        eprintln!("Account '{}' created.", args.name);
+        eprintln!("Account '{name}' created.");
+        eprintln!("  Type:    {kind}");
         eprintln!("  Chain:   {chain}");
         eprintln!("  Address: {address}");
     }

@@ -1201,12 +1201,17 @@ given name. The key never touches disk. Use the resulting account by \
 passing `--account <NAME>` to signing commands, or set it as the default \
 with `aleph account use <NAME>`.
 
+With --encrypted, the key is instead stored on disk as a password-protected \
+Ethereum keystore V3 file (EVM chains only). The password is asked once per \
+command at signing time; set ALEPH_PASSWORD for non-interactive use.
+
 To import an existing key (private-key, keystore file, or Ledger), use \
 `aleph account import` instead.
 
 Examples:
   aleph account create alice                    # EVM (default chain: eth)
   aleph account create alice --chain sol        # Solana
+  aleph account create alice --encrypted        # password-protected keystore
   aleph account use alice                       # set as default for signing")]
     Create(AccountCreateArgs),
     /// Remove an account from the keychain
@@ -1255,6 +1260,11 @@ pub struct AccountCreateArgs {
     /// Chain for the new account.
     #[arg(long, value_enum, default_value = "eth")]
     pub chain: ChainCli,
+
+    /// Protect the account with a password instead of the OS keychain.
+    /// The key is stored as an Ethereum keystore V3 file (EVM chains only).
+    #[arg(long)]
+    pub encrypted: bool,
 }
 
 #[derive(Args)]
