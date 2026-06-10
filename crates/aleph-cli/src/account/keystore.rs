@@ -308,6 +308,14 @@ fn derive_key(
             if *p > 1024 {
                 return Err(KeystoreError::InvalidFormat("scrypt p too large".into()));
             }
+            // Bound the B buffer (p * 128 * r bytes) like the V buffer below;
+            // the n-based ceiling alone does not cover it. This also implies
+            // RFC 7914's r * p < 2^30 requirement.
+            if (*r as u64) * (*p as u64) * 128 > TWO_GIB {
+                return Err(KeystoreError::InvalidFormat(
+                    "scrypt parameters require too much memory".into(),
+                ));
+            }
             // Memory ceiling: 128 * r * n must not overflow u64 or exceed 2 GiB.
             // This admits every real-world keystore (geth-heavy n=2^20, r=8 = 1 GiB;
             // official vector = 32 MiB) while bounding hostile input.
@@ -657,6 +665,17 @@ mod tests {
     fn hostile_scrypt_exceeds_2gib_ceiling_rejected() {
         // n = 2^32 with r=8: 128 * 8 * 2^32 = 2^43 bytes >> 2 GiB
         let ks = scrypt_ks_with(4_294_967_296, 8, 1);
+        let err = decrypt_key(&ks, "testpassword").unwrap_err();
+        assert!(
+            matches!(err, KeystoreError::InvalidFormat(_)),
+            "expected InvalidFormat, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn hostile_scrypt_b_buffer_exceeds_ceiling_rejected() {
+        // Small n keeps the V ceiling happy, but B = 128 * r * p = 1 TiB.
+        let ks = scrypt_ks_with(2, 8_388_608, 1024);
         let err = decrypt_key(&ks, "testpassword").unwrap_err();
         assert!(
             matches!(err, KeystoreError::InvalidFormat(_)),
