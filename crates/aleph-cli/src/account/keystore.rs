@@ -1,8 +1,9 @@
 //! Ethereum keystore V3 (Web3 Secret Storage) encryption and decryption.
 //!
-//! Pure crypto + serde — no file I/O and no prompting. Write path always
-//! uses scrypt with geth-strength parameters; read path also accepts
-//! pbkdf2 (HMAC-SHA256) so keystores exported by other tools import.
+//! Pure crypto + serde — no file I/O and no prompting. The read path accepts
+//! both scrypt and pbkdf2 (HMAC-SHA256) so keystores exported by other tools
+//! import cleanly. The write path (added alongside encryption support) always
+//! uses scrypt with geth-strength parameters.
 
 use aes::cipher::{KeyIvInit, StreamCipher};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,10 @@ type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 
 // Pure Salsa20/8 on a 64-byte block (in-place), without going through the
 // streaming cipher trait machinery.
+//
+// Note: small stack temporaries (`x`, `z`) are deliberately not wiped here,
+// matching the scrypt crate's own behavior — they are derived from the input
+// block and expose no additional secret material beyond what the caller holds.
 fn salsa20_8_inplace(block: &mut [u8; 64]) {
     #[inline(always)]
     fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
@@ -76,6 +81,8 @@ fn scrypt_block_mix(input: &[u8], output: &mut [u8]) {
     let mut x = [0u8; 64];
     x.copy_from_slice(&input[input.len() - 64..]);
 
+    // Stack temporary for the XOR+Salsa20/8 step — deliberately not wiped,
+    // matching the scrypt crate's own behavior.
     let mut t = [0u8; 64];
 
     for (i, chunk) in input.chunks_exact(64).enumerate() {
@@ -99,12 +106,13 @@ fn scrypt_block_mix(input: &[u8], output: &mut [u8]) {
 
 /// ROMix: the memory-hard loop.
 fn scrypt_ro_mix(b: &mut [u8], n: usize) {
-    use zeroize::Zeroize as _;
-
     let len = b.len(); // 128 * r
-    let mut v = vec![0u8; n * len];
-    let mut t = vec![0u8; len];
-    let mut scratch = vec![0u8; len];
+
+    // Use Zeroizing wrappers so secrets are wiped on drop even if a panic
+    // or early return occurs.
+    let mut v = Zeroizing::new(vec![0u8; n * len]);
+    let mut t = Zeroizing::new(vec![0u8; len]);
+    let mut scratch = Zeroizing::new(vec![0u8; len]);
 
     // Fill V: V[i] = X, then X = BlockMix(X)
     for i in 0..n {
@@ -115,7 +123,9 @@ fn scrypt_ro_mix(b: &mut [u8], n: usize) {
 
     // Mix phase
     for _ in 0..n {
-        // integerify: the last 64-byte block's first word (LE u32), mod n
+        // integerify: the last 64-byte block's first word (LE u32), mod n.
+        // Because the 2 GiB ceiling in derive_key guarantees n ≤ 2^24, a
+        // 4-byte (u32) integerify is always sufficient.
         let j = {
             let tail = &b[len - 64..len - 60];
             let word = u32::from_le_bytes(tail.try_into().unwrap());
@@ -126,10 +136,6 @@ fn scrypt_ro_mix(b: &mut [u8], n: usize) {
         }
         scrypt_block_mix(&scratch, b);
     }
-
-    v.zeroize();
-    t.zeroize();
-    scratch.zeroize();
 }
 
 /// scrypt KDF fallback — used only when `scrypt::Params::new` rejects the
@@ -144,8 +150,6 @@ fn scrypt_kdf(
     p: u32,
     dk: &mut [u8],
 ) -> Result<(), KeystoreError> {
-    use zeroize::Zeroize as _;
-
     let n: usize = 1usize
         .checked_shl(log_n as u32)
         .ok_or_else(|| KeystoreError::InvalidFormat("scrypt n overflows usize".into()))?;
@@ -154,9 +158,12 @@ fn scrypt_kdf(
     let block_len = 128 * r;
 
     // B = PBKDF2-HMAC-SHA256(password, salt, 1, p * 128 * r)
-    let b_len = p.checked_mul(block_len)
+    let b_len = p
+        .checked_mul(block_len)
         .ok_or_else(|| KeystoreError::InvalidFormat("scrypt p*128*r overflows".into()))?;
-    let mut b = vec![0u8; b_len];
+
+    // Use Zeroizing so the buffer is wiped on drop even on early return.
+    let mut b = Zeroizing::new(vec![0u8; b_len]);
     pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password, salt, 1, &mut b);
 
     // Apply ROMix to each 128*r-byte block
@@ -167,7 +174,6 @@ fn scrypt_kdf(
     // DK = PBKDF2-HMAC-SHA256(password, B, 1, dklen)
     pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password, &b, 1, dk);
 
-    b.zeroize();
     Ok(())
 }
 
@@ -275,12 +281,49 @@ pub fn decode_key_hex(key_hex: &str) -> Result<Zeroizing<[u8; 32]>, KeystoreErro
     Ok(out)
 }
 
-fn derive_key(crypto: &CryptoSection, password: &str) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
+fn derive_key(
+    crypto: &CryptoSection,
+    password: &str,
+) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
     let mut dk = Zeroizing::new([0u8; 32]);
     match (crypto.kdf.as_str(), &crypto.kdfparams) {
-        ("scrypt", KdfParams::Scrypt { dklen, n, r, p, salt }) => {
+        (
+            "scrypt",
+            KdfParams::Scrypt {
+                dklen,
+                n,
+                r,
+                p,
+                salt,
+            },
+        ) => {
             if *dklen != 32 {
                 return Err(KeystoreError::InvalidFormat("dklen must be 32".into()));
+            }
+            if *r == 0 || *p == 0 {
+                return Err(KeystoreError::InvalidFormat(
+                    "scrypt r and p must be nonzero".into(),
+                ));
+            }
+            if *p > 1024 {
+                return Err(KeystoreError::InvalidFormat("scrypt p too large".into()));
+            }
+            // Memory ceiling: 128 * r * n must not overflow u64 or exceed 2 GiB.
+            // This admits every real-world keystore (geth-heavy n=2^20, r=8 = 1 GiB;
+            // official vector = 32 MiB) while bounding hostile input.
+            // With this ceiling, n ≤ 2^24, so a 4-byte integerify in scrypt_ro_mix
+            // is provably sufficient.
+            const TWO_GIB: u64 = 2_147_483_648;
+            let mem = (*r as u64)
+                .checked_mul(128)
+                .and_then(|v| v.checked_mul(*n))
+                .ok_or_else(|| {
+                    KeystoreError::InvalidFormat("scrypt parameters require too much memory".into())
+                })?;
+            if mem > TWO_GIB {
+                return Err(KeystoreError::InvalidFormat(
+                    "scrypt parameters require too much memory".into(),
+                ));
             }
             let salt = hex::decode(salt)
                 .map_err(|e| KeystoreError::InvalidFormat(format!("invalid salt hex: {e}")))?;
@@ -304,12 +347,27 @@ fn derive_key(crypto: &CryptoSection, password: &str) -> Result<Zeroizing<[u8; 3
                 }
             }
         }
-        ("pbkdf2", KdfParams::Pbkdf2 { dklen, c, prf, salt }) => {
+        (
+            "pbkdf2",
+            KdfParams::Pbkdf2 {
+                dklen,
+                c,
+                prf,
+                salt,
+            },
+        ) => {
             if *dklen != 32 {
                 return Err(KeystoreError::InvalidFormat("dklen must be 32".into()));
             }
+            if *c == 0 {
+                return Err(KeystoreError::InvalidFormat(
+                    "pbkdf2 iteration count must be nonzero".into(),
+                ));
+            }
             if prf != "hmac-sha256" {
-                return Err(KeystoreError::UnsupportedKdf(format!("pbkdf2 with prf '{prf}'")));
+                return Err(KeystoreError::UnsupportedKdf(format!(
+                    "pbkdf2 with prf '{prf}'"
+                )));
             }
             let salt = hex::decode(salt)
                 .map_err(|e| KeystoreError::InvalidFormat(format!("invalid salt hex: {e}")))?;
@@ -349,6 +407,9 @@ pub fn decrypt_key(ks: &KeystoreV3, password: &str) -> Result<Zeroizing<[u8; 32]
         .map_err(|e| KeystoreError::InvalidFormat(format!("invalid IV hex: {e}")))?;
     let expected_mac = hex::decode(&ks.crypto.mac)
         .map_err(|e| KeystoreError::InvalidFormat(format!("invalid MAC hex: {e}")))?;
+    if expected_mac.len() != 32 {
+        return Err(KeystoreError::InvalidFormat("mac must be 32 bytes".into()));
+    }
 
     let dk = derive_key(&ks.crypto, password)?;
 
@@ -429,7 +490,12 @@ mod tests {
         assert_eq!(ks.crypto.kdf, "scrypt");
         assert!(matches!(
             ks.crypto.kdfparams,
-            KdfParams::Scrypt { n: 262144, r: 1, p: 8, .. }
+            KdfParams::Scrypt {
+                n: 262144,
+                r: 1,
+                p: 8,
+                ..
+            }
         ));
     }
 
@@ -520,8 +586,14 @@ mod tests {
     #[test]
     fn fallback_scrypt_matches_crate_for_valid_params() {
         // (log_n, r, p) sets accepted by scrypt::Params::new — exercise r>1
-        // and p>1 paths of our fallback implementation.
-        for &(log_n, r, p) in &[(4u8, 8u32, 1u32), (8, 8, 1), (6, 4, 2), (4, 2, 4)] {
+        // and p>1 paths of our fallback implementation, plus r=1.
+        for &(log_n, r, p) in &[
+            (4u8, 8u32, 1u32),
+            (8, 8, 1),
+            (6, 4, 2),
+            (4, 2, 4),
+            (4, 1, 1),
+        ] {
             let mut ours = [0u8; 32];
             scrypt_kdf(b"password", b"salt", log_n, r, p, &mut ours).unwrap();
 
@@ -531,5 +603,131 @@ mod tests {
 
             assert_eq!(ours, theirs, "mismatch at log_n={log_n} r={r} p={p}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hostile-input regression tests — must return InvalidFormat, never panic
+    // -----------------------------------------------------------------------
+
+    /// Build a scrypt keystore struct from SCRYPT_VECTOR with overridden params.
+    fn scrypt_ks_with(n: u64, r: u32, p: u32) -> KeystoreV3 {
+        let mut ks = parse_keystore(SCRYPT_VECTOR).unwrap();
+        ks.crypto.kdfparams = KdfParams::Scrypt {
+            dklen: 32,
+            n,
+            r,
+            p,
+            salt: "ab0c7876052600dd703518d6fc3fe8984592145b591fc8fb5c6d43190334ba19".to_string(),
+        };
+        ks
+    }
+
+    #[test]
+    fn hostile_scrypt_r_zero_rejected() {
+        let ks = scrypt_ks_with(262144, 0, 8);
+        let err = decrypt_key(&ks, "testpassword").unwrap_err();
+        assert!(
+            matches!(err, KeystoreError::InvalidFormat(_)),
+            "expected InvalidFormat, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn hostile_scrypt_p_zero_rejected() {
+        let ks = scrypt_ks_with(262144, 1, 0);
+        let err = decrypt_key(&ks, "testpassword").unwrap_err();
+        assert!(
+            matches!(err, KeystoreError::InvalidFormat(_)),
+            "expected InvalidFormat, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn hostile_scrypt_n_huge_rejected() {
+        // n = 2^63 — overflows memory ceiling
+        let ks = scrypt_ks_with(9_223_372_036_854_775_808, 1, 1);
+        let err = decrypt_key(&ks, "testpassword").unwrap_err();
+        assert!(
+            matches!(err, KeystoreError::InvalidFormat(_)),
+            "expected InvalidFormat, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn hostile_scrypt_exceeds_2gib_ceiling_rejected() {
+        // n = 2^32 with r=8: 128 * 8 * 2^32 = 2^43 bytes >> 2 GiB
+        let ks = scrypt_ks_with(4_294_967_296, 8, 1);
+        let err = decrypt_key(&ks, "testpassword").unwrap_err();
+        assert!(
+            matches!(err, KeystoreError::InvalidFormat(_)),
+            "expected InvalidFormat, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn hostile_pbkdf2_c_zero_rejected() {
+        let mut ks = parse_keystore(PBKDF2_VECTOR).unwrap();
+        ks.crypto.kdfparams = KdfParams::Pbkdf2 {
+            dklen: 32,
+            c: 0,
+            prf: "hmac-sha256".to_string(),
+            salt: "ae3cd4e7013836a3df6bd7241b12db061dbe2c6785853cce422d148a624ce0bd".to_string(),
+        };
+        let err = decrypt_key(&ks, "testpassword").unwrap_err();
+        assert!(
+            matches!(err, KeystoreError::InvalidFormat(_)),
+            "expected InvalidFormat, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // MAC length validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn short_mac_rejected_as_invalid_format() {
+        let mut ks = parse_keystore(PBKDF2_VECTOR).unwrap();
+        // A 16-byte (31 hex chars — odd, so decode would fail) truncated MAC.
+        // Use 30 hex chars = 15 bytes to keep it valid hex but short.
+        ks.crypto.mac = "517ead924a9d0dc3124507e3393d17".to_string();
+        let err = decrypt_key(&ks, "testpassword").unwrap_err();
+        assert!(
+            matches!(err, KeystoreError::InvalidFormat(_)),
+            "expected InvalidFormat for short MAC, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RFC 7914 §12 known-answer tests on scrypt_kdf directly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rfc7914_kat_empty_password_empty_salt() {
+        // scrypt(P="", S="", N=16, r=1, p=1, dkLen=64)
+        let expected = concat!(
+            "77d6576238657b203b19ca42c18a0497",
+            "f16b4844e3074ae8dfdffa3fede21442",
+            "fcd0069ded0948f8326a753a0fc81f17",
+            "e8d3e0fb2e0d3628cf35e20c38d18906"
+        );
+        let mut out = [0u8; 64];
+        // log_n=4 gives N=16
+        scrypt_kdf(b"", b"", 4, 1, 1, &mut out).unwrap();
+        assert_eq!(hex::encode(out), expected);
+    }
+
+    #[test]
+    fn rfc7914_kat_password_nacl() {
+        // scrypt(P="password", S="NaCl", N=1024, r=8, p=16, dkLen=64)
+        let expected = concat!(
+            "fdbabe1c9d3472007856e7190d01e9fe",
+            "7c6ad7cbc8237830e77376634b373162",
+            "2eaf30d92e22a3886ff109279d9830da",
+            "c727afb94a83ee6d8360cbdfa2cc0640"
+        );
+        let mut out = [0u8; 64];
+        // log_n=10 gives N=1024
+        scrypt_kdf(b"password", b"NaCl", 10, 8, 16, &mut out).unwrap();
+        assert_eq!(hex::encode(out), expected);
     }
 }
