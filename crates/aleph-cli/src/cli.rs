@@ -1237,7 +1237,9 @@ kept encrypted as-is).
 `--ledger-count` to fetch more than the default 5 candidate addresses.
 
 With --encrypted, a raw key is stored on disk as a password-protected \
-Ethereum keystore V3 file instead of the OS keychain (EVM chains only).
+Ethereum keystore V3 file instead of the OS keychain (EVM chains only). \
+For keystore V3 files this is implied: the file is imported as-is and its \
+original password is kept.
 
 Examples:
   aleph account import alice --private-key 0xabcd1234...

@@ -107,11 +107,14 @@ fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> R
 
     let chain: aleph_types::chain::Chain = args.chain.into();
 
-    // V3 keystore files are detected and imported as-is (still encrypted
-    // with their original password).
-    if let Some(path) = &args.from_file {
-        let raw =
-            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let key_hex = if let Some(path) = &args.from_file {
+        // The file may hold a raw key, so keep the buffer zeroized.
+        let raw = Zeroizing::new(
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?,
+        );
+
+        // V3 keystore files are detected and imported as-is (still encrypted
+        // with their original password).
         if let Ok(contents) = std::str::from_utf8(&raw) {
             match keystore::try_parse_v3(contents) {
                 Ok(Some(ks)) => {
@@ -126,11 +129,9 @@ fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> R
                 }
             }
         }
-    }
 
-    let key_hex = if let Some(path) = &args.from_file {
-        // Read from key file (raw binary or hex text)
-        crate::account::migrate::read_key_file(path).context("failed to read key file")?
+        // Raw key file (32-byte binary or hex text)
+        crate::account::migrate::parse_key_bytes(&raw, path).context("failed to read key file")?
     } else {
         // Existing flow: CLI flag, env var, or interactive stdin
         let raw = match args.private_key {
