@@ -220,6 +220,18 @@ mod tests {
     }
 
     #[test]
+    fn load_account_by_name_keystore_rejects_non_evm_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store::AccountStore::with_manifest_path(dir.path().join("accounts.toml"));
+        store
+            .add_keystore_account("enc", Chain::Sol, "abc".to_string(), r#"{"x": 1}"#)
+            .unwrap();
+
+        let err = load_account_by_name(&store, "enc").unwrap_err();
+        assert!(err.to_string().contains("only supported for EVM"));
+    }
+
+    #[test]
     fn load_account_by_name_keystore_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = store::AccountStore::with_manifest_path(dir.path().join("accounts.toml"));
