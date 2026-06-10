@@ -1201,17 +1201,22 @@ given name. The key never touches disk. Use the resulting account by \
 passing `--account <NAME>` to signing commands, or set it as the default \
 with `aleph account use <NAME>`.
 
+With --encrypted, the key is instead stored on disk as a password-protected \
+Ethereum keystore V3 file (EVM chains only). The password is asked once per \
+command at signing time; set ALEPH_PASSWORD for non-interactive use.
+
 To import an existing key (private-key, keystore file, or Ledger), use \
 `aleph account import` instead.
 
 Examples:
   aleph account create alice                    # EVM (default chain: eth)
   aleph account create alice --chain sol        # Solana
+  aleph account create alice --encrypted        # password-protected keystore
   aleph account use alice                       # set as default for signing")]
     Create(AccountCreateArgs),
-    /// Remove an account from the keychain
+    /// Remove an account and its stored key material
     Remove(AccountRemoveArgs),
-    /// Export the private key of a local account
+    /// Export the private key of a local or encrypted account
     Export(AccountExportArgs),
     /// Import an existing private key
     #[command(long_about = "\
@@ -1223,17 +1228,25 @@ omitted (and no other source given), the key is read from stdin so it does \
 not appear in shell history.
 
   --from-file <PATH>    Read from a file containing a raw 32-byte binary \
-key or a hex-encoded text key.
+key, a hex-encoded text key, or an Ethereum keystore V3 file (detected \
+automatically; you will be asked for the file's password, and the file is \
+kept encrypted as-is).
 
   --ledger              Use a Ledger hardware wallet. Combine with \
 `--derivation-path` to override the default BIP44 path, and \
 `--ledger-count` to fetch more than the default 5 candidate addresses.
 
+With --encrypted, a raw key is stored on disk as a password-protected \
+Ethereum keystore V3 file instead of the OS keychain (EVM chains only). \
+For keystore V3 files this is implied: the file is imported as-is and its \
+original password is kept.
+
 Examples:
   aleph account import alice --private-key 0xabcd1234...
   aleph account import alice --from-file ~/keys/alice.key
+  aleph account import alice --from-file ~/keystore.json   # keystore V3
+  aleph account import alice --private-key 0xab... --encrypted
   aleph account import alice --ledger
-  aleph account import alice --chain sol --ledger
   echo \"0xabcd1234...\" | aleph account import alice    # via stdin")]
     Import(AccountImportArgs),
     /// List all stored accounts
@@ -1255,6 +1268,11 @@ pub struct AccountCreateArgs {
     /// Chain for the new account.
     #[arg(long, value_enum, default_value = "eth")]
     pub chain: ChainCli,
+
+    /// Protect the account with a password instead of the OS keychain.
+    /// The key is stored as an Ethereum keystore V3 file (EVM chains only).
+    #[arg(long)]
+    pub encrypted: bool,
 }
 
 #[derive(Args)]
@@ -1274,6 +1292,11 @@ pub struct AccountImportArgs {
     /// Import from a key file (raw 32-byte binary or hex text).
     #[arg(long, conflicts_with_all = ["private_key", "ledger"])]
     pub from_file: Option<PathBuf>,
+
+    /// Protect the imported key with a password instead of the OS keychain.
+    /// The key is stored as an Ethereum keystore V3 file (EVM chains only).
+    #[arg(long, conflicts_with = "ledger")]
+    pub encrypted: bool,
 
     /// Import from a Ledger hardware wallet instead of a private key.
     #[arg(long)]

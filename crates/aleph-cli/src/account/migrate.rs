@@ -11,18 +11,24 @@ use crate::account::store::AccountStore;
 /// and hex-encode it. Otherwise, read as UTF-8 text, trim whitespace, strip an
 /// optional `0x` prefix, and validate as hex.
 pub fn read_key_file(path: &Path) -> Result<Zeroizing<String>> {
-    let raw = std::fs::read(path)
-        .with_context(|| format!("failed to read key file: {}", path.display()))?;
+    let raw = Zeroizing::new(
+        std::fs::read(path)
+            .with_context(|| format!("failed to read key file: {}", path.display()))?,
+    );
+    parse_key_bytes(&raw, path)
+}
 
+/// Parse already-read key file contents (see [`read_key_file`]).
+pub fn parse_key_bytes(raw: &[u8], path: &Path) -> Result<Zeroizing<String>> {
     if raw.is_empty() {
         anyhow::bail!("key file is empty: {}", path.display());
     }
 
     if raw.len() == 32 {
-        return Ok(Zeroizing::new(hex::encode(&raw)));
+        return Ok(Zeroizing::new(hex::encode(raw)));
     }
 
-    let text = std::str::from_utf8(&raw).with_context(|| {
+    let text = std::str::from_utf8(raw).with_context(|| {
         format!(
             "key file is not 32-byte binary and not valid UTF-8: {}",
             path.display()

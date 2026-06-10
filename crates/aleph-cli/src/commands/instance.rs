@@ -2,7 +2,9 @@ use crate::cli::{
     ImageRef, InstanceCommand, InstanceCreateArgs, InstanceDeleteArgs, InstanceListArgs,
     InstancePriceArgs, parse_size_to_mib,
 };
-use crate::common::{confirm_action, resolve_account, resolve_address, submit_or_preview};
+use crate::common::{
+    confirm_action, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview,
+};
 use aleph_sdk::aggregate_models::vm_images::{VmImagesData, VmImagesError};
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter, MessageWithStatus,
@@ -271,20 +273,9 @@ async fn handle_instance_list(
     json: bool,
     args: InstanceListArgs,
 ) -> Result<()> {
-    let address = match args.address.as_deref() {
-        Some(value) => resolve_address(value)?,
-        None => {
-            // Fall back to the current default signing account's address.
-            // No --private-key is passed so chain is unused.
-            let identity = crate::cli::IdentityArgs {
-                account: None,
-                private_key: None,
-                chain: None,
-            };
-            let account = resolve_account(&identity)?;
-            account.address().clone()
-        }
-    };
+    // Read-only: resolve the address from the manifest without loading the
+    // account (loading an encrypted account would prompt for its password).
+    let address = resolve_address_or_active(args.address.as_deref())?;
 
     let mut rows = fetch_instance_rows(aleph_client, &address).await?;
 

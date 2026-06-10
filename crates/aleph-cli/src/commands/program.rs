@@ -6,7 +6,8 @@ use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes, resolve_runtime_ref,
 };
 use crate::common::{
-    confirm_action, print_submission_result, resolve_account, resolve_address, submit_or_preview,
+    confirm_action, print_submission_result, resolve_account, resolve_address,
+    resolve_address_or_active, submit_or_preview,
 };
 use crate::program::archive::prepare_archive;
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
@@ -799,20 +800,9 @@ pub(crate) fn build_program_show_info(message: &Message) -> ProgramShowInfo {
 }
 
 async fn handle_list(aleph_client: &AlephClient, json: bool, args: ProgramListArgs) -> Result<()> {
-    let address = match args.address.as_deref() {
-        Some(value) => resolve_address(value)?,
-        None => {
-            // Fall back to the current default signing account's address.
-            // No --private-key is passed so chain is unused.
-            let identity = crate::cli::IdentityArgs {
-                account: None,
-                private_key: None,
-                chain: None,
-            };
-            let account = resolve_account(&identity)?;
-            account.address().clone()
-        }
-    };
+    // Read-only: resolve the address from the manifest without loading the
+    // account (loading an encrypted account would prompt for its password).
+    let address = resolve_address_or_active(args.address.as_deref())?;
     let rows = fetch_program_rows(aleph_client, &address).await?;
     render_program_rows(&rows, json)
 }

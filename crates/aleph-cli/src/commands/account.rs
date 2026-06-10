@@ -35,19 +35,63 @@ pub async fn handle_account_command(
 
 fn handle_create(store: &AccountStore, args: AccountCreateArgs, json: bool) -> Result<()> {
     let chain: aleph_types::chain::Chain = args.chain.into();
+
+    if args.encrypted {
+        return handle_create_encrypted(store, &args.name, chain, json);
+    }
+
     let (key_hex, address) = generate_key(chain.clone())?;
 
     store.add_local_account(&args.name, chain.clone(), address.clone(), &key_hex)?;
 
+    print_account_created(&args.name, &chain, &address, "local", json)
+}
+
+fn handle_create_encrypted(
+    store: &AccountStore,
+    name: &str,
+    chain: aleph_types::chain::Chain,
+    json: bool,
+) -> Result<()> {
+    use crate::account::{keystore, password};
+
+    if !chain.is_evm() {
+        anyhow::bail!("--encrypted accounts are only supported for EVM chains");
+    }
+    // Fail on invalid/taken names before prompting for a password. The
+    // store re-checks uniqueness on write; this is an early exit so the
+    // user isn't asked for a password just to be told the name is taken.
+    store.check_name_available(name)?;
+
+    let passphrase = password::read_new_password()?;
+    let (key_hex, address) = generate_key(chain.clone())?;
+    let key_bytes = keystore::decode_key_hex(&key_hex)?;
+    let ks = keystore::encrypt_key(&key_bytes, &passphrase, &address)?;
+    let ks_json = serde_json::to_string_pretty(&ks)?;
+
+    store.add_keystore_account(name, chain.clone(), address.clone(), &ks_json)?;
+
+    print_account_created(name, &chain, &address, "encrypted", json)
+}
+
+fn print_account_created(
+    name: &str,
+    chain: &aleph_types::chain::Chain,
+    address: &str,
+    kind: &str,
+    json: bool,
+) -> Result<()> {
     if json {
         let output = serde_json::json!({
-            "name": args.name,
+            "name": name,
             "chain": chain,
             "address": address,
+            "kind": kind,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        eprintln!("Account '{}' created.", args.name);
+        eprintln!("Account '{name}' created.");
+        eprintln!("  Type:    {kind}");
         eprintln!("  Chain:   {chain}");
         eprintln!("  Address: {address}");
     }
@@ -55,6 +99,8 @@ fn handle_create(store: &AccountStore, args: AccountCreateArgs, json: bool) -> R
 }
 
 fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> Result<()> {
+    use crate::account::{keystore, password};
+
     if args.ledger {
         return handle_import_ledger(store, args, json);
     }
@@ -62,8 +108,30 @@ fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> R
     let chain: aleph_types::chain::Chain = args.chain.into();
 
     let key_hex = if let Some(path) = &args.from_file {
-        // Read from key file (raw binary or hex text)
-        crate::account::migrate::read_key_file(path).context("failed to read key file")?
+        // The file may hold a raw key, so keep the buffer zeroized.
+        let raw = Zeroizing::new(
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?,
+        );
+
+        // V3 keystore files are detected and imported as-is (still encrypted
+        // with their original password).
+        if let Ok(contents) = std::str::from_utf8(&raw) {
+            match keystore::try_parse_v3(contents) {
+                Ok(Some(ks)) => {
+                    return handle_import_keystore_file(store, &args, chain, &ks, contents, json);
+                }
+                Ok(None) => {} // not a keystore — fall through to raw key handling
+                Err(e) => {
+                    anyhow::bail!(
+                        "{} looks like a keystore file but is invalid: {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        // Raw key file (32-byte binary or hex text)
+        crate::account::migrate::parse_key_bytes(&raw, path).context("failed to read key file")?
     } else {
         // Existing flow: CLI flag, env var, or interactive stdin
         let raw = match args.private_key {
@@ -80,17 +148,81 @@ fn handle_import(store: &AccountStore, args: AccountImportArgs, json: bool) -> R
     let account = crate::account::load_account(Some(&key_hex), chain.clone())?;
     let address = account.address().to_string();
 
+    if args.encrypted {
+        if !chain.is_evm() {
+            anyhow::bail!("--encrypted accounts are only supported for EVM chains");
+        }
+        // Early exit before the password prompt; the store re-checks on write.
+        store.check_name_available(&args.name)?;
+        let passphrase = password::read_new_password()?;
+        let key_bytes = keystore::decode_key_hex(&key_hex)?;
+        let ks = keystore::encrypt_key(&key_bytes, &passphrase, &address)?;
+        let ks_json = serde_json::to_string_pretty(&ks)?;
+        store.add_keystore_account(&args.name, chain.clone(), address.clone(), &ks_json)?;
+        return print_account_imported(&args.name, &chain, &address, "encrypted", json);
+    }
+
     store.add_local_account(&args.name, chain.clone(), address.clone(), &key_hex)?;
 
+    print_account_imported(&args.name, &chain, &address, "local", json)
+}
+
+/// Import an existing V3 keystore file: validate its password, derive the
+/// address, and copy the file as-is (no re-encryption).
+fn handle_import_keystore_file(
+    store: &AccountStore,
+    args: &AccountImportArgs,
+    chain: aleph_types::chain::Chain,
+    ks: &crate::account::keystore::KeystoreV3,
+    contents: &str,
+    json: bool,
+) -> Result<()> {
+    use crate::account::password;
+    use aleph_types::account::EvmAccount;
+
+    if !chain.is_evm() {
+        anyhow::bail!("keystore files are only supported for EVM chains");
+    }
+    store.check_name_available(&args.name)?;
+
+    let key = password::unlock_keystore(ks, &args.name)?;
+    let account = EvmAccount::new(chain.clone(), &key[..]).map_err(|e| anyhow::anyhow!(e))?;
+    let address = account.address().to_string();
+
+    if let Some(embedded) = &ks.address {
+        let derived = address.trim_start_matches("0x").to_lowercase();
+        let embedded_norm = embedded.trim_start_matches("0x").to_lowercase();
+        if embedded_norm != derived {
+            anyhow::bail!(
+                "keystore address field ({embedded}) does not match the address \
+                 derived from the key ({address}); the file may be corrupt"
+            );
+        }
+    }
+
+    store.add_keystore_account(&args.name, chain.clone(), address.clone(), contents)?;
+
+    print_account_imported(&args.name, &chain, &address, "encrypted", json)
+}
+
+fn print_account_imported(
+    name: &str,
+    chain: &aleph_types::chain::Chain,
+    address: &str,
+    kind: &str,
+    json: bool,
+) -> Result<()> {
     if json {
         let output = serde_json::json!({
-            "name": args.name,
+            "name": name,
             "chain": chain,
             "address": address,
+            "kind": kind,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        eprintln!("Account '{}' imported.", args.name);
+        eprintln!("Account '{name}' imported.");
+        eprintln!("  Type:    {kind}");
         eprintln!("  Chain:   {chain}");
         eprintln!("  Address: {address}");
     }
@@ -399,6 +531,13 @@ async fn handle_show(
 
     if json {
         let mut output = serde_json::to_value(&entry)?;
+        // The manifest serializes the kind as "keystore"; user-facing output
+        // consistently says "encrypted" (matching create/import/list).
+        output["kind"] = serde_json::json!(entry.kind_display());
+        if entry.kind == AccountKind::Keystore {
+            output["keystore_path"] =
+                serde_json::json!(store.keystore_path(&entry.name).display().to_string());
+        }
         if let Some(bal) = &balance {
             output["balance"] = serde_json::json!({
                 "aleph_tokens": bal.aleph_tokens,
@@ -414,6 +553,9 @@ async fn handle_show(
         eprintln!("Chain:   {}", entry.chain);
         eprintln!("Address: {}", entry.address);
         eprintln!("Type:    {}", entry.kind_display());
+        if entry.kind == AccountKind::Keystore {
+            eprintln!("File:    {}", store.keystore_path(&entry.name).display());
+        }
         if is_default {
             eprintln!("Default: yes");
         }
@@ -521,8 +663,11 @@ fn handle_use(store: &AccountStore, args: AccountUseArgs, json: bool) -> Result<
 fn handle_export(store: &AccountStore, args: AccountExportArgs, json: bool) -> Result<()> {
     let entry = store.get_account(&args.name)?;
 
-    if entry.kind != AccountKind::Local {
-        anyhow::bail!("cannot export key for non-local account '{}'", args.name);
+    if entry.kind == AccountKind::Ledger {
+        anyhow::bail!(
+            "cannot export key for ledger account '{}' (the key never leaves the device)",
+            args.name
+        );
     }
 
     if !confirm_typed_match(
@@ -536,7 +681,18 @@ fn handle_export(store: &AccountStore, args: AccountExportArgs, json: bool) -> R
         return Ok(());
     }
 
-    let key = Zeroizing::new(store.get_private_key(&args.name)?);
+    let key = match entry.kind {
+        AccountKind::Local => Zeroizing::new(store.get_private_key(&args.name)?),
+        AccountKind::Keystore => {
+            use crate::account::{keystore, password};
+            let ks_json = store.read_keystore_json(&args.name)?;
+            let ks = keystore::parse_keystore(&ks_json)
+                .map_err(|e| anyhow::anyhow!("invalid keystore for '{}': {e}", args.name))?;
+            let key_bytes = password::unlock_keystore(&ks, &args.name)?;
+            Zeroizing::new(hex::encode(&key_bytes[..]))
+        }
+        AccountKind::Ledger => unreachable!("rejected above"),
+    };
 
     if json {
         let output = serde_json::json!({
