@@ -4,6 +4,14 @@
 //! the public `ipfs.aleph.cloud` kubo, matching the production frontend. This
 //! is **temporary** until pyaleph exposes an authenticated directory-ingest
 //! endpoint; the gateway URL is overridable via `AlephClient::with_ipfs_gateway`.
+//!
+//! The filesystem-walking and CID types (`FolderEntry`, `UploadFolderOptions`,
+//! `collect_folder_files`, ...) live in the `aleph-cid` crate and are
+//! re-exported here at their historical paths.
+
+pub use aleph_cid::{
+    CidVersion, CollectError, FolderEntry, UploadFolderOptions, collect_folder_files,
+};
 
 /// Default kubo host used by the SDK when no override is configured. The SDK
 /// appends `/api/v0/...` paths internally; only the scheme + host (+ optional
@@ -12,31 +20,6 @@
 /// Temporary: public unauthenticated endpoint. Replace with pyaleph-side
 /// ingestion once that lands.
 pub const DEFAULT_IPFS_GATEWAY: &str = "https://ipfs.aleph.cloud";
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CidVersion {
-    V0,
-    #[default]
-    V1,
-}
-
-#[non_exhaustive]
-#[derive(Debug, Clone)]
-pub struct UploadFolderOptions {
-    pub cid_version: CidVersion,
-    pub pin: bool,
-    pub follow_symlinks: bool,
-}
-
-impl Default for UploadFolderOptions {
-    fn default() -> Self {
-        Self {
-            cid_version: CidVersion::V1,
-            pin: true,
-            follow_symlinks: true,
-        }
-    }
-}
 
 use aleph_types::cid::Cid;
 
@@ -90,77 +73,6 @@ pub enum ParseRootError {
     },
 }
 
-use std::path::{Path, PathBuf};
-
-#[non_exhaustive]
-#[derive(Debug)]
-pub struct FolderEntry {
-    /// Relative path from the upload root, forward-slash separated.
-    pub relative_path: String,
-    pub absolute_path: PathBuf,
-}
-
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum CollectError {
-    #[error("empty folder: {0}")]
-    Empty(PathBuf),
-    #[error("non-UTF-8 path: {0}")]
-    NonUtf8(PathBuf),
-    #[error("walk failed at {path}: {source}")]
-    Walk {
-        path: PathBuf,
-        #[source]
-        source: walkdir::Error,
-    },
-}
-
-/// Walks `root` and returns one entry per regular file, with the relative
-/// path normalized to forward-slash separators.
-///
-/// Symlinks are followed when `follow_symlinks` is true (matches kubo's
-/// `ipfs add -r` default). Walk errors abort the collection.
-pub fn collect_folder_files(
-    root: &Path,
-    follow_symlinks: bool,
-) -> Result<Vec<FolderEntry>, CollectError> {
-    let mut out = Vec::new();
-    let walker = walkdir::WalkDir::new(root)
-        .follow_links(follow_symlinks)
-        .min_depth(1);
-
-    for entry in walker {
-        let entry = entry.map_err(|e| {
-            let path = e
-                .path()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| root.to_path_buf());
-            CollectError::Walk { path, source: e }
-        })?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let abs = entry.path().to_path_buf();
-        let rel = entry
-            .path()
-            .strip_prefix(root)
-            .expect("walkdir entries are descendants of root");
-        let rel_str = rel
-            .to_str()
-            .ok_or_else(|| CollectError::NonUtf8(abs.clone()))?
-            .replace(std::path::MAIN_SEPARATOR, "/");
-        out.push(FolderEntry {
-            relative_path: rel_str,
-            absolute_path: abs,
-        });
-    }
-
-    if out.is_empty() {
-        return Err(CollectError::Empty(root.to_path_buf()));
-    }
-    Ok(out)
-}
-
 /// Builds the query string for `POST /api/v0/add`.
 pub(crate) fn build_add_query(opts: &UploadFolderOptions) -> String {
     let cid_version = match opts.cid_version {
@@ -178,14 +90,6 @@ pub(crate) fn build_add_query(opts: &UploadFolderOptions) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_options_are_v1_pinned_follow_symlinks() {
-        let opts = UploadFolderOptions::default();
-        assert_eq!(opts.cid_version, CidVersion::V1);
-        assert!(opts.pin);
-        assert!(opts.follow_symlinks);
-    }
 
     #[test]
     fn default_gateway_is_aleph_cloud() {
@@ -251,66 +155,6 @@ mod tests {
         assert!(matches!(err, ParseRootError::InvalidCid { .. }));
     }
 
-    use std::fs;
-    use tempfile::TempDir;
-
-    fn make_tree(tmp: &TempDir, files: &[(&str, &str)]) {
-        for (rel, content) in files {
-            let abs = tmp.path().join(rel);
-            if let Some(parent) = abs.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(&abs, content).unwrap();
-        }
-    }
-
-    #[test]
-    fn collect_files_flat_directory() {
-        let tmp = TempDir::new().unwrap();
-        make_tree(&tmp, &[("a.txt", "a"), ("b.txt", "b")]);
-        let mut entries = collect_folder_files(tmp.path(), true).unwrap();
-        entries.sort_by(|x, y| x.relative_path.cmp(&y.relative_path));
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].relative_path, "a.txt");
-        assert_eq!(entries[1].relative_path, "b.txt");
-    }
-
-    #[test]
-    fn collect_files_nested_directory() {
-        let tmp = TempDir::new().unwrap();
-        make_tree(
-            &tmp,
-            &[
-                ("a.txt", "a"),
-                ("sub/b.txt", "b"),
-                ("sub/deeper/c.txt", "c"),
-            ],
-        );
-        let mut paths: Vec<String> = collect_folder_files(tmp.path(), true)
-            .unwrap()
-            .into_iter()
-            .map(|e| e.relative_path)
-            .collect();
-        paths.sort();
-        assert_eq!(paths, vec!["a.txt", "sub/b.txt", "sub/deeper/c.txt"]);
-    }
-
-    #[test]
-    fn collect_files_empty_directory_errors() {
-        let tmp = TempDir::new().unwrap();
-        let err = collect_folder_files(tmp.path(), true).unwrap_err();
-        assert!(matches!(err, CollectError::Empty(_)));
-    }
-
-    #[test]
-    fn collect_files_uses_forward_slashes() {
-        let tmp = TempDir::new().unwrap();
-        make_tree(&tmp, &[("sub/x.txt", "x")]);
-        let entries = collect_folder_files(tmp.path(), true).unwrap();
-        assert_eq!(entries[0].relative_path, "sub/x.txt");
-        assert!(!entries[0].relative_path.contains('\\'));
-    }
-
     #[test]
     fn build_add_query_v1_includes_raw_leaves() {
         let q = build_add_query(&UploadFolderOptions::default());
@@ -322,10 +166,8 @@ mod tests {
 
     #[test]
     fn build_add_query_v0_omits_raw_leaves() {
-        let opts = UploadFolderOptions {
-            cid_version: CidVersion::V0,
-            ..Default::default()
-        };
+        let mut opts = UploadFolderOptions::default();
+        opts.cid_version = CidVersion::V0;
         let q = build_add_query(&opts);
         assert!(q.contains("cid-version=0"));
         assert!(!q.contains("raw-leaves"));

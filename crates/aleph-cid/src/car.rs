@@ -72,14 +72,14 @@ fn write_cbor_bytestring_header(out: &mut Vec<u8>, len: usize) {
 
 /// Write a complete CARv1 header (leading varint length + DAG-CBOR header)
 /// for a single-root file.
-pub(crate) fn write_carv1_header<W: Write>(w: &mut W, root_cid_bytes: &[u8]) -> io::Result<()> {
+pub fn write_carv1_header<W: Write>(w: &mut W, root_cid_bytes: &[u8]) -> io::Result<()> {
     let header = build_dagcbor_header(root_cid_bytes);
     write_uvarint(w, header.len() as u64)?;
     w.write_all(&header)
 }
 
 /// Write one CARv1 block frame: `varint(cid_len + data_len) || cid || data`.
-pub(crate) fn write_block_frame<W: Write>(
+pub fn write_block_frame<W: Write>(
     w: &mut W,
     cid_bytes: &[u8],
     block_bytes: &[u8],

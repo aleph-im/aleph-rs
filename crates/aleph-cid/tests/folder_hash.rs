@@ -7,7 +7,7 @@
 //! The fixture-builder functions below mirror the bash fixtures in the regen
 //! script — keep them in sync.
 
-use aleph_sdk::ipfs::{CidVersion, FolderEntry, UploadFolderOptions, collect_folder_files};
+use aleph_cid::{CidVersion, FolderEntry, UploadFolderOptions, collect_folder_files};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -105,7 +105,7 @@ fn hash_root(root: &Path, version: CidVersion) -> String {
     let entries = collect_folder_files(root, true).unwrap();
     let mut opts = UploadFolderOptions::default();
     opts.cid_version = version;
-    aleph_sdk::__test_only_hash_folder_root(&entries, &opts)
+    aleph_cid::folder_hash::hash_folder_root(&entries, &opts)
         .expect("hashing must succeed")
         .to_string()
 }
@@ -230,7 +230,7 @@ fn golden_empty_directory_v1() {
     let mut opts = UploadFolderOptions::default();
     opts.cid_version = CidVersion::V1;
     let hash =
-        aleph_sdk::__test_only_hash_folder_root(&entries, &opts).expect("hashing must succeed");
+        aleph_cid::folder_hash::hash_folder_root(&entries, &opts).expect("hashing must succeed");
     assert_eq!(hash.to_string(), GOLDEN_EMPTY_DIRECTORY_V1);
 }
 
@@ -295,8 +295,8 @@ fn order_independence_v1() {
 
     let mut opts = UploadFolderOptions::default();
     opts.cid_version = CidVersion::V1;
-    let ha = aleph_sdk::__test_only_hash_folder_root(&entries_a, &opts).unwrap();
-    let hb = aleph_sdk::__test_only_hash_folder_root(&entries_b, &opts).unwrap();
+    let ha = aleph_cid::folder_hash::hash_folder_root(&entries_a, &opts).unwrap();
+    let hb = aleph_cid::folder_hash::hash_folder_root(&entries_b, &opts).unwrap();
     assert_eq!(ha.to_string(), hb.to_string());
 
     // Cross-check against the canonical golden so this can't drift silently.
@@ -305,14 +305,14 @@ fn order_independence_v1() {
 
 #[test]
 fn build_folder_dag_matches_hash_folder_root_with_no_op_sink() {
-    use aleph_sdk::folder_hash::build_folder_dag;
-    use aleph_sdk::folder_hash::hash_folder_root;
-    use aleph_sdk::ipfs::UploadFolderOptions;
+    use aleph_cid::UploadFolderOptions;
+    use aleph_cid::folder_hash::build_folder_dag;
+    use aleph_cid::folder_hash::hash_folder_root;
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a.txt"), b"hello").unwrap();
     std::fs::write(tmp.path().join("b.txt"), b"world").unwrap();
-    let entries = aleph_sdk::ipfs::collect_folder_files(tmp.path(), true).unwrap();
+    let entries = aleph_cid::collect_folder_files(tmp.path(), true).unwrap();
     let opts = UploadFolderOptions::default();
 
     let via_walker = build_folder_dag(&entries, &opts, &mut |_, _| Ok(())).unwrap();
@@ -322,13 +322,13 @@ fn build_folder_dag_matches_hash_folder_root_with_no_op_sink() {
 
 #[test]
 fn build_folder_dag_blocks_self_consistent() {
-    use aleph_sdk::folder_hash::build_folder_dag;
-    use aleph_sdk::ipfs::UploadFolderOptions;
+    use aleph_cid::UploadFolderOptions;
+    use aleph_cid::folder_hash::build_folder_dag;
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a.txt"), b"abc").unwrap();
     std::fs::write(tmp.path().join("b.txt"), b"defgh").unwrap();
-    let entries = aleph_sdk::ipfs::collect_folder_files(tmp.path(), true).unwrap();
+    let entries = aleph_cid::collect_folder_files(tmp.path(), true).unwrap();
     let opts = UploadFolderOptions::default();
 
     let mut blocks: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
@@ -350,12 +350,12 @@ fn build_folder_dag_blocks_self_consistent() {
 
 #[test]
 fn build_folder_dag_propagates_sink_error() {
-    use aleph_sdk::folder_hash::{FolderHashError, build_folder_dag};
-    use aleph_sdk::ipfs::UploadFolderOptions;
+    use aleph_cid::UploadFolderOptions;
+    use aleph_cid::folder_hash::{FolderHashError, build_folder_dag};
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a.txt"), b"abc").unwrap();
-    let entries = aleph_sdk::ipfs::collect_folder_files(tmp.path(), true).unwrap();
+    let entries = aleph_cid::collect_folder_files(tmp.path(), true).unwrap();
     let opts = UploadFolderOptions::default();
 
     let err = build_folder_dag(&entries, &opts, &mut |_, _| {

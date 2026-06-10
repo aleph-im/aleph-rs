@@ -16,9 +16,9 @@
 //! via `tests/regen-folder-hash-goldens.sh`. Run it after any change that
 //! could affect output bytes.
 
-use crate::ipfs::{CidVersion, FolderEntry, UploadFolderOptions};
 use crate::proto::{merkledag, unixfs};
 use crate::verify::{DAG_PB_CODEC, DagNode, Hasher, encode_multihash, encode_pbnode_canonical};
+use crate::{CidVersion, FolderEntry, UploadFolderOptions};
 use aleph_types::item_hash::ItemHash;
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn hash_folder_root_single_file_v1_raw() {
-        use crate::ipfs::{CidVersion, UploadFolderOptions};
+        use crate::{CidVersion, UploadFolderOptions};
         use std::io::Write;
         use tempfile::TempDir;
 

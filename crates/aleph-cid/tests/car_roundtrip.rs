@@ -6,12 +6,12 @@
 //! Run manually:
 //!
 //!   docker run -d --name kubo-car-test -p 5001:5001 ipfs/kubo:v0.30.0
-//!   cargo test -p aleph-sdk --test car_roundtrip --features account-evm,test-helpers -- --ignored
+//!   cargo test -p aleph-cid --test car_roundtrip -- --ignored
 //!   docker rm -f kubo-car-test
 
-use aleph_sdk::folder_hash::build_folder_dag;
-use aleph_sdk::ipfs::{UploadFolderOptions, collect_folder_files};
-use aleph_sdk::{__test_only_write_block_frame, __test_only_write_carv1_header};
+use aleph_cid::car::{write_block_frame, write_carv1_header};
+use aleph_cid::folder_hash::build_folder_dag;
+use aleph_cid::{UploadFolderOptions, collect_folder_files};
 
 fn kubo_url() -> String {
     std::env::var("IPFS_GATEWAY_URL").unwrap_or_else(|_| "http://localhost:5001".into())
@@ -31,13 +31,13 @@ async fn car_roundtrip_via_dag_import() {
     let mut blocks_buf = Vec::new();
     let mut last_cid: Option<Vec<u8>> = None;
     let root = build_folder_dag(&entries, &opts, &mut |cid, block| {
-        __test_only_write_block_frame(&mut blocks_buf, cid, block)?;
+        write_block_frame(&mut blocks_buf, cid, block)?;
         last_cid = Some(cid.to_vec());
         Ok(())
     })
     .unwrap();
     let mut header_bytes = Vec::new();
-    __test_only_write_carv1_header(&mut header_bytes, last_cid.as_ref().unwrap()).unwrap();
+    write_carv1_header(&mut header_bytes, last_cid.as_ref().unwrap()).unwrap();
 
     let mut car_file = tempfile::NamedTempFile::new().unwrap();
     car_file.write_all(&header_bytes).unwrap();

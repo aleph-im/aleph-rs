@@ -7,7 +7,7 @@
 # Requires: docker.
 #
 # Usage:
-#   bash crates/aleph-sdk/tests/regen-folder-hash-goldens.sh
+#   bash crates/aleph-cid/tests/regen-folder-hash-goldens.sh
 
 set -euo pipefail
 
@@ -124,8 +124,8 @@ mk_threshold_above() {
 mk_hamt_multi_level() {
     local d="$1"
     local a b
-    a="$(cat crates/aleph-sdk/tests/hamt_collision_a.txt)"
-    b="$(cat crates/aleph-sdk/tests/hamt_collision_b.txt)"
+    a="$(cat crates/aleph-cid/tests/hamt_collision_a.txt)"
+    b="$(cat crates/aleph-cid/tests/hamt_collision_b.txt)"
     [[ -n "$a" && -n "$b" ]] || {
         echo "hamt_collision_*.txt are empty — discover collision pair first" >&2
         exit 1

@@ -9,6 +9,7 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aes = { workspace = true }
+aleph-cid = { workspace = true }
 aleph-types = { workspace = true }
 # alloy crates are only needed for the `credits` and `swap` features (EVM
 # credit purchases and token swaps). Gated so downstream SDK consumers who
@@ -23,18 +24,13 @@ alloy-signer-local = { workspace = true, optional = true }
 alloy-sol-types = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-bs58 = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
-cid = { workspace = true }
 ctr = { workspace = true }
-multihash = { workspace = true }
-multihash-codetable = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 futures-util = { workspace = true }
 http = { workspace = true }
 memsizes = { workspace = true }
-murmur3 = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }
 reqwest-retry = { workspace = true }
@@ -49,11 +45,9 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }
-walkdir = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 p256 = { workspace = true }
-prost = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
@@ -82,7 +76,7 @@ swap = [
     "dep:alloy-signer",
     "dep:alloy-signer-local",
 ]
-# Exposes test-only helpers; not for production use.
+# Gates network-tier integration tests (kept out of plain `cargo test`).
 test-helpers = []
 
 [[test]]
@@ -90,19 +84,11 @@ name = "credit_integration"
 required-features = ["credits"]
 
 [[test]]
-name = "folder_hash"
-required-features = ["test-helpers"]
-
-[[test]]
 name = "ipfs_upload"
 required-features = ["test-helpers"]
 
 [[test]]
 name = "ipfs_car_upload"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "car_roundtrip"
 required-features = ["test-helpers"]
 
 [[test]]

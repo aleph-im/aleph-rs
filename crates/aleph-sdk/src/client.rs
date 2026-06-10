@@ -2528,6 +2528,8 @@ impl AlephClient {
             CollectError::Empty(p) => StorageError::EmptyFolder(p),
             CollectError::NonUtf8(p) => StorageError::NonUtf8Path(p),
             CollectError::Walk { source, .. } => StorageError::Io(source.into()),
+            // `CollectError` is non-exhaustive now that it lives in `aleph-cid`.
+            other => StorageError::Io(std::io::Error::other(other.to_string())),
         })?;
 
         let local_cid = crate::folder_hash::hash_folder_root(&entries, &opts)?;
@@ -2607,6 +2609,8 @@ impl AlephClient {
             CollectError::Empty(p) => StorageError::EmptyFolder(p),
             CollectError::NonUtf8(p) => StorageError::NonUtf8Path(p),
             CollectError::Walk { source, .. } => StorageError::Io(source.into()),
+            // `CollectError` is non-exhaustive now that it lives in `aleph-cid`.
+            other => StorageError::Io(std::io::Error::other(other.to_string())),
         })?;
 
         // 1. Walk the DAG, stream block frames into a tempfile body.
