@@ -84,6 +84,13 @@ pub struct OrderCreation {
     pub quote_id: Option<i64>,
 }
 
+/// `PUT /app_data/{hash}` request body.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDataDocument {
+    pub full_app_data: String,
+}
+
 impl CowApi {
     /// Build a client for `chain_id`, or `UnsupportedChain` if CoW is not
     /// curated for it.
@@ -130,6 +137,28 @@ impl CowApi {
         // 201 -> a bare JSON string UID.
         let uid: String = Self::parse_json(resp).await?;
         Ok(uid)
+    }
+
+    /// Register a full appData document under its hash so the orderbook can
+    /// resolve it for on-chain (EthFlow) orders, which carry only the hash.
+    /// `PUT {base}/app_data/{hash}`; idempotent (200 if it already existed,
+    /// 201 if newly stored).
+    pub async fn put_app_data(&self, hash: &str, full_app_data: &str) -> Result<(), SwapError> {
+        let resp = self
+            .http
+            .put(format!("{}/app_data/{hash}", self.base_url))
+            .json(&AppDataDocument {
+                full_app_data: full_app_data.to_string(),
+            })
+            .send()
+            .await
+            .map_err(SwapError::Request)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SwapError::BadStatus { status, body });
+        }
+        Ok(())
     }
 
     async fn parse_json<T: serde::de::DeserializeOwned>(
@@ -225,6 +254,7 @@ pub async fn place_usdc_order(
     api: &CowApi,
     chain_id: u64,
     usdc_token: Address,
+    app_data: &order::AppData,
     req: &SwapRequest,
     quote: &SwapQuote,
     quote_resp: &QuoteResponse,
@@ -237,7 +267,7 @@ pub async fn place_usdc_order(
         sellAmount: quote.sell_amount,
         buyAmount: quote.min_buy_amount,
         validTo: quote_resp.quote.valid_to,
-        appData: order::app_data_hash(),
+        appData: app_data.hash,
         feeAmount: U256::ZERO,
         kind: "sell".to_string(),
         partiallyFillable: false,
@@ -254,7 +284,7 @@ pub async fn place_usdc_order(
         sell_amount: quote.sell_amount.to_string(),
         buy_amount: quote.min_buy_amount.to_string(),
         valid_to: quote_resp.quote.valid_to,
-        app_data: order::APP_DATA_JSON.to_string(),
+        app_data: app_data.json.to_string(),
         fee_amount: "0".to_string(),
         kind: "sell".to_string(),
         partially_fillable: false,
