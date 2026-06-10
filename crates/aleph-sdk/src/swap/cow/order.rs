@@ -32,8 +32,7 @@ impl AppData {
     /// The `"version":"1.3.0"` field is the **CoW appData document schema
     /// version** (from <https://github.com/cowprotocol/app-data>), not the
     /// aleph-cli or crate version. It must not be bumped on CLI releases.
-    pub const COW_JSON: &'static str =
-        r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{}}"#;
+    pub const COW_JSON: &'static str = r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{}}"#;
 
     /// Ophis document: the CoW document plus the CIP-75 VOLUME partner fee.
     ///
@@ -42,8 +41,7 @@ impl AppData {
     /// `volumeBps:10` == 0.10%; the recipient is the Ophis partner-fee Safe
     /// (source of truth: `@ophis/sdk` partner-fee.ts). The fee accrues to Ophis
     /// even though the order settles on the canonical mainnet orderbook.
-    pub const OPHIS_JSON: &'static str =
-        r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{"partnerFee":{"volumeBps":10,"recipient":"0x858f0F5eE954846D47155F5203c04aF1819eCeF8"}}}"#;
+    pub const OPHIS_JSON: &'static str = r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{"partnerFee":{"volumeBps":10,"recipient":"0x858f0F5eE954846D47155F5203c04aF1819eCeF8"}}}"#;
 
     fn from_json(json: &'static str) -> Self {
         Self {
@@ -152,7 +150,11 @@ mod tests {
         let ophis = AppData::ophis();
         // Volume policy shape the orderbook maps to FeePolicy::Volume.
         assert!(ophis.json.contains(r#""partnerFee":{"volumeBps":10"#));
-        assert!(ophis.json.contains("0x858f0F5eE954846D47155F5203c04aF1819eCeF8"));
+        assert!(
+            ophis
+                .json
+                .contains("0x858f0F5eE954846D47155F5203c04aF1819eCeF8")
+        );
         assert_eq!(ophis.hash, keccak256(ophis.json.as_bytes()));
         // Pinned hash - update deliberately if OPHIS_JSON changes.
         assert_eq!(

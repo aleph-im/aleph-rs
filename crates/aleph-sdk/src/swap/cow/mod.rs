@@ -250,6 +250,7 @@ pub async fn quote_eth(
 /// The order follows CoW's fee-in-price model: `sellAmount` is the quoted
 /// sell + fee total and `feeAmount` is zero. The body carries the full
 /// appData JSON document; the signed order carries its keccak256 hash.
+#[allow(clippy::too_many_arguments)]
 pub async fn place_usdc_order(
     api: &CowApi,
     chain_id: u64,
