@@ -1214,9 +1214,9 @@ Examples:
   aleph account create alice --encrypted        # password-protected keystore
   aleph account use alice                       # set as default for signing")]
     Create(AccountCreateArgs),
-    /// Remove an account from the keychain
+    /// Remove an account and its stored key material
     Remove(AccountRemoveArgs),
-    /// Export the private key of a local account
+    /// Export the private key of a local or encrypted account
     Export(AccountExportArgs),
     /// Import an existing private key
     #[command(long_about = "\

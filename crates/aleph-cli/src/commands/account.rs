@@ -531,6 +531,9 @@ async fn handle_show(
 
     if json {
         let mut output = serde_json::to_value(&entry)?;
+        // The manifest serializes the kind as "keystore"; user-facing output
+        // consistently says "encrypted" (matching create/import/list).
+        output["kind"] = serde_json::json!(entry.kind_display());
         if entry.kind == AccountKind::Keystore {
             output["keystore_path"] =
                 serde_json::json!(store.keystore_path(&entry.name).display().to_string());
