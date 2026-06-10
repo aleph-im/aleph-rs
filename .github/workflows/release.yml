@@ -426,6 +426,21 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # aleph-cid is versioned and released independently of the
+      # aleph-types/aleph-sdk/aleph-cli trio (it changes rarely). The trio
+      # depends on it from crates.io once published, so the exact version
+      # this workspace pins must already be there — fail early and loudly
+      # instead of half-publishing the trio.
+      - name: Ensure the pinned aleph-cid version is on crates.io
+        run: |
+          CID_VERSION=$(grep '^version = ' crates/aleph-cid/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Workspace pins aleph-cid v$CID_VERSION"
+          if ! curl -fsSL "https://index.crates.io/al/ep/aleph-cid" | grep -q "\"vers\":\"$CID_VERSION\""; then
+            echo "::error::aleph-cid v$CID_VERSION is not on crates.io. Publish it first (cargo publish -p aleph-cid), then re-run this workflow."
+            exit 1
+          fi
+          echo "✓ aleph-cid v$CID_VERSION is published"
+
       - name: Publish aleph-types
         run: |
           cd crates/aleph-types

@@ -304,7 +304,7 @@ async fn upload_folder_and_store(
 ) -> anyhow::Result<(String, String)> {
     let opts = aleph_sdk::ipfs::UploadFolderOptions::default();
     let entries = aleph_sdk::ipfs::collect_folder_files(path, opts.follow_symlinks)?;
-    let file_hash = aleph_sdk::folder_hash::hash_folder_root(&entries, &opts)?;
+    let file_hash = ItemHash::Ipfs(aleph_sdk::folder_hash::hash_folder_root(&entries, &opts)?);
     let cid_str = file_hash.to_string();
     let mut builder = StoreBuilder::new(account, file_hash, StorageEngine::Ipfs)
         .channel(Channel::from(channel.to_string()))

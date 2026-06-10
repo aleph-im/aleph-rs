@@ -3,8 +3,9 @@
 //! This crate is the single source of truth for client-side content
 //! addressing in the Aleph Rust workspace:
 //!
-//! - [`verify`] — streaming hashers ([`verify::Hasher`],
-//!   [`verify::HashVerifier`]) for Aleph native SHA-256 item hashes and IPFS
+//! - [`cid`] — the string-validated [`cid::Cid`] type (CIDv0/CIDv1), with
+//!   serde support behind the `serde` feature.
+//! - [`verify`] — streaming CID hashers ([`verify::Hasher`]) for IPFS
 //!   CIDv0/CIDv1 (UnixFS dag-pb, 256 KiB chunks, raw leaves), plus
 //!   [`verify::compute_cid`] for one-shot CIDv0 computation.
 //! - [`folder_hash`] — UnixFS directory DAG construction matching
@@ -12,12 +13,13 @@
 //!   streaming the DAG into a CAR file.
 //! - [`car`] — CARv1 framing: header/block writers and a strict root reader.
 //!
-//! It deliberately contains no networking, signing, or async code so that it
-//! can be reused as-is from FFI bindings (e.g. a Python wheel). Golden CIDs in
-//! `tests/folder_hash.rs` are regenerated against real kubo via
-//! `tests/regen-folder-hash-goldens.sh`.
+//! It deliberately contains no networking, signing, or async code — and no
+//! Aleph message types — so that it can be reused as-is from FFI bindings
+//! (e.g. a Python wheel). Golden CIDs in `tests/folder_hash.rs` are
+//! regenerated against real kubo via `tests/regen-folder-hash-goldens.sh`.
 
 pub mod car;
+pub mod cid;
 pub mod folder_hash;
 mod proto;
 pub mod verify;

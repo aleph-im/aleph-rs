@@ -2532,7 +2532,7 @@ impl AlephClient {
             other => StorageError::Io(std::io::Error::other(other.to_string())),
         })?;
 
-        let local_cid = crate::folder_hash::hash_folder_root(&entries, &opts)?;
+        let local_cid = ItemHash::Ipfs(crate::folder_hash::hash_folder_root(&entries, &opts)?);
 
         let mut form = reqwest::multipart::Form::new();
         for entry in entries {
@@ -2622,6 +2622,7 @@ impl AlephClient {
             Ok(())
         })?;
         body_tmp.flush()?;
+        let local_root = ItemHash::Ipfs(local_root);
         let root_cid_bytes =
             last_cid_bytes.expect("build_folder_dag always emits at least the root");
 

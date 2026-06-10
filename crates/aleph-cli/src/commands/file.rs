@@ -215,7 +215,7 @@ async fn handle_folder_upload(
         eprintln!("Hashing folder {}...", args.path.display());
     }
     let entries = collect_folder_files(&args.path, opts.follow_symlinks)?;
-    let file_hash = hash_folder_root(&entries, &opts)?;
+    let file_hash = ItemHash::Ipfs(hash_folder_root(&entries, &opts)?);
     if !json {
         eprintln!("  Directory CID: {file_hash}");
     }

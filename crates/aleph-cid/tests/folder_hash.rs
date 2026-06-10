@@ -340,10 +340,7 @@ fn build_folder_dag_blocks_self_consistent() {
 
     assert!(!blocks.is_empty());
     let last_cid_bytes = &blocks.last().unwrap().0;
-    let root_cid_str = match &root {
-        aleph_types::item_hash::ItemHash::Ipfs(cid) => cid.to_string(),
-        other => panic!("expected ItemHash::Ipfs, got {other:?}"),
-    };
+    let root_cid_str = root.to_string();
     let parsed = ::cid::Cid::try_from(&last_cid_bytes[..]).unwrap();
     assert_eq!(parsed.to_string(), root_cid_str);
 }
