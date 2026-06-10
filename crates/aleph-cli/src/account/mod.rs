@@ -121,6 +121,9 @@ pub fn load_account_by_name(store: &store::AccountStore, name: &str) -> Result<C
                 bail!("chain {} is not supported for Ledger signing", entry.chain)
             }
         }
+        store::AccountKind::Keystore => {
+            bail!("keystore accounts are not wired up yet (next task)")
+        }
     }
 }
 

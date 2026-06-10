@@ -9,6 +9,8 @@ const KEYRING_SERVICE: &str = "cloud.aleph.cli";
 pub enum AccountKind {
     Local,
     Ledger, // Phase 2
+    /// Password-protected Ethereum keystore V3 file (no keyring).
+    Keystore,
 }
 
 /// One entry in the accounts manifest.
@@ -35,6 +37,7 @@ impl AccountEntry {
         match self.kind {
             AccountKind::Local => "local",
             AccountKind::Ledger => "ledger",
+            AccountKind::Keystore => "encrypted",
         }
     }
 }
@@ -96,6 +99,8 @@ pub enum StoreError {
     InvalidName(String),
     #[error("{0}")]
     Keyring(String),
+    #[error("keystore file for account '{name}' not found at {}", path.display())]
+    KeystoreMissing { name: String, path: PathBuf },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("failed to parse manifest: {0}")]
@@ -283,6 +288,92 @@ impl AccountStore {
         self.save_manifest(&manifest)
     }
 
+    fn keystores_dir(&self) -> PathBuf {
+        self.manifest_path
+            .parent()
+            .map(|p| p.join("keystores"))
+            .unwrap_or_else(|| PathBuf::from("keystores"))
+    }
+
+    /// Path of the keystore file for an account (derived from its name).
+    pub fn keystore_path(&self, name: &str) -> PathBuf {
+        self.keystores_dir().join(format!("{name}.json"))
+    }
+
+    /// Add a keystore (password-encrypted file) account.
+    ///
+    /// Manifest first, file second, mirroring `add_local_account`: if the
+    /// file write fails the manifest entry is rolled back.
+    pub fn add_keystore_account(
+        &self,
+        name: &str,
+        chain: Chain,
+        address: String,
+        keystore_json: &str,
+    ) -> Result<(), StoreError> {
+        Self::validate_name(name)?;
+
+        let mut manifest = self.load_manifest()?;
+        if manifest.accounts.iter().any(|a| a.name == name)
+            || manifest.aliases.iter().any(|a| a.name == name)
+        {
+            return Err(StoreError::AlreadyExists(name.to_string()));
+        }
+
+        manifest.accounts.push(AccountEntry {
+            name: name.to_string(),
+            chain,
+            address,
+            kind: AccountKind::Keystore,
+            derivation_path: None,
+        });
+        if manifest.default.is_none() {
+            manifest.default = Some(name.to_string());
+        }
+        self.save_manifest(&manifest)?;
+
+        let write_result = (|| {
+            let dir = self.keystores_dir();
+            std::fs::create_dir_all(&dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+            self.write_restricted(&self.keystore_path(name), keystore_json)
+        })();
+
+        if let Err(io_err) = write_result {
+            manifest.accounts.retain(|a| a.name != name);
+            if manifest.default.as_deref() == Some(name) {
+                manifest.default = manifest.accounts.first().map(|a| a.name.clone());
+            }
+            if let Err(rollback_err) = self.save_manifest(&manifest) {
+                eprintln!(
+                    "warning: failed to roll back manifest after keystore write error: {rollback_err}"
+                );
+            }
+            return Err(StoreError::Io(io_err));
+        }
+
+        Ok(())
+    }
+
+    /// Read the raw keystore JSON for an account.
+    pub fn read_keystore_json(&self, name: &str) -> Result<String, StoreError> {
+        let path = self.keystore_path(name);
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => Ok(contents),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(StoreError::KeystoreMissing {
+                    name: name.to_string(),
+                    path,
+                })
+            }
+            Err(e) => Err(StoreError::Io(e)),
+        }
+    }
+
     /// Get the private key for a local account from the keyring.
     pub fn get_private_key(&self, name: &str) -> Result<String, StoreError> {
         let manifest = self.load_manifest()?;
@@ -342,7 +433,7 @@ impl AccountStore {
             .position(|a| a.name == name)
             .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
 
-        let is_local = manifest.accounts[idx].kind == AccountKind::Local;
+        let kind = manifest.accounts[idx].kind.clone();
 
         // 1. Update manifest first — remove the entry
         manifest.accounts.remove(idx);
@@ -351,16 +442,27 @@ impl AccountStore {
         }
         self.save_manifest(&manifest)?;
 
-        // 2. Remove from keyring if local — failure here is non-fatal
-        //    (orphaned keyring entry is harmless)
-        if is_local {
-            let keyring_entry =
-                keyring::Entry::new(KEYRING_SERVICE, name).map_err(keyring_error)?;
-            match keyring_entry.delete_credential() {
-                Ok(()) => {}
-                Err(keyring::Error::NoEntry) => {}
-                Err(e) => return Err(keyring_error(e)),
+        // 2. Clean up the secret store based on account kind
+        match kind {
+            AccountKind::Local => {
+                let keyring_entry =
+                    keyring::Entry::new(KEYRING_SERVICE, name).map_err(keyring_error)?;
+                match keyring_entry.delete_credential() {
+                    Ok(()) => {}
+                    Err(keyring::Error::NoEntry) => {}
+                    Err(e) => return Err(keyring_error(e)),
+                }
             }
+            AccountKind::Keystore => {
+                // Non-fatal if already gone — the manifest entry is removed,
+                // and an orphaned file is only wasted disk.
+                if let Err(e) = std::fs::remove_file(self.keystore_path(name)) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!("warning: failed to remove keystore file: {e}");
+                    }
+                }
+            }
+            AccountKind::Ledger => {}
         }
 
         Ok(())
@@ -636,6 +738,110 @@ mod tests {
             .add_alias("bad name!", "0x1234".to_string())
             .unwrap_err();
         assert!(matches!(err, StoreError::InvalidName(_)));
+    }
+
+    const KEYSTORE_JSON: &str = r#"{"version":3,"id":"test","crypto":{}}"#;
+
+    #[test]
+    fn add_keystore_account_writes_file_and_manifest() {
+        let (_dir, store) = temp_store();
+        store
+            .add_keystore_account("enc", Chain::Ethereum, "0x1234".to_string(), KEYSTORE_JSON)
+            .unwrap();
+
+        let manifest = store.load_manifest().unwrap();
+        assert_eq!(manifest.accounts.len(), 1);
+        assert_eq!(manifest.accounts[0].kind, AccountKind::Keystore);
+        assert_eq!(manifest.default.as_deref(), Some("enc"));
+
+        let contents = store.read_keystore_json("enc").unwrap();
+        assert_eq!(contents, KEYSTORE_JSON);
+    }
+
+    #[test]
+    fn keystore_kind_displays_as_encrypted() {
+        let entry = AccountEntry {
+            name: "enc".to_string(),
+            chain: Chain::Ethereum,
+            address: "0x1234".to_string(),
+            kind: AccountKind::Keystore,
+            derivation_path: None,
+        };
+        assert_eq!(entry.kind_display(), "encrypted");
+    }
+
+    #[test]
+    fn keystore_kind_roundtrips_in_manifest() {
+        let (_dir, store) = temp_store();
+        store
+            .add_keystore_account("enc", Chain::Ethereum, "0x1234".to_string(), KEYSTORE_JSON)
+            .unwrap();
+        let manifest = store.load_manifest().unwrap();
+        let serialized = toml::to_string_pretty(&manifest).unwrap();
+        assert!(serialized.contains("keystore"));
+        let parsed: AccountsManifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.accounts[0].kind, AccountKind::Keystore);
+    }
+
+    #[test]
+    fn read_keystore_json_missing_file_errors_with_path() {
+        let (_dir, store) = temp_store();
+        // Manifest entry without a file (e.g. file deleted manually)
+        let err = store.read_keystore_json("ghost").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ghost"));
+        assert!(msg.contains("keystores"));
+    }
+
+    #[test]
+    fn delete_keystore_account_removes_file() {
+        let (_dir, store) = temp_store();
+        store
+            .add_keystore_account("enc", Chain::Ethereum, "0x1234".to_string(), KEYSTORE_JSON)
+            .unwrap();
+        let path = store.keystore_path("enc");
+        assert!(path.exists());
+
+        store.delete_account("enc").unwrap();
+        assert!(!path.exists());
+        assert!(store.load_manifest().unwrap().accounts.is_empty());
+    }
+
+    #[test]
+    fn keystore_account_name_collision_rejected() {
+        let (_dir, store) = temp_store();
+        store
+            .add_keystore_account("enc", Chain::Ethereum, "0x1234".to_string(), KEYSTORE_JSON)
+            .unwrap();
+        let err = store
+            .add_keystore_account("enc", Chain::Ethereum, "0x5678".to_string(), KEYSTORE_JSON)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyExists(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keystore_file_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = temp_store();
+        store
+            .add_keystore_account("enc", Chain::Ethereum, "0x1234".to_string(), KEYSTORE_JSON)
+            .unwrap();
+        let mode = std::fs::metadata(store.keystore_path("enc"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn get_private_key_rejects_keystore_account() {
+        let (_dir, store) = temp_store();
+        store
+            .add_keystore_account("enc", Chain::Ethereum, "0x1234".to_string(), KEYSTORE_JSON)
+            .unwrap();
+        let err = store.get_private_key("enc").unwrap_err();
+        assert!(err.to_string().contains("not a local account"));
     }
 
     // Integration tests that actually touch the OS keyring are marked #[ignore].
