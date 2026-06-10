@@ -58,11 +58,13 @@ fn handle_create_encrypted(
     if !chain.is_evm() {
         anyhow::bail!("--encrypted accounts are only supported for EVM chains");
     }
-    // Fail on invalid/taken names before prompting for a password.
+    // Fail on invalid/taken names before prompting for a password. The
+    // store re-checks uniqueness on write; this is an early exit so the
+    // user isn't asked for a password just to be told the name is taken.
     store.check_name_available(name)?;
 
-    let (key_hex, address) = generate_key(chain.clone())?;
     let passphrase = password::read_new_password()?;
+    let (key_hex, address) = generate_key(chain.clone())?;
     let key_bytes = keystore::decode_key_hex(&key_hex)?;
     let ks = keystore::encrypt_key(&key_bytes, &passphrase, &address)?;
     let ks_json = serde_json::to_string_pretty(&ks)?;
