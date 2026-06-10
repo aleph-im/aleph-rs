@@ -515,7 +515,7 @@ pub(crate) fn encrypt_key_with_params(
     Ok(KeystoreV3 {
         version: 3,
         id: random_uuid(),
-        address: Some(address.trim_start_matches("0x").to_lowercase()),
+        address: Some(address.to_lowercase().trim_start_matches("0x").to_string()),
         crypto: CryptoSection {
             cipher: "aes-128-ctr".to_string(),
             ciphertext: hex::encode(&ciphertext[..]),
@@ -889,6 +889,11 @@ mod tests {
         assert_ne!(a.crypto.ciphertext, b.crypto.ciphertext);
         assert_ne!(a.crypto.cipherparams.iv, b.crypto.cipherparams.iv);
         assert_ne!(a.id, b.id);
+        let salt_of = |ks: &KeystoreV3| match &ks.crypto.kdfparams {
+            KdfParams::Scrypt { salt, .. } => salt.clone(),
+            KdfParams::Pbkdf2 { salt, .. } => salt.clone(),
+        };
+        assert_ne!(salt_of(&a), salt_of(&b));
     }
 
     #[test]
