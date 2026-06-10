@@ -1,0 +1,13 @@
+---
+source: crates/aleph-cli/src/commands/token.rs
+expression: "quote_json_ophis(SwapToken::Usdc, &sample_quote())"
+---
+{
+  "expected_aleph": "1",
+  "fee": "0.1",
+  "min_aleph": "0.995",
+  "partner_fee_bps": 10,
+  "sell_amount": "50",
+  "sell_token": "USDC",
+  "venue": "ophis"
+}
