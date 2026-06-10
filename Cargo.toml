@@ -77,6 +77,8 @@ k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 base64 = { version = "0.22" }
 p256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = { version = "0.10" }
+scrypt = { version = "0.11", default-features = false }
+pbkdf2 = { version = "0.12" }
 hex = { version = "0.4" }
 hmac = { version = "0.12" }
 zeroize = { version = "1" }
@@ -86,3 +88,17 @@ ctr = { version = "0.9" }
 ctrlc = { version = "3.4" }
 libc = { version = "0.2" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# scrypt at keystore-grade parameters is unusably slow in unoptimized debug
+# builds (tests, `cargo run` during development). Always optimize the crypto
+# kernels; the test profile inherits these overrides.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
