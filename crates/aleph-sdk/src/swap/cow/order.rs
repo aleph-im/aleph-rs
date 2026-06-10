@@ -15,14 +15,51 @@ pub const SETTLEMENT: Address = address!("9008D19f58AAbD9eD0D60971565AA8510560ab
 /// CoW chain.
 pub const VAULT_RELAYER: Address = address!("C92E8bdf79f0507f65a392b0ab4667716BFE0110");
 
-/// Minimal appData document. CoW accepts the keccak256 of this JSON as the
-/// order's appData hash. Kept byte-stable (no whitespace) so the hash is
-/// reproducible.
-///
-/// The `"version":"1.3.0"` field is the **CoW appData document schema
-/// version** (from <https://github.com/cowprotocol/app-data>), not the
-/// aleph-cli or crate version. It must not be bumped on CLI releases.
-pub const APP_DATA_JSON: &str = r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{}}"#;
+/// An appData document and its keccak256 hash. The document is byte-stable
+/// (no whitespace) so the hash is reproducible; the orderbook stores the full
+/// document while the signed order and the EthFlow order carry only the hash.
+#[derive(Debug, Clone, Copy)]
+pub struct AppData {
+    /// The full appData JSON document, exactly as POSTed to the orderbook.
+    pub json: &'static str,
+    /// keccak256 of `json` - the order's `appData` field.
+    pub hash: B256,
+}
+
+impl AppData {
+    /// Minimal CoW document (`appCode` only, empty metadata).
+    ///
+    /// The `"version":"1.3.0"` field is the **CoW appData document schema
+    /// version** (from <https://github.com/cowprotocol/app-data>), not the
+    /// aleph-cli or crate version. It must not be bumped on CLI releases.
+    pub const COW_JSON: &'static str = r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{}}"#;
+
+    /// Ophis document: the CoW document plus the CIP-75 VOLUME partner fee.
+    ///
+    /// The `{volumeBps, recipient}` shape is mapped to `FeePolicy::Volume` by
+    /// the orderbook (`cowprotocol/services`, which api.cow.fi runs).
+    /// `volumeBps:10` == 0.10%; the recipient is the Ophis partner-fee Safe
+    /// (source of truth: `@ophis/sdk` partner-fee.ts). The fee accrues to Ophis
+    /// even though the order settles on the canonical mainnet orderbook.
+    pub const OPHIS_JSON: &'static str = r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{"partnerFee":{"volumeBps":10,"recipient":"0x858f0F5eE954846D47155F5203c04aF1819eCeF8"}}}"#;
+
+    fn from_json(json: &'static str) -> Self {
+        Self {
+            json,
+            hash: keccak256(json.as_bytes()),
+        }
+    }
+
+    /// The plain CoW venue document.
+    pub fn cow() -> Self {
+        Self::from_json(Self::COW_JSON)
+    }
+
+    /// The Ophis venue document (CoW + partner fee).
+    pub fn ophis() -> Self {
+        Self::from_json(Self::OPHIS_JSON)
+    }
+}
 
 sol! {
     /// The GPv2 order, exactly as the orderbook expects it for EIP-712.
@@ -43,11 +80,6 @@ sol! {
         string sellTokenBalance;
         string buyTokenBalance;
     }
-}
-
-/// keccak256 of [`APP_DATA_JSON`] - the order's appData field.
-pub fn app_data_hash() -> B256 {
-    keccak256(APP_DATA_JSON.as_bytes())
 }
 
 /// Compute the EIP-712 signing digest for `order` on `chain_id`.
@@ -76,7 +108,7 @@ pub fn sign_order(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::U256;
+    use alloy_primitives::{U256, keccak256};
 
     fn sample_order() -> Order {
         Order {
@@ -86,7 +118,7 @@ mod tests {
             sellAmount: U256::from(50_000_000u64),
             buyAmount: U256::from(1_000_000_000_000_000_000u128),
             validTo: 2_000_000_000,
-            appData: app_data_hash(),
+            appData: AppData::cow().hash,
             feeAmount: U256::ZERO,
             kind: "sell".to_string(),
             partiallyFillable: false,
@@ -96,13 +128,39 @@ mod tests {
     }
 
     #[test]
-    fn app_data_hash_is_stable() {
-        // Pinned hash of APP_DATA_JSON. If the constant changes, update this
-        // literal deliberately - do not re-derive it from the constant.
+    fn appdata_cow_matches_legacy_doc() {
+        let cow = AppData::cow();
         assert_eq!(
-            app_data_hash(),
+            cow.json,
+            r#"{"appCode":"aleph-cli","version":"1.3.0","metadata":{}}"#
+        );
+        // Legacy pinned hash - unchanged behavior for the existing CoW venue.
+        // If the document changes, update this literal deliberately.
+        assert_eq!(
+            cow.hash,
             alloy_primitives::b256!(
                 "c26dc5fb52bdd81b9218532e71a8919ada11e5da152fbd437aabe8236cbeec73"
+            )
+        );
+        assert_eq!(cow.hash, keccak256(cow.json.as_bytes()));
+    }
+
+    #[test]
+    fn appdata_ophis_carries_partner_fee_and_is_stable() {
+        let ophis = AppData::ophis();
+        // Volume policy shape the orderbook maps to FeePolicy::Volume.
+        assert!(ophis.json.contains(r#""partnerFee":{"volumeBps":10"#));
+        assert!(
+            ophis
+                .json
+                .contains("0x858f0F5eE954846D47155F5203c04aF1819eCeF8")
+        );
+        assert_eq!(ophis.hash, keccak256(ophis.json.as_bytes()));
+        // Pinned hash - update deliberately if OPHIS_JSON changes.
+        assert_eq!(
+            ophis.hash,
+            alloy_primitives::b256!(
+                "ec501d43f8cf80098b69d17365c624e98f318601b8347174388be5818d05a80a"
             )
         );
     }

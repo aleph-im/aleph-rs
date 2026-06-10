@@ -3,7 +3,7 @@
 //! USDC-path tests use a wiremock server (no network). ETH-flow tests use a
 //! spawned anvil node and are `#[ignore]`d (require foundry in PATH).
 
-use aleph_sdk::swap::cow::order::APP_DATA_JSON;
+use aleph_sdk::swap::cow::order::AppData;
 use aleph_sdk::swap::cow::{CowApi, place_usdc_order, quote_usdc};
 use aleph_sdk::swap::{SwapRequest, SwapToken};
 use alloy_primitives::{Address, U256, address};
@@ -61,7 +61,7 @@ async fn usdc_quote_then_place_order_round_trip() {
             "kind": "sell",
             "signingScheme": "eip712",
             "quoteId": 42,
-            "appData": APP_DATA_JSON
+            "appData": AppData::COW_JSON
         })))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!(
             "0xabc0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000abcd"
@@ -94,10 +94,30 @@ async fn usdc_quote_then_place_order_round_trip() {
     );
     assert_eq!(quote.fee_amount, U256::from(1_000_000u64));
 
-    let uid = place_usdc_order(&api, 1, USDC, &req, &quote, &resp, &signer)
+    let uid = place_usdc_order(&api, 1, USDC, &AppData::cow(), &req, &quote, &resp, &signer)
         .await
         .expect("place order");
     assert!(uid.starts_with("0x"));
+}
+
+#[tokio::test]
+async fn put_app_data_posts_full_document_and_returns_hash() {
+    let server = MockServer::start().await;
+    let hash = "0xec501d43f8cf80098b69d17365c624e98f318601b8347174388be5818d05a80a";
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/app_data/{hash}")))
+        .and(body_partial_json(serde_json::json!({
+            "fullAppData": AppData::OPHIS_JSON,
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!(hash)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api = CowApi::with_base_url(reqwest::Client::new(), format!("{}/api/v1", server.uri()));
+    api.put_app_data(hash, AppData::OPHIS_JSON)
+        .await
+        .expect("put_app_data ok");
 }
 
 #[tokio::test]
@@ -128,6 +148,7 @@ async fn eth_flow_create_order_sends_value_with_calldata() {
         recipient, // stand-in for the ethflow contract address
         ALEPH,
         owner,
+        AppData::ophis().hash,
         sell_amount,
         U256::from(1u64),
         2_000_000_000,

@@ -185,7 +185,7 @@ pub enum Commands {
         #[clap(subcommand)]
         command: CreditCommand,
     },
-    /// Acquire ALEPH tokens by swapping ETH or USDC via CoW Swap or Uniswap
+    /// Acquire ALEPH tokens by swapping ETH or USDC via CoW Swap, Uniswap, or Ophis
     Token {
         #[clap(subcommand)]
         command: TokenCommand,
@@ -2431,23 +2431,26 @@ pub struct TransferCreditArgs {
 
 #[derive(Subcommand)]
 pub enum TokenCommand {
-    /// Swap ETH or USDC for ALEPH via CoW Swap or Uniswap
+    /// Swap ETH or USDC for ALEPH via CoW Swap, Uniswap, or Ophis
     #[command(long_about = "\
 Swap native ETH or USDC for ALEPH, leaving the ALEPH in your wallet.
 --amount is in human-readable units of the sell token.
 
-Two venues (--venue):
+Three venues (--venue):
   cow (default): gasless off-chain order filled by solvers; may expire
                  unfilled on a thin pair. Prints the order UID and exits;
                  check fill status on the explorer.
   uniswap:       immediate on-chain swap against Uniswap v3 pools; you pay
                  gas and the pool fee is embedded in the price. Useful when
                  a CoW order expired unfilled.
+  ophis:         CoW order routed through Ophis with a 0.10% partner fee;
+                 settles on the same mainnet orderbook as cow.
 
 Examples:
   aleph token swap --sell-token usdc --amount 100
   aleph token swap --sell-token eth  --amount 0.5 --slippage 1.0
   aleph token swap --sell-token eth  --amount 0.5 --venue uniswap
+  aleph token swap --sell-token usdc --amount 100 --venue ophis
   aleph token swap --sell-token usdc --amount 50 --yes")]
     Swap(TokenSwapArgs),
 }
@@ -2462,6 +2465,7 @@ pub enum SwapTokenCli {
 pub enum SwapVenueCli {
     Cow,
     Uniswap,
+    Ophis,
 }
 
 #[derive(Args)]

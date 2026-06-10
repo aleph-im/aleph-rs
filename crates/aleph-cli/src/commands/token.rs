@@ -7,7 +7,7 @@ use aleph_sdk::credit::{EthereumConfig, format_token_amount, parse_token_amount}
 use aleph_sdk::swap::cow::CowApi;
 use aleph_sdk::swap::cow::chains::cow_chain;
 use aleph_sdk::swap::cow::ethflow::create_eth_order;
-use aleph_sdk::swap::cow::order::VAULT_RELAYER;
+use aleph_sdk::swap::cow::order::{AppData, VAULT_RELAYER};
 use aleph_sdk::swap::uniswap::chains::uniswap_chain;
 use aleph_sdk::swap::uniswap::router::execute_swap;
 use aleph_sdk::swap::uniswap::{self, UniswapQuote};
@@ -182,6 +182,21 @@ async fn handle_swap(json: bool, args: TokenSwapArgs, cli_network: Option<&str>)
             )
             .await
         }
+        SwapVenueCli::Ophis => {
+            swap_via_ophis(
+                json,
+                &args,
+                &network.name,
+                &ethereum,
+                chain_id,
+                &provider,
+                owner,
+                receiver,
+                &signer,
+                &req,
+            )
+            .await
+        }
     }
 }
 
@@ -258,6 +273,7 @@ async fn swap_via_cow(
                 &api,
                 chain_id,
                 ethereum.usdc_token,
+                &AppData::cow(),
                 req,
                 &quote,
                 &resp,
@@ -280,6 +296,7 @@ async fn swap_via_cow(
                 chain.ethflow,
                 ethereum.aleph_token,
                 receiver,
+                AppData::cow().hash,
                 quote.sell_amount,
                 quote.min_buy_amount,
                 resp.quote.valid_to,
@@ -406,6 +423,147 @@ async fn swap_via_uniswap(
     Ok(())
 }
 
+fn print_ophis_quote(sell_token: SwapToken, quote: &SwapQuote) {
+    let sell_display = format_token_amount(quote.sell_amount, sell_token.decimals());
+    let buy_display = format_token_amount(quote.buy_amount, ALEPH_DECIMALS);
+    let min_display = format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS);
+    eprintln!(
+        "Swapping {} {} for ALEPH via Ophis",
+        sell_display,
+        sell_token.symbol()
+    );
+    eprintln!("  Expected:     ~{buy_display} ALEPH (before partner fee)");
+    eprintln!("  Min received: {min_display} ALEPH");
+    eprintln!("  Partner fee:  0.10% (Ophis), taken on settlement");
+}
+
+/// Swap via Ophis: a CoW order whose appData carries Ophis's partner fee.
+/// Same mainnet orderbook, settlement and contracts as the `cow` venue; the
+/// only difference is the appData document (and the native-ETH path must
+/// register that document so the orderbook can resolve the fee).
+#[allow(clippy::too_many_arguments)]
+async fn swap_via_ophis(
+    json: bool,
+    args: &TokenSwapArgs,
+    network_name: &str,
+    ethereum: &EthereumConfig,
+    chain_id: u64,
+    provider: &impl Provider,
+    owner: Address,
+    receiver: Address,
+    signer: &PrivateKeySigner,
+    req: &SwapRequest,
+) -> Result<()> {
+    let sell_token = req.sell_token;
+    let app_data = AppData::ophis();
+
+    let chain = cow_chain(chain_id).ok_or_else(|| {
+        anyhow!(
+            "Ophis is not available on chainId {} (network '{}')",
+            chain_id,
+            network_name
+        )
+    })?;
+
+    let api =
+        CowApi::new(chain_id).map_err(|e| anyhow!("failed to build Ophis API client: {e}"))?;
+
+    let (quote, resp) = match sell_token {
+        SwapToken::Usdc => cow::quote_usdc(&api, ethereum.usdc_token, req).await,
+        SwapToken::Eth => cow::quote_eth(&api, chain.weth, req).await,
+    }
+    .map_err(|e| anyhow!("failed to fetch Ophis quote: {e}"))?;
+
+    // Print quote summary to stderr (human mode).
+    if !json {
+        print_ophis_quote(sell_token, &quote);
+    }
+
+    // Dry-run: stop after printing the quote.
+    if args.signing.dry_run {
+        if json {
+            let mut output = quote_json_ophis(sell_token, &quote);
+            output["dry_run"] = serde_json::Value::Bool(true);
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            eprintln!("\nDry run - order not submitted.");
+        }
+        return Ok(());
+    }
+
+    // Confirmation: only prompt in human mode (mirror credit.rs: no prompt when --json).
+    if !json && !args.yes && !confirm_submission("Proceed?")? {
+        eprintln!("Cancelled.");
+        return Ok(());
+    }
+
+    match sell_token {
+        SwapToken::Usdc => {
+            ensure_allowance(
+                provider,
+                ethereum.usdc_token,
+                owner,
+                VAULT_RELAYER,
+                quote.sell_amount,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to ensure USDC allowance: {e}"))?;
+            let order_uid = cow::place_usdc_order(
+                &api,
+                chain_id,
+                ethereum.usdc_token,
+                &app_data,
+                req,
+                &quote,
+                &resp,
+                signer,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to place Ophis order: {e}"))?;
+
+            if json {
+                let output = result_json_ophis_usdc(sell_token, &quote, &order_uid);
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                eprintln!("Order submitted: {order_uid}");
+                eprintln!("https://explorer.cow.fi/orders/{order_uid}");
+            }
+        }
+        SwapToken::Eth => {
+            // EthFlow carries only the appData hash on-chain; register the full
+            // document first so the orderbook can resolve the partner fee.
+            let hash_hex = format!("{:#x}", app_data.hash);
+            api.put_app_data(&hash_hex, app_data.json)
+                .await
+                .map_err(|e| anyhow!("failed to register Ophis appData: {e}"))?;
+            let tx_hash = create_eth_order(
+                provider,
+                chain.ethflow,
+                ethereum.aleph_token,
+                receiver,
+                app_data.hash,
+                quote.sell_amount,
+                quote.min_buy_amount,
+                resp.quote.valid_to,
+                resp.id.unwrap_or(0),
+            )
+            .await
+            .map_err(|e| anyhow!("failed to submit Ophis ETH-flow order: {e}"))?;
+            let tx_hash_str = format!("{:#x}", tx_hash);
+
+            if json {
+                let output = result_json_ophis_eth(sell_token, &quote, &tx_hash_str);
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                eprintln!("Transaction submitted: {tx_hash_str}");
+                eprintln!("https://explorer.cow.fi/tx/{tx_hash_str}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_swap_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
     match resolve_account(&signing.identity)? {
         CliAccount::Evm(a) => Ok(a),
@@ -463,6 +621,40 @@ fn result_json_uniswap(
     tx_hash: &str,
 ) -> serde_json::Value {
     let mut v = quote_json_uniswap(sell_token, quote);
+    v["tx_hash"] = tx_hash.into();
+    v
+}
+
+/// Common quote fields for the Ophis venue: the CoW fields plus the partner
+/// fee taken on settlement (`partner_fee_bps`, 10 == 0.10%).
+fn quote_json_ophis(sell_token: SwapToken, quote: &SwapQuote) -> serde_json::Value {
+    serde_json::json!({
+        "venue": "ophis",
+        "sell_token": sell_token.symbol(),
+        "sell_amount": format_token_amount(quote.sell_amount, sell_token.decimals()),
+        "expected_aleph": format_token_amount(quote.buy_amount, ALEPH_DECIMALS),
+        "min_aleph": format_token_amount(quote.min_buy_amount, ALEPH_DECIMALS),
+        "fee": format_token_amount(quote.fee_amount, sell_token.decimals()),
+        "partner_fee_bps": 10,
+    })
+}
+
+fn result_json_ophis_usdc(
+    sell_token: SwapToken,
+    quote: &SwapQuote,
+    order_uid: &str,
+) -> serde_json::Value {
+    let mut v = quote_json_ophis(sell_token, quote);
+    v["order_id"] = order_uid.into();
+    v
+}
+
+fn result_json_ophis_eth(
+    sell_token: SwapToken,
+    quote: &SwapQuote,
+    tx_hash: &str,
+) -> serde_json::Value {
+    let mut v = quote_json_ophis(sell_token, quote);
     v["tx_hash"] = tx_hash.into();
     v
 }
@@ -656,5 +848,52 @@ mod tests {
     #[test]
     fn quote_json_snapshot() {
         insta::assert_json_snapshot!(quote_json(SwapToken::Eth, &sample_quote()));
+    }
+
+    // --- Ophis JSON helpers ---
+
+    #[test]
+    fn quote_json_ophis_has_partner_fee() {
+        let v = quote_json_ophis(SwapToken::Usdc, &sample_quote());
+        assert_eq!(v["venue"], "ophis");
+        assert_eq!(v["sell_token"], "USDC");
+        assert_eq!(v["sell_amount"], "50");
+        assert_eq!(v["expected_aleph"], "1");
+        assert_eq!(v["min_aleph"], "0.995");
+        assert_eq!(v["fee"], "0.1");
+        assert_eq!(v["partner_fee_bps"], 10);
+        assert!(v.get("order_id").is_none());
+        assert!(v.get("tx_hash").is_none());
+    }
+
+    #[test]
+    fn result_json_ophis_usdc_has_order_id() {
+        let v = result_json_ophis_usdc(SwapToken::Usdc, &sample_quote(), "0xUID");
+        assert_eq!(v["venue"], "ophis");
+        assert_eq!(v["order_id"], "0xUID");
+        assert_eq!(v["partner_fee_bps"], 10);
+        assert!(v.get("tx_hash").is_none());
+    }
+
+    #[test]
+    fn result_json_ophis_eth_has_tx_hash() {
+        let v = result_json_ophis_eth(SwapToken::Eth, &sample_quote(), "0xdeadbeef");
+        assert_eq!(v["venue"], "ophis");
+        assert_eq!(v["tx_hash"], "0xdeadbeef");
+        assert!(v.get("order_id").is_none());
+    }
+
+    #[test]
+    fn quote_json_ophis_snapshot() {
+        insta::assert_json_snapshot!(quote_json_ophis(SwapToken::Usdc, &sample_quote()));
+    }
+
+    #[test]
+    fn result_json_ophis_eth_snapshot() {
+        insta::assert_json_snapshot!(result_json_ophis_eth(
+            SwapToken::Eth,
+            &sample_quote(),
+            "0xfeed"
+        ));
     }
 }

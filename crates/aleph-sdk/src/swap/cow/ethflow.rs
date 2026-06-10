@@ -12,7 +12,6 @@ use alloy_sol_types::sol;
 
 use crate::swap::SwapError;
 use crate::swap::await_receipt;
-use crate::swap::cow::order::app_data_hash;
 
 sol! {
     #[sol(rpc)]
@@ -45,6 +44,7 @@ pub async fn create_eth_order(
     ethflow: Address,
     buy_token: Address,
     receiver: Address,
+    app_data: B256,
     sell_amount: U256,
     min_buy_amount: U256,
     valid_to: u32,
@@ -56,7 +56,7 @@ pub async fn create_eth_order(
         receiver,
         sellAmount: sell_amount,
         buyAmount: min_buy_amount,
-        appData: app_data_hash(),
+        appData: app_data,
         feeAmount: U256::ZERO,
         validTo: valid_to,
         partiallyFillable: false,
