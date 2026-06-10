@@ -452,10 +452,10 @@ impl AccountStore {
             AccountKind::Keystore => {
                 // Non-fatal if already gone — the manifest entry is removed,
                 // and an orphaned file is only wasted disk.
-                if let Err(e) = std::fs::remove_file(self.keystore_path(name)) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        eprintln!("warning: failed to remove keystore file: {e}");
-                    }
+                if let Err(e) = std::fs::remove_file(self.keystore_path(name))
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    eprintln!("warning: failed to remove keystore file: {e}");
                 }
             }
             AccountKind::Ledger => {}
