@@ -531,6 +531,10 @@ async fn handle_show(
 
     if json {
         let mut output = serde_json::to_value(&entry)?;
+        if entry.kind == AccountKind::Keystore {
+            output["keystore_path"] =
+                serde_json::json!(store.keystore_path(&entry.name).display().to_string());
+        }
         if let Some(bal) = &balance {
             output["balance"] = serde_json::json!({
                 "aleph_tokens": bal.aleph_tokens,
@@ -546,6 +550,9 @@ async fn handle_show(
         eprintln!("Chain:   {}", entry.chain);
         eprintln!("Address: {}", entry.address);
         eprintln!("Type:    {}", entry.kind_display());
+        if entry.kind == AccountKind::Keystore {
+            eprintln!("File:    {}", store.keystore_path(&entry.name).display());
+        }
         if is_default {
             eprintln!("Default: yes");
         }
@@ -653,8 +660,11 @@ fn handle_use(store: &AccountStore, args: AccountUseArgs, json: bool) -> Result<
 fn handle_export(store: &AccountStore, args: AccountExportArgs, json: bool) -> Result<()> {
     let entry = store.get_account(&args.name)?;
 
-    if entry.kind != AccountKind::Local {
-        anyhow::bail!("cannot export key for non-local account '{}'", args.name);
+    if entry.kind == AccountKind::Ledger {
+        anyhow::bail!(
+            "cannot export key for ledger account '{}' (the key never leaves the device)",
+            args.name
+        );
     }
 
     if !confirm_typed_match(
@@ -668,7 +678,18 @@ fn handle_export(store: &AccountStore, args: AccountExportArgs, json: bool) -> R
         return Ok(());
     }
 
-    let key = Zeroizing::new(store.get_private_key(&args.name)?);
+    let key = match entry.kind {
+        AccountKind::Local => Zeroizing::new(store.get_private_key(&args.name)?),
+        AccountKind::Keystore => {
+            use crate::account::{keystore, password};
+            let ks_json = store.read_keystore_json(&args.name)?;
+            let ks = keystore::parse_keystore(&ks_json)
+                .map_err(|e| anyhow::anyhow!("invalid keystore for '{}': {e}", args.name))?;
+            let key_bytes = password::unlock_keystore(&ks, &args.name)?;
+            Zeroizing::new(hex::encode(&key_bytes[..]))
+        }
+        AccountKind::Ledger => unreachable!("rejected above"),
+    };
 
     if json {
         let output = serde_json::json!({
