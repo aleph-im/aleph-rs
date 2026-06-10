@@ -122,7 +122,17 @@ pub fn load_account_by_name(store: &store::AccountStore, name: &str) -> Result<C
             }
         }
         store::AccountKind::Keystore => {
-            bail!("keystore accounts are not wired up yet (next task)")
+            if !entry.chain.is_evm() {
+                bail!("encrypted accounts are only supported for EVM chains");
+            }
+            let json = store
+                .read_keystore_json(name)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let ks = keystore::parse_keystore(&json)
+                .map_err(|e| anyhow::anyhow!("invalid keystore for '{name}': {e}"))?;
+            let key = password::unlock_keystore(&ks, name)?;
+            let account = EvmAccount::new(entry.chain, &key[..]).map_err(|e| anyhow::anyhow!(e))?;
+            Ok(CliAccount::Evm(account))
         }
     }
 }
@@ -206,6 +216,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store::AccountStore::with_manifest_path(dir.path().join("accounts.toml"));
         let err = load_account_by_name(&store, "nonexistent").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn load_account_by_name_keystore_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store::AccountStore::with_manifest_path(dir.path().join("accounts.toml"));
+        store
+            .add_keystore_account(
+                "enc",
+                Chain::Ethereum,
+                "0x1234".to_string(),
+                r#"{"placeholder": true}"#,
+            )
+            .unwrap();
+        // Simulate a manually deleted keystore file
+        std::fs::remove_file(store.keystore_path("enc")).unwrap();
+
+        let err = load_account_by_name(&store, "enc").unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 }
