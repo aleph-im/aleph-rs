@@ -437,6 +437,104 @@ pub fn decrypt_key(ks: &KeystoreV3, password: &str) -> Result<Zeroizing<[u8; 32]
     Ok(key)
 }
 
+/// Scrypt cost parameters for encryption.
+pub struct EncryptionParams {
+    pub log_n: u8,
+    pub r: u32,
+    pub p: u32,
+}
+
+/// geth-strength defaults: n = 2^18 (262144), r = 8, p = 1
+/// (~256 MB and ~1 s per derivation by design).
+pub const STANDARD_SCRYPT: EncryptionParams = EncryptionParams {
+    log_n: 18,
+    r: 8,
+    p: 1,
+};
+
+/// Encrypt a 32-byte private key with the standard scrypt parameters.
+///
+/// `address` is the account's 0x-prefixed EVM address; it is stored
+/// lowercase without the prefix, per the format convention.
+pub fn encrypt_key(
+    private_key: &[u8; 32],
+    password: &str,
+    address: &str,
+) -> Result<KeystoreV3, KeystoreError> {
+    encrypt_key_with_params(private_key, password, address, &STANDARD_SCRYPT)
+}
+
+fn random_uuid() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    // Set version (4) and variant bits so the id is a well-formed UUIDv4.
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    format!(
+        "{}-{}-{}-{}-{}",
+        hex::encode(&b[0..4]),
+        hex::encode(&b[4..6]),
+        hex::encode(&b[6..8]),
+        hex::encode(&b[8..10]),
+        hex::encode(&b[10..16]),
+    )
+}
+
+pub(crate) fn encrypt_key_with_params(
+    private_key: &[u8; 32],
+    password: &str,
+    address: &str,
+    params: &EncryptionParams,
+) -> Result<KeystoreV3, KeystoreError> {
+    use rand::RngCore;
+
+    let mut salt = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    let mut iv = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut iv);
+
+    let mut dk = Zeroizing::new([0u8; 32]);
+    let sp = scrypt::Params::new(params.log_n, params.r, params.p, 32)
+        .map_err(|e| KeystoreError::InvalidFormat(format!("invalid scrypt params: {e}")))?;
+    scrypt::scrypt(password.as_bytes(), &salt, &sp, &mut dk[..])
+        .map_err(|e| KeystoreError::InvalidFormat(format!("scrypt failed: {e}")))?;
+
+    // Encrypt in place: the buffer starts as the plaintext key (zeroized on
+    // drop) and is overwritten with the ciphertext by the XOR keystream.
+    let mut ciphertext = Zeroizing::new(*private_key);
+    let mut cipher =
+        Aes128Ctr::new_from_slices(&dk[..16], &iv).expect("key and IV lengths are fixed");
+    cipher.apply_keystream(&mut ciphertext[..]);
+
+    let mac = Keccak256::new()
+        .chain_update(&dk[16..32])
+        .chain_update(&ciphertext[..])
+        .finalize();
+
+    Ok(KeystoreV3 {
+        version: 3,
+        id: random_uuid(),
+        address: Some(address.trim_start_matches("0x").to_lowercase()),
+        crypto: CryptoSection {
+            cipher: "aes-128-ctr".to_string(),
+            ciphertext: hex::encode(&ciphertext[..]),
+            cipherparams: CipherParams {
+                iv: hex::encode(iv),
+            },
+            kdf: "scrypt".to_string(),
+            kdfparams: KdfParams::Scrypt {
+                dklen: 32,
+                n: 1u64 << params.log_n,
+                r: params.r,
+                p: params.p,
+                salt: hex::encode(salt),
+            },
+            mac: hex::encode(mac),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,5 +846,88 @@ mod tests {
         // log_n=10 gives N=1024
         scrypt_kdf(b"password", b"NaCl", 10, 8, 16, &mut out).unwrap();
         assert_eq!(hex::encode(out), expected);
+    }
+
+    // Fast params for tests only (n = 2^4). Production uses STANDARD_SCRYPT.
+    const TEST_PARAMS: EncryptionParams = EncryptionParams {
+        log_n: 4,
+        r: 8,
+        p: 1,
+    };
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let key = decode_key_hex(TEST_SECRET).unwrap();
+        let ks = encrypt_key_with_params(&key, "hunter2", "0xAbC123", &TEST_PARAMS).unwrap();
+        let decrypted = decrypt_key(&ks, "hunter2").unwrap();
+        assert_eq!(&decrypted[..], &key[..]);
+    }
+
+    #[test]
+    fn encrypt_then_wrong_password_rejected() {
+        let key = decode_key_hex(TEST_SECRET).unwrap();
+        let ks = encrypt_key_with_params(&key, "hunter2", "0xabc123", &TEST_PARAMS).unwrap();
+        assert!(matches!(
+            decrypt_key(&ks, "hunter3").unwrap_err(),
+            KeystoreError::IncorrectPassword
+        ));
+    }
+
+    #[test]
+    fn encrypt_normalizes_address() {
+        let key = decode_key_hex(TEST_SECRET).unwrap();
+        let ks = encrypt_key_with_params(&key, "pw", "0xAbCdEf0123", &TEST_PARAMS).unwrap();
+        // address stored lowercase, without 0x prefix
+        assert_eq!(ks.address.as_deref(), Some("abcdef0123"));
+    }
+
+    #[test]
+    fn encrypt_produces_unique_salt_iv_id() {
+        let key = decode_key_hex(TEST_SECRET).unwrap();
+        let a = encrypt_key_with_params(&key, "pw", "0xab", &TEST_PARAMS).unwrap();
+        let b = encrypt_key_with_params(&key, "pw", "0xab", &TEST_PARAMS).unwrap();
+        assert_ne!(a.crypto.ciphertext, b.crypto.ciphertext);
+        assert_ne!(a.crypto.cipherparams.iv, b.crypto.cipherparams.iv);
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn encrypt_id_is_uuid_shaped() {
+        let key = decode_key_hex(TEST_SECRET).unwrap();
+        let ks = encrypt_key_with_params(&key, "pw", "0xab", &TEST_PARAMS).unwrap();
+        let parts: Vec<&str> = ks.id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+    }
+
+    #[test]
+    fn encrypted_keystore_roundtrips_through_json() {
+        let key = decode_key_hex(TEST_SECRET).unwrap();
+        let ks = encrypt_key_with_params(&key, "pw", "0xab", &TEST_PARAMS).unwrap();
+        let json = serde_json::to_string_pretty(&ks).unwrap();
+        let parsed = parse_keystore(&json).unwrap();
+        let decrypted = decrypt_key(&parsed, "pw").unwrap();
+        assert_eq!(&decrypted[..], &key[..]);
+    }
+
+    #[test]
+    fn encrypt_with_standard_params_uses_geth_strength() {
+        // One slow test (~1 s, ~256 MB) proving the production parameters.
+        let key = decode_key_hex(TEST_SECRET).unwrap();
+        let ks = encrypt_key(&key, "pw", "0xab").unwrap();
+        assert!(matches!(
+            ks.crypto.kdfparams,
+            KdfParams::Scrypt {
+                n: 262144,
+                r: 8,
+                p: 1,
+                dklen: 32,
+                ..
+            }
+        ));
+        let decrypted = decrypt_key(&ks, "pw").unwrap();
+        assert_eq!(&decrypted[..], &key[..]);
     }
 }
