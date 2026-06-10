@@ -1228,17 +1228,23 @@ omitted (and no other source given), the key is read from stdin so it does \
 not appear in shell history.
 
   --from-file <PATH>    Read from a file containing a raw 32-byte binary \
-key or a hex-encoded text key.
+key, a hex-encoded text key, or an Ethereum keystore V3 file (detected \
+automatically; you will be asked for the file's password, and the file is \
+kept encrypted as-is).
 
   --ledger              Use a Ledger hardware wallet. Combine with \
 `--derivation-path` to override the default BIP44 path, and \
 `--ledger-count` to fetch more than the default 5 candidate addresses.
 
+With --encrypted, a raw key is stored on disk as a password-protected \
+Ethereum keystore V3 file instead of the OS keychain (EVM chains only).
+
 Examples:
   aleph account import alice --private-key 0xabcd1234...
   aleph account import alice --from-file ~/keys/alice.key
+  aleph account import alice --from-file ~/keystore.json   # keystore V3
+  aleph account import alice --private-key 0xab... --encrypted
   aleph account import alice --ledger
-  aleph account import alice --chain sol --ledger
   echo \"0xabcd1234...\" | aleph account import alice    # via stdin")]
     Import(AccountImportArgs),
     /// List all stored accounts
@@ -1284,6 +1290,11 @@ pub struct AccountImportArgs {
     /// Import from a key file (raw 32-byte binary or hex text).
     #[arg(long, conflicts_with_all = ["private_key", "ledger"])]
     pub from_file: Option<PathBuf>,
+
+    /// Protect the imported key with a password instead of the OS keychain.
+    /// The key is stored as an Ethereum keystore V3 file (EVM chains only).
+    #[arg(long, conflicts_with = "ledger")]
+    pub encrypted: bool,
 
     /// Import from a Ledger hardware wallet instead of a private key.
     #[arg(long)]
