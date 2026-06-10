@@ -13,13 +13,21 @@ use zeroize::Zeroizing;
 type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 
 // ---------------------------------------------------------------------------
-// Scrypt implementation
+// Scrypt fallback implementation
 //
 // The `scrypt` crate's `Params::new` enforces `log_n < r * 16` (i.e.
-// N < 2^(128*r/8)), which the official Web3 Secret Storage test vector
-// violates (n=262144, r=1 → log_n=18 ≥ 16).  We implement scrypt directly
-// using the same building blocks (`pbkdf2_hmac` + `salsa20::SalsaCore`) so
-// we can handle the full parameter space that real-world keystores use.
+// N < 2^(128*r/8)).  Most keystores produced by real-world tools (the
+// official Web3 Secret Storage test vector, Python `eth-keyfile` exports)
+// use n=262144 with r=1, which violates that constraint (log_n=18 ≥ 16).
+//
+// `derive_key` therefore tries `scrypt::Params::new` first; if it succeeds
+// (e.g. the geth-standard n=2^18, r=8, p=1 we use for writing), the
+// battle-tested `scrypt` crate is used.  Only when the crate rejects the
+// parameters does execution fall through to the internal `scrypt_kdf` below.
+//
+// The internal implementation hand-rolls the Salsa20/8 permutation (it does
+// NOT use the `salsa20` crate), BlockMix, and ROMix so that the full
+// parameter space accepted by real-world keystores can be handled.
 // ---------------------------------------------------------------------------
 
 // Pure Salsa20/8 on a 64-byte block (in-place), without going through the
@@ -91,15 +99,17 @@ fn scrypt_block_mix(input: &[u8], output: &mut [u8]) {
 
 /// ROMix: the memory-hard loop.
 fn scrypt_ro_mix(b: &mut [u8], n: usize) {
+    use zeroize::Zeroize as _;
+
     let len = b.len(); // 128 * r
     let mut v = vec![0u8; n * len];
     let mut t = vec![0u8; len];
+    let mut scratch = vec![0u8; len];
 
     // Fill V: V[i] = X, then X = BlockMix(X)
     for i in 0..n {
         v[i * len..(i + 1) * len].copy_from_slice(b);
-        let src = v[i * len..(i + 1) * len].to_vec();
-        scrypt_block_mix(&src, &mut t);
+        scrypt_block_mix(&v[i * len..(i + 1) * len], &mut t);
         b.copy_from_slice(&t);
     }
 
@@ -112,15 +122,20 @@ fn scrypt_ro_mix(b: &mut [u8], n: usize) {
             (word as usize) & (n - 1)
         };
         for k in 0..len {
-            t[k] = b[k] ^ v[j * len + k];
+            scratch[k] = b[k] ^ v[j * len + k];
         }
-        scrypt_block_mix(&t.clone(), b);
+        scrypt_block_mix(&scratch, b);
     }
+
+    v.zeroize();
+    t.zeroize();
+    scratch.zeroize();
 }
 
-/// scrypt KDF — reimplemented without `scrypt::Params` so that parameter
-/// combinations outside the crate's validation range (like the official
-/// Web3 test vectors with n=262144, r=1) are accepted.
+/// scrypt KDF fallback — used only when `scrypt::Params::new` rejects the
+/// parameter set (e.g. n=2^18, r=1 from the official Web3 test vectors).
+/// For parameter sets the `scrypt` crate accepts, `derive_key` calls the
+/// crate directly and never reaches this function.
 fn scrypt_kdf(
     password: &[u8],
     salt: &[u8],
@@ -129,6 +144,8 @@ fn scrypt_kdf(
     p: u32,
     dk: &mut [u8],
 ) -> Result<(), KeystoreError> {
+    use zeroize::Zeroize as _;
+
     let n: usize = 1usize
         .checked_shl(log_n as u32)
         .ok_or_else(|| KeystoreError::InvalidFormat("scrypt n overflows usize".into()))?;
@@ -149,6 +166,8 @@ fn scrypt_kdf(
 
     // DK = PBKDF2-HMAC-SHA256(password, B, 1, dklen)
     pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password, &b, 1, dk);
+
+    b.zeroize();
     Ok(())
 }
 
@@ -271,10 +290,19 @@ fn derive_key(crypto: &CryptoSection, password: &str) -> Result<Zeroizing<[u8; 3
                 ));
             }
             let log_n = n.trailing_zeros() as u8;
-            // Use our own scrypt_kdf rather than scrypt::Params::new, which
-            // enforces log_n < r*16 — a constraint the official Web3 Secret
-            // Storage test vectors (n=262144, r=1) violate.
-            scrypt_kdf(password.as_bytes(), &salt, log_n, *r, *p, &mut dk[..])?;
+            // Prefer the battle-tested `scrypt` crate. Fall back to our own
+            // implementation only when the crate rejects the parameters (e.g.
+            // n=2^18, r=1 from the official Web3 Secret Storage test vectors,
+            // where log_n=18 ≥ r*16=16).
+            match scrypt::Params::new(log_n, *r, *p, 32) {
+                Ok(params) => {
+                    scrypt::scrypt(password.as_bytes(), &salt, &params, &mut dk[..])
+                        .map_err(|_| KeystoreError::InvalidFormat("scrypt failed".into()))?;
+                }
+                Err(_) => {
+                    scrypt_kdf(password.as_bytes(), &salt, log_n, *r, *p, &mut dk[..])?;
+                }
+            }
         }
         ("pbkdf2", KdfParams::Pbkdf2 { dklen, c, prf, salt }) => {
             if *dklen != 32 {
@@ -487,5 +515,21 @@ mod tests {
     #[test]
     fn decode_key_hex_rejects_wrong_length() {
         assert!(decode_key_hex("abcd").is_err());
+    }
+
+    #[test]
+    fn fallback_scrypt_matches_crate_for_valid_params() {
+        // (log_n, r, p) sets accepted by scrypt::Params::new — exercise r>1
+        // and p>1 paths of our fallback implementation.
+        for &(log_n, r, p) in &[(4u8, 8u32, 1u32), (8, 8, 1), (6, 4, 2), (4, 2, 4)] {
+            let mut ours = [0u8; 32];
+            scrypt_kdf(b"password", b"salt", log_n, r, p, &mut ours).unwrap();
+
+            let params = scrypt::Params::new(log_n, r, p, 32).unwrap();
+            let mut theirs = [0u8; 32];
+            scrypt::scrypt(b"password", b"salt", &params, &mut theirs).unwrap();
+
+            assert_eq!(ours, theirs, "mismatch at log_n={log_n} r={r} p={p}");
+        }
     }
 }

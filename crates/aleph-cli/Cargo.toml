@@ -51,7 +51,6 @@ tempfile = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }
 scrypt = { workspace = true }
-salsa20 = { workspace = true }
 pbkdf2 = { workspace = true }
 aes = { workspace = true }
 ctr = { workspace = true }
