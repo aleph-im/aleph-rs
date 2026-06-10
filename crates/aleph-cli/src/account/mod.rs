@@ -1,4 +1,5 @@
 pub mod generate;
+pub mod keystore;
 pub mod ledger;
 pub mod migrate;
 pub mod store;

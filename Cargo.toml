@@ -78,6 +78,7 @@ base64 = { version = "0.22" }
 p256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = { version = "0.10" }
 scrypt = { version = "0.11", default-features = false }
+salsa20 = { version = "0.10" }
 pbkdf2 = { version = "0.12" }
 hex = { version = "0.4" }
 hmac = { version = "0.12" }
