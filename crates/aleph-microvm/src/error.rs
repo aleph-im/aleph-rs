@@ -9,6 +9,8 @@ pub enum MicrovmError {
     KvmUnavailable(String),
     #[error("timed out waiting for the VM init to connect")]
     InitTimeout,
+    #[error("timed out waiting for the VM to reply")]
+    ReplyTimeout,
     #[error("the runtime rejected the program configuration:\n{0}")]
     ConfigRejected(String),
     #[error("VM produced no response (it may have crashed); serial console:\n{0}")]
