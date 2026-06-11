@@ -2570,7 +2570,8 @@ pub struct ProgramRunArgs {
     /// Source code path: directory, .zip, or .squashfs.
     pub path: PathBuf,
 
-    /// Program entrypoint (e.g. `main:app` for ASGI).
+    /// Program entrypoint (e.g. `main:app`). Local run supports ASGI
+    /// entrypoints only; binary/executable interfaces are not yet supported.
     pub entrypoint: String,
 
     /// Runtime: preset slug from the vm-images aggregate (e.g. `python3.12`) or

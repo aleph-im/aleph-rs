@@ -334,7 +334,7 @@ async fn stream_console(stdout: tokio::process::ChildStdout) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        println!("  vm | {line}");
+        eprintln!("  vm | {line}");
     }
 }
 
