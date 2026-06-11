@@ -23,7 +23,10 @@ fn run_response_success_decodes_status_and_body() {
     let ok = resp.into_success().expect("should be success");
     assert_eq!(ok.status, 201);
     assert_eq!(ok.body, b"hello");
-    assert_eq!(ok.headers, vec![(b"content-type".to_vec(), b"text/plain".to_vec())]);
+    assert_eq!(
+        ok.headers,
+        vec![(b"content-type".to_vec(), b"text/plain".to_vec())]
+    );
 }
 
 #[test]

@@ -53,11 +53,19 @@ async fn handle(State(channel): State<VsockChannel>, req: Request) -> Response {
         Err(e) => return error_response(StatusCode::BAD_GATEWAY, &format!("VM call failed: {e}")),
     };
     if raw.is_empty() {
-        return error_response(StatusCode::BAD_GATEWAY, "VM produced no response (it may have crashed)");
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "VM produced no response (it may have crashed)",
+        );
     }
     let parsed: RunResponse = match rmp_serde::from_slice(&raw) {
         Ok(p) => p,
-        Err(e) => return error_response(StatusCode::BAD_GATEWAY, &format!("invalid VM response: {e}")),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("invalid VM response: {e}"),
+            )
+        }
     };
     match parsed.into_success() {
         Ok(success) => build_response(run_success_to_parts(success)),
@@ -67,13 +75,19 @@ async fn handle(State(channel): State<VsockChannel>, req: Request) -> Response {
 
 fn build_response(parts: (u16, Vec<(String, String)>, Vec<u8>)) -> Response {
     let (status, headers, body) = parts;
-    let mut builder = Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
     for (k, v) in headers {
-        if let (Ok(name), Ok(val)) = (HeaderName::try_from(k.as_str()), HeaderValue::try_from(v.as_str())) {
+        if let (Ok(name), Ok(val)) = (
+            HeaderName::try_from(k.as_str()),
+            HeaderValue::try_from(v.as_str()),
+        ) {
             builder = builder.header(name, val);
         }
     }
-    builder.body(axum::body::Body::from(Bytes::from(body))).unwrap()
+    builder
+        .body(axum::body::Body::from(Bytes::from(body)))
+        .unwrap()
 }
 
 fn error_response(status: StatusCode, msg: &str) -> Response {

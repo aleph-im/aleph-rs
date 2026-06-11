@@ -22,7 +22,12 @@ pub fn run_success_to_parts(s: RunSuccess) -> (u16, Vec<(String, String)>, Vec<u
     let headers = s
         .headers
         .into_iter()
-        .map(|(k, v)| (String::from_utf8_lossy(&k).into_owned(), String::from_utf8_lossy(&v).into_owned()))
+        .map(|(k, v)| {
+            (
+                String::from_utf8_lossy(&k).into_owned(),
+                String::from_utf8_lossy(&v).into_owned(),
+            )
+        })
         .filter(|(k, _)| !DROP.contains(&k.to_ascii_lowercase().as_str()))
         .collect();
     (s.status, headers, s.body)

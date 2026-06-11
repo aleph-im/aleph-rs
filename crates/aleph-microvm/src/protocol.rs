@@ -165,8 +165,12 @@ impl RunResponse {
         if let Some(tb) = self.traceback.or(self.error) {
             return Err(tb);
         }
-        let h = self.headers.ok_or_else(|| "missing headers in VM response".to_string())?;
-        let b = self.body.ok_or_else(|| "missing body in VM response".to_string())?;
+        let h = self
+            .headers
+            .ok_or_else(|| "missing headers in VM response".to_string())?;
+        let b = self
+            .body
+            .ok_or_else(|| "missing body in VM response".to_string())?;
         Ok(RunSuccess {
             status: h.status,
             headers: h

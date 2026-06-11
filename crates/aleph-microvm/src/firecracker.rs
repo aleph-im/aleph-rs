@@ -107,7 +107,8 @@ impl FirecrackerProcess {
             self.put(&format!("/drives/{id}"), drive).await?;
         }
         self.put("/vsock", &v["vsock"]).await?;
-        self.put("/actions", &json!({"action_type": "InstanceStart"})).await?;
+        self.put("/actions", &json!({"action_type": "InstanceStart"}))
+            .await?;
         Ok(())
     }
 
@@ -170,7 +171,9 @@ mod tests {
         let v = cfg.to_json();
         assert_eq!(v["boot-source"]["kernel_image_path"], "/k/vmlinux");
         let drives = v["drives"].as_array().unwrap();
-        assert!(drives.iter().any(|d| d["drive_id"] == "rootfs" && d["is_root_device"] == true));
+        assert!(drives
+            .iter()
+            .any(|d| d["drive_id"] == "rootfs" && d["is_root_device"] == true));
         assert!(drives.iter().any(|d| d["drive_id"] == "code"));
         assert_eq!(v["vsock"]["uds_path"], "/run/v.sock");
         assert_eq!(v["machine-config"]["vcpu_count"], 1);

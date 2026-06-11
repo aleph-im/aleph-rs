@@ -48,7 +48,10 @@ async fn download_to(url: &str, dest: &Path) -> Result<()> {
         .map_err(|e| MicrovmError::Download(e.to_string()))?
         .error_for_status()
         .map_err(|e| MicrovmError::Download(e.to_string()))?;
-    let bytes = resp.bytes().await.map_err(|e| MicrovmError::Download(e.to_string()))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| MicrovmError::Download(e.to_string()))?;
     let mut f = tokio::fs::File::create(dest).await?;
     f.write_all(&bytes).await?;
     f.flush().await?;
@@ -75,7 +78,10 @@ mod tests {
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, b"cached").unwrap();
         // url unreachable on purpose; must not be hit since file exists.
-        let got = cache.ensure("deadbeef", "http://127.0.0.1:1/never").await.unwrap();
+        let got = cache
+            .ensure("deadbeef", "http://127.0.0.1:1/never")
+            .await
+            .unwrap();
         assert_eq!(got, target);
     }
 }

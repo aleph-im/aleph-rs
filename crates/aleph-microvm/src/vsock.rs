@@ -128,7 +128,10 @@ impl ReadyServer {
                 let _ = tx.send(version);
             }
         });
-        Ok(ReadyServer { _listener_path: listener_path, rx })
+        Ok(ReadyServer {
+            _listener_path: listener_path,
+            rx,
+        })
     }
 
     /// Await the guest announce, with a timeout.
