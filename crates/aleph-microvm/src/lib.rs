@@ -10,4 +10,5 @@ pub mod protocol;
 pub mod server;
 pub mod vsock;
 
-// re-exports added in Task 2 once types are defined
+pub use config::{Encoding, Interface, LocalVmConfig, Volume};
+pub use error::MicrovmError;
