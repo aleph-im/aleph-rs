@@ -429,7 +429,7 @@ jobs:
       # aleph-cid is versioned and released independently of the
       # aleph-types/aleph-sdk/aleph-cli trio (it changes rarely). The trio
       # depends on it from crates.io once published, so the exact version
-      # this workspace pins must already be there — fail early and loudly
+      # this workspace pins must already be there. Fail early and loudly
       # instead of half-publishing the trio.
       - name: Ensure the pinned aleph-cid version is on crates.io
         run: |
