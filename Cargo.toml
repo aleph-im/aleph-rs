@@ -9,8 +9,8 @@ members = [
 
 [workspace.dependencies]
 aes = { version = "0.8" }
-aleph-sdk = { path = "crates/aleph-sdk", version = "0.12.0" }
-aleph-types = { path = "crates/aleph-types", version = "0.12.0" }
+aleph-sdk = { path = "crates/aleph-sdk", version = "0.13.0" }
+aleph-types = { path = "crates/aleph-types", version = "0.13.0" }
 # Individual alloy sub-crates instead of the `alloy` umbrella so we can pin
 # each to its own minor line and avoid pulling in consensus/blob/genesis
 # types we don't use.
