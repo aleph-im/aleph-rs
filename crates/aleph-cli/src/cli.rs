@@ -2552,6 +2552,87 @@ pub enum ProgramCommand {
     /// Show full information about a single program (creation time,
     /// ownership, per-ref freshness for code / runtime / data / volumes).
     Show(ProgramShowArgs),
+    /// Boot the program locally in Firecracker and serve it on localhost.
+    ///
+    /// Requires Linux with KVM (`/dev/kvm`) and the `firecracker` binary on
+    /// PATH. An uncompressed Linux kernel (vmlinux) is also required: pass
+    /// `--kernel`, set `ALEPH_VMLINUX`, or have `/opt/firecracker/vmlinux.bin`
+    /// present (as on an aleph CRN).
+    Run(ProgramRunArgs),
+    /// Boot a runtime locally and report the software versions it provides.
+    ///
+    /// Uses the same kernel resolution as `program run`.
+    CheckRuntime(ProgramCheckRuntimeArgs),
+}
+
+#[derive(Args)]
+pub struct ProgramRunArgs {
+    /// Source code path: directory, .zip, or .squashfs.
+    pub path: PathBuf,
+
+    /// Program entrypoint (e.g. `main:app`). Local run supports ASGI
+    /// entrypoints only; binary/executable interfaces are not yet supported.
+    pub entrypoint: String,
+
+    /// Runtime: preset slug from the vm-images aggregate (e.g. `python3.12`) or
+    /// a 64-char item hash. When omitted, resolves against the aggregate's
+    /// `defaults.runtime`.
+    #[arg(long, value_parser = parse_image_ref)]
+    pub runtime: Option<ImageRef>,
+
+    /// Localhost TCP port to serve on.
+    #[arg(long, default_value_t = 8080)]
+    pub port: u16,
+
+    /// Number of virtual CPUs.
+    #[arg(long, default_value_t = 1)]
+    pub vcpus: u32,
+
+    /// Memory size in MiB.
+    #[arg(long, default_value_t = 256)]
+    pub memory: u32,
+
+    /// Environment variable passed to the program, as KEY=VALUE. Repeatable.
+    #[arg(long = "env", value_parser = parse_key_val)]
+    pub env: Vec<(String, String)>,
+
+    /// Path to an uncompressed Linux kernel (vmlinux). Overrides the default
+    /// resolution (ALEPH_VMLINUX, then /opt/firecracker/vmlinux.bin).
+    #[arg(long)]
+    pub kernel: Option<PathBuf>,
+
+    /// Path to a local runtime rootfs to use directly, skipping the download.
+    #[arg(long)]
+    pub rootfs: Option<PathBuf>,
+
+    /// Run without host networking. M1 has no networking regardless; this flag
+    /// is accepted for forward compatibility.
+    #[arg(long, default_value_t = true)]
+    pub no_network: bool,
+}
+
+#[derive(Args)]
+pub struct ProgramCheckRuntimeArgs {
+    /// Runtime: preset slug from the vm-images aggregate (e.g. `python3.12`) or
+    /// a 64-char item hash.
+    #[arg(value_parser = parse_image_ref)]
+    pub runtime: ImageRef,
+
+    /// Path to an uncompressed Linux kernel (vmlinux). Overrides the default
+    /// resolution (ALEPH_VMLINUX, then /opt/firecracker/vmlinux.bin).
+    #[arg(long)]
+    pub kernel: Option<PathBuf>,
+
+    /// Path to a local runtime rootfs to use directly, skipping the download.
+    #[arg(long)]
+    pub rootfs: Option<PathBuf>,
+}
+
+/// Parse a single `KEY=VALUE` argument into a tuple.
+fn parse_key_val(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .ok_or_else(|| format!("expected KEY=VALUE, got `{s}`"))
 }
 
 #[derive(Args)]
