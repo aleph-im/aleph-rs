@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/aleph-cid",
     "crates/aleph-cli",
     "crates/aleph-sdk",
     "crates/aleph-types",
@@ -9,6 +10,7 @@ members = [
 
 [workspace.dependencies]
 aes = { version = "0.8" }
+aleph-cid = { path = "crates/aleph-cid", version = "0.1.0" }
 aleph-sdk = { path = "crates/aleph-sdk", version = "0.13.0" }
 aleph-types = { path = "crates/aleph-types", version = "0.13.0" }
 # Individual alloy sub-crates instead of the `alloy` umbrella so we can pin

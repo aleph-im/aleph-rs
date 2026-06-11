@@ -17,6 +17,7 @@ account-evm = ["signature-evm"]
 account-sol = ["signature-sol"]
 
 [dependencies]
+aleph-cid = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
 memsizes = { workspace = true }
 serde = { workspace = true }

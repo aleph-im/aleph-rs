@@ -62,7 +62,7 @@ fn build_store_message_for(folder: &Path) -> (PendingMessage, ItemHash) {
     let opts = UploadFolderOptions::default();
     let root = hash_folder_root(&entries, &opts).unwrap();
     let pending = fake_pending_store_for(&root.to_string());
-    (pending, root)
+    (pending, ItemHash::Ipfs(root))
 }
 
 #[tokio::test]

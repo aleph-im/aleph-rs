@@ -4,7 +4,7 @@
 # runs as of authoring; bump both together if drift becomes a problem.
 #
 # Usage:
-#   bash crates/aleph-sdk/tests/regen-car-goldens.sh
+#   bash crates/aleph-cid/tests/regen-car-goldens.sh
 
 set -euo pipefail
 

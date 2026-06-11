@@ -276,6 +276,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "aleph-cid"
+version = "0.1.0"
+dependencies = [
+ "bs58",
+ "cid",
+ "multihash",
+ "multihash-codetable",
+ "murmur3",
+ "prost",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
 name = "aleph-cli"
 version = "0.13.0"
 dependencies = [
@@ -339,6 +359,7 @@ name = "aleph-sdk"
 version = "0.13.0"
 dependencies = [
  "aes",
+ "aleph-cid",
  "aleph-types",
  "alloy-contract",
  "alloy-network",
@@ -352,21 +373,15 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64",
- "bs58",
  "bytes",
  "chrono",
- "cid",
  "ctr",
  "futures-util",
  "hex",
  "hmac",
  "http 1.4.0",
  "memsizes",
- "multihash",
- "multihash-codetable",
- "murmur3",
  "p256",
- "prost",
  "reqwest",
  "reqwest-middleware",
  "reqwest-retry",
@@ -382,7 +397,6 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "url",
- "walkdir",
  "wiremock",
 ]
 
@@ -390,6 +404,7 @@ dependencies = [
 name = "aleph-types"
 version = "0.13.0"
 dependencies = [
+ "aleph-cid",
  "assert_matches",
  "bs58",
  "chrono",

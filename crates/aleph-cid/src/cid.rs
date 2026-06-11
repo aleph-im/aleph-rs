@@ -1,14 +1,15 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 use thiserror::Error;
 
 /// Newtype for IPFS CIDv0 (base58-encoded, starts with "Qm", 46 characters).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CidV0(String);
 
 /// Newtype for IPFS CIDv1 (multibase-encoded with various encodings).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CidV1(String);
 
 /// Represents an IPFS Content Identifier (CID).
@@ -194,22 +195,24 @@ impl From<CidV1> for Cid {
 }
 
 // Custom serialization for Cid
-impl Serialize for Cid {
+#[cfg(feature = "serde")]
+impl serde::Serialize for Cid {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer,
+        S: serde::Serializer,
     {
         serializer.serialize_str(self.as_str())
     }
 }
 
 // Custom deserialization for Cid that detects the version
-impl<'de> Deserialize<'de> for Cid {
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Cid {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>,
+        D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
         Cid::try_from(s).map_err(serde::de::Error::custom)
     }
 }
@@ -338,6 +341,7 @@ mod tests {
         assert_eq!(format!("{}", cid), cid_str);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn test_cidv0_serde() {
         let cid_str = "QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8";
@@ -350,6 +354,7 @@ mod tests {
         assert_eq!(cid, deserialized);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn test_cidv1_serde() {
         let cid_str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
@@ -362,6 +367,7 @@ mod tests {
         assert_eq!(cid, deserialized);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn test_cid_serde_v0() {
         let cid_str = "QmYULJoNGPDmoRq4WNWTDTUvJGJv1hosox8H6vVd1kCsY8";
@@ -375,6 +381,7 @@ mod tests {
         assert!(deserialized.is_v0());
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn test_cid_serde_v1() {
         let cid_str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";

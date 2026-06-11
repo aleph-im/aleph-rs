@@ -35,11 +35,8 @@ async fn upload_folder_returns_root_cid_when_gateway_matches_local() {
     let entries = aleph_sdk::ipfs::collect_folder_files(tmp.path(), true).unwrap();
     let opts = aleph_sdk::ipfs::UploadFolderOptions::default();
     let local_root =
-        aleph_sdk::__test_only_hash_folder_root(&entries, &opts).expect("local hash must succeed");
-    let local_root_cid = match local_root {
-        aleph_types::item_hash::ItemHash::Ipfs(c) => c.to_string(),
-        _ => unreachable!(),
-    };
+        aleph_sdk::folder_hash::hash_folder_root(&entries, &opts).expect("local hash must succeed");
+    let local_root_cid = local_root.to_string();
 
     let body = format!(
         "{{\"Name\":\"hello.txt\",\"Hash\":\"QmFile1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"Size\":\"5\"}}\n\
@@ -77,11 +74,8 @@ async fn upload_folder_v0_omits_raw_leaves_and_matches_local() {
     let mut opts = aleph_sdk::ipfs::UploadFolderOptions::default();
     opts.cid_version = aleph_sdk::ipfs::CidVersion::V0;
     let local_root =
-        aleph_sdk::__test_only_hash_folder_root(&entries, &opts).expect("local hash must succeed");
-    let local_root_cid = match local_root {
-        aleph_types::item_hash::ItemHash::Ipfs(c) => c.to_string(),
-        _ => unreachable!(),
-    };
+        aleph_sdk::folder_hash::hash_folder_root(&entries, &opts).expect("local hash must succeed");
+    let local_root_cid = local_root.to_string();
 
     let body = format!(
         "{{\"Name\":\"a.txt\",\"Hash\":\"QmFile1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"Size\":\"1\"}}\n\

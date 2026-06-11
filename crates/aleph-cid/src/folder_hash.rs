@@ -16,10 +16,10 @@
 //! via `tests/regen-folder-hash-goldens.sh`. Run it after any change that
 //! could affect output bytes.
 
-use crate::ipfs::{CidVersion, FolderEntry, UploadFolderOptions};
+use crate::cid::Cid;
 use crate::proto::{merkledag, unixfs};
 use crate::verify::{DAG_PB_CODEC, DagNode, Hasher, encode_multihash, encode_pbnode_canonical};
-use aleph_types::item_hash::ItemHash;
+use crate::{CidVersion, FolderEntry, UploadFolderOptions};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -375,11 +375,11 @@ pub fn build_folder_dag(
     entries: &[FolderEntry],
     opts: &UploadFolderOptions,
     sink: &mut BlockSink<'_>,
-) -> Result<ItemHash, FolderHashError> {
+) -> Result<Cid, FolderHashError> {
     let tree = build_tree(entries);
     let cid_v1 = matches!(opts.cid_version, CidVersion::V1);
     let root = hash_dir_with_sink(&tree, cid_v1, sink)?;
-    cid_bytes_to_item_hash(&root.cid_bytes)
+    Ok(cid_bytes_to_cid(&root.cid_bytes))
 }
 
 /// Build the local UnixFS root CID for `entries`, matching what kubo's
@@ -404,7 +404,7 @@ pub fn build_folder_dag(
 pub fn hash_folder_root(
     entries: &[FolderEntry],
     opts: &UploadFolderOptions,
-) -> Result<ItemHash, FolderHashError> {
+) -> Result<Cid, FolderHashError> {
     build_folder_dag(entries, opts, &mut |_, _| Ok(()))
 }
 
@@ -470,7 +470,7 @@ fn hash_file_with_sink(
         .map_err(FolderHashError::Sink)
 }
 
-fn cid_bytes_to_item_hash(bytes: &[u8]) -> Result<ItemHash, FolderHashError> {
+fn cid_bytes_to_cid(bytes: &[u8]) -> Cid {
     // CIDv1 binary starts with 0x01 (version byte); CIDv0 binary is a bare
     // sha2-256 multihash starting with 0x12 (multihash code). Mirrors the
     // byte-sniff in `verify::Hasher::finalize`.
@@ -483,9 +483,7 @@ fn cid_bytes_to_item_hash(bytes: &[u8]) -> Result<ItemHash, FolderHashError> {
         let parsed = ::cid::Cid::new_v0(mh).expect("valid sha2-256 multihash");
         parsed.to_string()
     };
-    let aleph_cid =
-        aleph_types::cid::Cid::try_from(cid_str.as_str()).expect("round-trip CID parse");
-    Ok(ItemHash::Ipfs(aleph_cid))
+    Cid::try_from(cid_str.as_str()).expect("round-trip CID parse")
 }
 
 #[cfg(test)]
@@ -634,7 +632,7 @@ mod tests {
 
     #[test]
     fn hash_folder_root_single_file_v1_raw() {
-        use crate::ipfs::{CidVersion, UploadFolderOptions};
+        use crate::{CidVersion, UploadFolderOptions};
         use std::io::Write;
         use tempfile::TempDir;
 
@@ -653,12 +651,9 @@ mod tests {
             ..Default::default()
         };
 
-        let item = hash_folder_root(&entries, &opts).expect("hash should succeed");
+        let cid = hash_folder_root(&entries, &opts).expect("hash should succeed");
 
-        let s = match item {
-            aleph_types::item_hash::ItemHash::Ipfs(c) => c.to_string(),
-            _ => panic!("expected IPFS"),
-        };
+        let s = cid.to_string();
         assert!(s.starts_with("bafy"), "expected CIDv1 dag-pb root, got {s}");
     }
 
