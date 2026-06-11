@@ -301,6 +301,7 @@ version = "0.13.0"
 dependencies = [
  "actix-web",
  "aes",
+ "aleph-microvm",
  "aleph-sdk",
  "aleph-types",
  "alloy-network",
@@ -332,6 +333,7 @@ dependencies = [
  "pbkdf2",
  "rand 0.8.5",
  "reqwest",
+ "rmp-serde",
  "rpassword",
  "scrypt",
  "serde",

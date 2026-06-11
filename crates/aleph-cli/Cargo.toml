@@ -9,6 +9,7 @@ homepage = "https://github.com/aleph-im/aleph-rs"
 
 [dependencies]
 aleph-sdk = { workspace = true, features = ["account-evm", "account-sol", "credits", "swap"] }
+aleph-microvm = { path = "../aleph-microvm", version = "0.13.0" }
 alloy-network = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-provider = { workspace = true }
@@ -22,6 +23,7 @@ clap_complete = "4.5"
 memsizes = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
+rmp-serde = { workspace = true }
 tokio = { workspace = true, features = ["process"] }
 tokio-util = { workspace = true }
 url = { workspace = true }
