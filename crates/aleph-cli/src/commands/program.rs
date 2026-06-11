@@ -1,6 +1,7 @@
 use crate::cli::{
-    ImageRef, PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs,
-    ProgramListArgs, ProgramRunArgs, ProgramShowArgs, ProgramUpdateArgs, StorageEngineCli,
+    ImageRef, PaymentTypeCli, ProgramCheckRuntimeArgs, ProgramCommand, ProgramCreateArgs,
+    ProgramDeleteArgs, ProgramListArgs, ProgramRunArgs, ProgramShowArgs, ProgramUpdateArgs,
+    StorageEngineCli,
 };
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes, resolve_runtime_ref,
@@ -51,8 +52,8 @@ pub async fn handle_program_command(
         ProgramCommand::Update(args) => handle_update(aleph_client, ccn_url, json, args).await,
         ProgramCommand::Show(args) => handle_show(aleph_client, json, args).await,
         ProgramCommand::Run(args) => handle_run(aleph_client, ccn_url, json, args).await,
-        ProgramCommand::CheckRuntime(_) => {
-            unreachable!("check-runtime is wired in a later commit")
+        ProgramCommand::CheckRuntime(args) => {
+            handle_check_runtime(aleph_client, ccn_url, json, args).await
         }
     }
 }
@@ -405,6 +406,87 @@ async fn handle_run(
     serve_result.with_context(|| format!("failed to serve on localhost:{}", args.port))?;
     if !json {
         eprintln!("stopped");
+    }
+    Ok(())
+}
+
+async fn handle_check_runtime(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: ProgramCheckRuntimeArgs,
+) -> Result<()> {
+    let firecracker = preflight::check("firecracker").map_err(|e| anyhow::anyhow!("{e}"))?;
+    let kernel_path = resolve_kernel(args.kernel.clone())?;
+
+    let vm_images = vm_images_for_runtime(aleph_client, &Some(args.runtime.clone())).await?;
+    let runtime = resolve_runtime_ref(Some(args.runtime.clone()), &vm_images)?;
+    let rootfs_path = resolve_rootfs(ccn_url, &runtime, args.rootfs.clone(), json).await?;
+
+    // Write the embedded probe zip to a tempfile that outlives the VM launch.
+    let probe = crate::program::probe::probe_zip()?;
+    let tmp = tempfile::Builder::new()
+        .prefix("aleph-probe-")
+        .suffix(".zip")
+        .tempfile()?;
+    std::fs::write(tmp.path(), &probe)?;
+
+    let cfg = LocalVmConfig {
+        kernel_path,
+        rootfs_path,
+        code_path: tmp.path().to_path_buf(),
+        encoding: McEncoding::Zip,
+        interface: McInterface::Asgi,
+        entrypoint: "main:app".to_string(),
+        vm_hash: "runtime-check".to_string(),
+        vcpus: 1,
+        mem_mib: 256,
+        variables: vec![],
+        volumes: vec![],
+    };
+    let runtime_dir = std::env::temp_dir().join(format!("aleph-check-{}", std::process::id()));
+    let vm = LocalVm::launch(&cfg, &firecracker, runtime_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // One request to the probe, then decode its JSON version map.
+    let scope = aleph_microvm::asgi::scope_from_parts("GET", "/", &[], vec![]);
+    let result = async {
+        let payload = aleph_microvm::protocol::RunCodePayload { scope }
+            .to_msgpack()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let raw = vm
+            .channel
+            .send_run(&payload)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let resp: aleph_microvm::protocol::RunResponse =
+            rmp_serde::from_slice(&raw).context("invalid probe response")?;
+        let success = resp.into_success().map_err(|tb| anyhow::anyhow!(tb))?;
+        let versions: serde_json::Value =
+            serde_json::from_slice(&success.body).context("probe did not return JSON")?;
+        Ok::<_, anyhow::Error>(versions)
+    }
+    .await;
+
+    vm.shutdown().await;
+    let versions = result?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "runtime": runtime.to_string(),
+                "versions": versions,
+            }))?
+        );
+    } else {
+        println!("Runtime {runtime}");
+        if let Some(map) = versions.as_object() {
+            for (k, v) in map {
+                println!("  {k}: {}", v.as_str().unwrap_or(""));
+            }
+        }
     }
     Ok(())
 }
