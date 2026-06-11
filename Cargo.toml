@@ -7,6 +7,10 @@ members = [
     "crates/aleph-types",
     "crates/heph",
 ]
+# The PyO3 binding crate is built by maturin, not cargo: its
+# `extension-module` feature would break test linking for the rest of the
+# workspace, so it lives outside it with its own lockfile.
+exclude = ["crates/aleph-cid-python"]
 
 [workspace.dependencies]
 aes = { version = "0.8" }

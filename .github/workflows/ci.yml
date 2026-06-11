@@ -60,6 +60,41 @@ jobs:
       - name: Run tests (no default features)
         run: cargo test --verbose --no-default-features
 
+  # The PyO3 binding crate is excluded from the workspace (its
+  # extension-module feature breaks test linking), so the jobs above never
+  # touch it. Build and test it separately on Linux.
+  python-binding:
+    name: Python binding (aleph-cid-python)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-py-${{ hashFiles('crates/aleph-cid-python/Cargo.lock') }}
+
+      - name: Lint
+        run: |
+          cargo fmt --manifest-path crates/aleph-cid-python/Cargo.toml --check
+          cargo clippy --manifest-path crates/aleph-cid-python/Cargo.toml --all-features -- -D warnings
+
+      - name: Build and install the extension
+        run: pip install ./crates/aleph-cid-python pytest
+
+      - name: Run pytest
+        run: pytest crates/aleph-cid-python/tests -v
+
   integration-test:
     name: Integration Test
     runs-on: ubuntu-latest

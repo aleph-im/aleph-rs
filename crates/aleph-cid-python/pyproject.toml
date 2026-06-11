@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.13,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "aleph-cid"
+description = "kubo-compatible IPFS CID computation for Aleph Cloud, backed by the aleph-cid Rust crate"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Aleph Cloud" }]
+keywords = ["ipfs", "cid", "unixfs", "car", "aleph"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: System :: Filesystems",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/aleph-im/aleph-rs"
+Issues = "https://github.com/aleph-im/aleph-rs/issues"
+
+[tool.maturin]
+features = ["extension-module"]
+module-name = "aleph_cid"

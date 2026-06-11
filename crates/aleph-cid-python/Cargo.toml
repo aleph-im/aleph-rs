@@ -1,0 +1,28 @@
+[package]
+name = "aleph-cid-python"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Python bindings for aleph-cid: kubo-compatible IPFS CID computation"
+repository = "https://github.com/aleph-im/aleph-rs"
+# Published to PyPI (as `aleph-cid`) via maturin, never to crates.io.
+publish = false
+
+[lib]
+name = "aleph_cid"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Path for in-repo development, version when packaged: the sdist built by
+# maturin vendors the path dependency, wheels are self-contained.
+aleph-cid = { version = "0.1.0", path = "../aleph-cid" }
+pyo3 = { version = "0.28", features = ["abi3-py310"] }
+tempfile = { version = "3" }
+
+[features]
+# Enabled by maturin (see pyproject.toml). Keeping it off by default lets
+# `cargo check`/`cargo clippy` link normally outside of wheel builds.
+extension-module = ["pyo3/extension-module"]
+
+# This crate is excluded from the repo workspace (see the root Cargo.toml).
+[workspace]
