@@ -72,12 +72,19 @@ class TestCidHasher:
         h.update(b"deadbeef" * (16 * 1024 * 1024))
         assert h.finalize() == DEADBEEF_128MIB_V1
 
+    # Explicit ids keep the bytes params out of the generated test names:
+    # pytest would otherwise render the 128 MiB payload into a 128 MB test id,
+    # which hangs the GitHub Actions log pipeline.
     @pytest.mark.parametrize(
         "cid,data",
         [
-            (EMPTY_FILE_V0, b""),
-            (HELLO_NL_V1_RAW, b"hello\n"),
-            (DEADBEEF_128MIB_V1, b"deadbeef" * (16 * 1024 * 1024)),
+            pytest.param(EMPTY_FILE_V0, b"", id="empty-v0"),
+            pytest.param(HELLO_NL_V1_RAW, b"hello\n", id="hello-v1-raw"),
+            pytest.param(
+                DEADBEEF_128MIB_V1,
+                b"deadbeef" * (16 * 1024 * 1024),
+                id="deadbeef-128mib-v1",
+            ),
         ],
     )
     def test_for_expected_roundtrip(self, cid, data):
