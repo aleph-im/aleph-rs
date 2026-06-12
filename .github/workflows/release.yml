@@ -16,16 +16,18 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # First job: Build and verify all crates
-  verify:
-    name: Verify Release Build
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+  # First job: lightweight test gate (single OS).
+  # The full cross-platform matrix already runs on main via ci.yml; this is a
+  # fast safety net gating the irreversible publishes below.
+  test-gate:
+    name: Test Gate
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -35,29 +37,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v5
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Run tests
         run: cargo test --verbose --all-features
-
-      - name: Build release
-        run: cargo build --release --all-features
 
   # Second job: Check version consistency
   check-versions:
@@ -140,7 +124,7 @@ jobs:
   # Fourth job: Build release binaries and attach to existing release
   build-binaries:
     name: Build Release Binaries
-    needs: [verify, check-versions, check-release]
+    needs: [test-gate, check-versions, check-release]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -394,7 +378,7 @@ jobs:
   request-publish-approval:
     name: Request Publish Approval
     runs-on: ubuntu-latest
-    needs: [verify, check-versions, build-binaries]
+    needs: [test-gate, check-versions, build-binaries]
     environment:
       name: crates-io-publish  # Requires manual approval in GitHub
     steps:
