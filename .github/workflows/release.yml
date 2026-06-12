@@ -417,6 +417,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       # aleph-cid is versioned and released independently of the
       # aleph-types/aleph-sdk/aleph-cli trio (it changes rarely). The trio
       # depends on it from crates.io once published, so the exact version
@@ -435,7 +438,7 @@ jobs:
       - name: Publish aleph-types
         run: |
           cd crates/aleph-types
-          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          cargo publish --no-verify --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         continue-on-error: false
 
       - name: Wait for aleph-types to be available
@@ -446,7 +449,7 @@ jobs:
       - name: Publish aleph-sdk
         run: |
           cd crates/aleph-sdk
-          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          cargo publish --no-verify --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         continue-on-error: false
 
       - name: Wait for aleph-sdk to be available
@@ -457,7 +460,7 @@ jobs:
       - name: Publish aleph-cli
         run: |
           cd crates/aleph-cli
-          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          cargo publish --no-verify --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         continue-on-error: false
 
       - name: Update release with crates.io links
