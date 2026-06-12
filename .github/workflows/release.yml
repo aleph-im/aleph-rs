@@ -211,7 +211,7 @@ jobs:
   #
   publish-apt:
     name: Publish to APT Repository
-    needs: [check-versions, build-binaries]
+    needs: [check-versions, build-binaries, test-gate]
     if: needs.check-versions.outputs.is-prerelease != 'true'
     runs-on: ubuntu-latest
     environment: apt
@@ -315,7 +315,7 @@ jobs:
   #
   publish-brew:
     name: Publish to Homebrew Tap
-    needs: [check-versions, build-binaries]
+    needs: [check-versions, build-binaries, test-gate]
     if: needs.check-versions.outputs.is-prerelease != 'true'
     runs-on: ubuntu-latest
     environment: brew
