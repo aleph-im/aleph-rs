@@ -124,7 +124,7 @@ jobs:
   # Fourth job: Build release binaries and attach to existing release
   build-binaries:
     name: Build Release Binaries
-    needs: [test-gate, check-versions, check-release]
+    needs: [check-versions, check-release]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -160,6 +160,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Build release binary
         run: cargo build --release --package aleph-cli --target ${{ matrix.target }}
