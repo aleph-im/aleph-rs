@@ -131,7 +131,12 @@ pub(crate) struct Placement {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct Networking {
+    /// The CRN host's public IPv4, reachable via `mapped_ports`. The VM's own
+    /// IPv4 is a private NAT address (e.g. `172.16.7.2`), unreachable from
+    /// outside the host, so it is intentionally not surfaced.
     pub ipv4: Option<String>,
+    /// The VM's directly-routable IPv6. Falls back to the IPv6 subnet CIDR
+    /// if the CRN omits the concrete address.
     pub ipv6: Option<String>,
 }
 
@@ -607,8 +612,15 @@ async fn populate_verbose(
                                         && let Some(net) = entry.networking.as_ref()
                                     {
                                         show.networking = Some(Networking {
-                                            ipv4: net.ipv4.clone(),
-                                            ipv6: net.ipv6.clone(),
+                                            // The VM's own IPv4 is a private
+                                            // NAT address; only the host's
+                                            // public IPv4 (paired with
+                                            // mapped_ports) is reachable.
+                                            ipv4: net.host_ipv4.clone(),
+                                            ipv6: net
+                                                .ipv6_ip
+                                                .clone()
+                                                .or_else(|| net.ipv6_network.clone()),
                                         });
                                         let mapped: BTreeMap<u16, u16> = net
                                             .mapped_ports
@@ -1219,7 +1231,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 VM_HASH: {
                     "networking": {
-                        "ipv6": "fc00:1:2:3:1:abcd:1234:5670/124",
+                        "ipv6_ip": "fc00:1:2:3:1:abcd:1234:5671",
+                        "ipv6_network": "fc00:1:2:3:1:abcd:1234:5670/124",
+                        "ipv4_ip": "172.16.7.2",
+                        "ipv4_network": "172.16.7.0/24",
+                        "host_ipv4": "37.27.143.174",
                         "mapped_ports": { "22": { "host": 24221 } }
                     }
                 }
@@ -1254,11 +1270,12 @@ mod tests {
             .await
             .expect("verbose handler succeeds");
 
-        // Networking populated from CRN.
-        assert_eq!(
-            show.networking.as_ref().and_then(|n| n.ipv6.as_deref()),
-            Some("fc00:1:2:3:1:abcd:1234:5670/124")
-        );
+        // Networking populated from CRN: the concrete `ipv6_ip` address is
+        // surfaced (not the `ipv6_network` CIDR), and IPv4 shows the host's
+        // public address (not the VM's private NAT `ipv4_ip`).
+        let net = show.networking.as_ref().expect("networking is Some");
+        assert_eq!(net.ipv6.as_deref(), Some("fc00:1:2:3:1:abcd:1234:5671"));
+        assert_eq!(net.ipv4.as_deref(), Some("37.27.143.174"));
 
         // Mapped ports populated.
         let mapped = show.mapped_ports.as_ref().expect("mapped_ports is Some");
@@ -1338,8 +1355,8 @@ mod tests {
     fn show_with_verbose_data() -> InstanceShow {
         let mut show = show_for_render();
         show.networking = Some(Networking {
-            ipv4: None,
-            ipv6: Some("fc00:1:2:3:1:abcd:1234:5670/124".into()),
+            ipv4: Some("37.27.143.174".into()),
+            ipv6: Some("fc00:1:2:3:1:abcd:1234:5671".into()),
         });
         show.mapped_ports = Some(BTreeMap::from([(22u16, 24221u16), (80u16, 24222u16)]));
         show.port_forwards = Some(vec![
@@ -1370,8 +1387,8 @@ mod tests {
     fn render_text_verbose_networking_shows_ipv6() {
         let show = show_with_verbose_data();
         let out = render_text(&show);
-        assert!(out.contains("IPv6           fc00:1:2:3:1:abcd:1234:5670/124"));
-        assert!(out.contains("IPv4           -"));
+        assert!(out.contains("IPv6           fc00:1:2:3:1:abcd:1234:5671"));
+        assert!(out.contains("IPv4           37.27.143.174"));
     }
 
     #[test]

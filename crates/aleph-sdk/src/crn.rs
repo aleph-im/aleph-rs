@@ -165,14 +165,34 @@ pub struct ActiveVm {
     pub networking: Option<ActiveVmNetworking>,
 }
 
+/// Per-VM networking from a CRN's `/v2/about/executions/list`.
+///
+/// The v2 field names differ from the v1 `/about/executions/list` shape
+/// modeled by [`ExecutionNetworking`]: v2 reports the concrete assigned
+/// addresses (`ipv6_ip`, `ipv4_ip`) alongside the subnet CIDRs
+/// (`ipv6_network`, `ipv4_network`) and the CRN host's public IPv4
+/// (`host_ipv4`). An earlier version of this struct read `ipv4`/`ipv6`,
+/// which never appear on the v2 wire, so every address silently
+/// deserialized to `None` (see `instance show --verbose` showing `-`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActiveVmNetworking {
     #[serde(default)]
     pub mapped_ports: BTreeMap<u16, MappedPort>,
+    /// The VM's directly-routable IPv6 address, e.g. `2a01:…:7db1`.
     #[serde(default)]
-    pub ipv4: Option<String>,
+    pub ipv6_ip: Option<String>,
+    /// The VM's IPv6 subnet (a `/124`), e.g. `2a01:…:7db0/124`.
     #[serde(default)]
-    pub ipv6: Option<String>,
+    pub ipv6_network: Option<String>,
+    /// The VM's private, NAT'd IPv4 address, e.g. `172.16.7.2`.
+    #[serde(default)]
+    pub ipv4_ip: Option<String>,
+    /// The VM's IPv4 subnet, e.g. `172.16.7.0/24`.
+    #[serde(default)]
+    pub ipv4_network: Option<String>,
+    /// The CRN host's public IPv4, shared across VMs via `mapped_ports`.
+    #[serde(default)]
+    pub host_ipv4: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1125,12 +1145,18 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/v2/about/executions/list"))
             .respond_with(
+                // Mirrors the real CRN `/v2/about/executions/list` shape:
+                // concrete `*_ip` addresses plus `*_network` CIDRs and the
+                // host's public IPv4, not the v1 `ipv4`/`ipv6` keys.
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564": {
                         "networking": {
-                            "mapped_ports": { "22": { "host": 24221 } },
-                            "ipv6": "fc00:1:2:3:1:abcd:1234:5670/124",
-                            "ipv4": null
+                            "mapped_ports": { "22": { "host": 24221, "tcp": true, "udp": false } },
+                            "ipv4_network": "172.16.7.0/24",
+                            "host_ipv4": "37.27.143.174",
+                            "ipv6_network": "fc00:1:2:3:1:abcd:1234:5670/124",
+                            "ipv6_ip": "fc00:1:2:3:1:abcd:1234:5671",
+                            "ipv4_ip": "172.16.7.2"
                         }
                     }
                 })),
@@ -1147,8 +1173,14 @@ mod tests {
             .unwrap();
         let entry = list.0.get(&vm_id).expect("vm present");
         let net = entry.networking.as_ref().expect("networking present");
-        assert_eq!(net.ipv6.as_deref(), Some("fc00:1:2:3:1:abcd:1234:5670/124"));
-        assert!(net.ipv4.is_none());
+        assert_eq!(net.ipv6_ip.as_deref(), Some("fc00:1:2:3:1:abcd:1234:5671"));
+        assert_eq!(
+            net.ipv6_network.as_deref(),
+            Some("fc00:1:2:3:1:abcd:1234:5670/124")
+        );
+        assert_eq!(net.ipv4_ip.as_deref(), Some("172.16.7.2"));
+        assert_eq!(net.ipv4_network.as_deref(), Some("172.16.7.0/24"));
+        assert_eq!(net.host_ipv4.as_deref(), Some("37.27.143.174"));
         assert_eq!(net.mapped_ports.len(), 1);
         assert_eq!(net.mapped_ports.get(&22).map(|m| m.host), Some(24221));
     }
