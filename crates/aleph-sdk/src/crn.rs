@@ -841,13 +841,23 @@ fn build_signed_pubkey_header(
         .format("%Y-%m-%dT%H:%M:%S.%6fZ")
         .to_string();
 
+    // The CRN's ephemeral-key auth only accepts "ETH" or "SOL" here, and the
+    // signature it verifies (EIP-191 secp256k1 / Ed25519) is identical across
+    // every chain in a family, so we normalize to the family label rather than
+    // sending the account's concrete chain (e.g. "BASE"), which the CRN rejects
+    // with "Invalid X-SignedPubKey data". Mirrors aleph-sdk-python's VmClient.
+    let auth_chain = if account.chain().is_svm() {
+        "SOL"
+    } else {
+        "ETH"
+    };
     let payload = serde_json::json!({
         "pubkey": jwk,
         "alg": "ECDSA",
         "domain": domain,
         "address": account.address().to_string(),
         "expires": expires,
-        "chain": account.chain().to_string(),
+        "chain": auth_chain,
     });
 
     // The Python SDK signs the raw JSON bytes (not the hex string).
@@ -1182,6 +1192,26 @@ mod tests {
         assert_eq!(payload["chain"], "ETH");
         assert!(payload["pubkey"]["kty"] == "EC");
         assert!(payload["expires"].as_str().unwrap().ends_with("Z"));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[test]
+    fn build_signed_pubkey_header_normalizes_evm_chain_to_eth() {
+        use aleph_types::account::EvmAccount;
+
+        // A non-ETH EVM account (e.g. migrated with chain=BASE) must still send
+        // "ETH" in the auth payload -- the CRN only accepts ETH/SOL and rejects
+        // anything else with "Invalid X-SignedPubKey data". Regression for that.
+        let account = EvmAccount::new(Chain::Base, &[1u8; 32]).unwrap();
+        let signing_key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+
+        let header =
+            build_signed_pubkey_header(&account, "node.example.com", &signing_key).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&header).unwrap();
+        let payload_bytes = hex::decode(parsed["payload"].as_str().unwrap()).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        assert_eq!(payload["chain"], "ETH");
     }
 
     #[test]
