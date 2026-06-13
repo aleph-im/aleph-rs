@@ -2,8 +2,8 @@ use crate::account::generate::generate_key;
 use crate::account::store::{AccountKind, AccountStore};
 use crate::cli::{
     AccountBalanceArgs, AccountCommand, AccountCreateArgs, AccountExportArgs, AccountImportArgs,
-    AccountMigrateArgs, AccountRemoveArgs, AccountShowArgs, AccountUseArgs, AliasAddArgs,
-    AliasCommand, AliasRemoveArgs,
+    AccountMigrateArgs, AccountRemoveArgs, AccountSetArgs, AccountShowArgs, AccountUseArgs,
+    AliasAddArgs, AliasCommand, AliasRemoveArgs,
 };
 use crate::common::{confirm_typed_match, format_address, resolve_address};
 use aleph_sdk::client::{AccountBalance, AlephAccountClient, AlephClient};
@@ -25,6 +25,7 @@ pub async fn handle_account_command(
         AccountCommand::List => handle_list(client, &store, json).await,
         AccountCommand::Migrate(args) => handle_migrate(&store, args, json),
         AccountCommand::Show(args) => handle_show(client, &store, args, json).await,
+        AccountCommand::Set(args) => handle_set(&store, args, json),
         AccountCommand::Balance(args) => handle_balance(client, &store, args, json).await,
         AccountCommand::Remove(args) => handle_remove(&store, args),
         AccountCommand::Use(args) => handle_use(&store, args, json),
@@ -656,6 +657,57 @@ fn handle_use(store: &AccountStore, args: AccountUseArgs, json: bool) -> Result<
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         eprintln!("Default account set to '{}'.", args.name);
+    }
+    Ok(())
+}
+
+fn handle_set(store: &AccountStore, args: AccountSetArgs, json: bool) -> Result<()> {
+    if args.chain.is_none() && args.name.is_none() {
+        anyhow::bail!("nothing to update: pass --chain and/or --name");
+    }
+
+    let target = match args.account {
+        Some(n) => n,
+        None => store.default_account_name()?.ok_or_else(|| {
+            anyhow::anyhow!("no default account set; use: aleph account use <NAME>")
+        })?,
+    };
+
+    // Verify the account exists before doing anything, for a clean error.
+    let before = store.get_account(&target)?;
+
+    // Apply the chain change first (keyed by the current name), then rename.
+    if let Some(chain_cli) = args.chain {
+        let chain: aleph_types::chain::Chain = chain_cli.into();
+        store.set_account_chain(&target, chain)?;
+    }
+
+    let final_name = match &args.name {
+        Some(new_name) => {
+            store.rename_account(&target, new_name)?;
+            new_name.clone()
+        }
+        None => target.clone(),
+    };
+
+    let after = store.get_account(&final_name)?;
+
+    if json {
+        let output = serde_json::json!({
+            "name": after.name,
+            "chain": after.chain,
+            "address": after.address,
+            "renamed_from": (final_name != target).then(|| target.clone()),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        if before.chain != after.chain {
+            eprintln!("Chain: {} -> {}", before.chain, after.chain);
+        }
+        if final_name != target {
+            eprintln!("Name:  {target} -> {final_name}");
+        }
+        eprintln!("Account '{final_name}' updated.");
     }
     Ok(())
 }
