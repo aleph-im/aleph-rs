@@ -1255,6 +1255,24 @@ Examples:
     Migrate(AccountMigrateArgs),
     /// Show details of an account (defaults to the active account)
     Show(AccountShowArgs),
+    /// Update an account's settings (chain, name)
+    #[command(long_about = "\
+Update settings of an existing account. Pass the account to update as the \
+argument (defaults to the active account), then one or more changes:
+
+  --chain <CHAIN>   Change the chain used for signing. Only changes within \
+the same signature family are allowed (EVM<->EVM, SVM<->SVM); the address is \
+derived from the key and is the same across a family. Switching family would \
+point at a different address, so import a separate account for that instead.
+
+  --name <NAME>     Rename the account. Moves the stored key material \
+(keyring entry or keystore file) and updates the default pointer if needed.
+
+Examples:
+  aleph account set my-wallet --chain eth        # relabel BASE -> ETH
+  aleph account set my-wallet --name treasury    # rename
+  aleph account set --chain eth                  # update the active account")]
+    Set(AccountSetArgs),
     /// Set the default account used for signing
     Use(AccountUseArgs),
 }
@@ -1325,6 +1343,20 @@ pub struct AccountMigrateArgs {
 #[derive(Args)]
 pub struct AccountShowArgs {
     /// Account name (defaults to the active account).
+    pub name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct AccountSetArgs {
+    /// Account to update (defaults to the active account).
+    pub account: Option<String>,
+
+    /// New chain used for signing (same signature family only).
+    #[arg(long)]
+    pub chain: Option<ChainCli>,
+
+    /// New name for the account (renames it).
+    #[arg(long)]
     pub name: Option<String>,
 }
 

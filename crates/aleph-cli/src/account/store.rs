@@ -102,6 +102,14 @@ pub enum StoreError {
     Keyring(String),
     #[error("keystore file for account '{name}' not found at {}", path.display())]
     KeystoreMissing { name: String, path: PathBuf },
+    #[error(
+        "cannot change account '{name}' from {from} to {to}: the address is derived from the key and differs between chain families (EVM vs SVM), so the label cannot simply be switched. Import a separate account for {to} instead."
+    )]
+    ChainFamilyMismatch {
+        name: String,
+        from: Chain,
+        to: Chain,
+    },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("failed to parse manifest: {0}")]
@@ -415,6 +423,123 @@ impl AccountStore {
         self.save_manifest(&manifest)
     }
 
+    /// Change the chain of an existing account.
+    ///
+    /// Only changes within the same signature family are allowed (EVM↔EVM,
+    /// SVM↔SVM). The account address is derived from the key and is invariant
+    /// within a family, so the stored address stays valid. Crossing families
+    /// (e.g. EVM→SOL) would silently point the account at a different address,
+    /// so it is rejected with `ChainFamilyMismatch`.
+    pub fn set_account_chain(&self, name: &str, chain: Chain) -> Result<(), StoreError> {
+        let mut manifest = self.load_manifest()?;
+        let entry = manifest
+            .accounts
+            .iter_mut()
+            .find(|a| a.name == name)
+            .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
+
+        let same_family =
+            (entry.chain.is_evm() && chain.is_evm()) || (entry.chain.is_svm() && chain.is_svm());
+        if entry.chain != chain && !same_family {
+            return Err(StoreError::ChainFamilyMismatch {
+                name: name.to_string(),
+                from: entry.chain.clone(),
+                to: chain,
+            });
+        }
+
+        entry.chain = chain;
+        self.save_manifest(&manifest)
+    }
+
+    /// Rename an account, moving any associated secret material.
+    ///
+    /// The secret (keyring entry for local accounts, keystore file for
+    /// encrypted accounts) is copied to the new name *before* the manifest is
+    /// updated, and the old copy is removed only after the manifest save
+    /// succeeds. A failure at any step therefore leaves the original account
+    /// intact and at worst an orphaned (harmless) copy under the new name.
+    pub fn rename_account(&self, old: &str, new: &str) -> Result<(), StoreError> {
+        Self::validate_name(new)?;
+        if old == new {
+            return Ok(());
+        }
+
+        let mut manifest = self.load_manifest()?;
+        if manifest.accounts.iter().any(|a| a.name == new)
+            || manifest.aliases.iter().any(|a| a.name == new)
+        {
+            return Err(StoreError::AlreadyExists(new.to_string()));
+        }
+        let idx = manifest
+            .accounts
+            .iter()
+            .position(|a| a.name == old)
+            .ok_or_else(|| StoreError::NotFound(old.to_string()))?;
+        let kind = manifest.accounts[idx].kind;
+
+        // 1. Stage the secret under the new name (old copy untouched for now).
+        match kind {
+            AccountKind::Local => {
+                let old_entry = keyring::Entry::new(KEYRING_SERVICE, old).map_err(keyring_error)?;
+                let secret = old_entry.get_password().map_err(keyring_error)?;
+                let new_entry = keyring::Entry::new(KEYRING_SERVICE, new).map_err(keyring_error)?;
+                new_entry.set_password(&secret).map_err(keyring_error)?;
+            }
+            AccountKind::Keystore => {
+                let json = self.read_keystore_json(old)?;
+                let dir = self.keystores_dir();
+                std::fs::create_dir_all(&dir)?;
+                self.write_restricted(&self.keystore_path(new), &json)?;
+            }
+            AccountKind::Ledger => {}
+        }
+
+        // 2. Update the manifest. On failure, clean up the staged copy.
+        manifest.accounts[idx].name = new.to_string();
+        if manifest.default.as_deref() == Some(old) {
+            manifest.default = Some(new.to_string());
+        }
+        if let Err(save_err) = self.save_manifest(&manifest) {
+            match kind {
+                AccountKind::Local => {
+                    if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, new) {
+                        let _ = e.delete_credential();
+                    }
+                }
+                AccountKind::Keystore => {
+                    let _ = std::fs::remove_file(self.keystore_path(new));
+                }
+                AccountKind::Ledger => {}
+            }
+            return Err(save_err);
+        }
+
+        // 3. Manifest committed — remove the old secret (best effort).
+        match kind {
+            AccountKind::Local => {
+                if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, old) {
+                    match e.delete_credential() {
+                        Ok(()) | Err(keyring::Error::NoEntry) => {}
+                        Err(err) => {
+                            eprintln!("warning: failed to remove old keyring entry: {err}");
+                        }
+                    }
+                }
+            }
+            AccountKind::Keystore => {
+                if let Err(e) = std::fs::remove_file(self.keystore_path(old))
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    eprintln!("warning: failed to remove old keystore file: {e}");
+                }
+            }
+            AccountKind::Ledger => {}
+        }
+
+        Ok(())
+    }
+
     /// Delete an account (removes from manifest and keyring).
     ///
     /// The manifest is updated first, then the keyring entry is removed.
@@ -650,6 +775,140 @@ mod tests {
         let (_dir, store) = temp_store();
         let err = store.set_default("nonexistent").unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn set_account_chain_within_evm_family_keeps_address() {
+        let (_dir, store) = temp_store();
+        store
+            .add_ledger_account(
+                "hw",
+                Chain::Base,
+                "0xABCD".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+
+        store.set_account_chain("hw", Chain::Ethereum).unwrap();
+
+        let entry = store.get_account("hw").unwrap();
+        assert_eq!(entry.chain, Chain::Ethereum);
+        assert_eq!(entry.address, "0xABCD");
+    }
+
+    #[test]
+    fn set_account_chain_rejects_cross_family() {
+        let (_dir, store) = temp_store();
+        store
+            .add_ledger_account(
+                "hw",
+                Chain::Ethereum,
+                "0xABCD".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+
+        let err = store.set_account_chain("hw", Chain::Sol).unwrap_err();
+        assert!(matches!(err, StoreError::ChainFamilyMismatch { .. }));
+        // Unchanged on rejection.
+        assert_eq!(store.get_account("hw").unwrap().chain, Chain::Ethereum);
+    }
+
+    #[test]
+    fn set_account_chain_unknown_account_errors() {
+        let (_dir, store) = temp_store();
+        let err = store
+            .set_account_chain("ghost", Chain::Ethereum)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn rename_ledger_account_updates_name_and_default() {
+        let (_dir, store) = temp_store();
+        store
+            .add_ledger_account(
+                "old",
+                Chain::Ethereum,
+                "0xABCD".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.default_account_name().unwrap().as_deref(),
+            Some("old")
+        );
+
+        store.rename_account("old", "new").unwrap();
+
+        assert!(store.get_account("old").is_err());
+        assert_eq!(store.get_account("new").unwrap().address, "0xABCD");
+        assert_eq!(
+            store.default_account_name().unwrap().as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn rename_keystore_account_moves_file() {
+        let (_dir, store) = temp_store();
+        store
+            .add_keystore_account("old", Chain::Ethereum, "0x1234".to_string(), KEYSTORE_JSON)
+            .unwrap();
+        assert!(store.keystore_path("old").exists());
+
+        store.rename_account("old", "new").unwrap();
+
+        assert!(!store.keystore_path("old").exists());
+        assert!(store.keystore_path("new").exists());
+        assert_eq!(store.read_keystore_json("new").unwrap(), KEYSTORE_JSON);
+    }
+
+    #[test]
+    fn rename_to_existing_name_rejected() {
+        let (_dir, store) = temp_store();
+        store
+            .add_ledger_account(
+                "a",
+                Chain::Ethereum,
+                "0x1".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+        store
+            .add_ledger_account(
+                "b",
+                Chain::Ethereum,
+                "0x2".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+
+        let err = store.rename_account("a", "b").unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyExists(_)));
+        assert!(store.get_account("a").is_ok());
+    }
+
+    #[test]
+    fn rename_unknown_account_errors() {
+        let (_dir, store) = temp_store();
+        let err = store.rename_account("ghost", "new").unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn rename_rejects_invalid_new_name() {
+        let (_dir, store) = temp_store();
+        store
+            .add_ledger_account(
+                "ok",
+                Chain::Ethereum,
+                "0x1".to_string(),
+                "m/44'/60'/0'/0/0".to_string(),
+            )
+            .unwrap();
+        let err = store.rename_account("ok", "bad name!").unwrap_err();
+        assert!(matches!(err, StoreError::InvalidName(_)));
     }
 
     #[test]
