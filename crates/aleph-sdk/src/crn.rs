@@ -383,6 +383,47 @@ impl CrnClient {
         self.perform_operation(vm_id, "erase").await
     }
 
+    /// Reinstall an instance from its original OS image.
+    ///
+    /// `erase_volumes` controls how far the reset goes: `true` erases the
+    /// rootfs *and* all persistent data volumes; `false` resets only the
+    /// rootfs and preserves persistent data. Either way the rootfs is wiped
+    /// and reinstalled from the image in the INSTANCE message.
+    ///
+    /// `erase_volumes` is sent as a query parameter, not part of the signed
+    /// path - the CRN signs `/control/machine/<vm>/reinstall` only, same as
+    /// the `include_volumes`/`skip_fsfreeze` flags on `create_backup`.
+    pub async fn reinstall_instance(
+        &self,
+        vm_id: &ItemHash,
+        erase_volumes: bool,
+    ) -> Result<(), CrnError> {
+        let path = format!("/control/machine/{vm_id}/reinstall");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("POST", &path);
+
+        let mut request = self.http_client.post(url).query(&[(
+            "erase_volumes",
+            if erase_volumes { "true" } else { "false" },
+        )]);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        match status {
+            200 => Ok(()),
+            402 => Err(CrnError::PaymentRequired(response.text().await?)),
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
+            404 => Err(CrnError::VmNotFound(vm_id.clone())),
+            _ => Err(CrnError::Api {
+                status,
+                body: response.text().await?,
+            }),
+        }
+    }
+
     /// Ask the CRN to re-read the sender's `port-forwarding` aggregate and apply
     /// it to `vm_id` immediately. The CRN normally refreshes on its own schedule;
     /// this is the explicit prod.
@@ -1732,5 +1773,79 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, CrnError::Api { status: 400, .. }));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn reinstall_instance_erase_volumes_sends_true() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{header_exists, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/reinstall")))
+            .and(query_param("erase_volumes", "true"))
+            .and(header_exists("x-signedpubkey"))
+            .and(header_exists("x-signedoperation"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        client
+            .reinstall_instance(&vm.parse().unwrap(), true)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn reinstall_instance_keep_data_sends_false() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/reinstall")))
+            .and(query_param("erase_volumes", "false"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        client
+            .reinstall_instance(&vm.parse().unwrap(), false)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn reinstall_instance_surfaces_404_as_vm_not_found() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/reinstall")))
+            .respond_with(ResponseTemplate::new(404).set_body_string("unknown vm"))
+            .mount(&server)
+            .await;
+
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let err = client
+            .reinstall_instance(&vm.parse().unwrap(), true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CrnError::VmNotFound(_)));
     }
 }

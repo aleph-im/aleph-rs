@@ -1,11 +1,11 @@
 use aleph_sdk::crn::CrnClient;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use futures_util::StreamExt;
 use url::Url;
 
-use crate::cli::{CrnArgs, CrnStartArgs, SigningArgs};
+use crate::cli::{CrnArgs, CrnStartArgs, InstanceReinstallArgs, SigningArgs};
 use crate::commands::instance_target::resolve_target;
-use crate::common::resolve_account;
+use crate::common::{confirm_action, resolve_account};
 
 fn build_client(crn_url: &Url, signing: &SigningArgs) -> Result<CrnClient> {
     let account = resolve_account(&signing.identity)?;
@@ -75,6 +75,50 @@ pub async fn handle_operation(
             _ => unreachable!(),
         };
         eprintln!("Instance {vm_id} {past_tense} on {crn_url}");
+    }
+
+    Ok(())
+}
+
+pub async fn handle_reinstall(
+    scheduler_url: Url,
+    json: bool,
+    args: InstanceReinstallArgs,
+) -> Result<()> {
+    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
+
+    let prompt = if args.keep_data {
+        format!(
+            "Reinstall instance {vm_id}? The rootfs will be erased and reinstalled \
+             from its original image; persistent data volumes are preserved."
+        )
+    } else {
+        format!(
+            "Reinstall instance {vm_id}? The rootfs AND all persistent data volumes \
+             will be erased. This is irreversible."
+        )
+    };
+    if !confirm_action(&prompt, args.yes)? {
+        bail!("aborted");
+    }
+
+    let client = build_client(&crn_url, &args.signing)?;
+    client.reinstall_instance(&vm_id, !args.keep_data).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "vm_id": vm_id.to_string(),
+                "operation": "reinstall",
+                "keep_data": args.keep_data,
+                "status": "ok",
+            }))?
+        );
+    } else if args.keep_data {
+        eprintln!("Instance {vm_id} reinstalled on {crn_url} (data volumes preserved)");
+    } else {
+        eprintln!("Instance {vm_id} reinstalled on {crn_url}");
     }
 
     Ok(())
