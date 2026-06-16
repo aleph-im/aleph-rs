@@ -3003,12 +3003,10 @@ impl AlephAccountClient for AlephClient {
         address: &Address,
         filters: &CreditHistoryFilters,
     ) -> Result<CreditHistorySummary, MessageError> {
+        let path = format!("/api/v0/addresses/{}/credit_history/summary", address);
         let url = self
             .ccn_url
-            .join(&format!(
-                "/api/v0/addresses/{}/credit_history/summary",
-                address
-            ))
+            .join(&path)
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
         let response = self
@@ -3018,16 +3016,17 @@ impl AlephAccountClient for AlephClient {
             .send()
             .await?;
 
-        // The summary endpoint is contracted to always return 200 with zeroed
-        // totals for an unknown address, but we mirror the listing endpoint's
-        // 404 handling defensively so an older server still yields zeros.
+        // Unlike the listing endpoint, the summary endpoint always returns 200
+        // (with zeroed totals for an unknown address). A 404 therefore means
+        // the route does not exist, i.e. the CCN predates this endpoint, so we
+        // surface it as an error rather than silently reporting zero spend.
         if response.status() == StatusCode::NOT_FOUND {
-            return Ok(CreditHistorySummary {
-                address: address.to_string(),
-                entry_count: 0,
-                total_amount: 0,
-                total_incoming: 0,
-                total_outgoing: 0,
+            return Err(MessageError::ApiError {
+                status: StatusCode::NOT_FOUND.as_u16(),
+                body: format!(
+                    "credit history summary endpoint not found ({path}); \
+                     this CCN may be running a version without support for it"
+                ),
             });
         }
 
@@ -4812,7 +4811,10 @@ mod credit_history_summary_tests {
     }
 
     #[tokio::test]
-    async fn summary_maps_404_to_zeros() {
+    async fn summary_404_is_an_error_not_silent_zeros() {
+        // An old CCN without the summary route 404s. We must not report that
+        // as zero spend; it has to surface as an error so the caller knows the
+        // server is unsupported.
         let server = MockServer::start().await;
         let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
 
@@ -4825,13 +4827,17 @@ mod credit_history_summary_tests {
             .await;
 
         let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
-        let summary = client
+        let err = client
             .get_credit_history_summary(&addr, &CreditHistoryFilters::default())
             .await
-            .unwrap();
-        assert_eq!(summary.entry_count, 0);
-        assert_eq!(summary.total_amount, 0);
-        assert_eq!(summary.address, addr.to_string());
+            .expect_err("404 must be an error, not zeroed totals");
+        match err {
+            MessageError::ApiError { status, body } => {
+                assert_eq!(status, 404);
+                assert!(body.contains("summary endpoint not found"), "got: {body}");
+            }
+            other => panic!("expected ApiError, got: {other:?}"),
+        }
     }
 }
 

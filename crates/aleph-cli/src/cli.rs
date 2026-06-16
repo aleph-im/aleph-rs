@@ -309,7 +309,7 @@ pub struct PostListArgs {
 use aleph_sdk::client::{MessageFilter, PostFilter, SortBy, SortOrder};
 use aleph_types::message::{MessageStatus, MessageType};
 use aleph_types::timestamp::Timestamp;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use std::str::FromStr;
 
 fn parse_timestamp(s: &str) -> Result<Timestamp, String> {
@@ -2451,13 +2451,14 @@ pub struct CreditFilterArgs {
     pub since: Option<chrono::Duration>,
 
     /// Lower bound (inclusive): only entries at or after this instant.
-    /// Accepts an RFC3339 timestamp (e.g. `2026-01-01T00:00:00Z`) or Unix
+    /// Accepts a date (`2026-01-01`, UTC midnight), a datetime
+    /// (`2026-01-01T00:00:00Z`; timezone-less is treated as UTC), or Unix
     /// seconds.
     #[arg(long, value_parser = parse_when)]
     pub start: Option<DateTime<Utc>>,
 
-    /// Upper bound (inclusive): only entries at or before this instant.
-    /// RFC3339 or Unix seconds.
+    /// Upper bound (inclusive): only entries at or before this instant. Same
+    /// formats as `--start`.
     #[arg(long, value_parser = parse_when)]
     pub end: Option<DateTime<Utc>>,
 
@@ -2556,14 +2557,54 @@ fn parse_lookback(s: &str) -> Result<chrono::Duration, String> {
         .ok_or_else(|| format!("duration '{trimmed}' is too large"))
 }
 
-/// Parse an instant given as either an RFC3339 timestamp or Unix seconds.
+/// Parse an instant for the `--start` / `--end` credit-history bounds.
+///
+/// Accepts, in order of preference:
+/// - an RFC3339 timestamp with an explicit offset (`2026-01-01T00:00:00Z`),
+/// - a timezone-less datetime, interpreted as UTC, in extended (`2026-01-01T00:00:00`)
+///   or compact (`20260101T00:00:00`) ISO spelling,
+/// - a calendar date, interpreted as UTC midnight, extended (`2026-01-01`) or
+///   compact (`20260101`),
+/// - Unix seconds (tried last, so a compact date like `20260101` is read as a
+///   date rather than an epoch in 1970).
 fn parse_when(s: &str) -> Result<DateTime<Utc>, String> {
     let trimmed = s.trim();
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    const DATETIME_FORMATS: &[&str] = &[
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y%m%dT%H:%M:%S",
+        "%Y%m%dT%H%M%S",
+    ];
+    for fmt in DATETIME_FORMATS {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Ok(naive.and_utc());
+        }
+    }
+
+    const DATE_FORMATS: &[&str] = &["%Y-%m-%d", "%Y%m%d"];
+    for fmt in DATE_FORMATS {
+        if let Ok(date) = NaiveDate::parse_from_str(trimmed, fmt) {
+            return Ok(date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is a valid time")
+                .and_utc());
+        }
+    }
+
     if let Ok(seconds) = trimmed.parse::<i64>() {
         return DateTime::<Utc>::from_timestamp(seconds, 0)
             .ok_or_else(|| format!("Unix timestamp '{trimmed}' is out of range"));
     }
-    parse_rfc3339_utc(trimmed)
+
+    Err(format!(
+        "invalid timestamp '{trimmed}': expected a date (2026-01-01), \
+         a datetime (2026-01-01T00:00:00Z), or Unix seconds"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -3009,6 +3050,35 @@ mod credit_filter_args_tests {
         assert_eq!(from_epoch.timestamp(), 1769990400);
         let from_rfc = parse_when("2026-01-01T00:00:00Z").unwrap();
         assert_eq!(from_rfc.to_rfc3339(), "2026-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn parse_when_accepts_dates_and_timezoneless_datetimes() {
+        // All of these refer to 2026-01-01T00:00:00 UTC.
+        let expected = parse_when("2026-01-01T00:00:00Z").unwrap();
+        for input in [
+            "2026-01-01",
+            "20260101",
+            "2026-01-01T00:00:00",
+            "2026-01-01 00:00:00",
+            "20260101T00:00:00",
+            "20260101T000000",
+        ] {
+            assert_eq!(parse_when(input).unwrap(), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn parse_when_compact_date_is_not_read_as_epoch() {
+        // Regression: `20260101` must mean 2026-01-01, not epoch second
+        // 20260101 (August 1970).
+        assert_eq!(parse_when("20260101").unwrap().timestamp(), 1_767_225_600);
+    }
+
+    #[test]
+    fn parse_when_rejects_garbage() {
+        assert!(parse_when("not-a-date").is_err());
+        assert!(parse_when("2026-13-01").is_err(), "invalid month");
     }
 
     #[test]
