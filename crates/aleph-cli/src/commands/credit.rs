@@ -1,15 +1,15 @@
 use crate::account::CliAccount;
 use crate::account::store::AccountStore;
 use crate::cli::{
-    BuyCreditArgs, CreditCommand, CreditHistoryArgs, CreditTokenCli, SigningArgs,
-    TransferCreditArgs,
+    BuyCreditArgs, CreditCommand, CreditFilterArgs, CreditHistoryArgs, CreditSummaryArgs,
+    CreditTokenCli, SigningArgs, TransferCreditArgs,
 };
 use crate::common::{
     confirm_submission, format_address, resolve_account, resolve_address, resolve_network,
     submit_or_preview,
 };
 use aleph_sdk::builder::MessageBuilder;
-use aleph_sdk::client::{AlephAccountClient, AlephClient};
+use aleph_sdk::client::{AlephAccountClient, AlephClient, CreditDirection, CreditHistoryFilters};
 use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
 use aleph_sdk::credit_transfer::{
     CREDIT_TRANSFER_POST_TYPE, CreditTransferContent, CreditTransferEntry, CreditTransferError,
@@ -49,7 +49,44 @@ pub async fn handle_credit_command(
         CreditCommand::Buy(args) => handle_buy(json, args, cli_network).await,
         CreditCommand::Transfer(args) => handle_transfer(aleph_client, ccn_url, json, args).await,
         CreditCommand::History(args) => handle_history(aleph_client, json, args).await,
+        CreditCommand::Summary(args) => handle_summary(aleph_client, json, args).await,
     }
+}
+
+/// Resolve the owner address and translate the shared CLI filter flags into
+/// the SDK's [`CreditHistoryFilters`].
+///
+/// `--since` is resolved against the current time here (now - duration) so the
+/// lower bound reflects invocation time. `--expenses`/`--top-ups` map to the
+/// outgoing/incoming directions; clap guarantees they are not both set.
+fn build_filters(filters: &CreditFilterArgs) -> Result<(AlephAddress, CreditHistoryFilters)> {
+    let address = resolve_owner_address(filters.address.as_deref())?;
+
+    let start_date = match filters.since {
+        Some(window) => Some((Utc::now() - window).timestamp()),
+        None => filters.start.map(|dt| dt.timestamp()),
+    };
+
+    let direction = if filters.expenses {
+        Some(CreditDirection::Outgoing)
+    } else if filters.top_ups {
+        Some(CreditDirection::Incoming)
+    } else {
+        None
+    };
+
+    let sdk_filters = CreditHistoryFilters {
+        start_date,
+        end_date: filters.end.map(|dt| dt.timestamp()),
+        direction,
+        resource_types: filters
+            .resource_type
+            .iter()
+            .copied()
+            .map(Into::into)
+            .collect(),
+    };
+    Ok((address, sdk_filters))
 }
 
 async fn handle_history(
@@ -57,9 +94,9 @@ async fn handle_history(
     json: bool,
     args: CreditHistoryArgs,
 ) -> Result<()> {
-    let address = resolve_owner_address(args.address.as_deref())?;
+    let (address, filters) = build_filters(&args.filters)?;
     let history = aleph_client
-        .get_credit_history(&address, args.page, Some(args.page_size))
+        .get_credit_history(&address, args.page, Some(args.page_size), &filters)
         .await?;
 
     if json {
@@ -101,6 +138,29 @@ async fn handle_history(
             expires,
         );
     }
+    Ok(())
+}
+
+async fn handle_summary(
+    aleph_client: &AlephClient,
+    json: bool,
+    args: CreditSummaryArgs,
+) -> Result<()> {
+    let (address, filters) = build_filters(&args.filters)?;
+    let summary = aleph_client
+        .get_credit_history_summary(&address, &filters)
+        .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    eprintln!("Credit summary for {}", summary.address);
+    eprintln!("  Entries:   {}", summary.entry_count);
+    eprintln!("  Net:       {:+}", summary.total_amount);
+    eprintln!("  Incoming:  {:+}", summary.total_incoming);
+    eprintln!("  Outgoing:  {:+}", summary.total_outgoing);
     Ok(())
 }
 
@@ -156,6 +216,7 @@ fn truncate(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod history_tests {
     use super::*;
+    use crate::cli::ResourceTypeCli;
 
     #[test]
     fn display_optional_shows_dash_for_none() {
@@ -205,6 +266,69 @@ mod history_tests {
     fn truncate_keeps_short_strings_intact() {
         assert_eq!(truncate("hi", 5), "hi");
         assert_eq!(truncate("12345", 5), "12345");
+    }
+
+    fn filter_args(address: &str) -> CreditFilterArgs {
+        CreditFilterArgs {
+            address: Some(address.to_string()),
+            since: None,
+            start: None,
+            end: None,
+            expenses: false,
+            top_ups: false,
+            resource_type: Vec::new(),
+        }
+    }
+
+    const SAMPLE_ADDRESS: &str = "0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10";
+
+    #[test]
+    fn build_filters_maps_expenses_to_outgoing() {
+        let mut args = filter_args(SAMPLE_ADDRESS);
+        args.expenses = true;
+        let (_, filters) = build_filters(&args).unwrap();
+        assert!(matches!(filters.direction, Some(CreditDirection::Outgoing)));
+    }
+
+    #[test]
+    fn build_filters_maps_top_ups_to_incoming() {
+        let mut args = filter_args(SAMPLE_ADDRESS);
+        args.top_ups = true;
+        let (_, filters) = build_filters(&args).unwrap();
+        assert!(matches!(filters.direction, Some(CreditDirection::Incoming)));
+    }
+
+    #[test]
+    fn build_filters_no_direction_by_default() {
+        let (_, filters) = build_filters(&filter_args(SAMPLE_ADDRESS)).unwrap();
+        assert!(filters.direction.is_none());
+    }
+
+    #[test]
+    fn build_filters_translates_explicit_bounds_and_resources() {
+        let mut args = filter_args(SAMPLE_ADDRESS);
+        args.start = Some(DateTime::from_timestamp(1_769_990_400, 0).unwrap());
+        args.end = Some(DateTime::from_timestamp(1_770_000_000, 0).unwrap());
+        args.resource_type = vec![ResourceTypeCli::Store, ResourceTypeCli::Instance];
+        let (_, filters) = build_filters(&args).unwrap();
+        assert_eq!(filters.start_date, Some(1_769_990_400));
+        assert_eq!(filters.end_date, Some(1_770_000_000));
+        assert_eq!(
+            filters.resource_types,
+            vec![MessageType::Store, MessageType::Instance]
+        );
+    }
+
+    #[test]
+    fn build_filters_since_sets_lower_bound() {
+        let mut args = filter_args(SAMPLE_ADDRESS);
+        args.since = Some(chrono::Duration::days(7));
+        let before = (Utc::now() - chrono::Duration::days(7)).timestamp();
+        let (_, filters) = build_filters(&args).unwrap();
+        let start = filters.start_date.expect("since sets a lower bound");
+        // Resolved against the wall clock; allow a small execution window.
+        assert!((start - before).abs() <= 5, "start={start} before={before}");
+        assert!(filters.end_date.is_none());
     }
 }
 
