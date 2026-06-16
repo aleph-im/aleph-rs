@@ -1733,6 +1733,21 @@ Examples:
     Price(InstancePriceArgs),
     /// Reboot a VM instance
     Reboot(CrnArgs),
+    /// Reinstall an instance from its original OS image.
+    #[command(long_about = "\
+Reinstall an instance from its original OS image on the CRN.
+
+The rootfs is always erased and reinstalled from the image referenced by the
+INSTANCE message. By default ALL persistent data volumes are also erased; pass
+--keep-data to wipe only the rootfs and preserve persistent data volumes.
+
+This is irreversible and asks for confirmation unless --yes is given.
+
+Examples:
+  aleph instance reinstall a41fb91c3e68
+  aleph instance reinstall a41fb91c3e68 --keep-data
+  aleph instance reinstall a41fb91c3e68 --crn 9f3e... -y")]
+    Reinstall(InstanceReinstallArgs),
     /// Show details of an instance.
     #[command(long_about = "\
 Show details of a single VM instance.
@@ -2067,6 +2082,34 @@ pub struct CrnStartArgs {
     /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
     /// shown by `aleph instance list`); the scheduler matches it server-side.
     pub vm_id: String,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct InstanceReinstallArgs {
+    /// CRN to target: either a node hash or unique hash prefix or suffix
+    /// (resolved to its URL via the scheduler; a suffix matches the shorthand
+    /// IDs shown by `aleph instance list`) or a raw endpoint URL (anything
+    /// containing `://`).
+    ///
+    /// Optional override: if omitted, the CRN is discovered via the scheduler.
+    #[arg(long, alias = "crn-url")]
+    pub crn: Option<String>,
+
+    /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
+    /// shown by `aleph instance list`); the scheduler matches it server-side.
+    pub vm_id: String,
+
+    /// Reset only the rootfs image; preserve persistent data volumes.
+    /// Without this flag, all persistent data volumes are erased too.
+    #[arg(long)]
+    pub keep_data: bool,
+
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 
     #[command(flatten)]
     pub signing: SigningArgs,
