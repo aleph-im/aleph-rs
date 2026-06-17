@@ -16,6 +16,8 @@ use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::crns_list::{
     CrnFilter, CrnListEntry, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list,
 };
+use aleph_sdk::ssh::AlephSshClient;
+use aleph_types::chain::Address;
 use anyhow::{Result, anyhow, bail};
 use dialoguer::{Confirm, FuzzySelect, Input, Select};
 use std::cmp::Ordering;
@@ -24,6 +26,7 @@ use tokio::task::JoinHandle;
 pub async fn resolve_interactive(
     args: &mut InstanceCreateArgs,
     aleph_client: &AlephClient,
+    owner_address: &Address,
 ) -> Result<()> {
     // Kick off the CRN list fetch in parallel with the early prompts, but only
     // if a node isn't already pinned via `--crn-hash` (in which case the list is
@@ -104,8 +107,22 @@ pub async fn resolve_interactive(
         })?);
     }
 
-    if args.ssh_pubkey_file.is_empty() {
-        args.ssh_pubkey_file = vec![prompt_ssh_pubkey_path()?];
+    // Only prompt for a key file when the user has no other key source. If
+    // --ssh-key labels were given, or the owner already has registered keys,
+    // the resolver in handle_instance_create will attach those instead.
+    if args.ssh_pubkey_file.is_empty() && args.ssh_key.is_empty() {
+        let registered = aleph_client
+            .list_ssh_keys(owner_address)
+            .await
+            .unwrap_or_default();
+        if registered.is_empty() {
+            args.ssh_pubkey_file = vec![prompt_ssh_pubkey_path()?];
+        } else {
+            eprintln!(
+                "Using {} registered SSH key(s). Pass --ssh-pubkey-file to override.",
+                registered.len()
+            );
+        }
     }
 
     Ok(())

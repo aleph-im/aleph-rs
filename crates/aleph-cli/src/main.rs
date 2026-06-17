@@ -157,7 +157,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         cli::Commands::Account {
             command: account_command,
         } => {
-            commands::account::handle_account_command(&aleph_client, account_command, json).await?
+            commands::account::handle_account_command(
+                &aleph_client,
+                &ccn_url,
+                account_command,
+                json,
+            )
+            .await?
         }
         cli::Commands::Authorization {
             command: authorization_command,

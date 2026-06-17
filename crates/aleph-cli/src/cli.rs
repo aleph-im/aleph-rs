@@ -1192,6 +1192,12 @@ pub enum AccountCommand {
         #[clap(subcommand)]
         command: AliasCommand,
     },
+    /// Manage SSH public keys used to access instances (stored on the network)
+    #[command(name = "ssh-key")]
+    Ssh {
+        #[clap(subcommand)]
+        command: SshCommand,
+    },
     /// Show the balance of any address
     Balance(AccountBalanceArgs),
     /// Generate a new private key and store it in the OS keychain
@@ -1415,6 +1421,66 @@ pub struct AliasAddArgs {
 pub struct AliasRemoveArgs {
     /// Name of the alias to remove.
     pub name: String,
+}
+
+#[derive(Subcommand)]
+pub enum SshCommand {
+    /// Register an SSH public key
+    #[command(long_about = "\
+Register an SSH public key on the Aleph network under the active account. \
+Registered keys are reused by `aleph instance create` when --ssh-pubkey-file \
+is not given, and are interoperable with the web console.
+
+Provide a unique NAME, then the key as a file path (positional, use '-' for \
+stdin) or inline with --key.
+
+Examples:
+  aleph account ssh-key add laptop ~/.ssh/id_ed25519.pub
+  aleph account ssh-key add laptop --key \"ssh-ed25519 AAAA... me@host\"
+  pbpaste | aleph account ssh-key add laptop -")]
+    Add(SshAddArgs),
+    /// List registered SSH public keys
+    List(SshListArgs),
+    /// Remove a registered SSH public key
+    Remove(SshRemoveArgs),
+}
+
+#[derive(Args)]
+pub struct SshAddArgs {
+    /// Unique name for this key.
+    pub name: String,
+
+    /// Path to a public key file. Use '-' to read from stdin.
+    /// Provide this or --key.
+    pub file: Option<PathBuf>,
+
+    /// The raw public key string (alternative to a file path).
+    #[arg(long, conflicts_with = "file")]
+    pub key: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct SshListArgs {
+    /// Address to list keys for: hex (0x...), local account name, or alias.
+    /// Defaults to the active account.
+    #[arg(long)]
+    pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct SshRemoveArgs {
+    /// Name (label) or item-hash of the key to remove.
+    pub key: String,
+
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
 
 #[derive(Subcommand)]
@@ -1648,10 +1714,11 @@ sizes the VM at the GPU's minimum. GPU sizes scale in compute-unit steps \
 (e.g. `4vcpu-24gb`, `5vcpu-30gb`); `--vcpus`/`--memory` work too. `--disk-size` \
 is optional for GPU instances.
 
-Required: NAME (positional), `--image`, and at least one \
-`--ssh-pubkey-file`. Image accepts a preset name from the network's \
-`vm-images` aggregate (e.g. `ubuntu26`, `debian12`) or an item hash \
-(hex or IPFS CID).
+Required: NAME (positional) and `--image`. At least one SSH public key \
+must be authorized: pass `--ssh-pubkey-file` and/or `--ssh-key <NAME>`, or, \
+if neither is given, every key registered with `aleph account ssh-key add` \
+is attached. Image accepts a preset name from the network's `vm-images` \
+aggregate (e.g. `ubuntu26`, `debian12`) or an item hash (hex or IPFS CID).
 
 Pin to a specific compute node with `--crn-hash <HASH>`. For an \
 interactive walkthrough that prompts for any missing fields and lets you \
@@ -1908,8 +1975,14 @@ pub struct InstanceCreateArgs {
     pub memory: Option<u64>,
 
     /// Path to an SSH public key file. Can be repeated for multiple keys.
-    #[arg(long, required_unless_present = "interactive")]
+    /// When omitted (and no --ssh-key given), all registered keys are attached.
+    #[arg(long)]
     pub ssh_pubkey_file: Vec<PathBuf>,
+
+    /// Name of a registered SSH key to attach (see `aleph account ssh-key list`).
+    /// Can be repeated.
+    #[arg(long)]
+    pub ssh_key: Vec<String>,
 
     /// Channel name.
     #[arg(long)]
