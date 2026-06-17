@@ -13,6 +13,7 @@ pub mod ipfs;
 pub mod messages;
 pub mod progress;
 pub mod scheduler;
+pub mod ssh;
 #[cfg(feature = "swap")]
 pub mod swap;
 pub mod verify;
