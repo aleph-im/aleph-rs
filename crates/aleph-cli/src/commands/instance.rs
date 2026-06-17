@@ -474,6 +474,31 @@ pub(crate) fn validate_ssh_pubkey(key: &str, path: &std::path::Path) -> Result<(
     aleph_sdk::ssh::validate_pubkey(key).map_err(|msg| anyhow!("'{}' {}", path.display(), msg))
 }
 
+/// Merge the owner's and signer's registries for `--ssh-key` label lookup.
+///
+/// The signer's keys take precedence on label collisions (we act from the
+/// signer's point of view): a label present in both resolves to the signer's
+/// key. Owner labels not shadowed by the signer remain available, as do the
+/// signer's own labels. `sender` is empty when not acting on behalf of another
+/// address, so the result is just the owner's keys.
+pub(crate) fn merge_ssh_registries(owner: &[SshKey], sender: &[SshKey]) -> Vec<SshKey> {
+    let sender_labels: std::collections::HashSet<&str> =
+        sender.iter().filter_map(|k| k.label.as_deref()).collect();
+    sender
+        .iter()
+        .cloned()
+        .chain(
+            owner
+                .iter()
+                .filter(|k| match k.label.as_deref() {
+                    Some(label) => !sender_labels.contains(label),
+                    None => true,
+                })
+                .cloned(),
+        )
+        .collect()
+}
+
 /// Resolve `--ssh-key` labels against the registered keys, returning their key
 /// strings. Errors (listing available labels) if any label is unknown.
 pub(crate) fn select_keys_by_label(
@@ -830,15 +855,25 @@ async fn handle_instance_create(
         file_keys.push(key);
     }
     let explicit_given = !args.ssh_pubkey_file.is_empty() || !args.ssh_key.is_empty();
-    // Fetch registered keys only when needed: to resolve --ssh-key labels, or to
-    // fall back to all registered keys when no key flag was given at all.
-    let registered = if !args.ssh_key.is_empty() || !explicit_given {
+    let signer_address = account.address().clone();
+    // Fetch the owner's registry to resolve --ssh-key labels and for the no-flag
+    // fallback (attach all of the owner's keys).
+    let owner_keys = if !args.ssh_key.is_empty() || !explicit_given {
         aleph_client.list_ssh_keys(&owner_address).await?
     } else {
         Vec::new()
     };
-    let selected = select_keys_by_label(&args.ssh_key, &registered)?;
-    let all_registered: Vec<String> = registered.iter().map(|k| k.key.clone()).collect();
+    // When creating on behalf of another owner, --ssh-key may also reference the
+    // signer's own registered keys; the signer's keys win on name collisions
+    // (we act from the signer's point of view). The fallback stays owner-only.
+    let sender_keys = if !args.ssh_key.is_empty() && signer_address != owner_address {
+        aleph_client.list_ssh_keys(&signer_address).await?
+    } else {
+        Vec::new()
+    };
+    let label_registry = merge_ssh_registries(&owner_keys, &sender_keys);
+    let selected = select_keys_by_label(&args.ssh_key, &label_registry)?;
+    let all_registered: Vec<String> = owner_keys.iter().map(|k| k.key.clone()).collect();
     let ssh_keys = resolve_instance_ssh_keys(file_keys, selected, explicit_given, all_registered)?;
 
     // Resolve instance specs. GPU instances size from the GPU pricing namespace
@@ -2614,5 +2649,54 @@ mod tests {
             vec!["ssh-ed25519 AAAA"]
         );
         assert!(select_keys_by_label(&["nope".to_string()], &reg).is_err());
+    }
+
+    #[cfg(test)]
+    fn mk_key(label: &str, key: &str) -> aleph_sdk::ssh::SshKey {
+        use chrono::Utc;
+        aleph_sdk::ssh::SshKey {
+            item_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            key: key.into(),
+            label: Some(label.into()),
+            created: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn merge_registries_signer_overrides_owner_on_collision() {
+        let owner = vec![
+            mk_key("shared", "owner-shared"),
+            mk_key("owneronly", "owner-x"),
+        ];
+        let sender = vec![
+            mk_key("shared", "sender-shared"),
+            mk_key("senderonly", "sender-y"),
+        ];
+        let merged = merge_ssh_registries(&owner, &sender);
+        // Shared label resolves to the signer's key; both unique labels resolve.
+        assert_eq!(
+            select_keys_by_label(&["shared".into()], &merged).unwrap(),
+            vec!["sender-shared"]
+        );
+        assert_eq!(
+            select_keys_by_label(&["owneronly".into()], &merged).unwrap(),
+            vec!["owner-x"]
+        );
+        assert_eq!(
+            select_keys_by_label(&["senderonly".into()], &merged).unwrap(),
+            vec!["sender-y"]
+        );
+    }
+
+    #[test]
+    fn merge_registries_empty_sender_is_owner_only() {
+        let owner = vec![mk_key("laptop", "owner-laptop")];
+        let merged = merge_ssh_registries(&owner, &[]);
+        assert_eq!(
+            select_keys_by_label(&["laptop".into()], &merged).unwrap(),
+            vec!["owner-laptop"]
+        );
     }
 }
