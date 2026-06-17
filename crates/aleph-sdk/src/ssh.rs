@@ -10,9 +10,14 @@ use std::future::Future;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use aleph_types::account::{Account, SignError};
 use aleph_types::chain::Address;
+use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::MessageType;
+use aleph_types::message::pending::PendingMessage;
 
+use crate::builder::MessageBuilder;
 use crate::client::{AlephClient, AlephPostClient, MessageError, PaginationParams, PostFilter};
 
 /// Post type used for SSH key records (shared with the web console).
@@ -93,6 +98,40 @@ impl AlephSshClient for AlephClient {
         keys.sort_by(|a, b| b.created.cmp(&a.created));
         Ok(keys)
     }
+}
+
+/// Build the POST envelope that registers an SSH key.
+fn add_ssh_key_envelope(key: &str, label: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": SSH_POST_TYPE,
+        "content": { "key": key, "label": label },
+    })
+}
+
+/// Build the FORGET envelope that removes an SSH key post by hash.
+fn forget_ssh_key_envelope(item_hash: &ItemHash) -> serde_json::Value {
+    serde_json::json!({ "hashes": [item_hash.to_string()] })
+}
+
+/// Build a signed message registering `key` under `label` on the SSH channel.
+pub fn build_add_ssh_key<A: Account>(
+    account: &A,
+    key: &str,
+    label: &str,
+) -> Result<PendingMessage, SignError> {
+    MessageBuilder::new(account, MessageType::Post, add_ssh_key_envelope(key, label))
+        .channel(Channel::from(SSH_CHANNEL.to_string()))
+        .build()
+}
+
+/// Build a signed FORGET message removing the SSH key post `item_hash`.
+pub fn build_forget_ssh_key<A: Account>(
+    account: &A,
+    item_hash: &ItemHash,
+) -> Result<PendingMessage, SignError> {
+    MessageBuilder::new(account, MessageType::Forget, forget_ssh_key_envelope(item_hash))
+        .channel(Channel::from(SSH_CHANNEL.to_string()))
+        .build()
 }
 
 /// Validate that `key` looks like an SSH public key (not a private key/garbage).
@@ -201,5 +240,24 @@ mod tests {
         let c: SshKeyContent = serde_json::from_value(serde_json::json!({"key": "ssh-rsa X"})).unwrap();
         assert_eq!(c.key, "ssh-rsa X");
         assert_eq!(c.label, None);
+    }
+
+    #[test]
+    fn add_envelope_has_type_and_content() {
+        let v = add_ssh_key_envelope("ssh-ed25519 AAAA", "laptop");
+        assert_eq!(v["type"], "ALEPH-SSH");
+        assert_eq!(v["content"]["key"], "ssh-ed25519 AAAA");
+        assert_eq!(v["content"]["label"], "laptop");
+    }
+
+    #[test]
+    fn forget_envelope_lists_hash() {
+        let hash: ItemHash =
+            "1111111111111111111111111111111111111111111111111111111111111111".parse().unwrap();
+        let v = forget_ssh_key_envelope(&hash);
+        assert_eq!(
+            v["hashes"][0],
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
     }
 }
