@@ -997,10 +997,14 @@ async fn handle_ssh_remove(
     let account = resolve_account(&args.signing.identity)?;
     // With --on-behalf-of, resolve the label against that owner's registry and
     // forget on their behalf; otherwise the signer's own.
-    let owner_address = match &args.on_behalf_of {
-        Some(owner) => resolve_address(owner)?,
-        None => account.address().clone(),
-    };
+    let on_behalf_of = args
+        .on_behalf_of
+        .as_deref()
+        .map(resolve_address)
+        .transpose()?;
+    let owner_address = on_behalf_of
+        .clone()
+        .unwrap_or_else(|| account.address().clone());
     let keys = client.list_ssh_keys(&owner_address).await?;
     let hash = resolve_ssh_key_target(&keys, &args.key)?;
 
