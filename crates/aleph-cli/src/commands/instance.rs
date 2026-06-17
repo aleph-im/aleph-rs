@@ -798,8 +798,17 @@ async fn handle_instance_create(
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
+    // SSH keys are looked up for the instance OWNER. When signing on behalf of
+    // another address, that address owns the instance, so its registered keys
+    // (not the signer's) are the ones to attach.
+    let owner_address = match &args.on_behalf_of {
+        Some(owner) => resolve_address(owner)?,
+        None => account.address().clone(),
+    };
+
     if args.interactive {
-        crate::commands::instance_interactive::resolve_interactive(&mut args, aleph_client).await?;
+        crate::commands::instance_interactive::resolve_interactive(&mut args, aleph_client, &owner_address)
+            .await?;
     }
 
     // Resolve SSH keys: ad-hoc files + label-selected registered keys, falling
@@ -820,7 +829,7 @@ async fn handle_instance_create(
     // Fetch registered keys only when needed: to resolve --ssh-key labels, or to
     // fall back to all registered keys when no key flag was given at all.
     let registered = if !args.ssh_key.is_empty() || !explicit_given {
-        aleph_client.list_ssh_keys(account.address()).await?
+        aleph_client.list_ssh_keys(&owner_address).await?
     } else {
         Vec::new()
     };
