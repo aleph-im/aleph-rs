@@ -528,7 +528,7 @@ pub(crate) fn resolve_instance_ssh_keys(
 
     if keys.is_empty() {
         bail!(
-            "no SSH keys to attach. Register one with `aleph account ssh-keys add`, \
+            "no SSH keys to attach. Register one with `aleph account ssh-key add`, \
              or pass --ssh-pubkey-file"
         );
     }

@@ -898,7 +898,7 @@ async fn handle_ssh_add(
     {
         bail!(
             "an SSH key named '{}' already exists. Choose another name, or remove it first with: \
-             aleph account ssh-keys remove {}",
+             aleph account ssh-key remove {}",
             args.name,
             args.name
         );
@@ -925,7 +925,7 @@ async fn handle_ssh_list(client: &AlephClient, args: SshListArgs, json: bool) ->
     }
 
     if keys.is_empty() {
-        eprintln!("No SSH keys. Add one with: aleph account ssh-keys add <NAME> <FILE>");
+        eprintln!("No SSH keys. Add one with: aleph account ssh-key add <NAME> <FILE>");
         return Ok(());
     }
 
@@ -965,7 +965,7 @@ fn resolve_ssh_key_target(keys: &[SshKey], target: &str) -> Result<ItemHash> {
         .collect();
     match matches.as_slice() {
         [] => {
-            bail!("no SSH key named '{target}'. List your keys with: aleph account ssh-keys list")
+            bail!("no SSH key named '{target}'. List your keys with: aleph account ssh-key list")
         }
         [one] => Ok(one.item_hash.clone()),
         many => {

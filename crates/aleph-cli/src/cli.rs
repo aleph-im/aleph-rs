@@ -1193,7 +1193,7 @@ pub enum AccountCommand {
         command: AliasCommand,
     },
     /// Manage SSH public keys used to access instances (stored on the network)
-    #[command(name = "ssh-keys")]
+    #[command(name = "ssh-key")]
     Ssh {
         #[clap(subcommand)]
         command: SshCommand,
@@ -1435,9 +1435,9 @@ Provide a unique NAME, then the key as a file path (positional, use '-' for \
 stdin) or inline with --key.
 
 Examples:
-  aleph account ssh-keys add laptop ~/.ssh/id_ed25519.pub
-  aleph account ssh-keys add laptop --key \"ssh-ed25519 AAAA... me@host\"
-  pbpaste | aleph account ssh-keys add laptop -")]
+  aleph account ssh-key add laptop ~/.ssh/id_ed25519.pub
+  aleph account ssh-key add laptop --key \"ssh-ed25519 AAAA... me@host\"
+  pbpaste | aleph account ssh-key add laptop -")]
     Add(SshAddArgs),
     /// List registered SSH public keys
     List(SshListArgs),
@@ -1716,7 +1716,7 @@ is optional for GPU instances.
 
 Required: NAME (positional) and `--image`. At least one SSH public key \
 must be authorized: pass `--ssh-pubkey-file` and/or `--ssh-key <NAME>`, or, \
-if neither is given, every key registered with `aleph account ssh-keys add` \
+if neither is given, every key registered with `aleph account ssh-key add` \
 is attached. Image accepts a preset name from the network's `vm-images` \
 aggregate (e.g. `ubuntu26`, `debian12`) or an item hash (hex or IPFS CID).
 
@@ -1979,7 +1979,7 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub ssh_pubkey_file: Vec<PathBuf>,
 
-    /// Name of a registered SSH key to attach (see `aleph account ssh-keys list`).
+    /// Name of a registered SSH key to attach (see `aleph account ssh-key list`).
     /// Can be repeated.
     #[arg(long)]
     pub ssh_key: Vec<String>,
