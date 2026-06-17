@@ -100,7 +100,7 @@ impl AlephSshClient for AlephClient {
                 })
             })
             .collect();
-        keys.sort_by(|a, b| b.created.cmp(&a.created));
+        keys.sort_by_key(|k| std::cmp::Reverse(k.created));
         Ok(keys)
     }
 }
