@@ -858,7 +858,9 @@ fn read_ssh_key_arg(file: Option<&Path>, key: Option<&str>) -> Result<String> {
     if let Some(k) = key {
         return Ok(k.trim().to_string());
     }
-    let path = file.expect("clap ArgGroup guarantees one of file/key is set");
+    let Some(path) = file else {
+        bail!("provide a public key: a FILE path argument or --key <STRING>");
+    };
     let content = if path == Path::new("-") {
         let mut s = String::new();
         std::io::stdin()
@@ -895,8 +897,8 @@ async fn handle_ssh_add(
         .any(|k| k.label.as_deref() == Some(args.name.as_str()))
     {
         bail!(
-            "an SSH key named '{}' already exists. Choose another --name, or remove it first with: \
-             aleph account ssh remove {}",
+            "an SSH key named '{}' already exists. Choose another name, or remove it first with: \
+             aleph account ssh-keys remove {}",
             args.name,
             args.name
         );
@@ -919,6 +921,11 @@ async fn handle_ssh_list(client: &AlephClient, args: SshListArgs, json: bool) ->
 
     if json {
         println!("{}", serde_json::to_string_pretty(&keys)?);
+        return Ok(());
+    }
+
+    if keys.is_empty() {
+        eprintln!("No SSH keys. Add one with: aleph account ssh-keys add <NAME> <FILE>");
         return Ok(());
     }
 
@@ -957,7 +964,9 @@ fn resolve_ssh_key_target(keys: &[SshKey], target: &str) -> Result<ItemHash> {
         .filter(|k| k.label.as_deref() == Some(target))
         .collect();
     match matches.as_slice() {
-        [] => bail!("no SSH key named '{target}'. List your keys with: aleph account ssh list"),
+        [] => {
+            bail!("no SSH key named '{target}'. List your keys with: aleph account ssh-keys list")
+        }
         [one] => Ok(one.item_hash.clone()),
         many => {
             let hashes: Vec<String> = many.iter().map(|k| k.item_hash.to_string()).collect();

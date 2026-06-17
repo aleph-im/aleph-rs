@@ -2,7 +2,7 @@ use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_sdk::credit::PriceSource;
 use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
-use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use url::Url;
 
@@ -1193,6 +1193,7 @@ pub enum AccountCommand {
         command: AliasCommand,
     },
     /// Manage SSH public keys used to access instances (stored on the network)
+    #[command(name = "ssh-keys")]
     Ssh {
         #[clap(subcommand)]
         command: SshCommand,
@@ -1430,13 +1431,13 @@ Register an SSH public key on the Aleph network under the active account. \
 Registered keys are reused by `aleph instance create` when --ssh-pubkey-file \
 is not given, and are interoperable with the web console.
 
-Provide the key either as a file path (positional, use '-' for stdin) or \
-inline with --key. A unique --name is required.
+Provide a unique NAME, then the key as a file path (positional, use '-' for \
+stdin) or inline with --key.
 
 Examples:
-  aleph account ssh add ~/.ssh/id_ed25519.pub --name laptop
-  aleph account ssh add --key \"ssh-ed25519 AAAA... me@host\" --name laptop
-  pbpaste | aleph account ssh add - --name laptop")]
+  aleph account ssh-keys add laptop ~/.ssh/id_ed25519.pub
+  aleph account ssh-keys add laptop --key \"ssh-ed25519 AAAA... me@host\"
+  pbpaste | aleph account ssh-keys add laptop -")]
     Add(SshAddArgs),
     /// List registered SSH public keys
     List(SshListArgs),
@@ -1445,18 +1446,17 @@ Examples:
 }
 
 #[derive(Args)]
-#[command(group(ArgGroup::new("ssh_source").required(true).args(["file", "key"])))]
 pub struct SshAddArgs {
+    /// Unique name for this key.
+    pub name: String,
+
     /// Path to a public key file. Use '-' to read from stdin.
+    /// Provide this or --key.
     pub file: Option<PathBuf>,
 
     /// The raw public key string (alternative to a file path).
     #[arg(long, conflicts_with = "file")]
     pub key: Option<String>,
-
-    /// Unique name for this key.
-    #[arg(long)]
-    pub name: String,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -1716,8 +1716,8 @@ is optional for GPU instances.
 
 Required: NAME (positional) and `--image`. At least one SSH public key \
 must be authorized: pass `--ssh-pubkey-file` and/or `--ssh-key <NAME>`, or, \
-if neither is given, every key registered with `aleph account ssh add` is \
-attached. Image accepts a preset name from the network's `vm-images` \
+if neither is given, every key registered with `aleph account ssh-keys add` \
+is attached. Image accepts a preset name from the network's `vm-images` \
 aggregate (e.g. `ubuntu26`, `debian12`) or an item hash (hex or IPFS CID).
 
 Pin to a specific compute node with `--crn-hash <HASH>`. For an \
@@ -1979,7 +1979,7 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub ssh_pubkey_file: Vec<PathBuf>,
 
-    /// Name of a registered SSH key to attach (see `aleph account ssh list`).
+    /// Name of a registered SSH key to attach (see `aleph account ssh-keys list`).
     /// Can be repeated.
     #[arg(long)]
     pub ssh_key: Vec<String>,
