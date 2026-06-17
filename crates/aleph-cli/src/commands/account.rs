@@ -915,7 +915,7 @@ async fn handle_ssh_list(client: &AlephClient, args: SshListArgs, json: bool) ->
     for k in &keys {
         let name = k.label.as_deref().unwrap_or("(unnamed)");
         let preview = ssh_key_preview(&k.key);
-        println!("{name}\t{preview}\t{}\t{}", k.item_hash, k.created.format("%Y-%m-%d"));
+        eprintln!("{name}\t{preview}\t{}\t{}", k.item_hash, k.created.format("%Y-%m-%d"));
     }
     Ok(())
 }
@@ -925,10 +925,9 @@ fn ssh_key_preview(key: &str) -> String {
     let mut parts = key.split_whitespace();
     let algo = parts.next().unwrap_or("");
     let body = parts.next().unwrap_or("");
-    let tail: String =
-        body.chars().rev().take(8).collect::<String>().chars().rev().collect();
+    // SSH key bodies are ASCII base64, so byte slicing on the last 8 bytes is safe.
     if body.len() > 8 {
-        format!("{algo} ...{tail}")
+        format!("{algo} ...{}", &body[body.len() - 8..])
     } else {
         format!("{algo} {body}")
     }
