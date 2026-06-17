@@ -9,6 +9,7 @@ use aleph_sdk::aggregate_models::vm_images::{VmImagesData, VmImagesError};
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter, MessageWithStatus,
 };
+use aleph_sdk::ssh::{AlephSshClient, SshKey};
 use aleph_sdk::messages::{ForgetBuilder, InstanceBuilder};
 use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
 use aleph_types::account::Account;
@@ -474,6 +475,57 @@ pub(crate) fn validate_ssh_pubkey(key: &str, path: &std::path::Path) -> Result<(
         .map_err(|msg| anyhow!("'{}' {}", path.display(), msg))
 }
 
+/// Resolve `--ssh-key` labels against the registered keys, returning their key
+/// strings. Errors (listing available labels) if any label is unknown.
+pub(crate) fn select_keys_by_label(labels: &[String], registered: &[SshKey]) -> Result<Vec<String>> {
+    labels
+        .iter()
+        .map(|label| {
+            registered
+                .iter()
+                .find(|k| k.label.as_deref() == Some(label.as_str()))
+                .map(|k| k.key.clone())
+                .ok_or_else(|| {
+                    let avail: Vec<String> =
+                        registered.iter().filter_map(|k| k.label.clone()).collect();
+                    anyhow!(
+                        "no registered SSH key named '{label}'. Available: {}",
+                        if avail.is_empty() { "(none)".to_string() } else { avail.join(", ") }
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Combine explicit (file + label-selected) keys, or fall back to every
+/// registered key when neither flag was given. Dedupes by key value, preserving
+/// order. Errors when the final set is empty.
+pub(crate) fn resolve_instance_ssh_keys(
+    file_keys: Vec<String>,
+    selected: Vec<String>,
+    explicit_given: bool,
+    all_registered: Vec<String>,
+) -> Result<Vec<String>> {
+    let mut keys = if explicit_given {
+        let mut v = file_keys;
+        v.extend(selected);
+        v
+    } else {
+        all_registered
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    keys.retain(|k| seen.insert(k.clone()));
+
+    if keys.is_empty() {
+        bail!(
+            "no SSH keys to attach. Register one with `aleph account ssh add`, \
+             or pass --ssh-pubkey-file"
+        );
+    }
+    Ok(keys)
+}
+
 /// Parse a "key=value,key=value" string into a list of (key, value) pairs.
 fn parse_kv_pairs(s: &str) -> Result<Vec<(&str, &str)>, String> {
     s.split(',')
@@ -741,19 +793,26 @@ async fn handle_instance_create(
         crate::commands::instance_interactive::resolve_interactive(&mut args, aleph_client).await?;
     }
 
-    // Read and validate SSH public keys
-    let mut ssh_keys = Vec::new();
+    // Resolve SSH keys: ad-hoc files + label-selected registered keys, falling
+    // back to all registered keys when neither flag is given.
+    let mut file_keys = Vec::new();
     for path in &args.ssh_pubkey_file {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            anyhow!(
-                "failed to read SSH public key file '{}': {e}",
-                path.display()
-            )
+            anyhow!("failed to read SSH public key file '{}': {e}", path.display())
         })?;
         let key = content.trim().to_string();
         validate_ssh_pubkey(&key, path)?;
-        ssh_keys.push(key);
+        file_keys.push(key);
     }
+    let explicit_given = !args.ssh_pubkey_file.is_empty() || !args.ssh_key.is_empty();
+    let registered = if !args.ssh_key.is_empty() || !explicit_given {
+        aleph_client.list_ssh_keys(account.address()).await?
+    } else {
+        Vec::new()
+    };
+    let selected = select_keys_by_label(&args.ssh_key, &registered)?;
+    let all_registered: Vec<String> = registered.iter().map(|k| k.key.clone()).collect();
+    let ssh_keys = resolve_instance_ssh_keys(file_keys, selected, explicit_given, all_registered)?;
 
     // Resolve instance specs. GPU instances size from the GPU pricing namespace
     // (the tier minimum is a lower bound); otherwise from --size or raw flags.
@@ -2480,5 +2539,53 @@ mod tests {
             assert!(err.contains("below the minimum"), "{err}");
             assert!(err.contains("rtx-4000-ada"), "{err}");
         }
+    }
+
+    #[test]
+    fn resolve_keys_fallback_to_all_registered() {
+        let out = resolve_instance_ssh_keys(
+            vec![],
+            vec![],
+            false,
+            vec!["ssh-ed25519 A".into(), "ssh-ed25519 B".into()],
+        )
+        .unwrap();
+        assert_eq!(out, vec!["ssh-ed25519 A", "ssh-ed25519 B"]);
+    }
+
+    #[test]
+    fn resolve_keys_union_and_dedupe() {
+        let out = resolve_instance_ssh_keys(
+            vec!["ssh-ed25519 A".into(), "ssh-ed25519 B".into()],
+            vec!["ssh-ed25519 B".into(), "ssh-ed25519 C".into()],
+            true,
+            vec!["ssh-ed25519 Z".into()],
+        )
+        .unwrap();
+        assert_eq!(out, vec!["ssh-ed25519 A", "ssh-ed25519 B", "ssh-ed25519 C"]);
+    }
+
+    #[test]
+    fn resolve_keys_empty_is_error() {
+        assert!(resolve_instance_ssh_keys(vec![], vec![], false, vec![]).is_err());
+    }
+
+    #[test]
+    fn select_by_label_resolves_and_errors() {
+        use aleph_sdk::ssh::SshKey;
+        use chrono::Utc;
+        let reg = vec![SshKey {
+            item_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            key: "ssh-ed25519 AAAA".into(),
+            label: Some("laptop".into()),
+            created: Utc::now(),
+        }];
+        assert_eq!(
+            select_keys_by_label(&["laptop".to_string()], &reg).unwrap(),
+            vec!["ssh-ed25519 AAAA"]
+        );
+        assert!(select_keys_by_label(&["nope".to_string()], &reg).is_err());
     }
 }
