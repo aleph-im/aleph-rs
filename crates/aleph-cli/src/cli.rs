@@ -2,7 +2,7 @@ use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_sdk::credit::PriceSource;
 use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use url::Url;
 
@@ -1192,6 +1192,11 @@ pub enum AccountCommand {
         #[clap(subcommand)]
         command: AliasCommand,
     },
+    /// Manage SSH public keys used to access instances (stored on the network)
+    Ssh {
+        #[clap(subcommand)]
+        command: SshCommand,
+    },
     /// Show the balance of any address
     Balance(AccountBalanceArgs),
     /// Generate a new private key and store it in the OS keychain
@@ -1415,6 +1420,67 @@ pub struct AliasAddArgs {
 pub struct AliasRemoveArgs {
     /// Name of the alias to remove.
     pub name: String,
+}
+
+#[derive(Subcommand)]
+pub enum SshCommand {
+    /// Register an SSH public key
+    #[command(long_about = "\
+Register an SSH public key on the Aleph network under the active account. \
+Registered keys are reused by `aleph instance create` when --ssh-pubkey-file \
+is not given, and are interoperable with the web console.
+
+Provide the key either as a file path (positional, use '-' for stdin) or \
+inline with --key. A unique --name is required.
+
+Examples:
+  aleph account ssh add ~/.ssh/id_ed25519.pub --name laptop
+  aleph account ssh add --key \"ssh-ed25519 AAAA... me@host\" --name laptop
+  pbpaste | aleph account ssh add - --name laptop")]
+    Add(SshAddArgs),
+    /// List registered SSH public keys
+    List(SshListArgs),
+    /// Remove a registered SSH public key
+    Remove(SshRemoveArgs),
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("ssh_source").required(true).args(["file", "key"])))]
+pub struct SshAddArgs {
+    /// Path to a public key file. Use '-' to read from stdin.
+    pub file: Option<PathBuf>,
+
+    /// The raw public key string (alternative to a file path).
+    #[arg(long, conflicts_with = "file")]
+    pub key: Option<String>,
+
+    /// Unique name for this key.
+    #[arg(long)]
+    pub name: String,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+#[derive(Args)]
+pub struct SshListArgs {
+    /// Address to list keys for: hex (0x...), local account name, or alias.
+    /// Defaults to the active account.
+    #[arg(long)]
+    pub address: Option<String>,
+}
+
+#[derive(Args)]
+pub struct SshRemoveArgs {
+    /// Name (label) or item-hash of the key to remove.
+    pub key: String,
+
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
 
 #[derive(Subcommand)]
@@ -1908,8 +1974,14 @@ pub struct InstanceCreateArgs {
     pub memory: Option<u64>,
 
     /// Path to an SSH public key file. Can be repeated for multiple keys.
-    #[arg(long, required_unless_present = "interactive")]
+    /// When omitted (and no --ssh-key given), all registered keys are attached.
+    #[arg(long)]
     pub ssh_pubkey_file: Vec<PathBuf>,
+
+    /// Name of a registered SSH key to attach (see `aleph account ssh list`).
+    /// Can be repeated.
+    #[arg(long)]
+    pub ssh_key: Vec<String>,
 
     /// Channel name.
     #[arg(long)]

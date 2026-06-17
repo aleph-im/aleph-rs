@@ -3,17 +3,25 @@ use crate::account::store::{AccountKind, AccountStore};
 use crate::cli::{
     AccountBalanceArgs, AccountCommand, AccountCreateArgs, AccountExportArgs, AccountImportArgs,
     AccountMigrateArgs, AccountRemoveArgs, AccountSetArgs, AccountShowArgs, AccountUseArgs,
-    AliasAddArgs, AliasCommand, AliasRemoveArgs,
+    AliasAddArgs, AliasCommand, AliasRemoveArgs, SshAddArgs, SshCommand, SshListArgs,
+    SshRemoveArgs,
 };
-use crate::common::{confirm_typed_match, format_address, resolve_address};
+use crate::commands::message::{ForgetTargets, forget_targets};
+use crate::common::{confirm_typed_match, format_address, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview};
 use aleph_sdk::client::{AccountBalance, AlephAccountClient, AlephClient};
+use aleph_sdk::ssh::{AlephSshClient, SshKey, build_add_ssh_key};
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
-use anyhow::{Context, Result};
+use aleph_types::item_hash::ItemHash;
+use anyhow::{Context, Result, anyhow, bail};
+use std::io::Read;
+use std::path::Path;
+use url::Url;
 use zeroize::Zeroizing;
 
 pub async fn handle_account_command(
     client: &AlephClient,
+    ccn_url: &Url,
     command: AccountCommand,
     json: bool,
 ) -> Result<()> {
@@ -31,6 +39,9 @@ pub async fn handle_account_command(
         AccountCommand::Use(args) => handle_use(&store, args, json),
         AccountCommand::Export(args) => handle_export(&store, args, json),
         AccountCommand::Alias { command } => handle_alias_command(&store, command, json),
+        AccountCommand::Ssh { command } => {
+            handle_ssh_command(client, ccn_url, command, json).await
+        }
     }
 }
 
@@ -826,6 +837,199 @@ fn handle_alias_remove(store: &AccountStore, args: AliasRemoveArgs, json: bool) 
         eprintln!("Alias '{}' removed.", args.name);
     }
     Ok(())
+}
+
+async fn handle_ssh_command(
+    client: &AlephClient,
+    ccn_url: &Url,
+    command: SshCommand,
+    json: bool,
+) -> Result<()> {
+    match command {
+        SshCommand::Add(args) => handle_ssh_add(client, ccn_url, args, json).await,
+        SshCommand::List(args) => handle_ssh_list(client, args, json).await,
+        SshCommand::Remove(args) => handle_ssh_remove(client, ccn_url, args, json).await,
+    }
+}
+
+/// Read the key from `--key` or a file path (`-` means stdin), trimmed.
+fn read_ssh_key_arg(file: Option<&Path>, key: Option<&str>) -> Result<String> {
+    if let Some(k) = key {
+        return Ok(k.trim().to_string());
+    }
+    let path = file.expect("clap ArgGroup guarantees one of file/key is set");
+    let content = if path == Path::new("-") {
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(|e| anyhow!("failed to read SSH public key from stdin: {e}"))?;
+        s
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|e| anyhow!("failed to read SSH public key file '{}': {e}", path.display()))?
+    };
+    Ok(content.trim().to_string())
+}
+
+async fn handle_ssh_add(
+    client: &AlephClient,
+    ccn_url: &Url,
+    args: SshAddArgs,
+    json: bool,
+) -> Result<()> {
+    let key = read_ssh_key_arg(args.file.as_deref(), args.key.as_deref())?;
+    aleph_sdk::ssh::validate_pubkey(&key).map_err(|msg| anyhow!("{msg}"))?;
+
+    let account = resolve_account(&args.signing.identity)?;
+    let existing = client.list_ssh_keys(account.address()).await?;
+
+    if existing.iter().any(|k| k.label.as_deref() == Some(args.name.as_str())) {
+        bail!(
+            "an SSH key named '{}' already exists. Choose another --name, or remove it first with: \
+             aleph account ssh remove {}",
+            args.name,
+            args.name
+        );
+    }
+    if let Some(dup) = existing.iter().find(|k| k.key == key) {
+        bail!(
+            "this public key is already registered as '{}'",
+            dup.label.as_deref().unwrap_or("(unnamed)")
+        );
+    }
+
+    let pending = build_add_ssh_key(&account, &key, &args.name)
+        .map_err(|e| anyhow!("failed to sign message: {e}"))?;
+    submit_or_preview(client, ccn_url, &pending, args.signing.dry_run, json).await
+}
+
+async fn handle_ssh_list(client: &AlephClient, args: SshListArgs, json: bool) -> Result<()> {
+    let address = resolve_address_or_active(args.address.as_deref())?;
+    let keys = client.list_ssh_keys(&address).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&keys)?);
+        return Ok(());
+    }
+
+    for k in &keys {
+        let name = k.label.as_deref().unwrap_or("(unnamed)");
+        let preview = ssh_key_preview(&k.key);
+        println!("{name}\t{preview}\t{}\t{}", k.item_hash, k.created.format("%Y-%m-%d"));
+    }
+    Ok(())
+}
+
+/// "ssh-ed25519 ...last8" preview of a key for human listing.
+fn ssh_key_preview(key: &str) -> String {
+    let mut parts = key.split_whitespace();
+    let algo = parts.next().unwrap_or("");
+    let body = parts.next().unwrap_or("");
+    let tail: String =
+        body.chars().rev().take(8).collect::<String>().chars().rev().collect();
+    if body.len() > 8 {
+        format!("{algo} ...{tail}")
+    } else {
+        format!("{algo} {body}")
+    }
+}
+
+/// Resolve a remove target (item-hash first, then unique label) to its hash.
+fn resolve_ssh_key_target(keys: &[SshKey], target: &str) -> Result<ItemHash> {
+    if let Some(k) = keys.iter().find(|k| k.item_hash.to_string() == target) {
+        return Ok(k.item_hash.clone());
+    }
+    let matches: Vec<&SshKey> =
+        keys.iter().filter(|k| k.label.as_deref() == Some(target)).collect();
+    match matches.as_slice() {
+        [] => bail!("no SSH key named '{target}'. List your keys with: aleph account ssh list"),
+        [one] => Ok(one.item_hash.clone()),
+        many => {
+            let hashes: Vec<String> = many.iter().map(|k| k.item_hash.to_string()).collect();
+            bail!(
+                "multiple SSH keys named '{target}'. Remove by item-hash instead, one of: {}",
+                hashes.join(", ")
+            )
+        }
+    }
+}
+
+async fn handle_ssh_remove(
+    client: &AlephClient,
+    ccn_url: &Url,
+    args: SshRemoveArgs,
+    json: bool,
+) -> Result<()> {
+    let account = resolve_account(&args.signing.identity)?;
+    let keys = client.list_ssh_keys(account.address()).await?;
+    let hash = resolve_ssh_key_target(&keys, &args.key)?;
+
+    forget_targets(
+        client,
+        ccn_url,
+        json,
+        ForgetTargets {
+            hashes: vec![hash],
+            aggregates: vec![],
+            reason: None,
+            channel: Some(aleph_sdk::ssh::SSH_CHANNEL.to_string()),
+            on_behalf_of: None,
+            yes: args.yes,
+            confirm_label: "SSH key",
+            signing: args.signing,
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+mod ssh_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn mk(label: Option<&str>, hash: &str) -> SshKey {
+        SshKey {
+            item_hash: hash.parse().unwrap(),
+            key: format!("ssh-ed25519 AAAA{}", label.unwrap_or("x")),
+            label: label.map(|s| s.to_string()),
+            created: Utc::now(),
+        }
+    }
+
+    const H1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const H2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    #[test]
+    fn resolves_unique_label() {
+        let keys = vec![mk(Some("laptop"), H1), mk(Some("desktop"), H2)];
+        assert_eq!(resolve_ssh_key_target(&keys, "laptop").unwrap().to_string(), H1);
+    }
+
+    #[test]
+    fn resolves_direct_hash() {
+        let keys = vec![mk(Some("laptop"), H1)];
+        assert_eq!(resolve_ssh_key_target(&keys, H1).unwrap().to_string(), H1);
+    }
+
+    #[test]
+    fn errors_on_unknown_label() {
+        let keys = vec![mk(Some("laptop"), H1)];
+        assert!(resolve_ssh_key_target(&keys, "nope").is_err());
+    }
+
+    #[test]
+    fn errors_on_ambiguous_label() {
+        let keys = vec![mk(Some("dup"), H1), mk(Some("dup"), H2)];
+        let err = resolve_ssh_key_target(&keys, "dup").unwrap_err().to_string();
+        assert!(err.contains("multiple SSH keys"));
+    }
+
+    #[test]
+    fn preview_truncates_long_body() {
+        let p = ssh_key_preview("ssh-ed25519 AAAAB3NzaC1lZDI1NTE5AAAAIabcdefgh comment");
+        assert!(p.starts_with("ssh-ed25519 ..."));
+        assert!(p.ends_with("abcdefgh"));
+    }
 }
 
 #[cfg(test)]
