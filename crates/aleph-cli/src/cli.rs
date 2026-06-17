@@ -1714,10 +1714,11 @@ sizes the VM at the GPU's minimum. GPU sizes scale in compute-unit steps \
 (e.g. `4vcpu-24gb`, `5vcpu-30gb`); `--vcpus`/`--memory` work too. `--disk-size` \
 is optional for GPU instances.
 
-Required: NAME (positional), `--image`, and at least one \
-`--ssh-pubkey-file`. Image accepts a preset name from the network's \
-`vm-images` aggregate (e.g. `ubuntu26`, `debian12`) or an item hash \
-(hex or IPFS CID).
+Required: NAME (positional) and `--image`. At least one SSH public key \
+must be authorized: pass `--ssh-pubkey-file` and/or `--ssh-key <NAME>`, or, \
+if neither is given, every key registered with `aleph account ssh add` is \
+attached. Image accepts a preset name from the network's `vm-images` \
+aggregate (e.g. `ubuntu26`, `debian12`) or an item hash (hex or IPFS CID).
 
 Pin to a specific compute node with `--crn-hash <HASH>`. For an \
 interactive walkthrough that prompts for any missing fields and lets you \
