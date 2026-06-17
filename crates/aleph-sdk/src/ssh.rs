@@ -5,10 +5,15 @@
 //! a [`SshKeyContent`]. This module is the single, standardized place that knows
 //! that representation.
 
+use std::future::Future;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
+
+use crate::client::{AlephClient, AlephPostClient, MessageError, PaginationParams, PostFilter};
 
 /// Post type used for SSH key records (shared with the web console).
 pub const SSH_POST_TYPE: &str = "ALEPH-SSH";
@@ -50,6 +55,46 @@ const SSH_PUBKEY_PREFIXES: &[&str] = &[
     "sk-ecdsa-sha2-nistp256@openssh.com",
 ];
 
+/// Read SSH keys registered on the Aleph network.
+pub trait AlephSshClient {
+    /// List all SSH keys registered by `address`, newest first.
+    ///
+    /// Posts whose content does not parse as [`SshKeyContent`] are skipped.
+    fn list_ssh_keys(
+        &self,
+        address: &Address,
+    ) -> impl Future<Output = Result<Vec<SshKey>, MessageError>> + Send;
+}
+
+impl AlephSshClient for AlephClient {
+    async fn list_ssh_keys(&self, address: &Address) -> Result<Vec<SshKey>, MessageError> {
+        let filter = PostFilter {
+            addresses: Some(vec![address.clone()]),
+            post_types: Some(vec![SSH_POST_TYPE.to_string()]),
+            channels: Some(vec![SSH_CHANNEL.to_string()]),
+            ..Default::default()
+        };
+        let pagination = PaginationParams { pagination: Some(200), page: Some(1) };
+        let response = self.get_posts_v1(&filter, pagination).await?;
+
+        let mut keys: Vec<SshKey> = response
+            .posts
+            .into_iter()
+            .filter_map(|post| {
+                let content: SshKeyContent = serde_json::from_value(post.content).ok()?;
+                Some(SshKey {
+                    item_hash: post.item_hash,
+                    key: content.key,
+                    label: content.label,
+                    created: post.created,
+                })
+            })
+            .collect();
+        keys.sort_by(|a, b| b.created.cmp(&a.created));
+        Ok(keys)
+    }
+}
+
 /// Validate that `key` looks like an SSH public key (not a private key/garbage).
 pub fn validate_pubkey(key: &str) -> Result<(), String> {
     if SSH_PUBKEY_PREFIXES.iter().any(|p| key.starts_with(p)) {
@@ -65,6 +110,58 @@ pub fn validate_pubkey(key: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn list_ssh_keys_parses_and_sorts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "posts": [
+                {
+                    "item_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "content": {"key": "ssh-ed25519 AAAA", "label": "older"},
+                    "original_item_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "address": "0x0000000000000000000000000000000000000001",
+                    "created": "2024-01-01T00:00:00Z",
+                    "last_updated": "2024-01-01T00:00:00Z"
+                },
+                {
+                    "item_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "content": {"key": "ssh-rsa BBBB", "label": "newer"},
+                    "original_item_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "address": "0x0000000000000000000000000000000000000001",
+                    "created": "2024-06-01T00:00:00Z",
+                    "last_updated": "2024-06-01T00:00:00Z"
+                },
+                {
+                    "item_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+                    "content": {"not": "an ssh key"},
+                    "original_item_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+                    "address": "0x0000000000000000000000000000000000000001",
+                    "created": "2024-03-01T00:00:00Z",
+                    "last_updated": "2024-03-01T00:00:00Z"
+                }
+            ],
+            "pagination_per_page": 200,
+            "pagination_page": 1,
+            "pagination_total": 3
+        });
+        Mock::given(method("GET"))
+            .and(path("/api/v1/posts.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(server.uri().parse().unwrap());
+        let addr = Address::from("0x0000000000000000000000000000000000000001".to_string());
+        let keys = client.list_ssh_keys(&addr).await.unwrap();
+
+        assert_eq!(keys.len(), 2); // the non-SSH post is skipped
+        assert_eq!(keys[0].label.as_deref(), Some("newer")); // newest first
+        assert_eq!(keys[1].label.as_deref(), Some("older"));
+    }
 
     #[test]
     fn validate_pubkey_accepts_valid_keys() {
