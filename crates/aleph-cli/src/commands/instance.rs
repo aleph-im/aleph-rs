@@ -500,6 +500,9 @@ pub(crate) fn select_keys_by_label(labels: &[String], registered: &[SshKey]) -> 
 /// Combine explicit (file + label-selected) keys, or fall back to every
 /// registered key when neither flag was given. Dedupes by key value, preserving
 /// order. Errors when the final set is empty.
+///
+/// `explicit_given` is `true` iff at least one of `--ssh-pubkey-file` or
+/// `--ssh-key` was provided; when `true`, `all_registered` is ignored.
 pub(crate) fn resolve_instance_ssh_keys(
     file_keys: Vec<String>,
     selected: Vec<String>,
@@ -805,6 +808,8 @@ async fn handle_instance_create(
         file_keys.push(key);
     }
     let explicit_given = !args.ssh_pubkey_file.is_empty() || !args.ssh_key.is_empty();
+    // Fetch registered keys only when needed: to resolve --ssh-key labels, or to
+    // fall back to all registered keys when no key flag was given at all.
     let registered = if !args.ssh_key.is_empty() || !explicit_given {
         aleph_client.list_ssh_keys(account.address()).await?
     } else {
