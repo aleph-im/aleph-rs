@@ -114,14 +114,23 @@ fn add_ssh_key_envelope(key: &str, label: &str) -> serde_json::Value {
 }
 
 /// Build a signed message registering `key` under `label` on the SSH channel.
+///
+/// When `on_behalf_of` is set, the key is registered for that address (the
+/// envelope's content owner), which the network accepts only if that address
+/// has authorized the signer.
 pub fn build_add_ssh_key<A: Account>(
     account: &A,
     key: &str,
     label: &str,
+    on_behalf_of: Option<&Address>,
 ) -> Result<PendingMessage, SignError> {
-    MessageBuilder::new(account, MessageType::Post, add_ssh_key_envelope(key, label))
-        .channel(Channel::from(SSH_CHANNEL.to_string()))
-        .build()
+    let mut builder =
+        MessageBuilder::new(account, MessageType::Post, add_ssh_key_envelope(key, label))
+            .channel(Channel::from(SSH_CHANNEL.to_string()));
+    if let Some(owner) = on_behalf_of {
+        builder = builder.on_behalf_of(owner.clone());
+    }
+    builder.build()
 }
 
 /// Validate that `key` looks like an SSH public key (not a private key/garbage).

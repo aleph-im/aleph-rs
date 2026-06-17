@@ -1458,6 +1458,10 @@ pub struct SshAddArgs {
     #[arg(long, conflicts_with = "file")]
     pub key: Option<String>,
 
+    /// Register the key for another address (requires an authorization from it).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -1474,6 +1478,10 @@ pub struct SshListArgs {
 pub struct SshRemoveArgs {
     /// Name (label) or item-hash of the key to remove.
     pub key: String,
+
+    /// Remove the key from another address (requires an authorization from it).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
 
     /// Skip the confirmation prompt.
     #[arg(long)]

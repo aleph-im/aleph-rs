@@ -888,7 +888,17 @@ async fn handle_ssh_add(
     aleph_sdk::ssh::validate_pubkey(&key).map_err(|msg| anyhow!("{msg}"))?;
 
     let account = resolve_account(&args.signing.identity)?;
-    let existing = client.list_ssh_keys(account.address()).await?;
+    // With --on-behalf-of, register under (and check duplicates against) that
+    // owner's registry; otherwise the signer's own.
+    let on_behalf_of = args
+        .on_behalf_of
+        .as_deref()
+        .map(resolve_address)
+        .transpose()?;
+    let owner_address = on_behalf_of
+        .clone()
+        .unwrap_or_else(|| account.address().clone());
+    let existing = client.list_ssh_keys(&owner_address).await?;
 
     // Best-effort duplicate guard against the current network state. Concurrent
     // adds can still race; duplicates are then removable by item-hash.
@@ -910,7 +920,7 @@ async fn handle_ssh_add(
         );
     }
 
-    let pending = build_add_ssh_key(&account, &key, &args.name)
+    let pending = build_add_ssh_key(&account, &key, &args.name, on_behalf_of.as_ref())
         .map_err(|e| anyhow!("failed to sign message: {e}"))?;
     submit_or_preview(client, ccn_url, &pending, args.signing.dry_run, json).await
 }
@@ -985,7 +995,13 @@ async fn handle_ssh_remove(
     json: bool,
 ) -> Result<()> {
     let account = resolve_account(&args.signing.identity)?;
-    let keys = client.list_ssh_keys(account.address()).await?;
+    // With --on-behalf-of, resolve the label against that owner's registry and
+    // forget on their behalf; otherwise the signer's own.
+    let owner_address = match &args.on_behalf_of {
+        Some(owner) => resolve_address(owner)?,
+        None => account.address().clone(),
+    };
+    let keys = client.list_ssh_keys(&owner_address).await?;
     let hash = resolve_ssh_key_target(&keys, &args.key)?;
 
     forget_targets(
@@ -997,7 +1013,7 @@ async fn handle_ssh_remove(
             aggregates: vec![],
             reason: None,
             channel: Some(aleph_sdk::ssh::SSH_CHANNEL.to_string()),
-            on_behalf_of: None,
+            on_behalf_of: args.on_behalf_of.clone(),
             yes: args.yes,
             confirm_label: "SSH key",
             signing: args.signing,
