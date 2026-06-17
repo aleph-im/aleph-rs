@@ -1775,15 +1775,20 @@ Examples:
 Open an SSH session to a dispatched VM instance.
 
 The instance must already be dispatched: the scheduler is queried to find
-which CRN owns it, then the CRN's `/about/executions/list` endpoint is
-consulted to discover the VM's IPv6 address. SSH is then exec'd with that
-target.
+which CRN owns it, then the CRN's executions endpoint is consulted to
+discover how to reach it. SSH is then exec'd with that target.
+
+By default (or with -6) this connects directly to the VM's IPv6 address.
+Pass -4 to connect over IPv4 instead, via the CRN host's public IPv4 and the
+forwarded host port for the SSH port (set up with `aleph instance
+port-forward`); `--host-port` overrides that lookup for non-standard setups.
 
 Pass `--crn` (a node hash, unique hash prefix or suffix, or URL) to skip scheduler discovery. Extra arguments after `--`
 are forwarded verbatim to `ssh` (e.g. to run a remote command).
 
 Examples:
   aleph instance ssh <vm-hash>
+  aleph instance ssh -4 <vm-hash>
   aleph instance ssh <vm-hash> --user ubuntu --identity ~/.ssh/id_ed25519
   aleph instance ssh <vm-hash> -- uptime")]
     Ssh(InstanceSshArgs),
@@ -2218,13 +2223,30 @@ pub struct InstanceSshArgs {
     #[arg(long, alias = "crn-url")]
     pub crn: Option<String>,
 
+    /// Force IPv4: connect via the CRN host's public IPv4 and a forwarded
+    /// port (see `aleph instance port-forward`). Mutually exclusive with -6.
+    #[arg(short = '4', long = "ipv4", conflicts_with = "ipv6")]
+    pub ipv4: bool,
+
+    /// Force IPv6: connect directly to the VM's IPv6 address. This is the
+    /// default when neither -4 nor -6 is given.
+    #[arg(short = '6', long = "ipv6")]
+    pub ipv6: bool,
+
     /// SSH user to connect as.
     #[arg(long, default_value = "root")]
     pub user: String,
 
-    /// SSH port.
-    #[arg(long, default_value_t = 22)]
+    /// SSH port inside the VM (the port sshd listens on). Default 22. With -4,
+    /// the matching forwarded host port is resolved from the CRN's port map.
+    #[arg(short = 'p', long, default_value_t = 22)]
     pub port: u16,
+
+    /// IPv4 only: connect to this host-side port directly, bypassing the CRN
+    /// port-map lookup. Use when no forward for the SSH port can be found, or
+    /// for non-standard setups. Implies -4; mutually exclusive with -6.
+    #[arg(long, conflicts_with = "ipv6")]
+    pub host_port: Option<u16>,
 
     /// Path to an SSH private key (forwarded to `ssh -i`).
     #[arg(short = 'i', long)]
