@@ -309,7 +309,7 @@ pub struct PostListArgs {
 use aleph_sdk::client::{MessageFilter, PostFilter, SortBy, SortOrder};
 use aleph_types::message::{MessageStatus, MessageType};
 use aleph_types::timestamp::Timestamp;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use std::str::FromStr;
 
 fn parse_timestamp(s: &str) -> Result<Timestamp, String> {
@@ -2466,15 +2466,87 @@ Examples:
                         --expiration 2026-12-31T23:59:59Z")]
     Transfer(TransferCreditArgs),
     /// Display the paginated credit history of an address
+    #[command(long_about = "\
+List credit-affecting events for an address (purchases, transfers, \
+distributions, and per-resource expenses), most recent first.
+
+Filters narrow the rows server-side:
+  --since 7d / --start / --end   restrict to a time window
+  --expenses / --top-ups         show only spends or only credits received
+  --resource-type store          restrict to a billed resource type
+                                 (store = storage; instance, program = compute)
+
+For spend totals without the per-row detail, use `aleph credit summary`.
+
+Examples:
+  aleph credit history --since 24h
+  aleph credit history --expenses --resource-type store --resource-type program
+  aleph credit history --address 0xab12... --start 2026-01-01T00:00:00Z --json")]
     History(CreditHistoryArgs),
+    /// Summarize credit spend totals for an address over a filter window
+    #[command(long_about = "\
+Print aggregate credit totals for an address instead of the per-row detail: \
+the number of matching entries, the net change, total credits received \
+(incoming), and total credits spent (outgoing).
+
+Accepts the same filters as `aleph credit history` (--since/--start/--end, \
+--expenses/--top-ups, --resource-type). Always succeeds, reporting zeros for \
+an address with no matching entries.
+
+Examples:
+  aleph credit summary --since 7d
+  aleph credit summary --since 30d --expenses --resource-type store
+  aleph credit summary --address 0xab12... --json")]
+    Summary(CreditSummaryArgs),
 }
 
+/// Read-only filters shared by `aleph credit history` and
+/// `aleph credit summary`.
 #[derive(Args)]
-pub struct CreditHistoryArgs {
+pub struct CreditFilterArgs {
     /// Owner address. Accepts a raw address (`0x...`) or a local account /
     /// alias name. Defaults to the current default account.
     #[arg(long)]
     pub address: Option<String>,
+
+    /// Only include entries from the last DURATION, e.g. `30m`, `24h`, `7d`,
+    /// `2w`. Shorthand for `--start <now - DURATION>`; cannot be combined
+    /// with `--start`.
+    #[arg(long, value_parser = parse_lookback, conflicts_with = "start")]
+    pub since: Option<chrono::Duration>,
+
+    /// Lower bound (inclusive): only entries at or after this instant.
+    /// Accepts a date (`2026-01-01`, UTC midnight), a datetime
+    /// (`2026-01-01T00:00:00Z`; timezone-less is treated as UTC), or Unix
+    /// seconds.
+    #[arg(long, value_parser = parse_when)]
+    pub start: Option<DateTime<Utc>>,
+
+    /// Upper bound (inclusive): only entries at or before this instant. Same
+    /// formats as `--start`.
+    #[arg(long, value_parser = parse_when)]
+    pub end: Option<DateTime<Utc>>,
+
+    /// Only show expenses (credits spent: negative entries). Mutually
+    /// exclusive with `--top-ups`.
+    #[arg(long, conflicts_with = "top_ups")]
+    pub expenses: bool,
+
+    /// Only show top-ups (credits received: distributions and incoming
+    /// transfers).
+    #[arg(long)]
+    pub top_ups: bool,
+
+    /// Restrict to entries billed to this resource type (repeatable). `store`
+    /// is storage; `instance` and `program` are compute.
+    #[arg(long = "resource-type", value_enum)]
+    pub resource_type: Vec<ResourceTypeCli>,
+}
+
+#[derive(Args)]
+pub struct CreditHistoryArgs {
+    #[command(flatten)]
+    pub filters: CreditFilterArgs,
 
     /// Page number (1-indexed).
     #[arg(long, default_value_t = 1)]
@@ -2483,6 +2555,121 @@ pub struct CreditHistoryArgs {
     /// Items per page (server-clamped).
     #[arg(long, default_value_t = 100)]
     pub page_size: u32,
+}
+
+#[derive(Args)]
+pub struct CreditSummaryArgs {
+    #[command(flatten)]
+    pub filters: CreditFilterArgs,
+}
+
+/// CLI spelling of the billed-resource message types accepted by the
+/// `resourceTypes` credit-history filter.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ResourceTypeCli {
+    Store,
+    Instance,
+    Program,
+    Post,
+    Aggregate,
+    Forget,
+}
+
+impl From<ResourceTypeCli> for MessageType {
+    fn from(value: ResourceTypeCli) -> Self {
+        match value {
+            ResourceTypeCli::Store => MessageType::Store,
+            ResourceTypeCli::Instance => MessageType::Instance,
+            ResourceTypeCli::Program => MessageType::Program,
+            ResourceTypeCli::Post => MessageType::Post,
+            ResourceTypeCli::Aggregate => MessageType::Aggregate,
+            ResourceTypeCli::Forget => MessageType::Forget,
+        }
+    }
+}
+
+/// Parse a relative lookback window like `30m`, `24h`, `7d`, or `2w` into a
+/// duration. The unit suffix is required and the magnitude must be a positive
+/// integer.
+fn parse_lookback(s: &str) -> Result<chrono::Duration, String> {
+    let trimmed = s.trim();
+    let split = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| format!("missing time unit in '{trimmed}' (expected e.g. 24h, 7d)"))?;
+    let (value, unit) = trimmed.split_at(split);
+    let magnitude: i64 = value.parse().map_err(|_| {
+        format!("invalid duration '{trimmed}': expected a number followed by a unit")
+    })?;
+    if magnitude <= 0 {
+        return Err(format!("duration '{trimmed}' must be positive"));
+    }
+    let unit_seconds: i64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        "w" => 604_800,
+        other => {
+            return Err(format!(
+                "unknown time unit '{other}' (use s, m, h, d, or w)"
+            ));
+        }
+    };
+    let seconds = magnitude
+        .checked_mul(unit_seconds)
+        .ok_or_else(|| format!("duration '{trimmed}' is too large"))?;
+    chrono::Duration::try_seconds(seconds)
+        .ok_or_else(|| format!("duration '{trimmed}' is too large"))
+}
+
+/// Parse an instant for the `--start` / `--end` credit-history bounds.
+///
+/// Accepts, in order of preference:
+/// - an RFC3339 timestamp with an explicit offset (`2026-01-01T00:00:00Z`),
+/// - a timezone-less datetime, interpreted as UTC, in extended (`2026-01-01T00:00:00`)
+///   or compact (`20260101T00:00:00`) ISO spelling,
+/// - a calendar date, interpreted as UTC midnight, extended (`2026-01-01`) or
+///   compact (`20260101`),
+/// - Unix seconds (tried last, so a compact date like `20260101` is read as a
+///   date rather than an epoch in 1970).
+fn parse_when(s: &str) -> Result<DateTime<Utc>, String> {
+    let trimmed = s.trim();
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    const DATETIME_FORMATS: &[&str] = &[
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y%m%dT%H:%M:%S",
+        "%Y%m%dT%H%M%S",
+    ];
+    for fmt in DATETIME_FORMATS {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Ok(naive.and_utc());
+        }
+    }
+
+    const DATE_FORMATS: &[&str] = &["%Y-%m-%d", "%Y%m%d"];
+    for fmt in DATE_FORMATS {
+        if let Ok(date) = NaiveDate::parse_from_str(trimmed, fmt) {
+            return Ok(date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is a valid time")
+                .and_utc());
+        }
+    }
+
+    if let Ok(seconds) = trimmed.parse::<i64>() {
+        return DateTime::<Utc>::from_timestamp(seconds, 0)
+            .ok_or_else(|| format!("Unix timestamp '{trimmed}' is out of range"));
+    }
+
+    Err(format!(
+        "invalid timestamp '{trimmed}': expected a date (2026-01-01), \
+         a datetime (2026-01-01T00:00:00Z), or Unix seconds"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -2879,6 +3066,156 @@ mod credit_transfer_args_tests {
                 assert_eq!(addresses[0].to_string(), "0xABCD1234");
             }
             _ => panic!("expected post list"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod credit_filter_args_tests {
+    use super::*;
+
+    fn history_filters(args: &[&str]) -> CreditFilterArgs {
+        let mut full = vec!["aleph", "credit", "history"];
+        full.extend_from_slice(args);
+        match Cli::try_parse_from(full).unwrap().command {
+            Commands::Credit {
+                command: CreditCommand::History(h),
+            } => h.filters,
+            _ => panic!("expected credit history"),
+        }
+    }
+
+    #[test]
+    fn parse_lookback_supports_each_unit() {
+        assert_eq!(
+            parse_lookback("30s").unwrap(),
+            chrono::Duration::seconds(30)
+        );
+        assert_eq!(
+            parse_lookback("15m").unwrap(),
+            chrono::Duration::minutes(15)
+        );
+        assert_eq!(parse_lookback("24h").unwrap(), chrono::Duration::hours(24));
+        assert_eq!(parse_lookback("7d").unwrap(), chrono::Duration::days(7));
+        assert_eq!(parse_lookback("2w").unwrap(), chrono::Duration::weeks(2));
+    }
+
+    #[test]
+    fn parse_lookback_rejects_bad_input() {
+        assert!(parse_lookback("7").is_err(), "missing unit");
+        assert!(parse_lookback("d").is_err(), "missing magnitude");
+        assert!(parse_lookback("7y").is_err(), "unknown unit");
+        assert!(parse_lookback("0d").is_err(), "non-positive");
+        assert!(parse_lookback("-3d").is_err(), "negative");
+    }
+
+    #[test]
+    fn parse_when_accepts_unix_seconds_and_rfc3339() {
+        let from_epoch = parse_when("1769990400").unwrap();
+        assert_eq!(from_epoch.timestamp(), 1769990400);
+        let from_rfc = parse_when("2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(from_rfc.to_rfc3339(), "2026-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn parse_when_accepts_dates_and_timezoneless_datetimes() {
+        // All of these refer to 2026-01-01T00:00:00 UTC.
+        let expected = parse_when("2026-01-01T00:00:00Z").unwrap();
+        for input in [
+            "2026-01-01",
+            "20260101",
+            "2026-01-01T00:00:00",
+            "2026-01-01 00:00:00",
+            "20260101T00:00:00",
+            "20260101T000000",
+        ] {
+            assert_eq!(parse_when(input).unwrap(), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn parse_when_compact_date_is_not_read_as_epoch() {
+        // Regression: `20260101` must mean 2026-01-01, not epoch second
+        // 20260101 (August 1970).
+        assert_eq!(parse_when("20260101").unwrap().timestamp(), 1_767_225_600);
+    }
+
+    #[test]
+    fn parse_when_rejects_garbage() {
+        assert!(parse_when("not-a-date").is_err());
+        assert!(parse_when("2026-13-01").is_err(), "invalid month");
+    }
+
+    #[test]
+    fn resource_type_cli_maps_to_message_type() {
+        assert_eq!(
+            MessageType::from(ResourceTypeCli::Store),
+            MessageType::Store
+        );
+        assert_eq!(
+            MessageType::from(ResourceTypeCli::Instance),
+            MessageType::Instance
+        );
+        assert_eq!(
+            MessageType::from(ResourceTypeCli::Program),
+            MessageType::Program
+        );
+        assert_eq!(MessageType::from(ResourceTypeCli::Post), MessageType::Post);
+        assert_eq!(
+            MessageType::from(ResourceTypeCli::Aggregate),
+            MessageType::Aggregate
+        );
+        assert_eq!(
+            MessageType::from(ResourceTypeCli::Forget),
+            MessageType::Forget
+        );
+    }
+
+    #[test]
+    fn resource_type_flag_repeats() {
+        let filters = history_filters(&["--resource-type", "store", "--resource-type", "program"]);
+        assert_eq!(filters.resource_type.len(), 2);
+        assert!(matches!(filters.resource_type[0], ResourceTypeCli::Store));
+        assert!(matches!(filters.resource_type[1], ResourceTypeCli::Program));
+    }
+
+    #[test]
+    fn expenses_and_top_ups_conflict() {
+        match Cli::try_parse_from(["aleph", "credit", "history", "--expenses", "--top-ups"]) {
+            Ok(_) => panic!("expected conflict error"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict),
+        }
+    }
+
+    #[test]
+    fn since_and_start_conflict() {
+        match Cli::try_parse_from([
+            "aleph",
+            "credit",
+            "history",
+            "--since",
+            "7d",
+            "--start",
+            "1769990400",
+        ]) {
+            Ok(_) => panic!("expected conflict error"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict),
+        }
+    }
+
+    #[test]
+    fn summary_accepts_shared_filters() {
+        let cli =
+            Cli::try_parse_from(["aleph", "credit", "summary", "--since", "7d", "--expenses"])
+                .unwrap();
+        match cli.command {
+            Commands::Credit {
+                command: CreditCommand::Summary(s),
+            } => {
+                assert!(s.filters.since.is_some());
+                assert!(s.filters.expenses);
+            }
+            _ => panic!("expected credit summary"),
         }
     }
 }

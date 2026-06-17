@@ -1338,13 +1338,25 @@ pub trait AlephAccountClient {
     /// (purchases, transfers, expirations, etc.).
     ///
     /// Pages are 1-indexed to match the server. `page_size` is clamped by the
-    /// server side; pass `None` to use the server default.
+    /// server side; pass `None` to use the server default. `filters` narrows
+    /// the rows by time range, direction, and billed resource type.
     fn get_credit_history(
         &self,
         address: &Address,
         page: u32,
         page_size: Option<u32>,
+        filters: &CreditHistoryFilters,
     ) -> impl Future<Output = Result<CreditHistoryResponse, MessageError>> + Send;
+
+    /// Returns aggregate spend totals for the address over the same filter
+    /// set as [`get_credit_history`](Self::get_credit_history). Unlike the
+    /// listing endpoint this always succeeds, returning zeroed totals for an
+    /// address with no matching entries.
+    fn get_credit_history_summary(
+        &self,
+        address: &Address,
+        filters: &CreditHistoryFilters,
+    ) -> impl Future<Output = Result<CreditHistorySummary, MessageError>> + Send;
 }
 
 pub trait AlephAggregateClient {
@@ -2739,6 +2751,84 @@ pub struct CreditHistoryResponse {
     pub pagination_per_page: u32,
 }
 
+/// Sign-based classification of a credit history entry, mirroring pyaleph's
+/// `CreditFlow`. Incoming entries have a positive amount (distributions,
+/// received transfers); outgoing entries have a negative amount (expenses,
+/// sent transfers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreditDirection {
+    Incoming,
+    Outgoing,
+}
+
+impl CreditDirection {
+    /// The `direction` query-param value expected by pyaleph.
+    fn as_wire(self) -> &'static str {
+        match self {
+            CreditDirection::Incoming => "incoming",
+            CreditDirection::Outgoing => "outgoing",
+        }
+    }
+}
+
+/// Server-side filters shared by the credit history listing and summary
+/// endpoints. All fields are optional; the default value applies no filtering.
+#[derive(Debug, Default, Clone)]
+pub struct CreditHistoryFilters {
+    /// Inclusive lower bound on `message_timestamp`, as Unix seconds.
+    pub start_date: Option<i64>,
+    /// Inclusive upper bound on `message_timestamp`, as Unix seconds.
+    pub end_date: Option<i64>,
+    /// Restrict to incoming (top-ups) or outgoing (expenses) entries.
+    pub direction: Option<CreditDirection>,
+    /// Restrict to entries whose billed resource is one of these message
+    /// types (e.g. `STORE` for storage, `INSTANCE`/`PROGRAM` for compute).
+    pub resource_types: Vec<MessageType>,
+}
+
+impl CreditHistoryFilters {
+    /// Render the filters as repeated query parameters in pyaleph's camelCase
+    /// wire vocabulary. Empty/`None` fields are omitted.
+    fn query_params(&self) -> Vec<(&'static str, String)> {
+        let mut params = Vec::new();
+        if let Some(start) = self.start_date {
+            params.push(("startDate", start.to_string()));
+        }
+        if let Some(end) = self.end_date {
+            params.push(("endDate", end.to_string()));
+        }
+        if let Some(direction) = self.direction {
+            params.push(("direction", direction.as_wire().to_string()));
+        }
+        if !self.resource_types.is_empty() {
+            let joined = self
+                .resource_types
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            params.push(("resourceTypes", joined));
+        }
+        params
+    }
+}
+
+/// Aggregate spend totals from
+/// `/api/v0/addresses/{address}/credit_history/summary`.
+///
+/// Mirrors `aleph.schemas.api.accounts.GetAccountCreditHistorySummaryResponse`
+/// in pyaleph. `total_incoming` is the sum of positive amounts (>= 0),
+/// `total_outgoing` the sum of negative amounts (<= 0), and `total_amount`
+/// their net.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreditHistorySummary {
+    pub address: String,
+    pub entry_count: i64,
+    pub total_amount: i64,
+    pub total_incoming: i64,
+    pub total_outgoing: i64,
+}
+
 /// One row of `/api/v0/addresses/{address}/files`.
 ///
 /// `created` is a Unix-epoch timestamp (the cursor-mode shape used by the
@@ -2867,6 +2957,7 @@ impl AlephAccountClient for AlephClient {
         address: &Address,
         page: u32,
         page_size: Option<u32>,
+        filters: &CreditHistoryFilters,
     ) -> Result<CreditHistoryResponse, MessageError> {
         let url = self
             .ccn_url
@@ -2876,7 +2967,8 @@ impl AlephAccountClient for AlephClient {
         let mut request = self
             .http_client
             .get(url)
-            .query(&[("page", page.to_string())]);
+            .query(&[("page", page.to_string())])
+            .query(&filters.query_params());
         if let Some(per_page) = page_size {
             request = request.query(&[("pagination", per_page.to_string())]);
         }
@@ -2904,6 +2996,48 @@ impl AlephAccountClient for AlephClient {
             .await
             .map_err(reqwest_middleware::Error::from)?;
         Ok(history)
+    }
+
+    async fn get_credit_history_summary(
+        &self,
+        address: &Address,
+        filters: &CreditHistoryFilters,
+    ) -> Result<CreditHistorySummary, MessageError> {
+        let path = format!("/api/v0/addresses/{}/credit_history/summary", address);
+        let url = self
+            .ccn_url
+            .join(&path)
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let response = self
+            .http_client
+            .get(url)
+            .query(&filters.query_params())
+            .send()
+            .await?;
+
+        // Unlike the listing endpoint, the summary endpoint always returns 200
+        // (with zeroed totals for an unknown address). A 404 therefore means
+        // the route does not exist, i.e. the CCN predates this endpoint, so we
+        // surface it as an error rather than silently reporting zero spend.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(MessageError::ApiError {
+                status: StatusCode::NOT_FOUND.as_u16(),
+                body: format!(
+                    "credit history summary endpoint not found ({path}); \
+                     this CCN may be running a version without support for it"
+                ),
+            });
+        }
+
+        let response = response
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+        let summary: CreditHistorySummary = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(summary)
     }
 }
 
@@ -4582,6 +4716,128 @@ mod credit_history_serde_tests {
         let item: CreditHistoryItem = serde_json::from_value(missing_optionals).unwrap();
         assert!(item.expiration_date.is_none());
         assert!(item.payment_method.is_none());
+    }
+
+    #[test]
+    fn credit_direction_wire_values() {
+        assert_eq!(CreditDirection::Incoming.as_wire(), "incoming");
+        assert_eq!(CreditDirection::Outgoing.as_wire(), "outgoing");
+    }
+
+    #[test]
+    fn empty_filters_emit_no_query_params() {
+        assert!(CreditHistoryFilters::default().query_params().is_empty());
+    }
+
+    #[test]
+    fn filters_render_camelcase_query_params() {
+        let filters = CreditHistoryFilters {
+            start_date: Some(1_769_990_400),
+            end_date: Some(1_770_000_000),
+            direction: Some(CreditDirection::Outgoing),
+            resource_types: vec![MessageType::Store, MessageType::Program],
+        };
+        let params = filters.query_params();
+        assert_eq!(
+            params,
+            vec![
+                ("startDate", "1769990400".to_string()),
+                ("endDate", "1770000000".to_string()),
+                ("direction", "outgoing".to_string()),
+                ("resourceTypes", "STORE,PROGRAM".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn summary_deserializes() {
+        let body = serde_json::json!({
+            "address": "0xabc",
+            "entry_count": 42,
+            "total_amount": -1_250_000,
+            "total_incoming": 3_000_000,
+            "total_outgoing": -4_250_000,
+        });
+        let summary: CreditHistorySummary = serde_json::from_value(body).unwrap();
+        assert_eq!(summary.entry_count, 42);
+        assert_eq!(summary.total_amount, -1_250_000);
+        assert_eq!(summary.total_incoming, 3_000_000);
+        assert_eq!(summary.total_outgoing, -4_250_000);
+    }
+}
+
+#[cfg(test)]
+mod credit_history_summary_tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn summary_sends_filters_and_parses_totals() {
+        let server = MockServer::start().await;
+        let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/v0/addresses/{addr}/credit_history/summary"
+            )))
+            .and(query_param("startDate", "1769990400"))
+            .and(query_param("direction", "outgoing"))
+            .and(query_param("resourceTypes", "STORE,PROGRAM"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "address": addr.to_string(),
+                "entry_count": 3,
+                "total_amount": -900,
+                "total_incoming": 0,
+                "total_outgoing": -900,
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let filters = CreditHistoryFilters {
+            start_date: Some(1_769_990_400),
+            end_date: None,
+            direction: Some(CreditDirection::Outgoing),
+            resource_types: vec![MessageType::Store, MessageType::Program],
+        };
+        let summary = client
+            .get_credit_history_summary(&addr, &filters)
+            .await
+            .unwrap();
+        assert_eq!(summary.entry_count, 3);
+        assert_eq!(summary.total_outgoing, -900);
+    }
+
+    #[tokio::test]
+    async fn summary_404_is_an_error_not_silent_zeros() {
+        // An old CCN without the summary route 404s. We must not report that
+        // as zero spend; it has to surface as an error so the caller knows the
+        // server is unsupported.
+        let server = MockServer::start().await;
+        let addr = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
+
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/v0/addresses/{addr}/credit_history/summary"
+            )))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let err = client
+            .get_credit_history_summary(&addr, &CreditHistoryFilters::default())
+            .await
+            .expect_err("404 must be an error, not zeroed totals");
+        match err {
+            MessageError::ApiError { status, body } => {
+                assert_eq!(status, 404);
+                assert!(body.contains("summary endpoint not found"), "got: {body}");
+            }
+            other => panic!("expected ApiError, got: {other:?}"),
+        }
     }
 }
 
