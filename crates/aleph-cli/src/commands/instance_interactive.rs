@@ -111,7 +111,10 @@ pub async fn resolve_interactive(
     // --ssh-key labels were given, or the owner already has registered keys,
     // the resolver in handle_instance_create will attach those instead.
     if args.ssh_pubkey_file.is_empty() && args.ssh_key.is_empty() {
-        let registered = aleph_client.list_ssh_keys(owner_address).await.unwrap_or_default();
+        let registered = aleph_client
+            .list_ssh_keys(owner_address)
+            .await
+            .unwrap_or_default();
         if registered.is_empty() {
             args.ssh_pubkey_file = vec![prompt_ssh_pubkey_path()?];
         } else {

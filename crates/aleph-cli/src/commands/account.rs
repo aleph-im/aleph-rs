@@ -888,6 +888,8 @@ async fn handle_ssh_add(
     let account = resolve_account(&args.signing.identity)?;
     let existing = client.list_ssh_keys(account.address()).await?;
 
+    // Best-effort duplicate guard against the current network state. Concurrent
+    // adds can still race; duplicates are then removable by item-hash.
     if existing
         .iter()
         .any(|k| k.label.as_deref() == Some(args.name.as_str()))

@@ -807,8 +807,12 @@ async fn handle_instance_create(
     };
 
     if args.interactive {
-        crate::commands::instance_interactive::resolve_interactive(&mut args, aleph_client, &owner_address)
-            .await?;
+        crate::commands::instance_interactive::resolve_interactive(
+            &mut args,
+            aleph_client,
+            &owner_address,
+        )
+        .await?;
     }
 
     // Resolve SSH keys: ad-hoc files + label-selected registered keys, falling
