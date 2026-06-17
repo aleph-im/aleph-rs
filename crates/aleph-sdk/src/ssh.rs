@@ -79,7 +79,10 @@ impl AlephSshClient for AlephClient {
             channels: Some(vec![SSH_CHANNEL.to_string()]),
             ..Default::default()
         };
-        let pagination = PaginationParams { pagination: Some(200), page: Some(1) };
+        let pagination = PaginationParams {
+            pagination: Some(200),
+            page: Some(1),
+        };
         let response = self.get_posts_v1(&filter, pagination).await?;
 
         let mut keys: Vec<SshKey> = response
@@ -129,9 +132,13 @@ pub fn build_forget_ssh_key<A: Account>(
     account: &A,
     item_hash: &ItemHash,
 ) -> Result<PendingMessage, SignError> {
-    MessageBuilder::new(account, MessageType::Forget, forget_ssh_key_envelope(item_hash))
-        .channel(Channel::from(SSH_CHANNEL.to_string()))
-        .build()
+    MessageBuilder::new(
+        account,
+        MessageType::Forget,
+        forget_ssh_key_envelope(item_hash),
+    )
+    .channel(Channel::from(SSH_CHANNEL.to_string()))
+    .build()
 }
 
 /// Validate that `key` looks like an SSH public key (not a private key/garbage).
@@ -222,7 +229,10 @@ mod tests {
 
     #[test]
     fn content_serializes_with_key_and_label() {
-        let c = SshKeyContent { key: "ssh-ed25519 AAAA".into(), label: Some("laptop".into()) };
+        let c = SshKeyContent {
+            key: "ssh-ed25519 AAAA".into(),
+            label: Some("laptop".into()),
+        };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["key"], "ssh-ed25519 AAAA");
         assert_eq!(v["label"], "laptop");
@@ -230,14 +240,18 @@ mod tests {
 
     #[test]
     fn content_omits_absent_label() {
-        let c = SshKeyContent { key: "ssh-ed25519 AAAA".into(), label: None };
+        let c = SshKeyContent {
+            key: "ssh-ed25519 AAAA".into(),
+            label: None,
+        };
         let v = serde_json::to_value(&c).unwrap();
         assert!(v.get("label").is_none());
     }
 
     #[test]
     fn content_deserializes_without_label() {
-        let c: SshKeyContent = serde_json::from_value(serde_json::json!({"key": "ssh-rsa X"})).unwrap();
+        let c: SshKeyContent =
+            serde_json::from_value(serde_json::json!({"key": "ssh-rsa X"})).unwrap();
         assert_eq!(c.key, "ssh-rsa X");
         assert_eq!(c.label, None);
     }
@@ -252,8 +266,9 @@ mod tests {
 
     #[test]
     fn forget_envelope_lists_hash() {
-        let hash: ItemHash =
-            "1111111111111111111111111111111111111111111111111111111111111111".parse().unwrap();
+        let hash: ItemHash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
         let v = forget_ssh_key_envelope(&hash);
         assert_eq!(
             v["hashes"][0],

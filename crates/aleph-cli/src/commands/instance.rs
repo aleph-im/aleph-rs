@@ -9,9 +9,9 @@ use aleph_sdk::aggregate_models::vm_images::{VmImagesData, VmImagesError};
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter, MessageWithStatus,
 };
-use aleph_sdk::ssh::{AlephSshClient, SshKey};
 use aleph_sdk::messages::{ForgetBuilder, InstanceBuilder};
 use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
+use aleph_sdk::ssh::{AlephSshClient, SshKey};
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
@@ -471,13 +471,15 @@ pub async fn handle_instance_command(
 }
 
 pub(crate) fn validate_ssh_pubkey(key: &str, path: &std::path::Path) -> Result<()> {
-    aleph_sdk::ssh::validate_pubkey(key)
-        .map_err(|msg| anyhow!("'{}' {}", path.display(), msg))
+    aleph_sdk::ssh::validate_pubkey(key).map_err(|msg| anyhow!("'{}' {}", path.display(), msg))
 }
 
 /// Resolve `--ssh-key` labels against the registered keys, returning their key
 /// strings. Errors (listing available labels) if any label is unknown.
-pub(crate) fn select_keys_by_label(labels: &[String], registered: &[SshKey]) -> Result<Vec<String>> {
+pub(crate) fn select_keys_by_label(
+    labels: &[String],
+    registered: &[SshKey],
+) -> Result<Vec<String>> {
     labels
         .iter()
         .map(|label| {
@@ -490,7 +492,11 @@ pub(crate) fn select_keys_by_label(labels: &[String], registered: &[SshKey]) -> 
                         registered.iter().filter_map(|k| k.label.clone()).collect();
                     anyhow!(
                         "no registered SSH key named '{label}'. Available: {}",
-                        if avail.is_empty() { "(none)".to_string() } else { avail.join(", ") }
+                        if avail.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            avail.join(", ")
+                        }
                     )
                 })
         })
@@ -801,7 +807,10 @@ async fn handle_instance_create(
     let mut file_keys = Vec::new();
     for path in &args.ssh_pubkey_file {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            anyhow!("failed to read SSH public key file '{}': {e}", path.display())
+            anyhow!(
+                "failed to read SSH public key file '{}': {e}",
+                path.display()
+            )
         })?;
         let key = content.trim().to_string();
         validate_ssh_pubkey(&key, path)?;

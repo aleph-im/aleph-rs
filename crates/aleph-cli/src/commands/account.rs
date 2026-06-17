@@ -7,7 +7,10 @@ use crate::cli::{
     SshRemoveArgs,
 };
 use crate::commands::message::{ForgetTargets, forget_targets};
-use crate::common::{confirm_typed_match, format_address, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview};
+use crate::common::{
+    confirm_typed_match, format_address, resolve_account, resolve_address,
+    resolve_address_or_active, submit_or_preview,
+};
 use aleph_sdk::client::{AccountBalance, AlephAccountClient, AlephClient};
 use aleph_sdk::ssh::{AlephSshClient, SshKey, build_add_ssh_key};
 use aleph_types::account::Account;
@@ -39,9 +42,7 @@ pub async fn handle_account_command(
         AccountCommand::Use(args) => handle_use(&store, args, json),
         AccountCommand::Export(args) => handle_export(&store, args, json),
         AccountCommand::Alias { command } => handle_alias_command(&store, command, json),
-        AccountCommand::Ssh { command } => {
-            handle_ssh_command(client, ccn_url, command, json).await
-        }
+        AccountCommand::Ssh { command } => handle_ssh_command(client, ccn_url, command, json).await,
     }
 }
 
@@ -865,8 +866,12 @@ fn read_ssh_key_arg(file: Option<&Path>, key: Option<&str>) -> Result<String> {
             .map_err(|e| anyhow!("failed to read SSH public key from stdin: {e}"))?;
         s
     } else {
-        std::fs::read_to_string(path)
-            .map_err(|e| anyhow!("failed to read SSH public key file '{}': {e}", path.display()))?
+        std::fs::read_to_string(path).map_err(|e| {
+            anyhow!(
+                "failed to read SSH public key file '{}': {e}",
+                path.display()
+            )
+        })?
     };
     Ok(content.trim().to_string())
 }
@@ -883,7 +888,10 @@ async fn handle_ssh_add(
     let account = resolve_account(&args.signing.identity)?;
     let existing = client.list_ssh_keys(account.address()).await?;
 
-    if existing.iter().any(|k| k.label.as_deref() == Some(args.name.as_str())) {
+    if existing
+        .iter()
+        .any(|k| k.label.as_deref() == Some(args.name.as_str()))
+    {
         bail!(
             "an SSH key named '{}' already exists. Choose another --name, or remove it first with: \
              aleph account ssh remove {}",
@@ -915,7 +923,11 @@ async fn handle_ssh_list(client: &AlephClient, args: SshListArgs, json: bool) ->
     for k in &keys {
         let name = k.label.as_deref().unwrap_or("(unnamed)");
         let preview = ssh_key_preview(&k.key);
-        eprintln!("{name}\t{preview}\t{}\t{}", k.item_hash, k.created.format("%Y-%m-%d"));
+        eprintln!(
+            "{name}\t{preview}\t{}\t{}",
+            k.item_hash,
+            k.created.format("%Y-%m-%d")
+        );
     }
     Ok(())
 }
@@ -938,8 +950,10 @@ fn resolve_ssh_key_target(keys: &[SshKey], target: &str) -> Result<ItemHash> {
     if let Some(k) = keys.iter().find(|k| k.item_hash.to_string() == target) {
         return Ok(k.item_hash.clone());
     }
-    let matches: Vec<&SshKey> =
-        keys.iter().filter(|k| k.label.as_deref() == Some(target)).collect();
+    let matches: Vec<&SshKey> = keys
+        .iter()
+        .filter(|k| k.label.as_deref() == Some(target))
+        .collect();
     match matches.as_slice() {
         [] => bail!("no SSH key named '{target}'. List your keys with: aleph account ssh list"),
         [one] => Ok(one.item_hash.clone()),
@@ -1001,7 +1015,10 @@ mod ssh_tests {
     #[test]
     fn resolves_unique_label() {
         let keys = vec![mk(Some("laptop"), H1), mk(Some("desktop"), H2)];
-        assert_eq!(resolve_ssh_key_target(&keys, "laptop").unwrap().to_string(), H1);
+        assert_eq!(
+            resolve_ssh_key_target(&keys, "laptop").unwrap().to_string(),
+            H1
+        );
     }
 
     #[test]
@@ -1019,7 +1036,9 @@ mod ssh_tests {
     #[test]
     fn errors_on_ambiguous_label() {
         let keys = vec![mk(Some("dup"), H1), mk(Some("dup"), H2)];
-        let err = resolve_ssh_key_target(&keys, "dup").unwrap_err().to_string();
+        let err = resolve_ssh_key_target(&keys, "dup")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("multiple SSH keys"));
     }
 
