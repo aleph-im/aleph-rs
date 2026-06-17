@@ -469,28 +469,9 @@ pub async fn handle_instance_command(
     Ok(())
 }
 
-const SSH_PUBKEY_PREFIXES: &[&str] = &[
-    "ssh-rsa",
-    "ssh-ed25519",
-    "ssh-dss",
-    "ecdsa-sha2-nistp256",
-    "ecdsa-sha2-nistp384",
-    "ecdsa-sha2-nistp521",
-    "sk-ssh-ed25519@openssh.com",
-    "sk-ecdsa-sha2-nistp256@openssh.com",
-];
-
 pub(crate) fn validate_ssh_pubkey(key: &str, path: &std::path::Path) -> Result<()> {
-    let has_valid_prefix = SSH_PUBKEY_PREFIXES
-        .iter()
-        .any(|prefix| key.starts_with(prefix));
-    if !has_valid_prefix {
-        bail!(
-            "'{}' does not look like an SSH public key (expected a line starting with ssh-rsa, ssh-ed25519, etc.)",
-            path.display()
-        );
-    }
-    Ok(())
+    aleph_sdk::ssh::validate_pubkey(key)
+        .map_err(|msg| anyhow!("'{}' {}", path.display(), msg))
 }
 
 /// Parse a "key=value,key=value" string into a list of (key, value) pairs.
