@@ -895,10 +895,8 @@ async fn handle_ssh_add(
         .as_deref()
         .map(resolve_address)
         .transpose()?;
-    let owner_address = on_behalf_of
-        .clone()
-        .unwrap_or_else(|| account.address().clone());
-    let existing = client.list_ssh_keys(&owner_address).await?;
+    let owner_address = on_behalf_of.as_ref().unwrap_or_else(|| account.address());
+    let existing = client.list_ssh_keys(owner_address).await?;
 
     // Best-effort duplicate guard against the current network state. Concurrent
     // adds can still race; duplicates are then removable by item-hash.
@@ -1002,10 +1000,8 @@ async fn handle_ssh_remove(
         .as_deref()
         .map(resolve_address)
         .transpose()?;
-    let owner_address = on_behalf_of
-        .clone()
-        .unwrap_or_else(|| account.address().clone());
-    let keys = client.list_ssh_keys(&owner_address).await?;
+    let owner_address = on_behalf_of.as_ref().unwrap_or_else(|| account.address());
+    let keys = client.list_ssh_keys(owner_address).await?;
     let hash = resolve_ssh_key_target(&keys, &args.key)?;
 
     forget_targets(
