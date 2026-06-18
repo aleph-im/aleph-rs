@@ -15,8 +15,8 @@ exclude = ["crates/aleph-cid-python"]
 [workspace.dependencies]
 aes = { version = "0.8" }
 aleph-cid = { path = "crates/aleph-cid", version = "0.1.0" }
-aleph-sdk = { path = "crates/aleph-sdk", version = "0.13.2" }
-aleph-types = { path = "crates/aleph-types", version = "0.13.2" }
+aleph-sdk = { path = "crates/aleph-sdk", version = "0.14.0" }
+aleph-types = { path = "crates/aleph-types", version = "0.14.0" }
 # Individual alloy sub-crates instead of the `alloy` umbrella so we can pin
 # each to its own minor line and avoid pulling in consensus/blob/genesis
 # types we don't use.
