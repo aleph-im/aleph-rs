@@ -824,7 +824,6 @@ async fn handle_instance_create(
 ) -> Result<()> {
     let dry_run = args.signing.dry_run;
     let wait = args.wait;
-    let wait_timeout = std::time::Duration::from_secs(args.wait_timeout);
     let account = resolve_account(&args.signing.identity)?;
 
     // SSH keys are looked up for the instance OWNER. When signing on behalf of
@@ -1074,8 +1073,11 @@ async fn handle_instance_create(
     // The scheduler auto-dispatches instances, so creation does not notify a
     // CRN; with --wait we only poll until the VM is reachable. Skip on
     // --dry-run (nothing was submitted).
-    if wait && !dry_run {
+    if let Some(secs) = wait
+        && !dry_run
+    {
         use crate::commands::instance_wait::{WaitOutcome, report_ready, report_timeout};
+        let wait_timeout = std::time::Duration::from_secs(secs);
         match crate::commands::instance_wait::wait_until_ready(scheduler_url, &vm_id, wait_timeout)
             .await?
         {

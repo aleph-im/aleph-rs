@@ -2043,12 +2043,10 @@ pub struct InstanceCreateArgs {
 
     /// After submitting, poll until the VM is reachable (networking populated
     /// on its allocated CRN) and print its connectivity plus an SSH hint.
-    #[arg(long)]
-    pub wait: bool,
-
-    /// Maximum number of seconds to wait when `--wait` is set.
-    #[arg(long, default_value_t = 300)]
-    pub wait_timeout: u64,
+    /// Optionally takes a timeout in seconds (default 300): `--wait` or
+    /// `--wait 600`.
+    #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "300")]
+    pub wait: Option<u64>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
@@ -2179,13 +2177,10 @@ pub struct CrnStartArgs {
     pub vm_id: String,
 
     /// After notifying the CRN, poll until the VM is reachable (networking
-    /// populated) and print its connectivity plus an SSH hint.
-    #[arg(long)]
-    pub wait: bool,
-
-    /// Maximum number of seconds to wait when `--wait` is set.
-    #[arg(long, default_value_t = 300)]
-    pub wait_timeout: u64,
+    /// populated) and print its connectivity plus an SSH hint. Optionally takes
+    /// a timeout in seconds (default 300): `--wait` or `--wait 600`.
+    #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "300")]
+    pub wait: Option<u64>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
