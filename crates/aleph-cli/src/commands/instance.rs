@@ -68,6 +68,10 @@ pub(crate) struct InstanceRow {
     pub status: Option<String>,
     /// Node hash where the VM is currently allocated, per the scheduler.
     pub allocated_node: Option<String>,
+    /// VM's directly-routable IPv6 address, fetched best-effort from the CRN.
+    pub ipv6: Option<String>,
+    /// CRN host's public (shared, NAT) IPv4, fetched best-effort from the CRN.
+    pub ipv4: Option<String>,
     /// Full scheduler entry, used for `--json` passthrough.
     pub scheduler_raw: Option<VmEntry>,
     pub source_flags: SourceFlags,
@@ -133,6 +137,8 @@ pub(crate) fn extract_instance_row(message: &Message) -> Option<InstanceRow> {
         created_at: message.content.time.clone(),
         status: None,
         allocated_node: None,
+        ipv6: None,
+        ipv4: None,
         scheduler_raw: None,
         source_flags: SourceFlags::default(),
     })
@@ -268,6 +274,103 @@ async fn enrich_by_sender(
     }
 }
 
+/// Group the indices of rows that have an `allocated_node` by node hash.
+///
+/// Pure (no I/O) so it can be unit-tested: the IP-enrichment pass makes one
+/// CRN call per unique node, not one per VM, and applies the result to every
+/// row sharing that node. Rows without an `allocated_node` are skipped.
+fn group_row_indices_by_node(
+    rows: &[InstanceRow],
+) -> std::collections::HashMap<String, Vec<usize>> {
+    let mut by_node: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, row) in rows.iter().enumerate() {
+        if let Some(node) = row.allocated_node.as_deref() {
+            by_node.entry(node.to_string()).or_default().push(idx);
+        }
+    }
+    by_node
+}
+
+/// Apply the networking selection rules used across the CLI: the VM's
+/// directly-routable IPv6 (falling back to its `/124` network) and the CRN
+/// host's shared public IPv4. Self-contained so this stays independent of
+/// `instance_show::populate_verbose`.
+fn select_ips(net: &aleph_sdk::crn::ActiveVmNetworking) -> (Option<String>, Option<String>) {
+    let ipv6 = net.ipv6_ip.clone().or_else(|| net.ipv6_network.clone());
+    let ipv4 = net.host_ipv4.clone();
+    (ipv6, ipv4)
+}
+
+/// Best-effort IP enrichment: one CRN call per unique allocated node, run in
+/// parallel. A failed node lookup or CRN fetch logs a warning and leaves the
+/// affected rows' IPs as `None`; it never fails the list command.
+async fn enrich_rows_with_ips(scheduler: &SchedulerClient, rows: &mut [InstanceRow]) {
+    use aleph_sdk::crn::fetch_active_vms;
+
+    let by_node = group_row_indices_by_node(rows);
+    if by_node.is_empty() {
+        return;
+    }
+
+    let http = reqwest::Client::new();
+
+    // For each unique node, resolve its CRN URL and fetch the active VM list
+    // once. Returns the indices on that node alongside the fetched map so the
+    // results can be applied without holding a mutable borrow across awaits.
+    let fetches = by_node.into_iter().map(|(node, indices)| {
+        let http = &http;
+        async move {
+            let crn_url = match scheduler.get_node(&node).await {
+                Ok(Some(entry)) => match entry.address.as_deref() {
+                    Some(addr) => match Url::parse(addr) {
+                        Ok(url) => url,
+                        Err(e) => {
+                            eprintln!("warning: invalid CRN address `{addr}` for node {node}: {e}");
+                            return (indices, None);
+                        }
+                    },
+                    None => {
+                        eprintln!(
+                            "warning: scheduler knows node {node} but has no reachable \
+                             address; IP unavailable"
+                        );
+                        return (indices, None);
+                    }
+                },
+                Ok(None) => return (indices, None),
+                Err(e) => {
+                    eprintln!("warning: scheduler unreachable for node {node}: {e}");
+                    return (indices, None);
+                }
+            };
+            match fetch_active_vms(http, &crn_url).await {
+                Ok(list) => (indices, Some(list)),
+                Err(e) => {
+                    eprintln!("warning: CRN {crn_url} unreachable, IP unavailable: {e}");
+                    (indices, None)
+                }
+            }
+        }
+    });
+
+    let results = futures_util::future::join_all(fetches).await;
+
+    for (indices, list) in results {
+        let Some(list) = list else { continue };
+        for idx in indices {
+            let item_hash = rows[idx].item_hash.clone();
+            if let Some(entry) = list.0.get(&item_hash)
+                && let Some(net) = entry.networking.as_ref()
+            {
+                let (ipv6, ipv4) = select_ips(net);
+                rows[idx].ipv6 = ipv6;
+                rows[idx].ipv4 = ipv4;
+            }
+        }
+    }
+}
+
 async fn handle_instance_list(
     aleph_client: &AlephClient,
     scheduler_url: Url,
@@ -284,6 +387,7 @@ async fn handle_instance_list(
     let mut scheduler_map = fetch_scheduler_map(&scheduler, &address).await;
     enrich_by_sender(&scheduler, &address, &rows, &mut scheduler_map).await;
     merge_scheduler_into_rows(&mut rows, &scheduler_map);
+    enrich_rows_with_ips(&scheduler, &mut rows).await;
 
     render_rows(&rows, json)
 }
@@ -299,6 +403,8 @@ fn format_rows_json(rows: &[InstanceRow]) -> serde_json::Value {
                 "name": r.name,
                 "owner": r.owner.to_string(),
                 "node_hash": r.node_hash,
+                "ipv6": r.ipv6,
+                "ipv4": r.ipv4,
                 "created_at": r.created_at
                     .to_datetime()
                     .ok()
@@ -317,6 +423,7 @@ fn format_rows_text(rows: &[InstanceRow]) -> String {
     const NAME_HEADER: &str = "NAME";
     const OWNER_HEADER: &str = "OWNER";
     const STATUS_HEADER: &str = "STATUS";
+    const IPV6_HEADER: &str = "IPV6";
     const ALLOC_HEADER: &str = "ALLOCATED";
 
     // Hash column: 12-char prefix.
@@ -339,26 +446,35 @@ fn format_rows_text(rows: &[InstanceRow]) -> String {
         .chain(std::iter::once(STATUS_HEADER.len()))
         .max()
         .unwrap_or(STATUS_HEADER.len());
+    let ipv6_w = rows
+        .iter()
+        .map(|r| r.ipv6.as_deref().unwrap_or(MISSING_VALUE).len())
+        .chain(std::iter::once(IPV6_HEADER.len()))
+        .max()
+        .unwrap_or(IPV6_HEADER.len());
 
     let mut out = String::new();
     writeln!(
         out,
-        "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {:<status_w$}  {}",
+        "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {:<status_w$}  {:<ipv6_w$}  {}",
         HASH_HEADER,
         NAME_HEADER,
         OWNER_HEADER,
         STATUS_HEADER,
+        IPV6_HEADER,
         ALLOC_HEADER,
         hash_w = hash_w,
         name_w = name_w,
         owner_w = owner_w,
         status_w = status_w,
+        ipv6_w = ipv6_w,
     )
     .expect("writing to String cannot fail");
 
     for row in rows {
         let name = row.name.as_deref().unwrap_or(MISSING_VALUE);
         let status = row.status.as_deref().unwrap_or(MISSING_VALUE);
+        let ipv6 = row.ipv6.as_deref().unwrap_or(MISSING_VALUE);
         let allocated = row
             .allocated_node
             .as_deref()
@@ -366,16 +482,18 @@ fn format_rows_text(rows: &[InstanceRow]) -> String {
             .unwrap_or_else(|| MISSING_VALUE.to_string());
         writeln!(
             out,
-            "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {:<status_w$}  {}",
+            "{:<hash_w$}  {:<name_w$}  {:<owner_w$}  {:<status_w$}  {:<ipv6_w$}  {}",
             format_item_hash_short(&row.item_hash),
             name,
             row.owner,
             status,
+            ipv6,
             allocated,
             hash_w = hash_w,
             name_w = name_w,
             owner_w = owner_w,
             status_w = status_w,
+            ipv6_w = ipv6_w,
         )
         .expect("writing to String cannot fail");
     }
@@ -1874,6 +1992,8 @@ mod tests {
             created_at: Timestamp::from(epoch_seconds),
             status: None,
             allocated_node: None,
+            ipv6: None,
+            ipv4: None,
             scheduler_raw: None,
             source_flags: Default::default(),
         }
@@ -1991,6 +2111,7 @@ mod tests {
         assert!(lines[0].contains("NAME"));
         assert!(lines[0].contains("OWNER"));
         assert!(lines[0].contains("STATUS"));
+        assert!(lines[0].contains("IPV6"));
         assert!(lines[0].contains("ALLOCATED"));
 
         // Populated row renders the 12-char hash prefix (not full 64-char hash).
@@ -2002,11 +2123,11 @@ mod tests {
 
         // Missing fields use the ASCII `-` placeholder (not `—`).
         assert!(!lines[2].contains('—'));
-        // Exactly three `-` placeholders on the missing-fields row: NAME, STATUS,
-        // and ALLOCATED. Check with word boundaries (space on each side).
+        // Exactly four `-` placeholders on the missing-fields row: NAME, STATUS,
+        // IPV6, and ALLOCATED. Check with word boundaries (space on each side).
         assert_eq!(
             lines[2].matches(" - ").count() + lines[2].ends_with(" -") as usize,
-            3
+            4
         );
     }
 
@@ -2016,6 +2137,74 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("ITEM_HASH"));
+    }
+
+    #[test]
+    fn format_rows_text_shows_ipv6_or_placeholder() {
+        let mut with_ip = sample_row(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            Some("vm-a"),
+            None,
+            1_700_000_000.0,
+        );
+        with_ip.ipv6 = Some("2a01:240:ad00:1::7db1".to_string());
+        let without_ip = sample_row(
+            "0000000000000000000000000000000000000000000000000000000000000002",
+            Some("vm-b"),
+            None,
+            1_700_000_001.0,
+        );
+
+        let text = format_rows_text(&[with_ip, without_ip]);
+        let lines: Vec<&str> = text.lines().collect();
+
+        // Header carries the IPV6 column.
+        assert!(lines[0].contains("IPV6"));
+        // Row with an address shows it under that column.
+        assert!(lines[1].contains("2a01:240:ad00:1::7db1"));
+        // Row without an address shows the `-` placeholder for IPv6.
+        assert!(!lines[2].contains("2a01:240:ad00:1::7db1"));
+        assert!(lines[2].contains(" - "));
+    }
+
+    #[test]
+    fn group_row_indices_by_node_buckets_and_skips_unallocated() {
+        let mut a = sample_row(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            None,
+            None,
+            0.0,
+        );
+        a.allocated_node = Some("node-x".to_string());
+        let mut b = sample_row(
+            "0000000000000000000000000000000000000000000000000000000000000002",
+            None,
+            None,
+            0.0,
+        );
+        b.allocated_node = Some("node-x".to_string());
+        let mut c = sample_row(
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            None,
+            None,
+            0.0,
+        );
+        c.allocated_node = Some("node-y".to_string());
+        // Row with no allocation must be excluded entirely.
+        let d = sample_row(
+            "0000000000000000000000000000000000000000000000000000000000000004",
+            None,
+            None,
+            0.0,
+        );
+
+        let rows = vec![a, b, c, d];
+        let groups = group_row_indices_by_node(&rows);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups.get("node-x"), Some(&vec![0, 1]));
+        assert_eq!(groups.get("node-y"), Some(&vec![2]));
+        assert!(!groups.contains_key(&String::new()));
     }
 
     #[test]
