@@ -39,6 +39,19 @@ pub async fn handle_start(scheduler_url: Url, json: bool, args: CrnStartArgs) ->
         }
     }
 
+    // After a successful start, optionally poll until the VM is reachable and
+    // print its connectivity plus an SSH hint.
+    if args.wait && response.successful {
+        use crate::commands::instance_wait::{WaitOutcome, report_ready, report_timeout};
+        let timeout = std::time::Duration::from_secs(args.wait_timeout);
+        match crate::commands::instance_wait::wait_until_ready(&scheduler_url, &vm_id, timeout)
+            .await?
+        {
+            WaitOutcome::Ready(conn) => report_ready(&conn, &vm_id, json),
+            WaitOutcome::Timeout => report_timeout(&vm_id, json),
+        }
+    }
+
     Ok(())
 }
 

@@ -13,6 +13,7 @@ pub mod instance_interactive;
 pub mod instance_show;
 pub mod instance_ssh;
 pub mod instance_target;
+pub mod instance_wait;
 pub mod message;
 pub mod node;
 pub mod port_forward;
