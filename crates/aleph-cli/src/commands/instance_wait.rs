@@ -1,12 +1,8 @@
-//! Wait until a freshly created or started instance is actually reachable.
+//! Wait until a freshly created or started instance can actually accept SSH
+//! logins (not merely until it has booted).
 //!
-//! "Ready" means the VM appears in its allocated CRN's
-//! `/v2/about/executions/list` with networking populated (an IPv6 or host
-//! IPv4). The same data we poll for is what we print. The scheduler
-//! auto-dispatches instances, so `instance create --wait` never notifies a
-//! CRN.
-//!
-//! The wait has two phases:
+//! The scheduler auto-dispatches instances, so `instance create --wait` never
+//! notifies a CRN. The wait has two phases:
 //!
 //! 1. **Allocation** is observed over the scheduler's WebSocket
 //!    (`/api/v1/ws?vm_hash=...`), which pushes a `Scheduled` event the moment a
@@ -14,24 +10,41 @@
 //!    an immediate, reasoned failure instead of waiting out the timeout. If the
 //!    socket is unavailable we fall back to HTTP polling, so behaviour is never
 //!    worse than plain polling.
-//! 2. **Reachability** is then polled from the allocated CRN until networking
-//!    appears. This phase has no WebSocket equivalent (the scheduler does not
-//!    know VM IPs).
+//! 2. **Reachability** is then polled from the allocated CRN. A CRN listing the
+//!    VM with networking only means it is booting, so we actively probe the SSH
+//!    port until sshd answers. The probe prefers IPv4 (host public IPv4 plus
+//!    the forwarded SSH port), which works on virtually all nodes; some CRNs do
+//!    not assign IPv6 yet. This phase has no WebSocket equivalent (the
+//!    scheduler does not know VM IPs).
 //!
 //! The reachability poll mirrors `instance_backup::poll_until_complete`: it
 //! takes an injectable `sleep` closure so unit tests run instantly, and a
 //! `fetch` closure so the network access is mockable.
 
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use aleph_sdk::crn::ActiveVmNetworking;
 use aleph_sdk::scheduler::SchedulerClient;
 use aleph_sdk::scheduler_ws::{VmSchedulingEvent, subscribe_vm};
 use aleph_types::item_hash::ItemHash;
+use tokio::io::AsyncReadExt;
 use url::Url;
 
 /// Interval between successive polls.
 pub(crate) const WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// In-VM SSH port probed for reachability. Instances created by the CLI run
+/// sshd on 22, which the CRN forwards from a host port (see `mapped_ports`).
+const SSH_GUEST_PORT: u16 = 22;
+
+/// How long a single TCP connect attempt to the SSH port may take. A booting
+/// VM refuses the connection immediately (fast retry); this bound only applies
+/// when packets are dropped.
+const SSH_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long to wait for sshd's banner once connected.
+const SSH_PROBE_BANNER_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Connectivity selected from a VM's CRN networking, applying the same rules
 /// as `instance show --verbose`: IPv6 prefers the concrete address over the
@@ -40,18 +53,74 @@ pub(crate) const WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) struct Connectivity {
     pub ipv6: Option<String>,
     pub ipv4: Option<String>,
+    /// True when the SSH reachability probe succeeded over IPv4 (host public
+    /// IPv4 + forwarded port). Some CRNs do not assign IPv6 yet, so when this
+    /// is set the printed SSH hint recommends `-4`.
+    pub reachable_via_ipv4: bool,
 }
 
 impl Connectivity {
-    /// Apply the networking-selection rules. Returns `None` when neither an
-    /// IPv6 nor a host IPv4 is present, i.e. the VM is not reachable yet.
+    /// Build the display connectivity. Returns `None` when neither an IPv6 nor
+    /// a host IPv4 is present, i.e. the VM has no usable networking yet.
+    /// `reachable_via_ipv4` is set later by the reachability probe.
     fn from_networking(net: &ActiveVmNetworking) -> Option<Self> {
         let ipv6 = net.ipv6_ip.clone().or_else(|| net.ipv6_network.clone());
         let ipv4 = net.host_ipv4.clone();
         if ipv6.is_none() && ipv4.is_none() {
             return None;
         }
-        Some(Self { ipv6, ipv4 })
+        Some(Self {
+            ipv6,
+            ipv4,
+            reachable_via_ipv4: false,
+        })
+    }
+}
+
+/// Choose the endpoint to probe for SSH reachability, preferring IPv4.
+///
+/// IPv4 port-forwarding (the CRN host's public IPv4 plus the forwarded SSH
+/// port) works on virtually all nodes, whereas some CRNs do not assign IPv6
+/// yet, so a direct IPv6 connection can hang on those. Returns
+/// `(ip, port, is_ipv4)`, or `None` when no probeable endpoint exists.
+fn ssh_probe_target(net: &ActiveVmNetworking, guest_port: u16) -> Option<(IpAddr, u16, bool)> {
+    if let (Some(host), Some(mapped)) =
+        (net.host_ipv4.as_deref(), net.mapped_ports.get(&guest_port))
+        && let Ok(ip) = host.parse::<IpAddr>()
+    {
+        return Some((ip, mapped.host, true));
+    }
+    if let Some(ip6) = net.ipv6_ip.as_deref()
+        && let Ok(ip) = ip6.parse::<IpAddr>()
+    {
+        return Some((ip, guest_port, false));
+    }
+    None
+}
+
+/// sshd sends an identification string starting with `SSH-` as soon as a
+/// connection opens. Seeing it confirms sshd is actually answering, not just
+/// that the port is open.
+fn is_ssh_banner(buf: &[u8]) -> bool {
+    buf.starts_with(b"SSH-")
+}
+
+/// Probe SSH reachability: open a TCP connection and confirm sshd's banner.
+/// This mirrors what an `ssh` attempt does, so a success means the VM is
+/// genuinely ready to accept logins, not merely booting.
+async fn probe_ssh(ip: IpAddr, port: u16) -> bool {
+    let addr = SocketAddr::new(ip, port);
+    let connect = tokio::time::timeout(
+        SSH_PROBE_CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect(addr),
+    );
+    let Ok(Ok(mut stream)) = connect.await else {
+        return false;
+    };
+    let mut buf = [0u8; 4];
+    match tokio::time::timeout(SSH_PROBE_BANNER_TIMEOUT, stream.read_exact(&mut buf)).await {
+        Ok(Ok(_)) => is_ssh_banner(&buf),
+        _ => false,
     }
 }
 
@@ -105,12 +174,15 @@ where
     }
 }
 
-/// Resolve the VM's allocated CRN and read its current connectivity.
+/// Resolve the VM's allocated CRN and check whether it is reachable over SSH.
 ///
-/// Returns [`ReadyState::Pending`] when the VM is not allocated yet, when the
-/// node has no reachable address, or when the CRN does not (yet) list the VM
-/// with usable networking. Errors only on hard failures (malformed scheduler
-/// data, CRN HTTP errors).
+/// The CRN listing the VM with networking only means it is booting, not that
+/// it accepts logins. So once networking is present we actively probe the SSH
+/// port (preferring IPv4) and only report [`ReadyState::Ready`] when sshd
+/// answers. Returns [`ReadyState::Pending`] when the VM is not allocated yet,
+/// the node has no reachable address, the CRN does not (yet) list the VM with
+/// usable networking, or SSH is not up yet. Errors only on hard failures
+/// (malformed scheduler data, CRN HTTP errors).
 async fn fetch_ready_state(
     scheduler: &SchedulerClient,
     http: &reqwest::Client,
@@ -138,9 +210,25 @@ async fn fetch_ready_state(
     let Some(net) = entry.networking.as_ref() else {
         return Ok(ReadyState::Pending);
     };
-    match Connectivity::from_networking(net) {
-        Some(conn) => Ok(ReadyState::Ready(conn)),
-        None => Ok(ReadyState::Pending),
+    let Some(display) = Connectivity::from_networking(net) else {
+        return Ok(ReadyState::Pending);
+    };
+
+    match ssh_probe_target(net, SSH_GUEST_PORT) {
+        Some((ip, port, is_ipv4)) => {
+            if probe_ssh(ip, port).await {
+                Ok(ReadyState::Ready(Connectivity {
+                    reachable_via_ipv4: is_ipv4,
+                    ..display
+                }))
+            } else {
+                Ok(ReadyState::Pending)
+            }
+        }
+        // Networking exists but exposes no SSH endpoint to probe (no forwarded
+        // port and no IPv6). We cannot verify reachability, so report ready on
+        // a best-effort basis rather than waiting out the timeout.
+        None => Ok(ReadyState::Ready(display)),
     }
 }
 
@@ -296,11 +384,20 @@ pub(crate) fn finish_wait(
 /// hash. When `json` is set, the connectivity is merged into the caller's
 /// JSON object instead.
 pub(crate) fn report_ready(conn: &Connectivity, vm_id: &ItemHash, json: bool) {
+    // Recommend `-4` when the VM was confirmed reachable over IPv4, since some
+    // CRNs do not assign IPv6 and the default `instance ssh` path is IPv6.
+    let ssh_hint = if conn.reachable_via_ipv4 {
+        format!("aleph instance ssh {vm_id} -4")
+    } else {
+        format!("aleph instance ssh {vm_id}")
+    };
+
     if json {
         let payload = serde_json::json!({
             "ready": true,
             "ipv6": conn.ipv6,
             "ipv4": conn.ipv4,
+            "reachable_via": if conn.reachable_via_ipv4 { "ipv4" } else { "ipv6" },
         });
         println!("{payload}");
     } else {
@@ -311,7 +408,7 @@ pub(crate) fn report_ready(conn: &Connectivity, vm_id: &ItemHash, json: bool) {
         if let Some(ipv4) = &conn.ipv4 {
             eprintln!("  IPv4: {ipv4}");
         }
-        eprintln!("  SSH:  aleph instance ssh {vm_id}");
+        eprintln!("  SSH:  {ssh_hint}");
     }
 }
 
@@ -342,7 +439,101 @@ mod tests {
         Connectivity {
             ipv6: Some(ipv6.to_string()),
             ipv4: None,
+            reachable_via_ipv4: false,
         }
+    }
+
+    fn networking(
+        host_ipv4: Option<&str>,
+        ipv6_ip: Option<&str>,
+        ssh_host_port: Option<u16>,
+    ) -> ActiveVmNetworking {
+        let mut mapped_ports = std::collections::BTreeMap::new();
+        if let Some(host) = ssh_host_port {
+            mapped_ports.insert(
+                SSH_GUEST_PORT,
+                aleph_sdk::crn::MappedPort {
+                    host,
+                    extra: Default::default(),
+                },
+            );
+        }
+        ActiveVmNetworking {
+            mapped_ports,
+            ipv6_ip: ipv6_ip.map(Into::into),
+            ipv6_network: None,
+            ipv4_ip: None,
+            ipv4_network: None,
+            host_ipv4: host_ipv4.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn ssh_probe_target_prefers_ipv4_mapped_port() {
+        let net = networking(Some("1.2.3.4"), Some("2a01::5"), Some(24221));
+        let (ip, port, is_ipv4) = ssh_probe_target(&net, SSH_GUEST_PORT).unwrap();
+        assert_eq!(ip.to_string(), "1.2.3.4");
+        assert_eq!(port, 24221);
+        assert!(is_ipv4);
+    }
+
+    #[test]
+    fn ssh_probe_target_falls_back_to_ipv6() {
+        // No forwarded SSH port, so IPv4 is not probeable; use direct IPv6.
+        let net = networking(Some("1.2.3.4"), Some("2a01::5"), None);
+        let (ip, port, is_ipv4) = ssh_probe_target(&net, SSH_GUEST_PORT).unwrap();
+        assert_eq!(ip.to_string(), "2a01::5");
+        assert_eq!(port, SSH_GUEST_PORT);
+        assert!(!is_ipv4);
+    }
+
+    #[test]
+    fn ssh_probe_target_none_when_no_endpoint() {
+        let net = networking(Some("1.2.3.4"), None, None);
+        assert!(ssh_probe_target(&net, SSH_GUEST_PORT).is_none());
+    }
+
+    #[test]
+    fn ssh_banner_detection() {
+        assert!(is_ssh_banner(b"SSH-"));
+        assert!(is_ssh_banner(b"SSH-2.0-OpenSSH_9.6"));
+        assert!(!is_ssh_banner(b"HTTP"));
+        assert!(!is_ssh_banner(b"\x00\x00\x00\x00"));
+    }
+
+    #[tokio::test]
+    async fn probe_ssh_succeeds_on_ssh_banner() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").await;
+            }
+        });
+        assert!(probe_ssh(addr.ip(), addr.port()).await);
+    }
+
+    #[tokio::test]
+    async fn probe_ssh_fails_on_non_ssh_banner() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\n").await;
+            }
+        });
+        assert!(!probe_ssh(addr.ip(), addr.port()).await);
+    }
+
+    #[tokio::test]
+    async fn probe_ssh_fails_on_closed_port() {
+        // Bind then drop to get a port nothing listens on.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        assert!(!probe_ssh(addr.ip(), addr.port()).await);
     }
 
     /// VM becomes ready after a few pending polls: the fetcher returns
