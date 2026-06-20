@@ -1,19 +1,32 @@
-//! Poll until a freshly created or started instance is actually reachable.
+//! Wait until a freshly created or started instance is actually reachable.
 //!
 //! "Ready" means the VM appears in its allocated CRN's
 //! `/v2/about/executions/list` with networking populated (an IPv6 or host
 //! IPv4). The same data we poll for is what we print. The scheduler
 //! auto-dispatches instances, so `instance create --wait` never notifies a
-//! CRN; it only polls.
+//! CRN.
 //!
-//! The poll loop mirrors `instance_backup::poll_until_complete`: it takes an
-//! injectable `sleep` closure so unit tests run instantly, and a `fetch`
-//! closure so the network access is mockable.
+//! The wait has two phases:
+//!
+//! 1. **Allocation** is observed over the scheduler's WebSocket
+//!    (`/api/v1/ws?vm_hash=...`), which pushes a `Scheduled` event the moment a
+//!    node is assigned, or an `Unschedulable`/`Unscheduled` event we surface as
+//!    an immediate, reasoned failure instead of waiting out the timeout. If the
+//!    socket is unavailable we fall back to HTTP polling, so behaviour is never
+//!    worse than plain polling.
+//! 2. **Reachability** is then polled from the allocated CRN until networking
+//!    appears. This phase has no WebSocket equivalent (the scheduler does not
+//!    know VM IPs).
+//!
+//! The reachability poll mirrors `instance_backup::poll_until_complete`: it
+//! takes an injectable `sleep` closure so unit tests run instantly, and a
+//! `fetch` closure so the network access is mockable.
 
 use std::time::{Duration, Instant};
 
 use aleph_sdk::crn::ActiveVmNetworking;
 use aleph_sdk::scheduler::SchedulerClient;
+use aleph_sdk::scheduler_ws::{VmSchedulingEvent, subscribe_vm};
 use aleph_types::item_hash::ItemHash;
 use url::Url;
 
@@ -42,10 +55,13 @@ impl Connectivity {
     }
 }
 
-/// Outcome of [`poll_until_ready`].
+/// Outcome of [`wait_until_ready`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WaitOutcome {
     Ready(Connectivity),
+    /// The scheduler reported the VM cannot be placed (or was unscheduled).
+    /// Carries a human-friendly reason. This is terminal: stop waiting.
+    Failed(String),
     Timeout,
 }
 
@@ -128,23 +144,151 @@ async fn fetch_ready_state(
     }
 }
 
-/// Drive the readiness poll against the live scheduler/CRN, sleeping for real
-/// between attempts. Used by `instance create --wait` and `instance start
-/// --wait`.
+/// Outcome of the allocation phase ([`wait_for_allocation`]).
+enum AllocationOutcome {
+    /// A node was assigned. Proceed to poll the CRN for reachability.
+    Allocated,
+    /// The scheduler rejected the VM. Terminal, with a friendly reason.
+    Failed(String),
+    /// The deadline passed before any allocation event.
+    Timeout,
+    /// The WebSocket could not be used; the caller should fall back to polling.
+    Unavailable,
+}
+
+/// Map a scheduler reason code (e.g. `NoSuitableNode`) to a human sentence,
+/// passing unknown codes through verbatim so we never hide information.
+fn friendly_reason(raw: &str) -> String {
+    match raw {
+        "NoSuitableNode" => "no suitable node available".into(),
+        "InsufficientResources" => "insufficient resources available".into(),
+        "NoIpv6Node" => "no node with IPv6 connectivity available".into(),
+        "PaymentFailed" => "payment failed".into(),
+        "Deleted" => "the instance was deleted".into(),
+        "" => "scheduler rejected the instance".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Watch the scheduler WebSocket until the VM is scheduled, rejected, or the
+/// deadline passes. Subscribes first, then does a one-shot REST check to catch
+/// a VM that was already allocated (the stream replays no history), then reads
+/// live events.
+async fn wait_for_allocation(
+    scheduler_url: &Url,
+    vm_id: &ItemHash,
+    deadline: Instant,
+) -> AllocationOutcome {
+    let vm_hash = vm_id.to_string();
+
+    // Subscribe before the REST guard so an event landing between the two is
+    // not lost (the stream is deltas-only, no snapshot on connect).
+    let mut rx = match subscribe_vm(scheduler_url, &vm_hash).await {
+        Ok(rx) => rx,
+        Err(_) => return AllocationOutcome::Unavailable,
+    };
+
+    // Guard: the VM may already be allocated (or already rejected) before we
+    // connected. Ignore transient errors here and let the stream drive.
+    let scheduler = SchedulerClient::new(scheduler_url.clone());
+    if let Ok(Some(vm)) = scheduler.get_vm(vm_id).await {
+        if vm.allocated_node.is_some() {
+            return AllocationOutcome::Allocated;
+        }
+        if vm.status == "unschedulable" {
+            return AllocationOutcome::Failed(friendly_reason("NoSuitableNode"));
+        }
+    }
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return AllocationOutcome::Timeout;
+        }
+        match tokio::time::timeout(deadline - now, rx.recv()).await {
+            Err(_) => return AllocationOutcome::Timeout,
+            // Subscriber gave up (e.g. repeated reconnect failures): fall back.
+            Ok(None) => return AllocationOutcome::Unavailable,
+            Ok(Some(event)) => match event {
+                // The server filters by vm_hash, but match defensively.
+                VmSchedulingEvent::Scheduled { vm_hash: h, .. } if h == vm_hash => {
+                    return AllocationOutcome::Allocated;
+                }
+                VmSchedulingEvent::Unschedulable { vm_hash: h, reason }
+                | VmSchedulingEvent::Unscheduled { vm_hash: h, reason }
+                    if h == vm_hash =>
+                {
+                    return AllocationOutcome::Failed(friendly_reason(&reason));
+                }
+                _ => continue,
+            },
+        }
+    }
+}
+
+/// Drive the wait against the live scheduler/CRN. Phase 1 observes allocation
+/// over the WebSocket (falling back to polling if unavailable); phase 2 polls
+/// the allocated CRN for reachability, sleeping for real between attempts. Used
+/// by `instance create --wait` and `instance start --wait`.
 pub(crate) async fn wait_until_ready(
     scheduler_url: &Url,
     vm_id: &ItemHash,
     timeout: Duration,
 ) -> anyhow::Result<WaitOutcome> {
+    let deadline = Instant::now() + timeout;
+
+    match wait_for_allocation(scheduler_url, vm_id, deadline).await {
+        AllocationOutcome::Failed(reason) => return Ok(WaitOutcome::Failed(reason)),
+        AllocationOutcome::Timeout => return Ok(WaitOutcome::Timeout),
+        // Allocated: proceed to the reachability poll. Unavailable: the poll
+        // loop re-checks allocation itself, so this degrades to plain polling.
+        AllocationOutcome::Allocated | AllocationOutcome::Unavailable => {}
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
     let scheduler = SchedulerClient::new(scheduler_url.clone());
     let http = reqwest::Client::new();
     poll_until_ready(
         || fetch_ready_state(&scheduler, &http, vm_id),
         tokio::time::sleep,
-        timeout,
+        remaining,
         WAIT_POLL_INTERVAL,
     )
     .await
+}
+
+/// Report the wait outcome to the user and translate it into a process result.
+/// `Ready`/`Timeout` succeed (the create/start itself already succeeded);
+/// `Failed` returns an error so the command exits non-zero, since the instance
+/// will not become reachable without intervention.
+pub(crate) fn finish_wait(
+    outcome: WaitOutcome,
+    vm_id: &ItemHash,
+    json: bool,
+) -> anyhow::Result<()> {
+    match outcome {
+        WaitOutcome::Ready(conn) => {
+            report_ready(&conn, vm_id, json);
+            Ok(())
+        }
+        WaitOutcome::Timeout => {
+            report_timeout(vm_id, json);
+            Ok(())
+        }
+        WaitOutcome::Failed(reason) => {
+            if json {
+                let payload = serde_json::json!({
+                    "ready": false,
+                    "error": reason,
+                });
+                println!("{payload}");
+            }
+            Err(anyhow::anyhow!(
+                "instance could not be scheduled: {reason} \
+                 (check with `aleph instance show {vm_id} --verbose`)"
+            ))
+        }
+    }
 }
 
 /// Report a successful wait to the user. Human output goes to stderr (so it
@@ -269,6 +413,22 @@ mod tests {
         let c = Connectivity::from_networking(&net).unwrap();
         assert_eq!(c.ipv6.as_deref(), Some("2a01::5"));
         assert_eq!(c.ipv4.as_deref(), Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn friendly_reason_maps_known_codes_and_passes_through() {
+        assert_eq!(
+            friendly_reason("NoSuitableNode"),
+            "no suitable node available"
+        );
+        assert_eq!(
+            friendly_reason("InsufficientResources"),
+            "insufficient resources available"
+        );
+        // Unknown codes pass through verbatim so nothing is hidden.
+        assert_eq!(friendly_reason("SomethingNew"), "SomethingNew");
+        // Empty reason gets a sensible default.
+        assert_eq!(friendly_reason(""), "scheduler rejected the instance");
     }
 
     #[test]
