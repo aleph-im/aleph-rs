@@ -401,7 +401,8 @@ pub async fn handle_instance_command(
     use super::crn;
     match command {
         InstanceCommand::Create(args) => {
-            handle_instance_create(aleph_client, ccn_url, json, args).await?;
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            handle_instance_create(aleph_client, ccn_url, &scheduler_url, json, args).await?;
         }
         InstanceCommand::Delete(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
@@ -817,10 +818,12 @@ pub(crate) fn resolve_runtime_ref(
 async fn handle_instance_create(
     aleph_client: &AlephClient,
     ccn_url: &Url,
+    scheduler_url: &Url,
     json: bool,
     mut args: InstanceCreateArgs,
 ) -> Result<()> {
     let dry_run = args.signing.dry_run;
+    let wait = args.wait;
     let account = resolve_account(&args.signing.identity)?;
 
     // SSH keys are looked up for the instance OWNER. When signing on behalf of
@@ -1064,7 +1067,25 @@ async fn handle_instance_create(
     }
 
     let pending = builder.build()?;
-    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+    let vm_id = pending.item_hash.clone();
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await?;
+
+    // The scheduler auto-dispatches instances, so creation does not notify a
+    // CRN; with --wait we only poll until the VM is reachable. Skip on
+    // --dry-run (nothing was submitted).
+    if let Some(secs) = wait
+        && !dry_run
+    {
+        use crate::commands::instance_wait::{WaitOutcome, report_ready, report_timeout};
+        let wait_timeout = std::time::Duration::from_secs(secs);
+        match crate::commands::instance_wait::wait_until_ready(scheduler_url, &vm_id, wait_timeout)
+            .await?
+        {
+            WaitOutcome::Ready(conn) => report_ready(&conn, &vm_id, json),
+            WaitOutcome::Timeout => report_timeout(&vm_id, json),
+        }
+    }
+    Ok(())
 }
 
 /// Known GPU presets: (slug, pricing_model, vendor, device_name, device_class, device_id).

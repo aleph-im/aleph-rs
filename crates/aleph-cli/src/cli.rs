@@ -2041,6 +2041,13 @@ pub struct InstanceCreateArgs {
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
+    /// After submitting, poll until the VM is reachable (networking populated
+    /// on its allocated CRN) and print its connectivity plus an SSH hint.
+    /// Optionally takes a timeout in seconds (default 300): `--wait` or
+    /// `--wait 600`.
+    #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "300")]
+    pub wait: Option<u64>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -2168,6 +2175,12 @@ pub struct CrnStartArgs {
     /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
     /// shown by `aleph instance list`); the scheduler matches it server-side.
     pub vm_id: String,
+
+    /// After notifying the CRN, poll until the VM is reachable (networking
+    /// populated) and print its connectivity plus an SSH hint. Optionally takes
+    /// a timeout in seconds (default 300): `--wait` or `--wait 600`.
+    #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "300")]
+    pub wait: Option<u64>,
 
     #[command(flatten)]
     pub signing: SigningArgs,
