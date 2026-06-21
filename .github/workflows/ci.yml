@@ -264,6 +264,9 @@ jobs:
       - name: Build (release)
         run: cargo build --verbose --release --all-features
 
+      - name: Build aleph-cli (no admin feature, ensure admin symbols are gated)
+        run: cargo build -p aleph-cli
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest
