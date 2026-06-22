@@ -456,6 +456,7 @@ fn print_transfer_summary(
 fn resolve_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
     match resolve_account(&signing.identity)? {
         CliAccount::Evm(a) => Ok(a),
+        CliAccount::LazyKeystore(a) => a.into_evm(),
         CliAccount::LedgerEvm(_) => Err(anyhow!(
             "Ledger accounts are not supported for credit purchases. Use a local account."
         )),
