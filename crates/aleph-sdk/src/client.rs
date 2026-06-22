@@ -2856,6 +2856,10 @@ pub struct CreditHistoryFilters {
     /// Restrict to entries whose billed resource is one of these message
     /// types (e.g. `STORE` for storage, `INSTANCE`/`PROGRAM` for compute).
     pub resource_types: Vec<MessageType>,
+    /// Restrict to expenses billed to a single resource, identified by its
+    /// item hash (e.g. a VM/instance hash). Top-ups are never associated with
+    /// a resource, so this only ever narrows to outgoing entries.
+    pub resource: Option<String>,
 }
 
 impl CreditHistoryFilters {
@@ -2880,6 +2884,9 @@ impl CreditHistoryFilters {
                 .collect::<Vec<_>>()
                 .join(",");
             params.push(("resourceTypes", joined));
+        }
+        if let Some(resource) = &self.resource {
+            params.push(("resource", resource.clone()));
         }
         params
     }
@@ -4857,6 +4864,7 @@ mod credit_history_serde_tests {
             end_date: Some(1_770_000_000),
             direction: Some(CreditDirection::Outgoing),
             resource_types: vec![MessageType::Store, MessageType::Program],
+            resource: None,
         };
         let params = filters.query_params();
         assert_eq!(
@@ -4867,6 +4875,18 @@ mod credit_history_serde_tests {
                 ("direction", "outgoing".to_string()),
                 ("resourceTypes", "STORE,PROGRAM".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn filters_render_resource_query_param() {
+        let filters = CreditHistoryFilters {
+            resource: Some("vm-hash-abc".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            filters.query_params(),
+            vec![("resource", "vm-hash-abc".to_string())]
         );
     }
 
@@ -4922,6 +4942,7 @@ mod credit_history_summary_tests {
             end_date: None,
             direction: Some(CreditDirection::Outgoing),
             resource_types: vec![MessageType::Store, MessageType::Program],
+            resource: None,
         };
         let summary = client
             .get_credit_history_summary(&addr, &filters)

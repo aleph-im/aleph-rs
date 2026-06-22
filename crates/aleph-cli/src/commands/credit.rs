@@ -85,6 +85,7 @@ fn build_filters(filters: &CreditFilterArgs) -> Result<(AlephAddress, CreditHist
             .copied()
             .map(Into::into)
             .collect(),
+        resource: filters.resource.clone(),
     };
     Ok((address, sdk_filters))
 }
@@ -156,12 +157,31 @@ async fn handle_summary(
         return Ok(());
     }
 
-    eprintln!("Credit summary for {}", summary.address);
-    eprintln!("  Entries:   {}", summary.entry_count);
-    eprintln!("  Net:       {:+}", summary.total_amount);
-    eprintln!("  Incoming:  {:+}", summary.total_incoming);
-    eprintln!("  Outgoing:  {:+}", summary.total_outgoing);
+    for line in summary_lines(&summary, args.filters.resource.is_some()) {
+        eprintln!("{line}");
+    }
     Ok(())
+}
+
+/// Render the human-readable summary lines.
+///
+/// When the totals are scoped to a single resource (`--resource`), every entry
+/// is necessarily an expense, so the `Incoming` (top-ups) line is always zero
+/// and only adds noise — drop it.
+fn summary_lines(
+    summary: &aleph_sdk::client::CreditHistorySummary,
+    resource_filtered: bool,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("Credit summary for {}", summary.address),
+        format!("  Entries:   {}", summary.entry_count),
+        format!("  Net:       {:+}", summary.total_amount),
+    ];
+    if !resource_filtered {
+        lines.push(format!("  Incoming:  {:+}", summary.total_incoming));
+    }
+    lines.push(format!("  Outgoing:  {:+}", summary.total_outgoing));
+    lines
 }
 
 /// Resolve the owner address for read-only credit queries.
@@ -277,6 +297,7 @@ mod history_tests {
             expenses: false,
             top_ups: false,
             resource_type: Vec::new(),
+            resource: None,
         }
     }
 
@@ -317,6 +338,53 @@ mod history_tests {
             filters.resource_types,
             vec![MessageType::Store, MessageType::Instance]
         );
+    }
+
+    fn sample_summary() -> aleph_sdk::client::CreditHistorySummary {
+        aleph_sdk::client::CreditHistorySummary {
+            address: SAMPLE_ADDRESS.to_string(),
+            entry_count: 3,
+            total_amount: -900,
+            total_incoming: 0,
+            total_outgoing: -900,
+        }
+    }
+
+    #[test]
+    fn summary_lines_include_incoming_without_resource_filter() {
+        let lines = summary_lines(&sample_summary(), false);
+        assert!(
+            lines.iter().any(|l| l.contains("Incoming")),
+            "expected an Incoming line, got: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("Outgoing")));
+    }
+
+    #[test]
+    fn summary_lines_omit_incoming_with_resource_filter() {
+        let lines = summary_lines(&sample_summary(), true);
+        assert!(
+            !lines.iter().any(|l| l.contains("Incoming")),
+            "Incoming line must be hidden when filtering by resource, got: {lines:?}"
+        );
+        // The other totals must still be there.
+        assert!(lines.iter().any(|l| l.contains("Entries")));
+        assert!(lines.iter().any(|l| l.contains("Net")));
+        assert!(lines.iter().any(|l| l.contains("Outgoing")));
+    }
+
+    #[test]
+    fn build_filters_passes_resource() {
+        let mut args = filter_args(SAMPLE_ADDRESS);
+        args.resource = Some("vm-hash-abc".to_string());
+        let (_, filters) = build_filters(&args).unwrap();
+        assert_eq!(filters.resource.as_deref(), Some("vm-hash-abc"));
+    }
+
+    #[test]
+    fn build_filters_no_resource_by_default() {
+        let (_, filters) = build_filters(&filter_args(SAMPLE_ADDRESS)).unwrap();
+        assert!(filters.resource.is_none());
     }
 
     #[test]
