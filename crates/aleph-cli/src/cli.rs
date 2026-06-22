@@ -2569,12 +2569,15 @@ Filters narrow the rows server-side:
   --expenses / --top-ups         show only spends or only credits received
   --resource-type store          restrict to a billed resource type
                                  (store = storage; instance, program = compute)
+  --resource <HASH>              restrict to expenses billed to one resource,
+                                 e.g. a single instance/VM hash
 
 For spend totals without the per-row detail, use `aleph credit summary`.
 
 Examples:
   aleph credit history --since 24h
   aleph credit history --expenses --resource-type store --resource-type program
+  aleph credit history --resource 25c8a...f3 --since 30d
   aleph credit history --address 0xab12... --start 2026-01-01T00:00:00Z --json")]
     History(CreditHistoryArgs),
     /// Summarize credit spend totals for an address over a filter window
@@ -2584,12 +2587,17 @@ the number of matching entries, the net change, total credits received \
 (incoming), and total credits spent (outgoing).
 
 Accepts the same filters as `aleph credit history` (--since/--start/--end, \
---expenses/--top-ups, --resource-type). Always succeeds, reporting zeros for \
-an address with no matching entries.
+--expenses/--top-ups, --resource-type, --resource). Always succeeds, reporting \
+zeros for an address with no matching entries.
+
+Filtering by --resource scopes the totals to a single resource (e.g. one \
+instance/VM hash). Since resources are only ever charged, the incoming \
+(top-ups) line is omitted in that case.
 
 Examples:
   aleph credit summary --since 7d
   aleph credit summary --since 30d --expenses --resource-type store
+  aleph credit summary --resource 25c8a...f3
   aleph credit summary --address 0xab12... --json")]
     Summary(CreditSummaryArgs),
 }
@@ -2635,6 +2643,12 @@ pub struct CreditFilterArgs {
     /// is storage; `instance` and `program` are compute.
     #[arg(long = "resource-type", value_enum)]
     pub resource_type: Vec<ResourceTypeCli>,
+
+    /// Restrict to expenses billed to a single resource, identified by its
+    /// item hash (e.g. an instance/VM hash). Resources are only ever charged,
+    /// so this implies expenses; it cannot be combined with `--top-ups`.
+    #[arg(long, value_name = "HASH", conflicts_with = "top_ups")]
+    pub resource: Option<String>,
 }
 
 #[derive(Args)]
