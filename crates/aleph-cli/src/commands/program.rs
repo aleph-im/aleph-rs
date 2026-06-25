@@ -1,6 +1,7 @@
 use crate::cli::{
-    ImageRef, PaymentTypeCli, ProgramCommand, ProgramCreateArgs, ProgramDeleteArgs,
-    ProgramListArgs, ProgramShowArgs, ProgramUpdateArgs, StorageEngineCli,
+    ImageRef, PaymentTypeCli, ProgramCheckRuntimeArgs, ProgramCommand, ProgramCreateArgs,
+    ProgramDeleteArgs, ProgramListArgs, ProgramRunArgs, ProgramShowArgs, ProgramUpdateArgs,
+    StorageEngineCli,
 };
 use crate::commands::instance::{
     parse_ephemeral_volumes, parse_immutable_volumes, parse_persistent_volumes, resolve_runtime_ref,
@@ -10,6 +11,10 @@ use crate::common::{
     resolve_address_or_active, submit_or_preview,
 };
 use crate::program::archive::prepare_archive;
+use aleph_microvm::cache::ArtifactCache;
+use aleph_microvm::config::{Encoding as McEncoding, Interface as McInterface, LocalVmConfig};
+use aleph_microvm::server::serve_localhost;
+use aleph_microvm::{LocalVm, preflight};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, MessageError, MessageFilter,
@@ -46,6 +51,10 @@ pub async fn handle_program_command(
         ProgramCommand::Delete(args) => handle_delete(aleph_client, ccn_url, json, args).await,
         ProgramCommand::Update(args) => handle_update(aleph_client, ccn_url, json, args).await,
         ProgramCommand::Show(args) => handle_show(aleph_client, json, args).await,
+        ProgramCommand::Run(args) => handle_run(aleph_client, ccn_url, json, args).await,
+        ProgramCommand::CheckRuntime(args) => {
+            handle_check_runtime(aleph_client, ccn_url, json, args).await
+        }
     }
 }
 
@@ -233,6 +242,252 @@ async fn handle_create(
         eprintln!("  {path}");
     }
 
+    Ok(())
+}
+
+// =============================================================================
+// `aleph program run` / `aleph program check-runtime` (local Firecracker)
+// =============================================================================
+
+/// Resolve the path to an uncompressed Linux kernel (vmlinux) for local boot.
+///
+/// There is no downloadable aleph kernel artifact: CRNs ship a pre-baked
+/// `/opt/firecracker/vmlinux.bin`. Resolution order: explicit `--kernel`, then
+/// the `ALEPH_VMLINUX` env var, then `/opt/firecracker/vmlinux.bin`.
+fn resolve_kernel(explicit: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
+    if let Some(path) = explicit {
+        if !path.exists() {
+            bail!("kernel image not found: {}", path.display());
+        }
+        return Ok(path);
+    }
+    if let Some(env) = std::env::var_os("ALEPH_VMLINUX") {
+        let path = std::path::PathBuf::from(env);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    let default = std::path::PathBuf::from("/opt/firecracker/vmlinux.bin");
+    if default.exists() {
+        return Ok(default);
+    }
+    bail!(
+        "No kernel image found. Pass --kernel <path> to an uncompressed Linux kernel \
+         (vmlinux). See the Firecracker getting-started guide, or copy \
+         /opt/firecracker/vmlinux.bin from an aleph CRN."
+    )
+}
+
+/// Resolve the runtime rootfs to a local path: either the `--rootfs` override or
+/// a download from the CCN raw storage endpoint into the artifact cache.
+async fn resolve_rootfs(
+    ccn_url: &Url,
+    runtime: &ItemHash,
+    rootfs_override: Option<std::path::PathBuf>,
+    json: bool,
+) -> Result<std::path::PathBuf> {
+    if let Some(path) = rootfs_override {
+        if !path.exists() {
+            bail!("rootfs not found: {}", path.display());
+        }
+        return Ok(path);
+    }
+    let url = ccn_url
+        .join(&format!("/api/v0/storage/raw/{runtime}"))
+        .with_context(|| format!("failed to build storage URL for runtime {runtime}"))?;
+    if !json {
+        eprintln!("Fetching runtime rootfs {runtime}...");
+    }
+    let cache = ArtifactCache::default_location();
+    cache
+        .ensure(&runtime.to_string(), url.as_str())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to fetch runtime rootfs: {e}"))
+}
+
+/// Fetch the vm-images aggregate when the runtime ref needs resolving (preset or
+/// default), mirroring `handle_create`. Raw item hashes short-circuit the fetch.
+async fn vm_images_for_runtime(
+    aleph_client: &AlephClient,
+    runtime: &Option<ImageRef>,
+) -> Result<VmImagesData> {
+    let needs_aggregate = !matches!(runtime, Some(ImageRef::Hash(_)));
+    if needs_aggregate {
+        Ok(aleph_client
+            .get_vm_images_aggregate()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to fetch vm-images aggregate: {e}. \
+                     As a fallback, pass --runtime with a raw item hash."
+                )
+            })?
+            .vm_images)
+    } else {
+        Ok(VmImagesData::default())
+    }
+}
+
+/// Forward the guest serial console to stdout, prefixed so it is distinguishable
+/// from the CLI's own output.
+async fn stream_console(stdout: tokio::process::ChildStdout) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut lines = BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        eprintln!("  vm | {line}");
+    }
+}
+
+async fn handle_run(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: ProgramRunArgs,
+) -> Result<()> {
+    // 1. Preflight: firecracker + /dev/kvm, then the kernel image.
+    let firecracker = preflight::check("firecracker").map_err(|e| anyhow::anyhow!("{e}"))?;
+    let kernel_path = resolve_kernel(args.kernel.clone())?;
+    if !json {
+        eprintln!("firecracker + /dev/kvm OK");
+    }
+
+    // 2. Package the code, byte-identical to `program create`.
+    let (archive, encoding) = prepare_archive(&args.path)?;
+    let code_path = archive.path().to_path_buf();
+    let mc_encoding = match encoding {
+        Encoding::Squashfs => McEncoding::Squashfs,
+        _ => McEncoding::Zip,
+    };
+
+    // 3. Resolve + cache the runtime rootfs.
+    let vm_images = vm_images_for_runtime(aleph_client, &args.runtime).await?;
+    let runtime = resolve_runtime_ref(args.runtime.clone(), &vm_images)?;
+    let rootfs_path = resolve_rootfs(ccn_url, &runtime, args.rootfs.clone(), json).await?;
+
+    // 4. Assemble config and launch.
+    let cfg = LocalVmConfig {
+        kernel_path,
+        rootfs_path,
+        code_path,
+        encoding: mc_encoding,
+        interface: McInterface::Asgi,
+        entrypoint: args.entrypoint.clone(),
+        vm_hash: "local-test".to_string(),
+        vcpus: args.vcpus,
+        mem_mib: args.memory,
+        variables: args.env.clone(),
+        volumes: vec![],
+    };
+    let runtime_dir = std::env::temp_dir().join(format!("aleph-run-{}", std::process::id()));
+    let mut vm = LocalVm::launch(&cfg, &firecracker, runtime_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !json {
+        eprintln!("VM booted (runtime {})", vm.runtime_version);
+    }
+
+    // 5. Stream the serial console.
+    if let Some(stdout) = vm.take_console() {
+        tokio::spawn(stream_console(stdout));
+    }
+
+    // 6. Serve until Ctrl-C.
+    let channel = vm.channel.clone();
+    if !json {
+        eprintln!("Serving http://localhost:{} (Ctrl-C to stop)", args.port);
+    }
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    let serve_result = serve_localhost(args.port, channel, ctrl_c).await;
+
+    // 7. Teardown regardless of the serve outcome.
+    vm.shutdown().await;
+    serve_result.with_context(|| format!("failed to serve on localhost:{}", args.port))?;
+    if !json {
+        eprintln!("stopped");
+    }
+    Ok(())
+}
+
+async fn handle_check_runtime(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    json: bool,
+    args: ProgramCheckRuntimeArgs,
+) -> Result<()> {
+    let firecracker = preflight::check("firecracker").map_err(|e| anyhow::anyhow!("{e}"))?;
+    let kernel_path = resolve_kernel(args.kernel.clone())?;
+
+    let vm_images = vm_images_for_runtime(aleph_client, &Some(args.runtime.clone())).await?;
+    let runtime = resolve_runtime_ref(Some(args.runtime.clone()), &vm_images)?;
+    let rootfs_path = resolve_rootfs(ccn_url, &runtime, args.rootfs.clone(), json).await?;
+
+    // Write the embedded probe zip to a tempfile that outlives the VM launch.
+    let probe = crate::program::probe::probe_zip()?;
+    let tmp = tempfile::Builder::new()
+        .prefix("aleph-probe-")
+        .suffix(".zip")
+        .tempfile()?;
+    std::fs::write(tmp.path(), &probe)?;
+
+    let cfg = LocalVmConfig {
+        kernel_path,
+        rootfs_path,
+        code_path: tmp.path().to_path_buf(),
+        encoding: McEncoding::Zip,
+        interface: McInterface::Asgi,
+        entrypoint: "main:app".to_string(),
+        vm_hash: "runtime-check".to_string(),
+        vcpus: 1,
+        mem_mib: 256,
+        variables: vec![],
+        volumes: vec![],
+    };
+    let runtime_dir = std::env::temp_dir().join(format!("aleph-check-{}", std::process::id()));
+    let vm = LocalVm::launch(&cfg, &firecracker, runtime_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // One request to the probe, then decode its JSON version map.
+    let scope = aleph_microvm::asgi::scope_from_parts("GET", "/", &[], vec![]);
+    let result = async {
+        let payload = aleph_microvm::protocol::RunCodePayload { scope }
+            .to_msgpack()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let raw = vm
+            .channel
+            .send_run(&payload)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let resp: aleph_microvm::protocol::RunResponse =
+            rmp_serde::from_slice(&raw).context("invalid probe response")?;
+        let success = resp.into_success().map_err(|tb| anyhow::anyhow!(tb))?;
+        let versions: serde_json::Value =
+            serde_json::from_slice(&success.body).context("probe did not return JSON")?;
+        Ok::<_, anyhow::Error>(versions)
+    }
+    .await;
+
+    vm.shutdown().await;
+    let versions = result?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "runtime": runtime.to_string(),
+                "versions": versions,
+            }))?
+        );
+    } else {
+        println!("Runtime {runtime}");
+        if let Some(map) = versions.as_object() {
+            for (k, v) in map {
+                println!("  {k}: {}", v.as_str().unwrap_or(""));
+            }
+        }
+    }
     Ok(())
 }
 

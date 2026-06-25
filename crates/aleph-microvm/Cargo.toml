@@ -1,0 +1,25 @@
+[package]
+name = "aleph-microvm"
+version = "0.13.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "sync", "time", "process", "net", "io-util", "signal"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+serde_bytes = "0.11"
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+nix = { workspace = true }
+bytes = "1"
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+rmpv = { version = "1", features = ["with-serde"] }
+serde_json = { workspace = true }
+tempfile = "3"
