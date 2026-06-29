@@ -1267,7 +1267,7 @@ const GPU_PRESETS: &[(&str, &str, &str, &str, &str, &str)] = &[
     ),
 ];
 
-fn resolve_gpu(name: &str) -> Result<GpuProperties> {
+pub(crate) fn resolve_gpu(name: &str) -> Result<GpuProperties> {
     let lower = name.to_ascii_lowercase();
     for &(slug, _, vendor, device_name, class, device_id) in GPU_PRESETS {
         if lower == slug {

@@ -105,8 +105,10 @@ pub struct CrnFilter {
     pub min_disk_mib: Option<u64>,
     /// Require `confidential_support == true`.
     pub confidential: bool,
-    /// Require `gpu_support == true` with at least one compatible available GPU.
-    pub gpu: bool,
+    /// GPU constraint: `None` = no requirement; `Some([])` = any compatible GPU;
+    /// `Some([device_id, ...])` = require a compatible available GPU matching
+    /// every listed PCI id (case-insensitive, e.g. `"10de:2204"`).
+    pub gpu: Option<Vec<String>>,
 }
 
 impl CrnListResponse {
@@ -129,13 +131,18 @@ fn matches_filter(entry: &CrnListEntry, f: &CrnFilter) -> bool {
     if f.confidential && !entry.confidential_support {
         return false;
     }
-    if f.gpu {
-        let has_gpu = entry.gpu_support
-            && entry
-                .compatible_available_gpus
-                .as_ref()
-                .is_some_and(|g| !g.is_empty());
-        if !has_gpu {
+    if let Some(device_ids) = &f.gpu {
+        let available = entry.compatible_available_gpus.as_deref().unwrap_or(&[]);
+        if !entry.gpu_support || available.is_empty() {
+            return false;
+        }
+        // Empty list = any compatible GPU; otherwise every id must be present.
+        let all_present = device_ids.iter().all(|want| {
+            available
+                .iter()
+                .any(|g| g.device_id.eq_ignore_ascii_case(want))
+        });
+        if !all_present {
             return false;
         }
     }
@@ -259,14 +266,34 @@ mod tests {
     }
 
     #[test]
-    fn filter_gpu_keeps_only_delta() {
+    fn filter_gpu_any_keeps_only_delta() {
         let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
         let f = CrnFilter {
-            gpu: true,
+            gpu: Some(vec![]),
             ..Default::default()
         };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["delta-gpu"]);
+    }
+
+    #[test]
+    fn filter_gpu_by_device_id_matches_model() {
+        let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
+        // delta-gpu advertises an H100 (10de:2331).
+        let f = CrnFilter {
+            gpu: Some(vec!["10de:2331".into()]),
+            ..Default::default()
+        };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["delta-gpu"]);
+
+        // A different model (rtx3090, 10de:2204) must not match an H100-only node.
+        let f = CrnFilter {
+            gpu: Some(vec!["10DE:2204".into()]),
+            ..Default::default()
+        };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        assert!(names.is_empty(), "rtx3090 must not match an H100-only node");
     }
 
     #[test]
