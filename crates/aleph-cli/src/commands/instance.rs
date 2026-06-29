@@ -1239,7 +1239,7 @@ const GPU_PRESETS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "NVIDIA",
         "GB202 [GeForce RTX 5090]",
         "0300",
-        "10de:2684",
+        "10de:2b85",
     ),
     (
         "l40s",
