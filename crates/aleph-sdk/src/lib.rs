@@ -1,6 +1,7 @@
 pub mod aggregate_models;
 pub mod authorization;
 pub mod builder;
+pub mod caching_aggregate_client;
 pub mod client;
 pub mod confidential;
 pub mod corechannel;

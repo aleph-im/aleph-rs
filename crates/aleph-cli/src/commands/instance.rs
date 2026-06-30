@@ -6,6 +6,7 @@ use crate::common::{
     confirm_action, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview,
 };
 use aleph_sdk::aggregate_models::vm_images::{VmImagesData, VmImagesError};
+use aleph_sdk::caching_aggregate_client::CachingAggregateClient;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, MessageFilter, MessageWithStatus,
 };
@@ -952,9 +953,15 @@ async fn handle_instance_create(
         None => account.address().clone(),
     };
 
+    // The pricing and settings aggregates are fetched from several places below
+    // (the interactive picker, the CRN filter, GPU sizing). Wrap the client so
+    // each is fetched at most once for this command.
+    let aggregates = CachingAggregateClient::new(aleph_client);
+
     if args.interactive {
         crate::commands::instance_interactive::resolve_interactive(
             &mut args,
+            &aggregates,
             aleph_client,
             &owner_address,
         )
@@ -1008,7 +1015,7 @@ async fn handle_instance_create(
         // Resolve every requested GPU against the network aggregates: pricing for
         // sizing, settings (`compatible_gpus`) for the device identity that goes
         // into the instance message.
-        let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
+        let (pricing, settings) = fetch_pricing_and_settings(&aggregates).await?;
         let options = build_gpu_options(&pricing.pricing, &settings.settings);
 
         // Build the GPU requirement: one device per requested model, demanding the
@@ -1056,7 +1063,7 @@ async fn handle_instance_create(
 
         (vcpus, memory_mib, disk_size_mib)
     } else if let Some(slug) = &args.size {
-        let pricing = aleph_client
+        let pricing = aggregates
             .get_pricing_aggregate()
             .await
             .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
@@ -1246,7 +1253,7 @@ impl GpuOption {
 /// so a GPU request resolves them in a single round-trip rather than two
 /// sequential ones.
 pub(crate) async fn fetch_pricing_and_settings(
-    aleph_client: &AlephClient,
+    aleph_client: &impl AlephAggregateClient,
 ) -> Result<(
     aleph_sdk::aggregate_models::pricing::PricingAggregate,
     aleph_sdk::aggregate_models::settings::SettingsAggregate,
@@ -1316,7 +1323,9 @@ pub(crate) fn resolve_gpu_option<'a>(
 /// Fetch the pricing + settings aggregates (concurrently) and build the GPU
 /// catalog. Used by the interactive picker, which needs the catalog for both the
 /// CRN filter and resolving the pinned node's exact GPU device.
-pub(crate) async fn load_gpu_options(aleph_client: &AlephClient) -> Result<Vec<GpuOption>> {
+pub(crate) async fn load_gpu_options(
+    aleph_client: &impl AlephAggregateClient,
+) -> Result<Vec<GpuOption>> {
     let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
     Ok(build_gpu_options(&pricing.pricing, &settings.settings))
 }
