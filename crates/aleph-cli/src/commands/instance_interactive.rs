@@ -9,13 +9,13 @@
 //! never prompted for.
 
 use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
-use crate::commands::instance::{gpu_filter_device_ids, validate_ssh_pubkey};
+use crate::commands::instance::{
+    gpu_filter_groups, load_gpu_options, resolve_node_gpu_props, validate_ssh_pubkey,
+};
 use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, GpuModel, PricingPerEntity};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
-use aleph_sdk::crns_list::{
-    CrnFilter, CrnListEntry, CrnListResponse, DEFAULT_CRN_LIST_URL, fetch_crns_list,
-};
+use aleph_sdk::crns_list::{CrnFilter, CrnListEntry, CrnListResponse};
 use aleph_sdk::ssh::AlephSshClient;
 use aleph_types::chain::Address;
 use anyhow::{Result, anyhow, bail};
@@ -73,11 +73,17 @@ pub async fn resolve_interactive(
             .map_err(|e| anyhow!("background task error: {e}"))?
             .map_err(anyhow::Error::msg)?;
         let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aleph_client).await?;
-        // Filter by the requested GPU model's PCI id, not merely "has a GPU", so
-        // the picker matches the GPU requirement put in the instance message.
-        let gpu_filter = match &args.gpu {
-            Some(model_ids) => Some(gpu_filter_device_ids(aleph_client, model_ids).await?),
+        // Build the GPU catalog once: it drives both the CRN filter and (after a
+        // node is picked) resolving that node's exact GPU device.
+        let gpu_options = match &args.gpu {
+            Some(_) => Some(load_gpu_options(aleph_client).await?),
             None => None,
+        };
+        // Filter by the requested GPU model, accepting any of its PCI variants,
+        // so the picker surfaces every node that can host it.
+        let gpu_filter = match (&gpu_options, &args.gpu) {
+            (Some(options), Some(model_ids)) => Some(gpu_filter_groups(options, model_ids)?),
+            _ => None,
         };
         // `ipv6: true` filters the CRN's own infrastructure. CRNs without working IPv6
         // can't route traffic to their VMs, so they can't host usable instances. This is
@@ -108,6 +114,11 @@ pub async fn resolve_interactive(
         }
         let chosen = prompt_crn(&filtered)?;
         accept_terms_and_conditions(chosen).await?;
+        // Record the node's actual GPU device(s) so the instance message demands
+        // exactly the variant this node advertises (not the model representative).
+        if let (Some(options), Some(model_ids)) = (&gpu_options, &args.gpu) {
+            args.resolved_gpus = Some(resolve_node_gpu_props(options, model_ids, chosen)?);
+        }
         args.crn_hash = Some(chosen.hash.parse().map_err(|e| {
             anyhow!(
                 "CRN list returned an invalid node hash '{}': {}",
@@ -312,22 +323,11 @@ async fn prompt_gpu(args: &mut InstanceCreateArgs, aleph_client: &AlephClient) -
     Ok(true)
 }
 
-fn crn_list_url() -> Result<url::Url> {
-    let raw =
-        std::env::var("ALEPH_CRN_LIST_URL").unwrap_or_else(|_| DEFAULT_CRN_LIST_URL.to_string());
-    Ok(url::Url::parse(&raw)?)
-}
-
 fn spawn_crn_list_fetch() -> JoinHandle<Result<CrnListResponse, String>> {
     tokio::spawn(async move {
-        let url = crn_list_url().map_err(|e| e.to_string())?;
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| e.to_string())?;
-        fetch_crns_list(&http, &url, true)
+        crate::commands::instance::fetch_crn_list()
             .await
-            .map_err(|e| format!("failed to fetch CRN list from {url}: {e}"))
+            .map_err(|e| e.to_string())
     })
 }
 
