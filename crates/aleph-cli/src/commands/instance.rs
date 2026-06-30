@@ -1008,14 +1008,7 @@ async fn handle_instance_create(
         // Resolve every requested GPU against the network aggregates: pricing for
         // sizing, settings (`compatible_gpus`) for the device identity that goes
         // into the instance message.
-        let pricing = aleph_client
-            .get_pricing_aggregate()
-            .await
-            .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
-        let settings = aleph_client
-            .get_settings_aggregate()
-            .await
-            .map_err(|e| anyhow!("failed to fetch network settings: {e}"))?;
+        let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
         let options = build_gpu_options(&pricing.pricing, &settings.settings);
 
         // Build the GPU requirement: one device per requested model, using the
@@ -1240,6 +1233,31 @@ impl GpuOption {
     }
 }
 
+/// Fetch the pricing and settings aggregates concurrently. They are independent,
+/// so a GPU request resolves them in a single round-trip rather than two
+/// sequential ones.
+pub(crate) async fn fetch_pricing_and_settings(
+    aleph_client: &AlephClient,
+) -> Result<(
+    aleph_sdk::aggregate_models::pricing::PricingAggregate,
+    aleph_sdk::aggregate_models::settings::SettingsAggregate,
+)> {
+    tokio::try_join!(
+        async {
+            aleph_client
+                .get_pricing_aggregate()
+                .await
+                .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))
+        },
+        async {
+            aleph_client
+                .get_settings_aggregate()
+                .await
+                .map_err(|e| anyhow!("failed to fetch network settings: {e}"))
+        },
+    )
+}
+
 /// Build the list of selectable GPUs by joining the pricing aggregate (which
 /// models are purchasable, and their sizing) with the settings aggregate (the
 /// device identity and canonical `model_id`), matched on the model name.
@@ -1293,14 +1311,7 @@ pub(crate) async fn gpu_filter_device_ids(
     aleph_client: &AlephClient,
     model_ids: &[String],
 ) -> Result<Vec<String>> {
-    let pricing = aleph_client
-        .get_pricing_aggregate()
-        .await
-        .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
-    let settings = aleph_client
-        .get_settings_aggregate()
-        .await
-        .map_err(|e| anyhow!("failed to fetch network settings: {e}"))?;
+    let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
     let options = build_gpu_options(&pricing.pricing, &settings.settings);
 
     let mut device_ids = Vec::with_capacity(model_ids.len());
@@ -1404,25 +1415,23 @@ async fn handle_instance_price(
     json: bool,
     args: InstancePriceArgs,
 ) -> Result<()> {
-    let pricing = aleph_client
-        .get_pricing_aggregate()
-        .await
-        .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
-
     if args.confidential && args.gpu.is_some() {
         bail!("--confidential and --gpu cannot be combined");
     }
 
-    // The settings aggregate provides the canonical GPU `model_id` and device
-    // data; only fetched when a GPU is involved to avoid a needless call.
-    let gpu_options = if args.list_gpus || args.gpu.is_some() {
-        let settings = aleph_client
-            .get_settings_aggregate()
-            .await
-            .map_err(|e| anyhow!("failed to fetch network settings: {e}"))?;
-        build_gpu_options(&pricing.pricing, &settings.settings)
+    // Pricing is always needed; the settings aggregate (canonical GPU `model_id`
+    // and device data) only when a GPU is involved. In the GPU case fetch the
+    // pair concurrently; otherwise fetch pricing alone.
+    let (pricing, gpu_options) = if args.list_gpus || args.gpu.is_some() {
+        let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
+        let options = build_gpu_options(&pricing.pricing, &settings.settings);
+        (pricing, options)
     } else {
-        Vec::new()
+        let pricing = aleph_client
+            .get_pricing_aggregate()
+            .await
+            .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
+        (pricing, Vec::new())
     };
 
     if args.list_gpus || args.gpu.as_deref() == Some("") {
