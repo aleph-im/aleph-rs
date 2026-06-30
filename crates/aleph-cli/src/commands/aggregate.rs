@@ -15,6 +15,7 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value};
+use std::io::{IsTerminal, Read};
 use url::Url;
 
 /// Parse `--content` (or edited buffer) and validate it is well-formed JSON.
@@ -178,11 +179,25 @@ async fn handle_aggregate_edit(
             let desired = parse_content_json(raw)?;
             content_to_post(&current, &desired)
         }
-        // Interactive: open the current content in $EDITOR, then diff.
+        // Neither subkey nor content: read the desired whole content from stdin
+        // when it is piped (e.g. `cat file | aleph aggregate edit ...`), otherwise
+        // open the current content in $EDITOR. Either way, diff against current.
         (None, None) => {
-            let initial = serde_json::to_string_pretty(&current)?;
-            let edited = edit_via_editor(&initial)?;
-            content_to_post(&current, &edited)
+            let desired = if std::io::stdin().is_terminal() {
+                edit_via_editor(&serde_json::to_string_pretty(&current)?)?
+            } else {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                if buf.trim().is_empty() {
+                    bail!(
+                        "no content on stdin. Pipe JSON (`cat file | aleph aggregate edit \
+                         --key {}`), pass --content, or run in a terminal to use $EDITOR.",
+                        args.key
+                    );
+                }
+                parse_content_json(&buf)?
+            };
+            content_to_post(&current, &desired)
         }
     };
 

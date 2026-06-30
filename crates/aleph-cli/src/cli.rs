@@ -859,7 +859,9 @@ pub struct AggregateEditArgs {
 
     /// New content as JSON. With --subkey it is the subkey's value; without it,
     /// the desired full content for the key (removed subkeys are nulled).
-    /// If both --subkey and --content are omitted, $EDITOR is opened.
+    /// If both --subkey and --content are omitted, the content is read from stdin
+    /// when piped (e.g. `cat file | aleph aggregate edit ...`), otherwise $EDITOR
+    /// is opened.
     #[arg(long)]
     pub content: Option<String>,
 
