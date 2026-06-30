@@ -567,6 +567,7 @@ async fn swap_via_ophis(
 fn resolve_swap_evm_account(signing: &SigningArgs) -> Result<EvmAccount> {
     match resolve_account(&signing.identity)? {
         CliAccount::Evm(a) => Ok(a),
+        CliAccount::LazyKeystore(a) => a.into_evm(),
         CliAccount::LedgerEvm(_) => Err(anyhow!(
             "Ledger accounts are not yet supported for swaps. Use a local account."
         )),

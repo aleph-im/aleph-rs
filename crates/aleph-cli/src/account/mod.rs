@@ -8,6 +8,7 @@ pub mod store;
 use aleph_types::account::{Account, EvmAccount, SignError, SolanaAccount};
 use aleph_types::chain::{Address, Chain, Signature};
 use anyhow::{Context, Result, bail};
+use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
 /// Account wrapper that dispatches to the correct signing implementation
@@ -17,6 +18,59 @@ pub enum CliAccount {
     Evm(EvmAccount),
     Sol(SolanaAccount),
     LedgerEvm(ledger::LedgerEvmAccount),
+    /// An encrypted (keystore) account decrypted lazily — see
+    /// [`LazyKeystoreAccount`].
+    LazyKeystore(LazyKeystoreAccount),
+}
+
+/// An encrypted (keystore) EVM account whose private key is decrypted lazily.
+///
+/// The address is recorded in the account store, so read-only operations can
+/// be served without ever touching the key. The keystore is parsed and
+/// decrypted — prompting for the password — only on the first signing
+/// operation, after which the decrypted account is cached for the rest of the
+/// process.
+pub struct LazyKeystoreAccount {
+    chain: Chain,
+    address: Address,
+    label: String,
+    keystore_json: String,
+    evm: OnceLock<EvmAccount>,
+}
+
+impl LazyKeystoreAccount {
+    /// Parse the keystore and decrypt the key, sourcing the password from
+    /// `ALEPH_PASSWORD` or an interactive prompt.
+    fn decrypt(&self) -> Result<EvmAccount> {
+        let ks = keystore::parse_keystore(&self.keystore_json)
+            .map_err(|e| anyhow::anyhow!("invalid keystore for '{}': {e}", self.label))?;
+        let key = password::unlock_keystore(&ks, &self.label)?;
+        EvmAccount::new(self.chain.clone(), &key[..]).map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Decrypt the key on first use and return the underlying EVM account,
+    /// caching the result for subsequent calls.
+    fn evm(&self) -> Result<&EvmAccount> {
+        if let Some(account) = self.evm.get() {
+            return Ok(account);
+        }
+        let account = self.decrypt()?;
+        // If another caller raced us, theirs is kept and ours is dropped (its
+        // key wiped on drop); either way `get()` now returns a cached account.
+        let _ = self.evm.set(account);
+        Ok(self.evm.get().expect("just set above"))
+    }
+
+    /// Consume the lazy account, returning the decrypted EVM account.
+    ///
+    /// Used by operations (e.g. on-chain credit/token transactions) that need
+    /// the raw [`EvmAccount`] rather than the [`Account`] trait interface.
+    pub fn into_evm(self) -> Result<EvmAccount> {
+        if self.evm.get().is_some() {
+            return Ok(self.evm.into_inner().expect("just checked it is set"));
+        }
+        self.decrypt()
+    }
 }
 
 impl std::fmt::Debug for CliAccount {
@@ -25,6 +79,7 @@ impl std::fmt::Debug for CliAccount {
             CliAccount::Evm(a) => write!(f, "CliAccount::Evm({})", a.address()),
             CliAccount::Sol(a) => write!(f, "CliAccount::Sol({})", a.address()),
             CliAccount::LedgerEvm(a) => write!(f, "CliAccount::LedgerEvm({})", a.address()),
+            CliAccount::LazyKeystore(a) => write!(f, "CliAccount::LazyKeystore({})", a.address),
         }
     }
 }
@@ -35,6 +90,7 @@ impl Account for CliAccount {
             CliAccount::Evm(a) => a.chain(),
             CliAccount::Sol(a) => a.chain(),
             CliAccount::LedgerEvm(a) => a.chain(),
+            CliAccount::LazyKeystore(a) => a.chain.clone(),
         }
     }
 
@@ -43,6 +99,7 @@ impl Account for CliAccount {
             CliAccount::Evm(a) => a.address(),
             CliAccount::Sol(a) => a.address(),
             CliAccount::LedgerEvm(a) => a.address(),
+            CliAccount::LazyKeystore(a) => &a.address,
         }
     }
 
@@ -51,6 +108,10 @@ impl Account for CliAccount {
             CliAccount::Evm(a) => a.sign_raw(buffer),
             CliAccount::Sol(a) => a.sign_raw(buffer),
             CliAccount::LedgerEvm(a) => a.sign_raw(buffer),
+            CliAccount::LazyKeystore(a) => a
+                .evm()
+                .map_err(|e| SignError::SigningFailed(e.to_string()))?
+                .sign_raw(buffer),
         }
     }
 }
@@ -128,11 +189,16 @@ pub fn load_account_by_name(store: &store::AccountStore, name: &str) -> Result<C
             let json = store
                 .read_keystore_json(name)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let ks = keystore::parse_keystore(&json)
-                .map_err(|e| anyhow::anyhow!("invalid keystore for '{name}': {e}"))?;
-            let key = password::unlock_keystore(&ks, name)?;
-            let account = EvmAccount::new(entry.chain, &key[..]).map_err(|e| anyhow::anyhow!(e))?;
-            Ok(CliAccount::Evm(account))
+            // The address is recorded in the store, so we defer decryption (and
+            // the password prompt) until the first signing operation. Read-only
+            // commands that only need the address never trigger a prompt.
+            Ok(CliAccount::LazyKeystore(LazyKeystoreAccount {
+                chain: entry.chain,
+                address: Address::from(entry.address),
+                label: name.to_string(),
+                keystore_json: json,
+                evm: OnceLock::new(),
+            }))
         }
     }
 }
@@ -229,6 +295,30 @@ mod tests {
 
         let err = load_account_by_name(&store, "enc").unwrap_err();
         assert!(err.to_string().contains("only supported for EVM"));
+    }
+
+    #[test]
+    fn load_account_by_name_keystore_is_lazy() {
+        // A keystore account must load WITHOUT prompting for a password: the
+        // address is recorded in the store, so read-only operations need no
+        // decryption. (There is no terminal in tests, so an eager password
+        // prompt would fail here — making this a faithful regression test.)
+        let dir = tempfile::tempdir().unwrap();
+        let store = store::AccountStore::with_manifest_path(dir.path().join("accounts.toml"));
+        let address = "0x0000000000000000000000000000000000000001";
+        store
+            .add_keystore_account(
+                "enc",
+                Chain::Ethereum,
+                address.to_string(),
+                r#"{"placeholder": true}"#,
+            )
+            .unwrap();
+
+        let account = load_account_by_name(&store, "enc").unwrap();
+        assert!(matches!(account, CliAccount::LazyKeystore(_)));
+        assert_eq!(account.chain(), Chain::Ethereum);
+        assert_eq!(account.address().as_str(), address);
     }
 
     #[test]
