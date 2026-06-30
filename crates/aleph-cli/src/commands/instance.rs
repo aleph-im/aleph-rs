@@ -999,41 +999,38 @@ async fn handle_instance_create(
 
     // Resolve instance specs. GPU instances size from the GPU pricing namespace
     // (the tier minimum is a lower bound); otherwise from --size or raw flags.
+    // `gpu_props` is filled here (when a GPU is requested) and reused to build
+    // the host requirements below.
     let gpu_requested = args.gpu.as_ref().is_some_and(|g| !g.is_empty());
+    let mut gpu_props: Option<Vec<GpuProperties>> = None;
     let (vcpus, memory_mib, disk_size_mib) = if gpu_requested {
-        // When several GPUs are requested we size from the first model's minimum
-        // (we do not sum across models); the others share the same VM resources.
-        let gpu_slug = &args.gpu.as_ref().unwrap()[0];
-        let model_name = GPU_PRESETS
-            .iter()
-            .find(|(slug, ..)| slug.eq_ignore_ascii_case(gpu_slug))
-            .map(|(_, model, ..)| *model)
-            .ok_or_else(|| {
-                let available: Vec<&str> = GPU_PRESETS.iter().map(|(n, ..)| *n).collect();
-                anyhow!(
-                    "unknown GPU model '{gpu_slug}'. Available models: {}",
-                    available.join(", ")
-                )
-            })?;
+        let gpu_model_ids = args.gpu.as_ref().unwrap();
+        // Resolve every requested GPU against the network aggregates: pricing for
+        // sizing, settings (`compatible_gpus`) for the device identity that goes
+        // into the instance message.
+        let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
+        let options = build_gpu_options(&pricing.pricing, &settings.settings);
 
-        let pricing = aleph_client
-            .get_pricing_aggregate()
-            .await
-            .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
-        let instance_pricing = pricing.pricing.for_instance(false, Some(model_name));
+        // Build the GPU requirement: one device per requested model, using the
+        // model's representative variant. (Pinning to a node whose only GPU is a
+        // different PCI variant of the same model is a known limitation.)
+        let mut props = Vec::with_capacity(gpu_model_ids.len());
+        for model_id in gpu_model_ids {
+            let option = resolve_gpu_option(&options, model_id)?;
+            props.push(option.representative_gpu_properties()?);
+        }
+        gpu_props = Some(props);
 
-        let tier = instance_pricing
-            .tiers
-            .iter()
-            .find(|t| t.model.as_deref() == Some(model_name))
-            .ok_or_else(|| anyhow!("GPU tier not found for '{model_name}'"))?;
-        let min_cu = tier.compute_units;
+        // Size from the first model's minimum (we do not sum across models; the
+        // others share the same VM resources).
+        let first = resolve_gpu_option(&options, &gpu_model_ids[0])?;
+        let instance_pricing = pricing.pricing.for_instance(false, Some(&first.name));
         let cu_spec = &instance_pricing.compute_unit;
 
         let cu = resolve_gpu_compute_units(
             instance_pricing,
-            min_cu,
-            gpu_slug,
+            first.compute_units,
+            &first.model_id,
             args.size.as_deref(),
             args.vcpus,
             args.memory,
@@ -1044,7 +1041,8 @@ async fn handle_instance_create(
         let disk_size_mib = args.disk_size.unwrap_or(cu as u64 * cu_spec.disk_mib);
 
         eprintln!(
-            "GPU '{gpu_slug}' ({cu} CU): {vcpus} vCPUs, {memory_mib} MiB memory, {disk_size_mib} MiB disk",
+            "GPU '{}' ({cu} CU): {vcpus} vCPUs, {memory_mib} MiB memory, {disk_size_mib} MiB disk",
+            first.model_id,
         );
 
         (vcpus, memory_mib, disk_size_mib)
@@ -1139,18 +1137,8 @@ async fn handle_instance_create(
         });
     }
 
-    // GPU requirements
-    let gpu_props = if let Some(gpu_names) = &args.gpu {
-        let mut gpus = Vec::new();
-        for name in gpu_names {
-            gpus.push(resolve_gpu(name)?);
-        }
-        Some(gpus)
-    } else {
-        None
-    };
-
-    // Build host requirements if CRN hash or GPU is specified
+    // GPU requirements were resolved above (`gpu_props` is Some iff a GPU was
+    // requested). Build host requirements if a CRN hash or GPU is specified.
     if args.crn_hash.is_some() || gpu_props.is_some() {
         let requirements = HostRequirements {
             cpu: None,
@@ -1206,89 +1194,168 @@ async fn handle_instance_create(
     Ok(())
 }
 
-/// Known GPU presets: (slug, pricing_model, vendor, device_name, device_class, device_id).
-/// `pricing_model` matches the `model` field in pricing aggregate tiers.
-const GPU_PRESETS: &[(&str, &str, &str, &str, &str, &str)] = &[
-    (
-        "rtx3090",
-        "RTX 3090",
-        "NVIDIA",
-        "GA102 [GeForce RTX 3090]",
-        "0300",
-        "10de:2204",
-    ),
-    (
-        "rtx4000ada",
-        "RTX 4000 ADA",
-        "NVIDIA",
-        "AD104GL [RTX 4000 SFF Ada Generation]",
-        "0300",
-        "10de:27b0",
-    ),
-    (
-        "rtx4090",
-        "RTX 4090",
-        "NVIDIA",
-        "AD102 [GeForce RTX 4090]",
-        "0300",
-        "10de:2684",
-    ),
-    (
-        "rtx5090",
-        "RTX 5090",
-        "NVIDIA",
-        "GB202 [GeForce RTX 5090]",
-        "0300",
-        "10de:2b85",
-    ),
-    (
-        "l40s",
-        "L40S",
-        "NVIDIA",
-        "AD102GL [L40S]",
-        "0302",
-        "10de:26b9",
-    ),
-    (
-        "a100",
-        "A100",
-        "NVIDIA",
-        "GA100 [A100 PCIe 80GB]",
-        "0302",
-        "10de:20b5",
-    ),
-    (
-        "h100",
-        "H100",
-        "NVIDIA",
-        "GH100 [H100 PCIe]",
-        "0302",
-        "10de:2331",
-    ),
-];
+/// A selectable GPU model: pricing/sizing info (from the pricing aggregate)
+/// joined with the network's compatible PCI device variants (from the settings
+/// aggregate). This replaces a hardcoded preset table so new GPUs work the
+/// moment they are published on-network.
+#[derive(Debug)]
+pub(crate) struct GpuOption {
+    /// Canonical slug the user passes to `--gpu` (settings `model_id`, or the
+    /// derived fallback when the aggregate has no explicit id).
+    pub model_id: String,
+    /// Pricing model name, the join key between the two aggregates (e.g. "RTX 3090").
+    pub name: String,
+    /// Advertised VRAM, when known.
+    pub vram_mib: Option<u64>,
+    /// Minimum compute units for this GPU (a lower bound; sizes scale up from it).
+    pub compute_units: u32,
+    /// Pricing tier ("standard" or "premium").
+    pub tier: String,
+    /// Compatible PCI device variants from the settings aggregate. Empty when the
+    /// model is priced but absent from `compatible_gpus` (then the model can be
+    /// listed/priced but a create message cannot be built for it).
+    pub variants: Vec<aleph_sdk::aggregate_models::settings::CompatibleGpu>,
+}
 
-pub(crate) fn resolve_gpu(name: &str) -> Result<GpuProperties> {
-    let lower = name.to_ascii_lowercase();
-    for &(slug, _, vendor, device_name, class, device_id) in GPU_PRESETS {
-        if lower == slug {
-            let device_class = match class {
-                "0300" => GpuDeviceClass::VgaCompatibleController,
-                "0302" => GpuDeviceClass::_3DController,
-                _ => unreachable!(),
-            };
-            return Ok(GpuProperties {
-                vendor: vendor.to_string(),
-                device_name: device_name.to_string(),
-                device_class,
-                device_id: device_id.to_string(),
-            });
-        }
+impl GpuOption {
+    /// Device properties for the representative variant (the first listed for the
+    /// model), used to build the instance message and CRN filter when no specific
+    /// node GPU is known.
+    fn representative_gpu_properties(&self) -> Result<GpuProperties> {
+        let variant = self.variants.first().ok_or_else(|| {
+            anyhow!(
+                "GPU '{}' has no compatible device listed in the network settings \
+                 aggregate (compatible_gpus); it cannot be attached to an instance.",
+                self.name
+            )
+        })?;
+        gpu_properties_from_variant(variant)
     }
-    let available: Vec<&str> = GPU_PRESETS.iter().map(|(n, ..)| *n).collect();
-    Err(anyhow!(
-        "unknown GPU model '{name}'. Available models: {}",
-        available.join(", ")
-    ))
+}
+
+/// Fetch the pricing and settings aggregates concurrently. They are independent,
+/// so a GPU request resolves them in a single round-trip rather than two
+/// sequential ones.
+pub(crate) async fn fetch_pricing_and_settings(
+    aleph_client: &AlephClient,
+) -> Result<(
+    aleph_sdk::aggregate_models::pricing::PricingAggregate,
+    aleph_sdk::aggregate_models::settings::SettingsAggregate,
+)> {
+    tokio::try_join!(
+        async {
+            aleph_client
+                .get_pricing_aggregate()
+                .await
+                .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))
+        },
+        async {
+            aleph_client
+                .get_settings_aggregate()
+                .await
+                .map_err(|e| anyhow!("failed to fetch network settings: {e}"))
+        },
+    )
+}
+
+/// Build the list of selectable GPUs by joining the pricing aggregate (which
+/// models are purchasable, and their sizing) with the settings aggregate (the
+/// device identity and canonical `model_id`), matched on the model name.
+pub(crate) fn build_gpu_options(
+    pricing: &aleph_sdk::aggregate_models::pricing::PricingData,
+    settings: &aleph_sdk::aggregate_models::settings::SettingsData,
+) -> Vec<GpuOption> {
+    pricing
+        .available_gpu_models()
+        .into_iter()
+        .map(|m| {
+            let model_id = settings.model_id_for_name(&m.name);
+            let variants = settings
+                .gpu_variants_for_model_id(&model_id)
+                .into_iter()
+                .cloned()
+                .collect();
+            GpuOption {
+                model_id,
+                name: m.name,
+                vram_mib: m.vram_mib,
+                compute_units: m.compute_units,
+                tier: m.tier,
+                variants,
+            }
+        })
+        .collect()
+}
+
+/// Resolve a user-provided `--gpu <model_id>` against the available options.
+pub(crate) fn resolve_gpu_option<'a>(
+    options: &'a [GpuOption],
+    model_id: &str,
+) -> Result<&'a GpuOption> {
+    options
+        .iter()
+        .find(|o| o.model_id == model_id)
+        .ok_or_else(|| {
+            let available: Vec<&str> = options.iter().map(|o| o.model_id.as_str()).collect();
+            anyhow!(
+                "unknown GPU model '{model_id}'. Available models: {}",
+                available.join(", ")
+            )
+        })
+}
+
+/// Representative PCI device id for each requested GPU model id, for filtering
+/// CRNs in the interactive picker. Uses the same representative variant as the
+/// instance message so the picker only surfaces nodes that can host it.
+pub(crate) async fn gpu_filter_device_ids(
+    aleph_client: &AlephClient,
+    model_ids: &[String],
+) -> Result<Vec<String>> {
+    let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
+    let options = build_gpu_options(&pricing.pricing, &settings.settings);
+
+    let mut device_ids = Vec::with_capacity(model_ids.len());
+    for model_id in model_ids {
+        let option = resolve_gpu_option(&options, model_id)?;
+        let variant = option.variants.first().ok_or_else(|| {
+            anyhow!(
+                "GPU '{}' has no compatible device listed in the network settings \
+                 aggregate (compatible_gpus).",
+                option.name
+            )
+        })?;
+        device_ids.push(variant.device_id.clone());
+    }
+    Ok(device_ids)
+}
+
+/// Convert a settings-aggregate device variant to instance-message GPU properties.
+fn gpu_properties_from_variant(
+    variant: &aleph_sdk::aggregate_models::settings::CompatibleGpu,
+) -> Result<GpuProperties> {
+    let device_class = parse_gpu_device_class(variant.device_class.as_deref(), &variant.model)?;
+    Ok(GpuProperties {
+        vendor: variant.vendor.clone(),
+        device_name: variant.name.clone(),
+        device_class,
+        device_id: variant.device_id.clone(),
+    })
+}
+
+/// Parse the settings aggregate's `device_class` string into the message enum.
+fn parse_gpu_device_class(raw: Option<&str>, model: &str) -> Result<GpuDeviceClass> {
+    match raw {
+        Some("0300") => Ok(GpuDeviceClass::VgaCompatibleController),
+        Some("0302") => Ok(GpuDeviceClass::_3DController),
+        Some(other) => bail!(
+            "GPU '{model}' has unsupported device_class '{other}' in the network \
+             settings aggregate (expected 0300 or 0302)."
+        ),
+        None => bail!(
+            "GPU '{model}' is missing device_class in the network settings aggregate \
+             (compatible_gpus); the aggregate needs updating."
+        ),
+    }
 }
 
 /// Guidance shown under the GPU table so users know how to actually create a
@@ -1307,9 +1374,11 @@ fn compute_unit_summary(cu: &aleph_sdk::aggregate_models::pricing::ComputeUnitSp
     )
 }
 
-fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingData) {
-    let models = pricing.available_gpu_models();
-    if models.is_empty() {
+fn print_available_gpus(
+    options: &[GpuOption],
+    pricing: &aleph_sdk::aggregate_models::pricing::PricingData,
+) {
+    if options.is_empty() {
         eprintln!("No GPU models available.");
         return;
     }
@@ -1319,12 +1388,12 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
         ("standard", &pricing.instance_gpu_standard),
         ("premium", &pricing.instance_gpu_premium),
     ] {
-        let mut tier_models: Vec<_> = models.iter().filter(|m| m.tier == tier_name).collect();
+        let mut tier_models: Vec<_> = options.iter().filter(|o| o.tier == tier_name).collect();
         if tier_models.is_empty() {
             continue;
         }
-        // Sort alphabetically by display slug rather than aggregate order.
-        tier_models.sort_by_key(|m| m.slug());
+        // Sort alphabetically by the model id (the slug users pass to `--gpu`).
+        tier_models.sort_by(|a, b| a.model_id.cmp(&b.model_id));
         eprintln!(
             "\n{tier_name} tier  ({})",
             compute_unit_summary(&entity.compute_unit)
@@ -1336,7 +1405,7 @@ fn print_available_gpus(pricing: &aleph_sdk::aggregate_models::pricing::PricingD
                 .map(|v| format!("{} GiB", v / 1024))
                 .unwrap_or_default();
             let min_size = entity.slug_for_compute_units(gpu.compute_units);
-            eprintln!("  {:<30} {:<10} {}", gpu.slug(), vram, min_size);
+            eprintln!("  {:<30} {:<10} {}", gpu.model_id, vram, min_size);
         }
     }
 }
@@ -1346,41 +1415,38 @@ async fn handle_instance_price(
     json: bool,
     args: InstancePriceArgs,
 ) -> Result<()> {
-    let pricing = aleph_client
-        .get_pricing_aggregate()
-        .await
-        .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
-
     if args.confidential && args.gpu.is_some() {
         bail!("--confidential and --gpu cannot be combined");
     }
 
+    // Pricing is always needed; the settings aggregate (canonical GPU `model_id`
+    // and device data) only when a GPU is involved. In the GPU case fetch the
+    // pair concurrently; otherwise fetch pricing alone.
+    let (pricing, gpu_options) = if args.list_gpus || args.gpu.is_some() {
+        let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
+        let options = build_gpu_options(&pricing.pricing, &settings.settings);
+        (pricing, options)
+    } else {
+        let pricing = aleph_client
+            .get_pricing_aggregate()
+            .await
+            .map_err(|e| anyhow!("failed to fetch pricing tiers: {e}"))?;
+        (pricing, Vec::new())
+    };
+
     if args.list_gpus || args.gpu.as_deref() == Some("") {
-        print_available_gpus(&pricing.pricing);
+        print_available_gpus(&gpu_options, &pricing.pricing);
         return Ok(());
     }
 
-    // Match the user-provided GPU name against pricing tier model names
-    let gpu_model = if let Some(slug) = args.gpu.as_deref() {
-        let models = pricing.pricing.available_gpu_models();
-        let matched = models.iter().find(|m| m.slug() == slug);
-        match matched {
-            Some(m) => Some(m.clone()),
-            None => {
-                let names: Vec<String> = models.iter().map(|m| m.slug()).collect();
-                bail!(
-                    "unknown GPU model '{slug}'. Available models: {}",
-                    names.join(", ")
-                );
-            }
-        }
-    } else {
-        None
+    // Resolve the user-provided `--gpu <model_id>` against the available options.
+    let gpu_option = match args.gpu.as_deref() {
+        Some(model_id) => Some(resolve_gpu_option(&gpu_options, model_id)?),
+        None => None,
     };
-    let instance_pricing = pricing.pricing.for_instance(
-        args.confidential,
-        gpu_model.as_ref().map(|m| m.name.as_str()),
-    );
+    let instance_pricing = pricing
+        .pricing
+        .for_instance(args.confidential, gpu_option.map(|o| o.name.as_str()));
 
     let cu_price = instance_pricing
         .price
@@ -1393,7 +1459,7 @@ async fn handle_instance_price(
         .map_err(|_| anyhow!("invalid credit price: '{}'", cu_price.credit))?;
 
     // Resolve specs: GPU tier, --size tier, or fully manual
-    let (size_slug, compute_units, vcpus, memory_mib, disk_mib) = if let Some(gpu) = &gpu_model {
+    let (size_slug, compute_units, vcpus, memory_mib, disk_mib) = if let Some(gpu) = &gpu_option {
         // GPU: tier CU count is a lower bound; --size or --vcpus/--memory can raise it.
         let tier = instance_pricing
             .tiers
@@ -1406,7 +1472,7 @@ async fn handle_instance_price(
         let cu = resolve_gpu_compute_units(
             instance_pricing,
             min_cu,
-            &gpu.slug(),
+            &gpu.model_id,
             args.size.as_deref(),
             args.vcpus,
             args.memory,
@@ -1479,7 +1545,7 @@ async fn handle_instance_price(
                 "vcpus": vcpus,
                 "memory_mib": memory_mib,
                 "disk_mib": disk_mib,
-                "gpu": gpu_model.as_ref().map(|m| m.slug()),
+                "gpu": gpu_option.map(|o| o.model_id.clone()),
                 "confidential": args.confidential,
                 "compute_credits_per_hour": compute_credits,
                 "storage_credits_per_hour": extra_storage_credits,
@@ -1491,8 +1557,8 @@ async fn handle_instance_price(
         if let Some(slug) = &size_slug {
             eprintln!("Size:    {slug}");
         }
-        if let Some(gpu) = &gpu_model {
-            eprintln!("GPU:     {}", gpu.slug());
+        if let Some(gpu) = &gpu_option {
+            eprintln!("GPU:     {}", gpu.model_id);
         }
         if args.confidential {
             eprintln!("Type:    confidential");
@@ -2908,5 +2974,171 @@ mod tests {
             select_keys_by_label(&["laptop".into()], &merged).unwrap(),
             vec!["owner-laptop"]
         );
+    }
+
+    mod gpu_catalog {
+        use super::super::*;
+        use aleph_sdk::aggregate_models::pricing::PricingData;
+        use aleph_sdk::aggregate_models::settings::{CompatibleGpu, SettingsData};
+
+        /// Minimal pricing data with one standard GPU (RTX 3090, 4 CU) and one
+        /// premium GPU (H100, 24 CU).
+        fn pricing() -> PricingData {
+            serde_json::from_value(serde_json::json!({
+                "instance": {
+                    "compute_unit": {"vcpus": 1, "memory_mib": 2048, "disk_mib": 20480},
+                    "tiers": [{"id": "t1", "compute_units": 1}],
+                    "price": {"compute_unit": {"credit": "1"}}
+                },
+                "instance_confidential": {
+                    "compute_unit": {"vcpus": 1, "memory_mib": 2048, "disk_mib": 20480},
+                    "tiers": [{"id": "t1", "compute_units": 1}],
+                    "price": {"compute_unit": {"credit": "1"}}
+                },
+                "instance_gpu_standard": {
+                    "compute_unit": {"vcpus": 1, "memory_mib": 6144, "disk_mib": 61440},
+                    "tiers": [{"id": "g1", "compute_units": 4, "model": "RTX 3090", "vram": 24576}],
+                    "price": {"compute_unit": {"credit": "1"}}
+                },
+                "instance_gpu_premium": {
+                    "compute_unit": {"vcpus": 1, "memory_mib": 6144, "disk_mib": 61440},
+                    "tiers": [{"id": "g2", "compute_units": 24, "model": "H100", "vram": 81920}],
+                    "price": {"compute_unit": {"credit": "1"}}
+                }
+            }))
+            .unwrap()
+        }
+
+        fn variant(
+            model_id: Option<&str>,
+            model: &str,
+            name: &str,
+            class: Option<&str>,
+            device_id: &str,
+        ) -> CompatibleGpu {
+            CompatibleGpu {
+                explicit_model_id: model_id.map(str::to_string),
+                model: model.into(),
+                name: name.into(),
+                vendor: "NVIDIA".into(),
+                device_class: class.map(str::to_string),
+                device_id: device_id.into(),
+            }
+        }
+
+        fn settings() -> SettingsData {
+            SettingsData {
+                compatible_gpus: vec![
+                    // RTX 3090 has two variants; the first is representative.
+                    variant(
+                        Some("rtx3090"),
+                        "RTX 3090",
+                        "GA102 [GeForce RTX 3090]",
+                        Some("0300"),
+                        "10de:2204",
+                    ),
+                    variant(
+                        Some("rtx3090"),
+                        "RTX 3090",
+                        "GA102 [GeForce RTX 3090 Ti]",
+                        Some("0300"),
+                        "10de:2203",
+                    ),
+                    variant(
+                        Some("h100"),
+                        "H100",
+                        "GH100 [H100 PCIe]",
+                        Some("0302"),
+                        "10de:2331",
+                    ),
+                ],
+            }
+        }
+
+        #[test]
+        fn build_options_joins_pricing_and_settings_by_model_name() {
+            let options = build_gpu_options(&pricing(), &settings());
+            assert_eq!(options.len(), 2);
+
+            let rtx = resolve_gpu_option(&options, "rtx3090").unwrap();
+            assert_eq!(rtx.name, "RTX 3090");
+            assert_eq!(rtx.compute_units, 4);
+            assert_eq!(rtx.tier, "standard");
+            assert_eq!(rtx.variants.len(), 2);
+
+            let h100 = resolve_gpu_option(&options, "h100").unwrap();
+            assert_eq!(h100.tier, "premium");
+            assert_eq!(h100.compute_units, 24);
+        }
+
+        #[test]
+        fn resolve_unknown_model_lists_available_ids() {
+            let options = build_gpu_options(&pricing(), &settings());
+            let err = resolve_gpu_option(&options, "rtx-3090")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("unknown GPU model 'rtx-3090'"), "{err}");
+            assert!(err.contains("rtx3090"), "{err}");
+            assert!(err.contains("h100"), "{err}");
+        }
+
+        #[test]
+        fn representative_uses_first_variant_with_full_device_props() {
+            let options = build_gpu_options(&pricing(), &settings());
+            let rtx = resolve_gpu_option(&options, "rtx3090").unwrap();
+            let props = rtx.representative_gpu_properties().unwrap();
+            assert_eq!(props.device_id, "10de:2204");
+            assert_eq!(props.device_name, "GA102 [GeForce RTX 3090]");
+            assert_eq!(props.vendor, "NVIDIA");
+            assert_eq!(props.device_class, GpuDeviceClass::VgaCompatibleController);
+        }
+
+        #[test]
+        fn model_id_falls_back_to_derivation_when_absent_from_settings() {
+            // Settings has no entry for H100 -> derived model_id, but no variants
+            // so a message cannot be built.
+            let settings = SettingsData {
+                compatible_gpus: vec![variant(
+                    Some("rtx3090"),
+                    "RTX 3090",
+                    "GA102 [GeForce RTX 3090]",
+                    Some("0300"),
+                    "10de:2204",
+                )],
+            };
+            let options = build_gpu_options(&pricing(), &settings);
+            let h100 = resolve_gpu_option(&options, "h100").unwrap();
+            assert!(h100.variants.is_empty());
+            let err = h100
+                .representative_gpu_properties()
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no compatible device"), "{err}");
+        }
+
+        #[test]
+        fn device_class_3d_controller_parses() {
+            let options = build_gpu_options(&pricing(), &settings());
+            let h100 = resolve_gpu_option(&options, "h100").unwrap();
+            let props = h100.representative_gpu_properties().unwrap();
+            assert_eq!(props.device_class, GpuDeviceClass::_3DController);
+        }
+
+        #[test]
+        fn missing_device_class_is_a_clear_error() {
+            let settings = SettingsData {
+                compatible_gpus: vec![variant(
+                    Some("rtx3090"),
+                    "RTX 3090",
+                    "GA102 [GeForce RTX 3090]",
+                    None,
+                    "10de:2204",
+                )],
+            };
+            let options = build_gpu_options(&pricing(), &settings);
+            let rtx = resolve_gpu_option(&options, "rtx3090").unwrap();
+            let err = rtx.representative_gpu_properties().unwrap_err().to_string();
+            assert!(err.contains("missing device_class"), "{err}");
+        }
     }
 }
