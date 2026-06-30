@@ -26,7 +26,7 @@ use url::Url;
 use super::message::{ForgetTargets, forget_targets};
 
 /// Largest file the CCN accepts on the native storage engine for an
-/// authenticated (with-metadata) upload (heph `storage.rs` `MAX_SIZE_WITH_META`).
+/// authenticated (with-metadata) upload, matching pyaleph's default limit.
 /// Above this, native uploads are rejected, so an unspecified `--storage-engine`
 /// falls back to IPFS instead of failing.
 const MAX_NATIVE_STORAGE_SIZE: u64 = 100 * 1024 * 1024;
@@ -106,7 +106,12 @@ async fn handle_single_file_upload(
         Some(StorageEngineCli::Ipfs) => StorageEngine::Ipfs,
         // No explicit choice: native storage is rejected above the CCN limit,
         // so size-select the engine to avoid a doomed native upload.
-        None => select_default_engine(tokio::fs::metadata(&args.path).await?.len()),
+        None => {
+            let meta = tokio::fs::metadata(&args.path)
+                .await
+                .with_context(|| format!("stat {}", args.path.display()))?;
+            select_default_engine(meta.len())
+        }
     };
 
     if !json {
