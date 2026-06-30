@@ -9,7 +9,7 @@
 //! never prompted for.
 
 use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
-use crate::commands::instance::validate_ssh_pubkey;
+use crate::commands::instance::{resolve_gpu, validate_ssh_pubkey};
 use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, GpuModel, PricingPerEntity};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
@@ -73,6 +73,18 @@ pub async fn resolve_interactive(
             .map_err(|e| anyhow!("background task error: {e}"))?
             .map_err(anyhow::Error::msg)?;
         let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aleph_client).await?;
+        // Filter by the requested GPU model's PCI id, not merely "has a GPU", so
+        // the picker matches the GPU requirement put in the instance message.
+        let gpu_filter = match &args.gpu {
+            Some(names) => {
+                let mut device_ids = Vec::with_capacity(names.len());
+                for name in names {
+                    device_ids.push(resolve_gpu(name)?.device_id);
+                }
+                Some(device_ids)
+            }
+            None => None,
+        };
         // `ipv6: true` filters the CRN's own infrastructure. CRNs without working IPv6
         // can't route traffic to their VMs, so they can't host usable instances. This is
         // unrelated to the user's local IPv6 connectivity. Matches the Python CLI.
@@ -82,10 +94,14 @@ pub async fn resolve_interactive(
             min_memory_mib: Some(memory_mib),
             min_disk_mib: Some(disk_mib),
             confidential: args.confidential,
-            gpu: args.gpu.is_some(),
+            gpu: gpu_filter,
         };
         let filtered = crn_list.filter(&filter);
         if filtered.is_empty() {
+            let gpu_desc = match &args.gpu {
+                Some(names) => names.join(","),
+                None => "none".into(),
+            };
             bail!(
                 "No CRN matches the requirements (vcpus={}, memory_mib={}, disk_mib={}, confidential={}, gpu={}). \
                  Try a smaller size or wait for capacity.",
@@ -93,7 +109,7 @@ pub async fn resolve_interactive(
                 memory_mib,
                 disk_mib,
                 filter.confidential,
-                filter.gpu
+                gpu_desc
             );
         }
         let chosen = prompt_crn(&filtered)?;
