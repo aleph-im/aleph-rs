@@ -1936,7 +1936,7 @@ pub struct InstancePriceArgs {
     #[arg(long, value_parser = parse_size_to_mib)]
     pub disk_size: Option<u64>,
 
-    /// GPU model name (e.g. h100, a100, rtx-4090). Pass --gpu without a value to list models
+    /// GPU model id (e.g. h100, a100, rtx4090). Pass --gpu without a value to list models
     /// (or use --list-gpus).
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub gpu: Option<String>,
@@ -2020,7 +2020,7 @@ pub struct InstanceCreateArgs {
     #[arg(long, value_parser = parse_image_ref)]
     pub confidential_firmware: Option<ImageRef>,
 
-    /// GPU model name (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
+    /// GPU model id (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
     /// Use `aleph instance price --list-gpus` to list available models. The VM is
     /// sized at the GPU's minimum; pass `--size`, `--vcpus`, or `--memory` to request
     /// more. `--disk-size` is optional for GPU instances (defaults to the tier disk).

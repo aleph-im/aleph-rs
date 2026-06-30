@@ -9,7 +9,7 @@
 //! never prompted for.
 
 use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
-use crate::commands::instance::{resolve_gpu, validate_ssh_pubkey};
+use crate::commands::instance::{gpu_filter_device_ids, validate_ssh_pubkey};
 use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, GpuModel, PricingPerEntity};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
@@ -76,13 +76,7 @@ pub async fn resolve_interactive(
         // Filter by the requested GPU model's PCI id, not merely "has a GPU", so
         // the picker matches the GPU requirement put in the instance message.
         let gpu_filter = match &args.gpu {
-            Some(names) => {
-                let mut device_ids = Vec::with_capacity(names.len());
-                for name in names {
-                    device_ids.push(resolve_gpu(name)?.device_id);
-                }
-                Some(device_ids)
-            }
+            Some(model_ids) => Some(gpu_filter_device_ids(aleph_client, model_ids).await?),
             None => None,
         };
         // `ipv6: true` filters the CRN's own infrastructure. CRNs without working IPv6
@@ -272,6 +266,13 @@ async fn prompt_gpu(args: &mut InstanceCreateArgs, aleph_client: &AlephClient) -
         // No GPU models on the network: silently fall back to the regular flow.
         return Ok(false);
     }
+    // The settings aggregate provides the canonical `model_id` slug (the value
+    // the non-interactive `--gpu` path accepts). Fetched here so the picker emits
+    // exactly that slug into `args.gpu`.
+    let settings = aleph_client
+        .get_settings_aggregate()
+        .await
+        .map_err(|e| anyhow!("failed to fetch network settings: {e}"))?;
 
     let mut items: Vec<String> = vec!["No GPU".to_string()];
     items.extend(models.iter().map(|m| {
@@ -297,7 +298,7 @@ async fn prompt_gpu(args: &mut InstanceCreateArgs, aleph_client: &AlephClient) -
     let cu = prompt_gpu_size(model, entity)?;
     let (vcpus, memory_mib, disk_mib) = specs_for_cu(cu, &entity.compute_unit);
 
-    args.gpu = Some(vec![model.slug()]);
+    args.gpu = Some(vec![settings.settings.model_id_for_name(&model.name)]);
     args.vcpus = Some(vcpus);
     args.memory = Some(memory_mib);
     args.disk_size = Some(disk_mib);
