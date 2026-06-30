@@ -91,22 +91,28 @@ fn run_aggregate(
 }
 
 /// Like `run_aggregate` but pipes `stdin_data` to the child's stdin (closing it
-/// afterwards so the read sees EOF). Always appends `-y`. Used to exercise the
-/// `edit` whole-content-from-stdin path.
-fn run_aggregate_stdin(ccn: &str, extra: &[&str], stdin_data: &str) -> std::process::Output {
+/// afterwards so the read sees EOF). `yes` appends `-y`; `dry_run` appends
+/// `--dry-run`. Used to exercise the `edit` whole-content-from-stdin path.
+fn run_aggregate_stdin(
+    ccn: &str,
+    extra: &[&str],
+    stdin_data: &str,
+    yes: bool,
+    dry_run: bool,
+) -> std::process::Output {
     use std::process::Stdio;
     let bin = env!("CARGO_BIN_EXE_aleph");
-    let mut child = Command::new(bin)
-        .args(["--ccn", ccn, "--json", "aggregate"])
+    let mut cmd = Command::new(bin);
+    cmd.args(["--ccn", ccn, "--json", "aggregate"])
         .args(extra)
-        .args([
-            "--private-key",
-            PRIVATE_KEY_HEX,
-            "--chain",
-            "eth",
-            "--dry-run",
-            "-y",
-        ])
+        .args(["--private-key", PRIVATE_KEY_HEX, "--chain", "eth"]);
+    if dry_run {
+        cmd.arg("--dry-run");
+    }
+    if yes {
+        cmd.arg("-y");
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -220,7 +226,7 @@ fn edit_whole_content_from_stdin_nulls_removed_subkey() {
     // Piping the whole content via stdin behaves like `--content`: the diff
     // updates `a` and nulls the removed `old` subkey.
     let ccn = start_mock(r#"{"data": {"mykey": {"a": 1, "old": true}}}"#);
-    let out = run_aggregate_stdin(&ccn, &["edit", "--key", "mykey"], "{\"a\":2}");
+    let out = run_aggregate_stdin(&ccn, &["edit", "--key", "mykey"], "{\"a\":2}", true, true);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -230,6 +236,21 @@ fn edit_whole_content_from_stdin_nulls_removed_subkey() {
     let content = parse_item_content(&stdout);
     assert_eq!(content["content"]["a"], 2, "{stdout}");
     assert!(content["content"]["old"].is_null(), "{stdout}");
+}
+
+#[test]
+fn edit_from_stdin_without_yes_requires_flag() {
+    // A real (non-dry-run) submit can't prompt for confirmation once stdin has
+    // been consumed for content, so it must require -y rather than silently
+    // aborting on the EOF'd stdin.
+    let ccn = start_mock(r#"{"data": {"mykey": {"a": 1}}}"#);
+    let out = run_aggregate_stdin(&ccn, &["edit", "--key", "mykey"], "{\"a\":2}", false, false);
+    assert!(!out.status.success(), "should fail without -y");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Re-run with -y"),
+        "expected the -y guidance, got: {stderr}"
+    );
 }
 
 #[test]

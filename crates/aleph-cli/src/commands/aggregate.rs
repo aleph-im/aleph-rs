@@ -164,7 +164,10 @@ async fn handle_aggregate_edit(
             )
         })?;
 
-    // Build the content to post (a merge patch).
+    // Build the content to post (a merge patch). `content_from_stdin` records
+    // whether stdin was consumed reading it, so the confirmation below knows it
+    // can no longer prompt on stdin.
+    let mut content_from_stdin = false;
     let patch: Value = match (args.subkey.as_deref(), args.content.as_deref()) {
         // Targeted subkey: post {subkey: content} verbatim (content may be null).
         (Some(subkey), Some(raw)) => {
@@ -196,6 +199,7 @@ async fn handle_aggregate_edit(
                 std::io::stdin().read_to_string(&mut buf)?;
                 (!buf.trim().is_empty()).then_some(buf)
             };
+            content_from_stdin = piped.is_some();
             let desired = match piped {
                 Some(raw) => parse_content_json(&raw)?,
                 None => edit_via_editor(&serde_json::to_string_pretty(&current)?)?,
@@ -212,6 +216,14 @@ async fn handle_aggregate_edit(
     }
 
     if !dry_run {
+        // Content read from stdin has consumed it, so we cannot prompt there.
+        // Require -y, mirroring the "no TTY -> pass --yes" convention.
+        if content_from_stdin && !args.yes {
+            bail!(
+                "content was read from stdin, so the confirmation prompt can't read your \
+                 answer. Re-run with -y to apply non-interactively."
+            );
+        }
         let preview = serde_json::to_string_pretty(&patch)?;
         let prompt = format!("Apply this patch to `{}` for {owner}?\n{preview}", args.key);
         if !confirm_action(&prompt, args.yes)? {
