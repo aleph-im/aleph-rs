@@ -179,23 +179,26 @@ async fn handle_aggregate_edit(
             let desired = parse_content_json(raw)?;
             content_to_post(&current, &desired)
         }
-        // Neither subkey nor content: read the desired whole content from stdin
-        // when it is piped (e.g. `cat file | aleph aggregate edit ...`), otherwise
-        // open the current content in $EDITOR. Either way, diff against current.
+        // Neither subkey nor content: take the desired whole content from piped
+        // stdin (e.g. `cat file | aleph aggregate edit ...`), otherwise open the
+        // current content in $EDITOR. Either way, diff against current.
+        //
+        // We only read stdin when it is NOT a terminal (reading an interactive
+        // TTY would block). A non-terminal but *empty* stdin - e.g. a parent
+        // process, test harness, or CI that pipes nothing - falls back to the
+        // editor too, preserving the original behavior; only actual piped data
+        // is treated as content.
         (None, None) => {
-            let desired = if std::io::stdin().is_terminal() {
-                edit_via_editor(&serde_json::to_string_pretty(&current)?)?
+            let piped = if std::io::stdin().is_terminal() {
+                None
             } else {
                 let mut buf = String::new();
                 std::io::stdin().read_to_string(&mut buf)?;
-                if buf.trim().is_empty() {
-                    bail!(
-                        "no content on stdin. Pipe JSON (`cat file | aleph aggregate edit \
-                         --key {}`), pass --content, or run in a terminal to use $EDITOR.",
-                        args.key
-                    );
-                }
-                parse_content_json(&buf)?
+                (!buf.trim().is_empty()).then_some(buf)
+            };
+            let desired = match piped {
+                Some(raw) => parse_content_json(&raw)?,
+                None => edit_via_editor(&serde_json::to_string_pretty(&current)?)?,
             };
             content_to_post(&current, &desired)
         }

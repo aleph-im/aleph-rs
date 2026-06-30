@@ -90,6 +90,39 @@ fn run_aggregate(
     cmd.output().expect("failed to spawn aleph binary")
 }
 
+/// Like `run_aggregate` but pipes `stdin_data` to the child's stdin (closing it
+/// afterwards so the read sees EOF). Always appends `-y`. Used to exercise the
+/// `edit` whole-content-from-stdin path.
+fn run_aggregate_stdin(ccn: &str, extra: &[&str], stdin_data: &str) -> std::process::Output {
+    use std::process::Stdio;
+    let bin = env!("CARGO_BIN_EXE_aleph");
+    let mut child = Command::new(bin)
+        .args(["--ccn", ccn, "--json", "aggregate"])
+        .args(extra)
+        .args([
+            "--private-key",
+            PRIVATE_KEY_HEX,
+            "--chain",
+            "eth",
+            "--dry-run",
+            "-y",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn aleph binary");
+    {
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        stdin
+            .write_all(stdin_data.as_bytes())
+            .expect("failed to write to child stdin");
+    } // drop closes stdin -> EOF
+    child
+        .wait_with_output()
+        .expect("failed to wait for aleph binary")
+}
+
 /// Parse the pretty-printed `PendingMessage` JSON from stdout and decode the
 /// `item_content` field (which is an inline JSON string) into a `Value`.
 ///
@@ -171,6 +204,23 @@ fn edit_whole_content_nulls_removed_subkey() {
         true,
         None,
     );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let content = parse_item_content(&stdout);
+    assert_eq!(content["content"]["a"], 2, "{stdout}");
+    assert!(content["content"]["old"].is_null(), "{stdout}");
+}
+
+#[test]
+fn edit_whole_content_from_stdin_nulls_removed_subkey() {
+    // Piping the whole content via stdin behaves like `--content`: the diff
+    // updates `a` and nulls the removed `old` subkey.
+    let ccn = start_mock(r#"{"data": {"mykey": {"a": 1, "old": true}}}"#);
+    let out = run_aggregate_stdin(&ccn, &["edit", "--key", "mykey"], "{\"a\":2}");
     assert!(
         out.status.success(),
         "stderr: {}",
