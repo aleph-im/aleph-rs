@@ -1525,10 +1525,12 @@ the network. The signed STORE message anchors a content-addressed pin: \
 its item hash is the file's hash, and the network keeps the content as \
 long as the pin is paid for.
 
-Storage engine defaults to `storage` (Aleph native, ≤ 100 MB) for files \
-and `ipfs` for directories. Pass `--storage-engine ipfs` to put a single \
-file on IPFS instead. Payment defaults to credits; pass \
-`--payment-type hold` to fall back to locked-stake.
+When `--storage-engine` is unset, a single file uses `storage` (Aleph \
+native) up to 100 MiB and switches to `ipfs` automatically above that, \
+since native storage rejects larger uploads. Directories always use \
+`ipfs`. Pass `--storage-engine` to force a specific engine. Payment \
+defaults to credits; pass `--payment-type hold` to fall back to \
+locked-stake.
 
 Use `--ref <NAME>` to give the file a stable user-defined identifier \
 (e.g. `report/latest`) — useful for in-place updates and for downloading \
@@ -1545,7 +1547,7 @@ Examples:
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum StorageEngineCli {
-    /// Aleph native storage (default, recommended for files up to 100 MB).
+    /// Aleph native storage (default for files up to 100 MiB).
     Storage,
     /// IPFS storage.
     Ipfs,
@@ -1564,8 +1566,9 @@ pub struct FileUploadArgs {
     /// Path of the file to upload.
     pub path: std::path::PathBuf,
 
-    /// Storage engine to use. Defaults to `storage` for files and `ipfs` for
-    /// directories (native storage does not support directory uploads).
+    /// Storage engine to use. When unset, a single file uses `storage` up to
+    /// 100 MiB and `ipfs` above that; directories always use `ipfs` (native
+    /// storage does not support directory uploads).
     #[arg(long, value_enum)]
     pub storage_engine: Option<StorageEngineCli>,
 
