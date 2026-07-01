@@ -2659,7 +2659,9 @@ pub struct CreditFilterArgs {
 
     /// Restrict to expenses billed to a single resource, identified by its
     /// item hash (e.g. an instance/VM hash). Resources are only ever charged,
-    /// so this implies expenses; it cannot be combined with `--top-ups`.
+    /// so this implies expenses; it cannot be combined with `--top-ups`. The
+    /// owner defaults to the resource's own payer, so `--address` is only
+    /// needed to override it.
     #[arg(long, value_name = "HASH", conflicts_with = "top_ups")]
     pub resource: Option<ItemHash>,
 }
