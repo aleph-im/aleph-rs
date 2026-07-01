@@ -85,7 +85,7 @@ fn build_filters(filters: &CreditFilterArgs) -> Result<(AlephAddress, CreditHist
             .copied()
             .map(Into::into)
             .collect(),
-        resource: filters.resource.clone(),
+        resource: filters.resource.as_ref().map(ToString::to_string),
     };
     Ok((address, sdk_filters))
 }
@@ -302,6 +302,7 @@ mod history_tests {
     }
 
     const SAMPLE_ADDRESS: &str = "0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10";
+    const SAMPLE_HASH: &str = "3c5b05761c8f94a7b8fe6d0d43e5fb91f9689c53c078a870e5e300c7da8a1878";
 
     #[test]
     fn build_filters_maps_expenses_to_outgoing() {
@@ -376,9 +377,9 @@ mod history_tests {
     #[test]
     fn build_filters_passes_resource() {
         let mut args = filter_args(SAMPLE_ADDRESS);
-        args.resource = Some("vm-hash-abc".to_string());
+        args.resource = Some(SAMPLE_HASH.parse().unwrap());
         let (_, filters) = build_filters(&args).unwrap();
-        assert_eq!(filters.resource.as_deref(), Some("vm-hash-abc"));
+        assert_eq!(filters.resource.as_deref(), Some(SAMPLE_HASH));
     }
 
     #[test]

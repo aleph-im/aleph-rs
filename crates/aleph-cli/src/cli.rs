@@ -2661,7 +2661,7 @@ pub struct CreditFilterArgs {
     /// item hash (e.g. an instance/VM hash). Resources are only ever charged,
     /// so this implies expenses; it cannot be combined with `--top-ups`.
     #[arg(long, value_name = "HASH", conflicts_with = "top_ups")]
-    pub resource: Option<String>,
+    pub resource: Option<ItemHash>,
 }
 
 #[derive(Args)]
