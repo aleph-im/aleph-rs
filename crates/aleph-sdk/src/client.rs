@@ -90,7 +90,8 @@ pub struct AlephClient {
     /// Plain client without retry middleware — used for uploads where the
     /// request body (multipart) is not cloneable and therefore cannot be retried.
     /// Carries no reqwest total timeout; upload deadlines are enforced per-request
-    /// by [`AlephClient::upload_timeout`] via [`crate::upload_timeout::run_upload`].
+    /// by the [`AlephClientBuilder::upload_timeout`] policy via
+    /// [`crate::upload_timeout::run_upload`].
     upload_client: reqwest::Client,
     /// Policy governing how long an upload may run. See [`UploadTimeout`].
     upload_timeout: UploadTimeout,

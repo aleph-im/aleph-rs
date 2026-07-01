@@ -72,12 +72,14 @@ pub enum TimeoutFired {
 
 impl fmt::Display for TimeoutFired {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `{:?}` on a Duration renders human-readable units ("60s", "200ms")
+        // without truncating sub-second timeouts to "0s".
         match self {
             TimeoutFired::Total(d) => {
-                write!(f, "exceeded total timeout of {}s", d.as_secs())
+                write!(f, "exceeded total timeout of {d:?}")
             }
             TimeoutFired::Idle(d) => {
-                write!(f, "no data sent for {}s", d.as_secs())
+                write!(f, "no data sent for {d:?}")
             }
         }
     }
@@ -192,6 +194,11 @@ mod tests {
         assert_eq!(
             TimeoutFired::Idle(Duration::from_secs(60)).to_string(),
             "no data sent for 60s"
+        );
+        // Sub-second timeouts must not truncate to "0s".
+        assert_eq!(
+            TimeoutFired::Total(Duration::from_millis(200)).to_string(),
+            "exceeded total timeout of 200ms"
         );
     }
 
