@@ -1560,12 +1560,12 @@ pub struct TimeoutConfig {
     /// reading the response body). Default: 120s. Set to `None` via
     /// [`TimeoutConfig::no_request_timeout`] to disable.
     ///
-    /// Uploads do not use this: they are governed by [`Self::timeout`], because
-    /// a fixed total deadline cuts large uploads on slow-but-healthy links.
+    /// Uploads do not use this: they are governed by [`Self::upload_timeout`],
+    /// because a fixed total deadline cuts large uploads on slow-but-healthy links.
     pub request_timeout: Option<Duration>,
     /// Policy governing how long an upload may run. Default: [`UploadTimeout::Idle`]
     /// of 60s, so a slow upload that keeps making progress is never cut.
-    pub timeout: UploadTimeout,
+    pub upload_timeout: UploadTimeout,
 }
 
 impl TimeoutConfig {
@@ -1584,7 +1584,7 @@ impl Default for TimeoutConfig {
         Self {
             connect_timeout: Duration::from_secs(10),
             request_timeout: Some(Duration::from_secs(120)),
-            timeout: UploadTimeout::default(),
+            upload_timeout: UploadTimeout::default(),
         }
     }
 }
@@ -1622,10 +1622,10 @@ impl AlephClientBuilder {
         self
     }
 
-    /// Overrides the upload timeout policy (the `timeout` field of
+    /// Overrides the upload timeout policy (the `upload_timeout` field of
     /// [`TimeoutConfig`]), leaving other timeout settings untouched.
     pub fn upload_timeout(mut self, policy: UploadTimeout) -> Self {
-        self.timeout_config.timeout = policy;
+        self.timeout_config.upload_timeout = policy;
         self
     }
 
@@ -1675,7 +1675,7 @@ impl AlephClientBuilder {
         AlephClient {
             http_client,
             upload_client,
-            upload_timeout: self.timeout_config.timeout,
+            upload_timeout: self.timeout_config.upload_timeout,
             ccn_url: self.ccn_url,
             ipfs_gateway: self.ipfs_gateway,
         }
