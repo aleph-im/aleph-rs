@@ -25,6 +25,22 @@ use url::Url;
 
 use super::message::{ForgetTargets, forget_targets};
 
+/// Largest file the CCN accepts on the native storage engine for an
+/// authenticated (with-metadata) upload, matching pyaleph's default limit.
+/// Above this, native uploads are rejected, so an unspecified `--storage-engine`
+/// falls back to IPFS instead of failing.
+const MAX_NATIVE_STORAGE_SIZE: u64 = 100 * 1024 * 1024;
+
+/// Pick the storage engine for a single-file upload when the user did not pass
+/// `--storage-engine`: native storage up to the CCN limit, IPFS beyond it.
+fn select_default_engine(size: u64) -> StorageEngine {
+    if size > MAX_NATIVE_STORAGE_SIZE {
+        StorageEngine::Ipfs
+    } else {
+        StorageEngine::Storage
+    }
+}
+
 fn resolve_payment(choice: Option<PaymentTypeCli>) -> Payment {
     match choice.unwrap_or(PaymentTypeCli::Credit) {
         PaymentTypeCli::Hold => Payment::hold(),
@@ -85,9 +101,17 @@ async fn handle_single_file_upload(
     let dry_run = args.signing.dry_run;
     let account = resolve_account(&args.signing.identity)?;
 
-    let storage_engine = match args.storage_engine.unwrap_or(StorageEngineCli::Storage) {
-        StorageEngineCli::Storage => StorageEngine::Storage,
-        StorageEngineCli::Ipfs => StorageEngine::Ipfs,
+    let storage_engine = match args.storage_engine {
+        Some(StorageEngineCli::Storage) => StorageEngine::Storage,
+        Some(StorageEngineCli::Ipfs) => StorageEngine::Ipfs,
+        // No explicit choice: native storage is rejected above the CCN limit,
+        // so size-select the engine to avoid a doomed native upload.
+        None => {
+            let meta = tokio::fs::metadata(&args.path)
+                .await
+                .with_context(|| format!("stat {}", args.path.display()))?;
+            select_default_engine(meta.len())
+        }
     };
 
     if !json {
@@ -658,6 +682,24 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let err = walk_folder_summary(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("empty folder"));
+    }
+
+    #[test]
+    fn default_engine_uses_storage_at_or_below_native_limit() {
+        assert_eq!(select_default_engine(0), StorageEngine::Storage);
+        assert_eq!(select_default_engine(1), StorageEngine::Storage);
+        assert_eq!(
+            select_default_engine(MAX_NATIVE_STORAGE_SIZE),
+            StorageEngine::Storage
+        );
+    }
+
+    #[test]
+    fn default_engine_uses_ipfs_above_native_limit() {
+        assert_eq!(
+            select_default_engine(MAX_NATIVE_STORAGE_SIZE + 1),
+            StorageEngine::Ipfs
+        );
     }
 
     use aleph_types::timestamp::Timestamp;
