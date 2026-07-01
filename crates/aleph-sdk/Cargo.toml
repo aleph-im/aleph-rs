@@ -55,6 +55,9 @@ alloy-network = { workspace = true }
 alloy-node-bindings = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 alloy-signer-local = { workspace = true }
+# test-util enables tokio's paused-clock test runtime (start_paused) used by the
+# upload_timeout policy tests.
+tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
 
 [features]

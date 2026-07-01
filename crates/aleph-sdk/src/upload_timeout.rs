@@ -1,0 +1,285 @@
+//! Timeout policy for streamed uploads.
+//!
+//! The upload endpoints stream a request body whose duration is dominated by
+//! the client's connection speed and the server's synchronous IPFS pinning.
+//! A single wall-clock deadline over the whole request (reqwest's `.timeout()`)
+//! cuts large uploads on slow-but-healthy links, because it does not reset as
+//! bytes flow.
+//!
+//! Instead the SDK manages the upload deadline itself via [`UploadTimeout`].
+//! The [`Idle`](UploadTimeout::Idle) policy aborts only when no bytes have moved
+//! for a while, so a slow upload that keeps making progress is never cut.
+//!
+//! ## Why an external watchdog
+//!
+//! Idle detection cannot be a per-poll timeout on the body stream. When the
+//! socket back-pressures on a slow connection, hyper stops polling the body
+//! stream, so a timeout wrapping `poll_next` would never fire during a stall.
+//! The reliable signal is the *chunk-consumed* event: hyper pulls the next
+//! chunk only once the socket has drained the previous one. [`track_activity`]
+//! bumps a shared counter on each consumed chunk, and [`run_upload`] runs a
+//! watchdog that observes that counter.
+//!
+//! "Activity" therefore means "bytes accepted by the HTTP client for
+//! transmission". With a streamed body reqwest applies back-pressure, so this
+//! closely tracks socket drain; a genuine stall stops activity and the watchdog
+//! fires.
+
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
+use tokio::time::{Duration, Instant, sleep};
+
+/// Chunk size used when turning an in-memory buffer into an activity-tracked
+/// upload stream. Small enough that the activity counter advances smoothly as
+/// the socket drains, large enough to keep per-chunk overhead negligible.
+const BYTES_STREAM_CHUNK: usize = 64 * 1024;
+
+/// Policy governing how long an upload may run before the SDK aborts it.
+///
+/// Applies only to the upload endpoints (the retry-less `upload_client`); other
+/// requests use [`TimeoutConfig::request_timeout`](crate::client::TimeoutConfig).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadTimeout {
+    /// No SDK-managed deadline; only the connection timeout applies. A stalled
+    /// upload can hang until the OS tears the connection down.
+    None,
+    /// Abort after this much wall-clock time, regardless of progress. This is
+    /// the pre-policy behavior and does not suit large uploads on slow links.
+    Total(Duration),
+    /// Abort only after no bytes have been sent for this long. A slow upload
+    /// that keeps making progress runs to completion.
+    Idle(Duration),
+}
+
+impl Default for UploadTimeout {
+    /// Idle timeout of 60s: forgiving of slow links, quick to give up on a
+    /// genuinely dead connection.
+    fn default() -> Self {
+        UploadTimeout::Idle(Duration::from_secs(60))
+    }
+}
+
+/// Which deadline tripped, for building a user-facing message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutFired {
+    Total(Duration),
+    Idle(Duration),
+}
+
+impl fmt::Display for TimeoutFired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TimeoutFired::Total(d) => {
+                write!(f, "exceeded total timeout of {}s", d.as_secs())
+            }
+            TimeoutFired::Idle(d) => {
+                write!(f, "no data sent for {}s", d.as_secs())
+            }
+        }
+    }
+}
+
+/// Shared counter of bytes handed to the HTTP client, bumped by
+/// [`track_activity`] and sampled by the idle watchdog in [`run_upload`].
+#[derive(Clone, Default)]
+pub struct UploadActivity(Arc<AtomicU64>);
+
+impl UploadActivity {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn bump(&self, n: u64) {
+        self.0.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Wrap an upload byte stream so every chunk that passes through bumps
+/// `activity` by its length. Chunks are forwarded unchanged; errored items do
+/// not advance the counter.
+pub fn track_activity<S>(stream: S, activity: UploadActivity) -> impl Stream<Item = S::Item> + Send
+where
+    S: Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+{
+    stream.map(move |chunk| {
+        if let Ok(bytes) = &chunk {
+            activity.bump(bytes.len() as u64);
+        }
+        chunk
+    })
+}
+
+/// Turn an in-memory buffer into a chunked byte stream suitable for a streamed
+/// multipart part. Combined with [`track_activity`] this gives buffered uploads
+/// (small metadata bodies, CAR archives) the same incremental activity signal
+/// as file streams, so the idle policy applies to them too.
+pub fn bytes_stream(data: Vec<u8>) -> impl Stream<Item = std::io::Result<Bytes>> + Send {
+    let bytes = Bytes::from(data);
+    let len = bytes.len();
+    let offsets = (0..len).step_by(BYTES_STREAM_CHUNK);
+    futures_util::stream::iter(offsets.map(move |start| {
+        let end = (start + BYTES_STREAM_CHUNK).min(len);
+        Ok(bytes.slice(start..end))
+    }))
+}
+
+/// Watchdog future that resolves once `activity` has not advanced for `idle`.
+async fn watch_idle(activity: UploadActivity, idle: Duration) {
+    // Poll finely enough to bound detection latency to roughly `idle + tick`.
+    let tick = (idle / 4).max(Duration::from_millis(50));
+    let mut last_value = activity.load();
+    let mut last_change = Instant::now();
+    loop {
+        sleep(tick).await;
+        let current = activity.load();
+        if current != last_value {
+            last_value = current;
+            last_change = Instant::now();
+        } else if last_change.elapsed() >= idle {
+            return;
+        }
+    }
+}
+
+/// Run the upload future `fut` under `policy`.
+///
+/// Returns `Ok(fut output)` if the upload finished within the policy, or
+/// `Err(TimeoutFired)` if a deadline tripped first (in which case `fut` is
+/// dropped, cancelling the in-flight request). `activity` is only consulted for
+/// [`UploadTimeout::Idle`]; callers must feed it via [`track_activity`] for the
+/// idle policy to see progress, otherwise `Idle(d)` degrades to a total `d`.
+pub async fn run_upload<F, T>(
+    policy: UploadTimeout,
+    activity: UploadActivity,
+    fut: F,
+) -> Result<T, TimeoutFired>
+where
+    F: std::future::Future<Output = T>,
+{
+    match policy {
+        UploadTimeout::None => Ok(fut.await),
+        UploadTimeout::Total(d) => tokio::time::timeout(d, fut)
+            .await
+            .map_err(|_| TimeoutFired::Total(d)),
+        UploadTimeout::Idle(d) => {
+            tokio::pin!(fut);
+            tokio::select! {
+                out = &mut fut => Ok(out),
+                () = watch_idle(activity, d) => Err(TimeoutFired::Idle(d)),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_fired_messages() {
+        assert_eq!(
+            TimeoutFired::Total(Duration::from_secs(120)).to_string(),
+            "exceeded total timeout of 120s"
+        );
+        assert_eq!(
+            TimeoutFired::Idle(Duration::from_secs(60)).to_string(),
+            "no data sent for 60s"
+        );
+    }
+
+    #[test]
+    fn default_is_idle_60s() {
+        assert_eq!(
+            UploadTimeout::default(),
+            UploadTimeout::Idle(Duration::from_secs(60))
+        );
+    }
+
+    #[tokio::test]
+    async fn bytes_stream_preserves_content_in_chunks() {
+        let data: Vec<u8> = (0..(BYTES_STREAM_CHUNK * 2 + 7) as u32)
+            .map(|i| i as u8)
+            .collect();
+        let collected: Vec<u8> = bytes_stream(data.clone())
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(collected, data);
+    }
+
+    #[tokio::test]
+    async fn track_activity_counts_bytes() {
+        let activity = UploadActivity::new();
+        let stream = track_activity(bytes_stream(vec![0u8; 5000]), activity.clone());
+        let _: Vec<_> = stream.collect().await;
+        assert_eq!(activity.load(), 5000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn none_never_times_out() {
+        let activity = UploadActivity::new();
+        let fut = async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            42
+        };
+        let out = run_upload(UploadTimeout::None, activity, fut).await;
+        assert_eq!(out, Ok(42));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn total_fires_at_deadline() {
+        let activity = UploadActivity::new();
+        let fut = async {
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            1
+        };
+        let out: Result<i32, _> = run_upload(
+            UploadTimeout::Total(Duration::from_secs(120)),
+            activity,
+            fut,
+        )
+        .await;
+        assert_eq!(out, Err(TimeoutFired::Total(Duration::from_secs(120))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_fires_when_no_activity() {
+        let activity = UploadActivity::new();
+        // Upload that never makes progress and never finishes.
+        let fut = async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            1
+        };
+        let out: Result<i32, _> =
+            run_upload(UploadTimeout::Idle(Duration::from_secs(60)), activity, fut).await;
+        assert_eq!(out, Err(TimeoutFired::Idle(Duration::from_secs(60))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_resets_on_activity_and_completes() {
+        let activity = UploadActivity::new();
+        let bumper = activity.clone();
+        // A "slow but alive" upload: bumps activity every 30s for 5 minutes,
+        // then finishes. Each gap is under the 60s idle window, so it survives.
+        let fut = async move {
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                bumper.bump(1024);
+            }
+            "done"
+        };
+        let out = run_upload(UploadTimeout::Idle(Duration::from_secs(60)), activity, fut).await;
+        assert_eq!(out, Ok("done"));
+    }
+}

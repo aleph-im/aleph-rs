@@ -9,6 +9,9 @@ use crate::aggregate_models::vm_images::{VM_IMAGES_KEY, VmImagesAggregate};
 use crate::aggregate_models::websites::{WEBSITES_AGGREGATE_KEY, WebsitesAggregate};
 use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
 use crate::messages::StoreBuilder;
+use crate::upload_timeout::{
+    UploadActivity, UploadTimeout, bytes_stream, run_upload, track_activity,
+};
 use crate::verify::Hasher;
 use aleph_types::account::Account;
 use aleph_types::chain::{Address, Chain, Signature};
@@ -86,7 +89,11 @@ pub struct AlephClient {
     http_client: ClientWithMiddleware,
     /// Plain client without retry middleware — used for uploads where the
     /// request body (multipart) is not cloneable and therefore cannot be retried.
+    /// Carries no reqwest total timeout; upload deadlines are enforced per-request
+    /// by [`AlephClient::upload_timeout`] via [`crate::upload_timeout::run_upload`].
     upload_client: reqwest::Client,
+    /// Policy governing how long an upload may run. See [`UploadTimeout`].
+    upload_timeout: UploadTimeout,
     ccn_url: Url,
     ipfs_gateway: Url,
 }
@@ -119,6 +126,11 @@ pub enum StorageError {
     FileTooLarge,
     #[error("Upload failed: {0}")]
     UploadFailed(reqwest_middleware::Error),
+    /// The upload was aborted by the client-side timeout policy (an idle stall
+    /// or a total deadline). Distinct from [`Self::UploadFailed`], which is a
+    /// server or transport error. Transient; retry.
+    #[error("Upload timed out: {0}")]
+    UploadTimeout(String),
     /// The node responded but the body could not be deserialized as JSON.
     #[error("invalid response body from node")]
     InvalidResponseBody(#[source] reqwest::Error),
@@ -1544,10 +1556,16 @@ impl Default for RetryConfig {
 pub struct TimeoutConfig {
     /// Timeout for establishing a TCP connection. Default: 10s.
     pub connect_timeout: Duration,
-    /// Overall timeout for an individual HTTP request (including reading the
-    /// response body). Default: 120s. Set to `None` via [`TimeoutConfig::no_request_timeout`]
-    /// to disable.
+    /// Overall timeout for an individual non-upload HTTP request (including
+    /// reading the response body). Default: 120s. Set to `None` via
+    /// [`TimeoutConfig::no_request_timeout`] to disable.
+    ///
+    /// Uploads do not use this: they are governed by [`Self::timeout`], because
+    /// a fixed total deadline cuts large uploads on slow-but-healthy links.
     pub request_timeout: Option<Duration>,
+    /// Policy governing how long an upload may run. Default: [`UploadTimeout::Idle`]
+    /// of 60s, so a slow upload that keeps making progress is never cut.
+    pub timeout: UploadTimeout,
 }
 
 impl TimeoutConfig {
@@ -1566,6 +1584,7 @@ impl Default for TimeoutConfig {
         Self {
             connect_timeout: Duration::from_secs(10),
             request_timeout: Some(Duration::from_secs(120)),
+            timeout: UploadTimeout::default(),
         }
     }
 }
@@ -1603,6 +1622,13 @@ impl AlephClientBuilder {
         self
     }
 
+    /// Overrides the upload timeout policy (the `timeout` field of
+    /// [`TimeoutConfig`]), leaving other timeout settings untouched.
+    pub fn upload_timeout(mut self, policy: UploadTimeout) -> Self {
+        self.timeout_config.timeout = policy;
+        self
+    }
+
     /// Sets the maximum number of concurrent HTTP requests. Default: 16.
     ///
     /// # Panics
@@ -1629,30 +1655,38 @@ impl AlephClientBuilder {
             semaphore: Arc::new(Semaphore::new(self.max_concurrent_requests)),
         };
 
-        let base_client = self.build_reqwest_client();
+        // General client: carries the per-request total timeout.
+        let base_client = self.build_reqwest_client(self.timeout_config.request_timeout);
 
         // Retry is the outer middleware: it decides whether to retry.
         // ConcurrencyLimit is the inner middleware: each attempt (including retries)
         // acquires a permit only for the duration of actual network I/O.
-        let http_client = ClientBuilder::new(base_client.clone())
+        let http_client = ClientBuilder::new(base_client)
             .with(RetryTransientMiddleware::new_with_policy(retry_policy))
             .with(concurrency_limit)
             .build();
 
-        // Upload client shares the same timeout settings but has no retry
-        // middleware (multipart bodies are not cloneable and cannot be retried).
+        // Upload client: no retry middleware (multipart bodies are not cloneable)
+        // and no reqwest total timeout — a fixed deadline cuts large uploads on
+        // slow links. Upload deadlines are enforced per-request via
+        // `run_upload` using the `timeout` policy instead.
+        let upload_client = self.build_reqwest_client(None);
+
         AlephClient {
             http_client,
-            upload_client: base_client,
+            upload_client,
+            upload_timeout: self.timeout_config.timeout,
             ccn_url: self.ccn_url,
             ipfs_gateway: self.ipfs_gateway,
         }
     }
 
-    fn build_reqwest_client(&self) -> reqwest::Client {
+    /// Build a plain reqwest client with the configured connect timeout and an
+    /// optional overall request timeout.
+    fn build_reqwest_client(&self, request_timeout: Option<Duration>) -> reqwest::Client {
         let mut builder =
             reqwest::Client::builder().connect_timeout(self.timeout_config.connect_timeout);
-        if let Some(timeout) = self.timeout_config.request_timeout {
+        if let Some(timeout) = request_timeout {
             builder = builder.timeout(timeout);
         }
         builder.build().expect("failed to build HTTP client")
@@ -1679,6 +1713,25 @@ impl AlephClient {
     pub fn with_ipfs_gateway(mut self, gateway: Url) -> Self {
         self.ipfs_gateway = gateway;
         self
+    }
+
+    /// Send a prepared upload request under the configured [`UploadTimeout`]
+    /// policy, mapping a policy abort to [`StorageError::UploadTimeout`] and a
+    /// transport error to [`StorageError::UploadFailed`].
+    ///
+    /// `activity` must be the counter feeding the request body (via
+    /// [`track_activity`]); for [`UploadTimeout::Idle`] the watchdog observes
+    /// progress through it. When the body carries no activity signal, `Idle(d)`
+    /// degrades to a total deadline of `d`.
+    async fn send_upload(
+        &self,
+        request: reqwest::RequestBuilder,
+        activity: UploadActivity,
+    ) -> Result<Response, StorageError> {
+        run_upload(self.upload_timeout, activity, request.send())
+            .await
+            .map_err(|fired| StorageError::UploadTimeout(fired.to_string()))?
+            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))
     }
 }
 
@@ -2107,6 +2160,46 @@ fn serialize_storage_metadata(message: &PendingMessage, sync: bool) -> String {
     serde_json::json!({"message": message, "sync": sync}).to_string()
 }
 
+/// Build a multipart part from an in-memory buffer, streamed in chunks so the
+/// upload idle-timeout watchdog sees incremental progress via `activity`.
+fn tracked_bytes_part(
+    data: Vec<u8>,
+    file_name: &str,
+    mime: &str,
+    activity: &UploadActivity,
+) -> reqwest::multipart::Part {
+    let len = data.len() as u64;
+    let body = reqwest::Body::wrap_stream(track_activity(bytes_stream(data), activity.clone()));
+    reqwest::multipart::Part::stream_with_length(body, len)
+        .file_name(file_name.to_string())
+        .mime_str(mime)
+        .expect("valid mime type")
+}
+
+/// Build a multipart part that streams `path` from disk, bumping `activity` as
+/// chunks are consumed (for the idle-timeout watchdog) and optionally invoking a
+/// user progress callback. `Content-Length` is preserved.
+async fn tracked_file_part(
+    path: &std::path::Path,
+    file_name: String,
+    activity: &UploadActivity,
+    progress: Option<Box<dyn FnMut(u64, u64) + Send>>,
+) -> std::io::Result<reqwest::multipart::Part> {
+    let total = tokio::fs::metadata(path).await?.len();
+    let file = tokio::fs::File::open(path).await?;
+    let stream = track_activity(tokio_util::io::ReaderStream::new(file), activity.clone());
+    let body = match progress {
+        Some(on_tick) => reqwest::Body::wrap_stream(crate::progress::report_upload_progress(
+            stream, total, on_tick,
+        )),
+        None => reqwest::Body::wrap_stream(stream),
+    };
+    Ok(reqwest::multipart::Part::stream_with_length(body, total)
+        .file_name(file_name)
+        .mime_str("application/octet-stream")
+        .expect("valid mime type"))
+}
+
 fn build_storage_metadata_part(message: &PendingMessage, sync: bool) -> reqwest::multipart::Part {
     reqwest::multipart::Part::text(serialize_storage_metadata(message, sync))
         .mime_str("application/json")
@@ -2273,10 +2366,13 @@ impl AlephStorageClient for AlephClient {
             .join("/api/v0/storage/add_file")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let part = reqwest::multipart::Part::bytes(data.to_vec())
-            .file_name("upload")
-            .mime_str("application/octet-stream")
-            .expect("valid mime type");
+        let activity = UploadActivity::new();
+        let part = tracked_bytes_part(
+            data.to_vec(),
+            "upload",
+            "application/octet-stream",
+            &activity,
+        );
         let mut form = reqwest::multipart::Form::new().part("file", part);
 
         if let Some(msg) = message {
@@ -2286,12 +2382,8 @@ impl AlephStorageClient for AlephClient {
         // Use the plain client — multipart bodies are not cloneable, so the
         // retry middleware would fail with "Request object is not cloneable".
         let response = self
-            .upload_client
-            .post(url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+            .send_upload(self.upload_client.post(url).multipart(form), activity)
+            .await?;
 
         let response = handle_storage_response(response).await?;
 
@@ -2320,10 +2412,13 @@ impl AlephStorageClient for AlephClient {
             .join("/api/v0/ipfs/add_file")
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let part = reqwest::multipart::Part::bytes(data.to_vec())
-            .file_name("upload")
-            .mime_str("application/octet-stream")
-            .expect("valid mime type");
+        let activity = UploadActivity::new();
+        let part = tracked_bytes_part(
+            data.to_vec(),
+            "upload",
+            "application/octet-stream",
+            &activity,
+        );
         let mut form = reqwest::multipart::Form::new().part("file", part);
 
         if let Some(msg) = message {
@@ -2333,12 +2428,8 @@ impl AlephStorageClient for AlephClient {
         // Use the plain client — multipart bodies are not cloneable, so the
         // retry middleware would fail with "Request object is not cloneable".
         let response = self
-            .upload_client
-            .post(url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+            .send_upload(self.upload_client.post(url).multipart(form), activity)
+            .await?;
 
         let response = handle_storage_response(response).await?;
 
@@ -2395,11 +2486,11 @@ impl AlephClient {
     /// Shared body for [`AlephStorageClient::upload_file_to_storage`] /
     /// `upload_file_to_ipfs` and their `_with_progress` variants.
     ///
-    /// With `progress == None` the file is sent via `Part::file` (no per-chunk
-    /// hook). With `Some(on_tick)` the file is streamed through
-    /// [`crate::progress::report_upload_progress`] so the caller observes upload
-    /// progress. In both cases the locally-computed hash is verified against the
-    /// server's response.
+    /// The file is always streamed from disk through an activity tracker (so the
+    /// upload idle timeout observes progress). With `Some(on_tick)` it is also
+    /// wrapped in [`crate::progress::report_upload_progress`] so the caller
+    /// observes upload progress. In both cases the locally-computed hash is
+    /// verified against the server's response.
     async fn upload_file_streaming(
         &self,
         endpoint_path: &str,
@@ -2418,32 +2509,16 @@ impl AlephClient {
             .join(endpoint_path)
             .unwrap_or_else(|e| panic!("invalid url: {e}"));
 
-        let part = match progress {
-            Some(on_tick) => {
-                // Stream from disk so each chunk passes through the progress
-                // reporter. `Part::stream_with_length` keeps Content-Length set.
-                let total = tokio::fs::metadata(path).await?.len();
-                let file = tokio::fs::File::open(path).await?;
-                let stream = tokio_util::io::ReaderStream::new(file);
-                let body = reqwest::Body::wrap_stream(crate::progress::report_upload_progress(
-                    stream, total, on_tick,
-                ));
-                let file_name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("file")
-                    .to_string();
-                reqwest::multipart::Part::stream_with_length(body, total)
-                    .file_name(file_name)
-                    .mime_str("application/octet-stream")
-                    .expect("valid mime type")
-            }
-            // Part::file() returns io::Result<Part>, converts via StorageError::Io
-            None => reqwest::multipart::Part::file(path)
-                .await?
-                .mime_str("application/octet-stream")
-                .expect("valid mime type"),
-        };
+        // Always stream from disk through an activity tracker so the upload
+        // idle-timeout watchdog sees progress, layering the optional user
+        // progress callback on top. `tracked_file_part` keeps Content-Length set.
+        let activity = UploadActivity::new();
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let part = tracked_file_part(path, file_name, &activity, progress).await?;
         let mut form = reqwest::multipart::Form::new().part("file", part);
 
         if let Some(msg) = message {
@@ -2451,12 +2526,8 @@ impl AlephClient {
         }
 
         let response = self
-            .upload_client
-            .post(url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+            .send_upload(self.upload_client.post(url).multipart(form), activity)
+            .await?;
 
         let response = handle_storage_response(response).await?;
 
@@ -2556,13 +2627,12 @@ impl AlephClient {
 
         let local_cid = ItemHash::Ipfs(crate::folder_hash::hash_folder_root(&entries, &opts)?);
 
+        let activity = UploadActivity::new();
         let mut form = reqwest::multipart::Form::new();
         for entry in entries {
-            let part = reqwest::multipart::Part::file(&entry.absolute_path)
-                .await?
-                .file_name(entry.relative_path)
-                .mime_str("application/octet-stream")
-                .expect("valid mime type");
+            let part =
+                tracked_file_part(&entry.absolute_path, entry.relative_path, &activity, None)
+                    .await?;
             form = form.part("file", part);
         }
 
@@ -2573,12 +2643,8 @@ impl AlephClient {
             .map_err(StorageError::InvalidUrl)?;
 
         let response = self
-            .upload_client
-            .post(url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+            .send_upload(self.upload_client.post(url).multipart(form), activity)
+            .await?;
 
         match response.status() {
             StatusCode::FORBIDDEN => return Err(StorageError::IpfsDisabled),
@@ -2662,11 +2728,10 @@ impl AlephClient {
         write_carv1_header(&mut header_bytes, &root_cid_bytes)?;
 
         // 4. Construct the multipart body.
+        let activity = UploadActivity::new();
         let body = build_car_upload_body(header_bytes, body_tmp.path()).await?;
-        let file_part = reqwest::multipart::Part::bytes(body)
-            .file_name("upload.car")
-            .mime_str("application/vnd.ipld.car")
-            .expect("application/vnd.ipld.car is a valid mime");
+        let file_part =
+            tracked_bytes_part(body, "upload.car", "application/vnd.ipld.car", &activity);
         let form = reqwest::multipart::Form::new()
             .part("file", file_part)
             .part("metadata", build_storage_metadata_part(message, sync));
@@ -2678,12 +2743,8 @@ impl AlephClient {
 
         // 5. POST and classify the response.
         let response = self
-            .upload_client
-            .post(url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| StorageError::UploadFailed(reqwest_middleware::Error::from(e)))?;
+            .send_upload(self.upload_client.post(url).multipart(form), activity)
+            .await?;
 
         let response = handle_storage_response(response).await?;
         let upload: UploadResponse = response
@@ -3780,6 +3841,7 @@ mod tests {
             .timeout_config(TimeoutConfig {
                 connect_timeout: Duration::from_secs(5),
                 request_timeout: Some(Duration::from_millis(200)),
+                ..Default::default()
             })
             .retry_config(RetryConfig {
                 max_retries: 0,
@@ -3805,6 +3867,53 @@ mod tests {
         );
     }
 
+    /// An upload with a total policy aborts a stalled request as
+    /// `StorageError::UploadTimeout`, distinct from a transport `UploadFailed`.
+    #[tokio::test]
+    async fn upload_total_timeout_fires_on_stalled_server() {
+        let url = start_stalling_server().await;
+        let client = AlephClient::builder(url)
+            .upload_timeout(UploadTimeout::Total(Duration::from_millis(200)))
+            .build();
+
+        let result = client.upload_to_ipfs(b"payload", None, false).await;
+
+        match result {
+            Err(StorageError::UploadTimeout(msg)) => {
+                assert!(msg.contains("total"), "unexpected message: {msg}");
+            }
+            other => panic!("expected UploadTimeout, got {other:?}"),
+        }
+    }
+
+    /// The idle policy aborts a stalled upload once no bytes have moved for the
+    /// idle window. The tiny body is flushed to the socket immediately, then the
+    /// server never responds, so the idle watchdog trips.
+    #[tokio::test]
+    async fn upload_idle_timeout_fires_on_stalled_server() {
+        let url = start_stalling_server().await;
+        let client = AlephClient::builder(url)
+            .upload_timeout(UploadTimeout::Idle(Duration::from_millis(200)))
+            .build();
+
+        let start = std::time::Instant::now();
+        let result = client.upload_to_ipfs(b"payload", None, false).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(StorageError::UploadTimeout(msg)) => {
+                assert!(msg.contains("no data sent"), "unexpected message: {msg}");
+            }
+            other => panic!("expected UploadTimeout, got {other:?}"),
+        }
+        // The server holds the connection for an hour; returning well under that
+        // proves the idle watchdog fired. Generous margin for loaded CI runners.
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "should bail out via the idle timeout (took {elapsed:?})"
+        );
+    }
+
     #[tokio::test]
     async fn test_connect_timeout_fires_on_unreachable_host() {
         // 192.0.2.1 is TEST-NET-1 (RFC 5737) — routable nowhere, will time out.
@@ -3812,6 +3921,7 @@ mod tests {
             .timeout_config(TimeoutConfig {
                 connect_timeout: Duration::from_millis(200),
                 request_timeout: Some(Duration::from_secs(120)),
+                ..Default::default()
             })
             .retry_config(RetryConfig {
                 max_retries: 0,
