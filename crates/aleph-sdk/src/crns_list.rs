@@ -105,10 +105,18 @@ pub struct CrnFilter {
     pub min_disk_mib: Option<u64>,
     /// Require `confidential_support == true`.
     pub confidential: bool,
-    /// GPU constraint: `None` = no requirement; `Some([])` = any compatible GPU;
-    /// `Some([device_id, ...])` = require a compatible available GPU matching
-    /// every listed PCI id (case-insensitive, e.g. `"10de:2204"`).
-    pub gpu: Option<Vec<String>>,
+    /// GPU constraint as a list of requirement groups (one per requested GPU).
+    ///
+    /// * `None` = no requirement.
+    /// * `Some([])` = any compatible available GPU.
+    /// * `Some([group, ...])` = the node must satisfy *every* group (AND); a
+    ///   group is satisfied when the node has a compatible available GPU whose
+    ///   PCI id matches *any* id in the group (OR, case-insensitive). An empty
+    ///   group matches any compatible available GPU.
+    ///
+    /// The OR within a group lets a single requested model accept all of its PCI
+    /// device variants (e.g. an RTX 4090 and an RTX 4090 D).
+    pub gpu: Option<Vec<Vec<String>>>,
 }
 
 impl CrnListResponse {
@@ -131,18 +139,23 @@ fn matches_filter(entry: &CrnListEntry, f: &CrnFilter) -> bool {
     if f.confidential && !entry.confidential_support {
         return false;
     }
-    if let Some(device_ids) = &f.gpu {
+    if let Some(groups) = &f.gpu {
         let available = entry.compatible_available_gpus.as_deref().unwrap_or(&[]);
         if !entry.gpu_support || available.is_empty() {
             return false;
         }
-        // Empty list = any compatible GPU; otherwise every id must be present.
-        let all_present = device_ids.iter().all(|want| {
-            available
-                .iter()
-                .any(|g| g.device_id.eq_ignore_ascii_case(want))
+        // Each group is the set of acceptable PCI ids for one requested GPU
+        // (OR within a group); the node must satisfy every group (AND across
+        // groups). An empty group matches any compatible available GPU.
+        let all_satisfied = groups.iter().all(|group| {
+            group.is_empty()
+                || group.iter().any(|want| {
+                    available
+                        .iter()
+                        .any(|g| g.device_id.eq_ignore_ascii_case(want))
+                })
         });
-        if !all_present {
+        if !all_satisfied {
             return false;
         }
     }
@@ -281,7 +294,7 @@ mod tests {
         let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
         // delta-gpu advertises an H100 (10de:2331).
         let f = CrnFilter {
-            gpu: Some(vec!["10de:2331".into()]),
+            gpu: Some(vec![vec!["10de:2331".into()]]),
             ..Default::default()
         };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
@@ -289,11 +302,33 @@ mod tests {
 
         // A different model (rtx3090, 10de:2204) must not match an H100-only node.
         let f = CrnFilter {
-            gpu: Some(vec!["10DE:2204".into()]),
+            gpu: Some(vec![vec!["10DE:2204".into()]]),
             ..Default::default()
         };
         let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
         assert!(names.is_empty(), "rtx3090 must not match an H100-only node");
+    }
+
+    #[test]
+    fn filter_gpu_group_matches_any_variant_in_group() {
+        let r: CrnListResponse = serde_json::from_str(FIXTURE).unwrap();
+        // A single requested model whose accepted variants include the node's
+        // actual device id (10de:2331) alongside another variant: OR matches.
+        let f = CrnFilter {
+            gpu: Some(vec![vec!["10de:2330".into(), "10de:2331".into()]]),
+            ..Default::default()
+        };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["delta-gpu"]);
+
+        // Two groups (two requested GPUs): the H100-only node satisfies the H100
+        // group but not the rtx3090 group, so it is dropped (AND across groups).
+        let f = CrnFilter {
+            gpu: Some(vec![vec!["10de:2331".into()], vec!["10de:2204".into()]]),
+            ..Default::default()
+        };
+        let names: Vec<&str> = r.filter(&f).iter().map(|c| c.name.as_str()).collect();
+        assert!(names.is_empty(), "node lacks the second requested model");
     }
 
     #[test]

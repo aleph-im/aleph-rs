@@ -1011,15 +1011,24 @@ async fn handle_instance_create(
         let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
         let options = build_gpu_options(&pricing.pricing, &settings.settings);
 
-        // Build the GPU requirement: one device per requested model, using the
-        // model's representative variant. (Pinning to a node whose only GPU is a
-        // different PCI variant of the same model is a known limitation.)
-        let mut props = Vec::with_capacity(gpu_model_ids.len());
-        for model_id in gpu_model_ids {
-            let option = resolve_gpu_option(&options, model_id)?;
-            props.push(option.representative_gpu_properties()?);
-        }
-        gpu_props = Some(props);
+        // Build the GPU requirement: one device per requested model, demanding the
+        // node's actual PCI variant whenever a node is known.
+        gpu_props = Some(if let Some(props) = &args.resolved_gpus {
+            // Interactive picker already resolved the pinned node's exact device(s).
+            props.clone()
+        } else if let Some(crn_hash) = &args.crn_hash {
+            // Pinned via `--crn-hash` on the command line: look the node up and use
+            // its actual advertised GPU variant.
+            resolve_pinned_node_gpu_props(&options, gpu_model_ids, crn_hash).await?
+        } else {
+            // Automatic placement: no node to copy from, use the representative variant.
+            let mut props = Vec::with_capacity(gpu_model_ids.len());
+            for model_id in gpu_model_ids {
+                let option = resolve_gpu_option(&options, model_id)?;
+                props.push(option.representative_gpu_properties()?);
+            }
+            props
+        });
 
         // Size from the first model's minimum (we do not sum across models; the
         // others share the same VM resources).
@@ -1304,29 +1313,138 @@ pub(crate) fn resolve_gpu_option<'a>(
         })
 }
 
-/// Representative PCI device id for each requested GPU model id, for filtering
-/// CRNs in the interactive picker. Uses the same representative variant as the
-/// instance message so the picker only surfaces nodes that can host it.
-pub(crate) async fn gpu_filter_device_ids(
-    aleph_client: &AlephClient,
-    model_ids: &[String],
-) -> Result<Vec<String>> {
+/// Fetch the pricing + settings aggregates (concurrently) and build the GPU
+/// catalog. Used by the interactive picker, which needs the catalog for both the
+/// CRN filter and resolving the pinned node's exact GPU device.
+pub(crate) async fn load_gpu_options(aleph_client: &AlephClient) -> Result<Vec<GpuOption>> {
     let (pricing, settings) = fetch_pricing_and_settings(aleph_client).await?;
-    let options = build_gpu_options(&pricing.pricing, &settings.settings);
+    Ok(build_gpu_options(&pricing.pricing, &settings.settings))
+}
 
-    let mut device_ids = Vec::with_capacity(model_ids.len());
+/// CRN filter groups for the requested GPU model ids: one group per requested
+/// model holding *all* of that model's accepted PCI device ids. A node matches a
+/// group if it advertises any one of those variants, so the picker surfaces
+/// every node that can host the model (not just the representative variant).
+pub(crate) fn gpu_filter_groups(
+    options: &[GpuOption],
+    model_ids: &[String],
+) -> Result<Vec<Vec<String>>> {
+    let mut groups = Vec::with_capacity(model_ids.len());
     for model_id in model_ids {
-        let option = resolve_gpu_option(&options, model_id)?;
-        let variant = option.variants.first().ok_or_else(|| {
-            anyhow!(
+        let option = resolve_gpu_option(options, model_id)?;
+        if option.variants.is_empty() {
+            bail!(
                 "GPU '{}' has no compatible device listed in the network settings \
                  aggregate (compatible_gpus).",
                 option.name
-            )
-        })?;
-        device_ids.push(variant.device_id.clone());
+            );
+        }
+        groups.push(
+            option
+                .variants
+                .iter()
+                .map(|v| v.device_id.clone())
+                .collect(),
+        );
     }
-    Ok(device_ids)
+    Ok(groups)
+}
+
+/// Resolve the GPU device properties for a pinned node: for each requested
+/// model, use the *node's actual* advertised GPU variant (exact device id /
+/// name / class) so the instance message demands exactly what the node has.
+/// Falls back to the model's representative variant if the node does not (or no
+/// longer) advertises a matching device.
+pub(crate) fn resolve_node_gpu_props(
+    options: &[GpuOption],
+    model_ids: &[String],
+    node: &aleph_sdk::crns_list::CrnListEntry,
+) -> Result<Vec<GpuProperties>> {
+    let node_gpus = node.compatible_available_gpus.as_deref().unwrap_or(&[]);
+    let mut props = Vec::with_capacity(model_ids.len());
+    for model_id in model_ids {
+        let option = resolve_gpu_option(options, model_id)?;
+        let node_gpu = node_gpus.iter().find(|g| {
+            option
+                .variants
+                .iter()
+                .any(|v| v.device_id.eq_ignore_ascii_case(&g.device_id))
+        });
+        match node_gpu {
+            Some(g) => props.push(gpu_properties_from_node_gpu(g)?),
+            None => props.push(option.representative_gpu_properties()?),
+        }
+    }
+    Ok(props)
+}
+
+/// Convert a CRN-advertised GPU to instance-message GPU properties.
+fn gpu_properties_from_node_gpu(gpu: &aleph_sdk::crns_list::Gpu) -> Result<GpuProperties> {
+    let device_class = parse_gpu_device_class(Some(&gpu.device_class), &gpu.model)?;
+    Ok(GpuProperties {
+        vendor: gpu.vendor.clone(),
+        device_name: gpu.device_name.clone(),
+        device_class,
+        device_id: gpu.device_id.clone(),
+    })
+}
+
+/// Fetch the active CRN list, honoring the `ALEPH_CRN_LIST_URL` override. Shared
+/// by the interactive picker (which spawns it in parallel) and the
+/// non-interactive `--crn-hash` GPU path.
+pub(crate) async fn fetch_crn_list() -> Result<aleph_sdk::crns_list::CrnListResponse> {
+    let raw = std::env::var("ALEPH_CRN_LIST_URL")
+        .unwrap_or_else(|_| aleph_sdk::crns_list::DEFAULT_CRN_LIST_URL.to_string());
+    let url = url::Url::parse(&raw).map_err(|e| anyhow!("invalid CRN list URL '{raw}': {e}"))?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| anyhow!("failed to build HTTP client: {e}"))?;
+    aleph_sdk::crns_list::fetch_crns_list(&http, &url, true)
+        .await
+        .map_err(|e| anyhow!("failed to fetch CRN list from {url}: {e}"))
+}
+
+/// Resolve the GPU device(s) for a node pinned via `--crn-hash` on the
+/// non-interactive path: fetch the CRN list and use the node's actual advertised
+/// GPU variant.
+async fn resolve_pinned_node_gpu_props(
+    options: &[GpuOption],
+    model_ids: &[String],
+    crn_hash: &aleph_sdk::aggregate_models::corechannel::NodeHash,
+) -> Result<Vec<GpuProperties>> {
+    let list = fetch_crn_list().await?;
+    pinned_node_gpu_props_from_list(&list, options, model_ids, &crn_hash.to_string())
+}
+
+/// Pure core of [`resolve_pinned_node_gpu_props`]: pick the node from an
+/// already-fetched list and resolve its GPU device(s). Falls back to the model's
+/// representative variant when the node is not in the list (e.g. inactive), so a
+/// valid pin never hard-fails.
+fn pinned_node_gpu_props_from_list(
+    list: &aleph_sdk::crns_list::CrnListResponse,
+    options: &[GpuOption],
+    model_ids: &[String],
+    crn_hash: &str,
+) -> Result<Vec<GpuProperties>> {
+    match list
+        .crns
+        .iter()
+        .find(|e| e.hash.eq_ignore_ascii_case(crn_hash))
+    {
+        Some(node) => resolve_node_gpu_props(options, model_ids, node),
+        None => {
+            eprintln!(
+                "Note: CRN '{crn_hash}' is not in the CRN list; using the GPU model's default \
+                 device variant. If the node hosts a different variant, create interactively \
+                 (-i) to pin its exact device."
+            );
+            model_ids
+                .iter()
+                .map(|m| resolve_gpu_option(options, m)?.representative_gpu_properties())
+                .collect()
+        }
+    }
 }
 
 /// Convert a settings-aggregate device variant to instance-message GPU properties.
@@ -3139,6 +3257,92 @@ mod tests {
             let rtx = resolve_gpu_option(&options, "rtx3090").unwrap();
             let err = rtx.representative_gpu_properties().unwrap_err().to_string();
             assert!(err.contains("missing device_class"), "{err}");
+        }
+
+        #[test]
+        fn filter_groups_hold_all_variants_per_model() {
+            let options = build_gpu_options(&pricing(), &settings());
+            let groups = gpu_filter_groups(&options, &["rtx3090".to_string()]).unwrap();
+            assert_eq!(groups.len(), 1);
+            // Both RTX 3090 PCI variants are accepted (OR within the group).
+            assert_eq!(groups[0], vec!["10de:2204", "10de:2203"]);
+        }
+
+        fn node_with_gpu(device_id: &str, device_name: &str) -> aleph_sdk::crns_list::CrnListEntry {
+            use std::collections::HashMap;
+            aleph_sdk::crns_list::CrnListEntry {
+                hash: "h".into(),
+                name: "n".into(),
+                address: "https://x.y".into(),
+                score: None,
+                version: None,
+                payment_receiver_address: None,
+                gpu_support: true,
+                confidential_support: false,
+                qemu_support: false,
+                ipv6_check: None,
+                system_usage: None,
+                compatible_available_gpus: Some(vec![aleph_sdk::crns_list::Gpu {
+                    vendor: "NVIDIA".into(),
+                    model: "RTX 3090".into(),
+                    device_name: device_name.into(),
+                    device_class: "0300".into(),
+                    pci_host: "01:00.0".into(),
+                    device_id: device_id.into(),
+                    compatible: true,
+                }]),
+                terms_and_conditions: None,
+                extra: HashMap::new(),
+            }
+        }
+
+        #[test]
+        fn node_exact_uses_the_nodes_actual_variant_not_representative() {
+            let options = build_gpu_options(&pricing(), &settings());
+            // Node advertises the 3090 Ti variant (2203), not the representative 2204.
+            let node = node_with_gpu("10de:2203", "GA102 [GeForce RTX 3090 Ti]");
+            let props = resolve_node_gpu_props(&options, &["rtx3090".to_string()], &node).unwrap();
+            assert_eq!(props.len(), 1);
+            assert_eq!(props[0].device_id, "10de:2203");
+            assert_eq!(props[0].device_name, "GA102 [GeForce RTX 3090 Ti]");
+        }
+
+        #[test]
+        fn node_exact_falls_back_to_representative_when_node_has_no_match() {
+            let options = build_gpu_options(&pricing(), &settings());
+            // Node's GPU device id is not one of the model's known variants.
+            let node = node_with_gpu("10de:9999", "Mystery GPU");
+            let props = resolve_node_gpu_props(&options, &["rtx3090".to_string()], &node).unwrap();
+            assert_eq!(props[0].device_id, "10de:2204"); // representative
+        }
+
+        #[test]
+        fn pinned_node_uses_its_variant_else_representative() {
+            let options = build_gpu_options(&pricing(), &settings());
+            let mut node = node_with_gpu("10de:2203", "GA102 [GeForce RTX 3090 Ti]");
+            node.hash = "abc123".into();
+            let list = aleph_sdk::crns_list::CrnListResponse { crns: vec![node] };
+
+            // --crn-hash matches the listed node -> its actual variant (2203);
+            // hash comparison is case-insensitive.
+            let props = pinned_node_gpu_props_from_list(
+                &list,
+                &options,
+                &["rtx3090".to_string()],
+                "ABC123",
+            )
+            .unwrap();
+            assert_eq!(props[0].device_id, "10de:2203");
+
+            // Unknown hash -> representative fallback (2204), no hard failure.
+            let props = pinned_node_gpu_props_from_list(
+                &list,
+                &options,
+                &["rtx3090".to_string()],
+                "deadbeef",
+            )
+            .unwrap();
+            assert_eq!(props[0].device_id, "10de:2204");
         }
     }
 }

@@ -2,6 +2,7 @@ use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_sdk::credit::PriceSource;
 use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::execution::environment::GpuProperties;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use url::Url;
@@ -2031,6 +2032,13 @@ pub struct InstanceCreateArgs {
     /// more. `--disk-size` is optional for GPU instances (defaults to the tier disk).
     #[arg(long)]
     pub gpu: Option<Vec<String>>,
+
+    /// Not a CLI flag: the exact GPU device(s) resolved from the pinned node by
+    /// the interactive picker, used verbatim in the instance message so it
+    /// demands the node's actual PCI variant. Left `None` on the non-interactive
+    /// path (the create handler then uses the model's representative variant).
+    #[arg(skip)]
+    pub resolved_gpus: Option<Vec<GpuProperties>>,
 
     /// CRN node hash. Pins the instance to a specific compute node.
     #[arg(long)]
