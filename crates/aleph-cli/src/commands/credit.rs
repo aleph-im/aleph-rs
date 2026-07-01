@@ -9,7 +9,10 @@ use crate::common::{
     submit_or_preview,
 };
 use aleph_sdk::builder::MessageBuilder;
-use aleph_sdk::client::{AlephAccountClient, AlephClient, CreditDirection, CreditHistoryFilters};
+use aleph_sdk::client::{
+    AlephAccountClient, AlephClient, AlephMessageClient, CreditDirection, CreditHistoryFilters,
+    MessageWithStatus,
+};
 use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
 use aleph_sdk::credit_transfer::{
     CREDIT_TRANSFER_POST_TYPE, CreditTransferContent, CreditTransferEntry, CreditTransferError,
@@ -18,6 +21,7 @@ use aleph_sdk::credit_transfer::{
 use aleph_types::account::{Account, EvmAccount};
 use aleph_types::chain::Address as AlephAddress;
 use aleph_types::channel::Channel;
+use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
 use alloy_network::EthereumWallet;
 use alloy_primitives::{Address, U256};
@@ -53,15 +57,13 @@ pub async fn handle_credit_command(
     }
 }
 
-/// Resolve the owner address and translate the shared CLI filter flags into
-/// the SDK's [`CreditHistoryFilters`].
+/// Translate the shared CLI filter flags into the SDK's
+/// [`CreditHistoryFilters`].
 ///
 /// `--since` is resolved against the current time here (now - duration) so the
 /// lower bound reflects invocation time. `--expenses`/`--top-ups` map to the
 /// outgoing/incoming directions; clap guarantees they are not both set.
-fn build_filters(filters: &CreditFilterArgs) -> Result<(AlephAddress, CreditHistoryFilters)> {
-    let address = resolve_owner_address(filters.address.as_deref())?;
-
+fn build_filters(filters: &CreditFilterArgs) -> Result<CreditHistoryFilters> {
     let start_date = match filters.since {
         Some(window) => Some((Utc::now() - window).timestamp()),
         None => filters.start.map(|dt| dt.timestamp()),
@@ -85,8 +87,9 @@ fn build_filters(filters: &CreditFilterArgs) -> Result<(AlephAddress, CreditHist
             .copied()
             .map(Into::into)
             .collect(),
+        resource: filters.resource.as_ref().map(ToString::to_string),
     };
-    Ok((address, sdk_filters))
+    Ok(sdk_filters)
 }
 
 async fn handle_history(
@@ -94,7 +97,8 @@ async fn handle_history(
     json: bool,
     args: CreditHistoryArgs,
 ) -> Result<()> {
-    let (address, filters) = build_filters(&args.filters)?;
+    let address = resolve_owner_address(aleph_client, &args.filters).await?;
+    let filters = build_filters(&args.filters)?;
     let history = aleph_client
         .get_credit_history(&address, args.page, Some(args.page_size), &filters)
         .await?;
@@ -146,7 +150,8 @@ async fn handle_summary(
     json: bool,
     args: CreditSummaryArgs,
 ) -> Result<()> {
-    let (address, filters) = build_filters(&args.filters)?;
+    let address = resolve_owner_address(aleph_client, &args.filters).await?;
+    let filters = build_filters(&args.filters)?;
     let summary = aleph_client
         .get_credit_history_summary(&address, &filters)
         .await?;
@@ -156,22 +161,52 @@ async fn handle_summary(
         return Ok(());
     }
 
-    eprintln!("Credit summary for {}", summary.address);
-    eprintln!("  Entries:   {}", summary.entry_count);
-    eprintln!("  Net:       {:+}", summary.total_amount);
-    eprintln!("  Incoming:  {:+}", summary.total_incoming);
-    eprintln!("  Outgoing:  {:+}", summary.total_outgoing);
+    for line in summary_lines(&summary, args.filters.resource.is_some()) {
+        eprintln!("{line}");
+    }
     Ok(())
 }
 
-/// Resolve the owner address for read-only credit queries.
+/// Render the human-readable summary lines.
 ///
-/// Mirrors `aleph account balance` / `aleph aggregate list`: explicit
-/// `--address` (raw or local-name) wins, otherwise we use the default
-/// account from the local store.
-fn resolve_owner_address(args_address: Option<&str>) -> Result<AlephAddress> {
-    if let Some(value) = args_address {
+/// When the totals are scoped to a single resource (`--resource`), every entry
+/// is necessarily an expense, so the `Incoming` (top-ups) line is always zero
+/// and only adds noise — drop it.
+fn summary_lines(
+    summary: &aleph_sdk::client::CreditHistorySummary,
+    resource_filtered: bool,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("Credit summary for {}", summary.address),
+        format!("  Entries:   {}", summary.entry_count),
+        format!("  Net:       {:+}", summary.total_amount),
+    ];
+    if !resource_filtered {
+        lines.push(format!("  Incoming:  {:+}", summary.total_incoming));
+    }
+    lines.push(format!("  Outgoing:  {:+}", summary.total_outgoing));
+    lines
+}
+
+/// Resolve the owner address whose credit ledger to query.
+///
+/// Precedence:
+/// 1. An explicit `--address` (raw or local-name) always wins.
+/// 2. Otherwise, if `--resource` is set, derive the owner from the resource's
+///    own message: its `content.address` is the payer, i.e. exactly the ledger
+///    charged for it. This lets `--resource <hash>` alone identify the ledger,
+///    so inspecting another owner's resource needs only its hash.
+/// 3. Otherwise fall back to the default account from the local store (mirrors
+///    `aleph account balance` / `aleph aggregate list`).
+async fn resolve_owner_address(
+    aleph_client: &AlephClient,
+    filters: &CreditFilterArgs,
+) -> Result<AlephAddress> {
+    if let Some(value) = filters.address.as_deref() {
         return resolve_address(value);
+    }
+    if let Some(resource) = &filters.resource {
+        return owner_of_resource(aleph_client, resource).await;
     }
     let store = AccountStore::open().map_err(|e| anyhow!("failed to open account store: {e}"))?;
     let name = store.default_account_name()?.ok_or_else(|| {
@@ -182,6 +217,29 @@ fn resolve_owner_address(args_address: Option<&str>) -> Result<AlephAddress> {
     })?;
     let entry = store.get_account(&name)?;
     Ok(AlephAddress::from(entry.address))
+}
+
+/// Look up the owner (payer) of a resource by fetching its message and reading
+/// `content.address`. Backs the `--resource`-implies-owner shortcut above.
+async fn owner_of_resource(
+    aleph_client: &AlephClient,
+    resource: &ItemHash,
+) -> Result<AlephAddress> {
+    let with_status = aleph_client
+        .get_message(resource)
+        .await
+        .map_err(|e| anyhow!("failed to look up resource {resource}: {e}"))?;
+    let message = match with_status {
+        MessageWithStatus::Processed { message }
+        | MessageWithStatus::Removing { message, .. }
+        | MessageWithStatus::Removed { message, .. } => message,
+        other => bail!(
+            "could not determine the owner of resource {resource} (status: {}); \
+             pass --address explicitly",
+            other.status()
+        ),
+    };
+    Ok(message.owner().clone())
 }
 
 fn total_pages(total: u64, per_page: u32) -> u64 {
@@ -277,16 +335,18 @@ mod history_tests {
             expenses: false,
             top_ups: false,
             resource_type: Vec::new(),
+            resource: None,
         }
     }
 
     const SAMPLE_ADDRESS: &str = "0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10";
+    const SAMPLE_HASH: &str = "3c5b05761c8f94a7b8fe6d0d43e5fb91f9689c53c078a870e5e300c7da8a1878";
 
     #[test]
     fn build_filters_maps_expenses_to_outgoing() {
         let mut args = filter_args(SAMPLE_ADDRESS);
         args.expenses = true;
-        let (_, filters) = build_filters(&args).unwrap();
+        let filters = build_filters(&args).unwrap();
         assert!(matches!(filters.direction, Some(CreditDirection::Outgoing)));
     }
 
@@ -294,13 +354,13 @@ mod history_tests {
     fn build_filters_maps_top_ups_to_incoming() {
         let mut args = filter_args(SAMPLE_ADDRESS);
         args.top_ups = true;
-        let (_, filters) = build_filters(&args).unwrap();
+        let filters = build_filters(&args).unwrap();
         assert!(matches!(filters.direction, Some(CreditDirection::Incoming)));
     }
 
     #[test]
     fn build_filters_no_direction_by_default() {
-        let (_, filters) = build_filters(&filter_args(SAMPLE_ADDRESS)).unwrap();
+        let filters = build_filters(&filter_args(SAMPLE_ADDRESS)).unwrap();
         assert!(filters.direction.is_none());
     }
 
@@ -310,7 +370,7 @@ mod history_tests {
         args.start = Some(DateTime::from_timestamp(1_769_990_400, 0).unwrap());
         args.end = Some(DateTime::from_timestamp(1_770_000_000, 0).unwrap());
         args.resource_type = vec![ResourceTypeCli::Store, ResourceTypeCli::Instance];
-        let (_, filters) = build_filters(&args).unwrap();
+        let filters = build_filters(&args).unwrap();
         assert_eq!(filters.start_date, Some(1_769_990_400));
         assert_eq!(filters.end_date, Some(1_770_000_000));
         assert_eq!(
@@ -319,12 +379,59 @@ mod history_tests {
         );
     }
 
+    fn sample_summary() -> aleph_sdk::client::CreditHistorySummary {
+        aleph_sdk::client::CreditHistorySummary {
+            address: SAMPLE_ADDRESS.to_string(),
+            entry_count: 3,
+            total_amount: -900,
+            total_incoming: 0,
+            total_outgoing: -900,
+        }
+    }
+
+    #[test]
+    fn summary_lines_include_incoming_without_resource_filter() {
+        let lines = summary_lines(&sample_summary(), false);
+        assert!(
+            lines.iter().any(|l| l.contains("Incoming")),
+            "expected an Incoming line, got: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("Outgoing")));
+    }
+
+    #[test]
+    fn summary_lines_omit_incoming_with_resource_filter() {
+        let lines = summary_lines(&sample_summary(), true);
+        assert!(
+            !lines.iter().any(|l| l.contains("Incoming")),
+            "Incoming line must be hidden when filtering by resource, got: {lines:?}"
+        );
+        // The other totals must still be there.
+        assert!(lines.iter().any(|l| l.contains("Entries")));
+        assert!(lines.iter().any(|l| l.contains("Net")));
+        assert!(lines.iter().any(|l| l.contains("Outgoing")));
+    }
+
+    #[test]
+    fn build_filters_passes_resource() {
+        let mut args = filter_args(SAMPLE_ADDRESS);
+        args.resource = Some(SAMPLE_HASH.parse().unwrap());
+        let filters = build_filters(&args).unwrap();
+        assert_eq!(filters.resource.as_deref(), Some(SAMPLE_HASH));
+    }
+
+    #[test]
+    fn build_filters_no_resource_by_default() {
+        let filters = build_filters(&filter_args(SAMPLE_ADDRESS)).unwrap();
+        assert!(filters.resource.is_none());
+    }
+
     #[test]
     fn build_filters_since_sets_lower_bound() {
         let mut args = filter_args(SAMPLE_ADDRESS);
         args.since = Some(chrono::Duration::days(7));
         let before = (Utc::now() - chrono::Duration::days(7)).timestamp();
-        let (_, filters) = build_filters(&args).unwrap();
+        let filters = build_filters(&args).unwrap();
         let start = filters.start_date.expect("since sets a lower bound");
         // Resolved against the wall clock; allow a small execution window.
         assert!((start - before).abs() <= 5, "start={start} before={before}");
