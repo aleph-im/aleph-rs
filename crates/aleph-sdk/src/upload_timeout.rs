@@ -47,11 +47,15 @@ pub enum UploadTimeout {
     /// No SDK-managed deadline; only the connection timeout applies. A stalled
     /// upload can hang until the OS tears the connection down.
     None,
-    /// Abort after this much wall-clock time, regardless of progress. This is
-    /// the pre-policy behavior and does not suit large uploads on slow links.
+    /// Abort after this much wall-clock time, regardless of progress. Close to
+    /// the pre-policy behavior, but note the scope: like all policies here it
+    /// bounds the request send and response headers, not the reading of the
+    /// (tiny) response body afterwards. Does not suit large uploads on slow links.
     Total(Duration),
     /// Abort only after no bytes have been sent for this long. A slow upload
-    /// that keeps making progress runs to completion.
+    /// that keeps making progress runs to completion. The window starts when the
+    /// upload begins, so it also bounds a stalled connection setup before the
+    /// first byte flows; this is only noticeable with a very short duration.
     Idle(Duration),
 }
 
@@ -134,6 +138,10 @@ pub fn bytes_stream(data: Vec<u8>) -> impl Stream<Item = std::io::Result<Bytes>>
 }
 
 /// Watchdog future that resolves once `activity` has not advanced for `idle`.
+///
+/// The clock starts now, before the first byte is sent, so a stalled connection
+/// setup counts as idle too. That deliberately bounds a pre-first-byte hang; it
+/// is only noticeable when `idle` is very short relative to connection setup.
 async fn watch_idle(activity: UploadActivity, idle: Duration) {
     // Poll finely enough to bound detection latency to roughly `idle + tick`.
     let tick = (idle / 4).max(Duration::from_millis(50));
@@ -158,6 +166,10 @@ async fn watch_idle(activity: UploadActivity, idle: Duration) {
 /// dropped, cancelling the in-flight request). `activity` is only consulted for
 /// [`UploadTimeout::Idle`]; callers must feed it via [`track_activity`] for the
 /// idle policy to see progress, otherwise `Idle(d)` degrades to a total `d`.
+///
+/// The policy bounds exactly what `fut` covers. Callers pass the `send()` future
+/// (request body plus response headers), so reading the response body afterwards
+/// is not bounded here; for uploads that body is a tiny JSON object.
 pub async fn run_upload<F, T>(
     policy: UploadTimeout,
     activity: UploadActivity,
