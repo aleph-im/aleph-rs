@@ -93,11 +93,6 @@ impl<C: AlephAggregateClient + Sync> AlephAggregateClient for CachingAggregateCl
         deserialize(value)
     }
 
-    // get_pricing_aggregate, get_settings_aggregate, get_vm_images_aggregate,
-    // get_corechannel_aggregate and the per-address get_{websites,domains,
-    // port_forwarding}_aggregate are all trait default methods over
-    // get_aggregate, so they are cached by the override above with no extra code.
-
     async fn get_aggregates(
         &self,
         address: &Address,
