@@ -220,13 +220,12 @@ mod tests {
         let inner = CountingClient::default();
         let client = CachingAggregateClient::new(&inner);
 
+        // Domains are a per-address aggregate; use an arbitrary user address.
+        let address = aleph_types::address!("0xa1B3bb7d2332383D96b7796B908fB7f7F3c2Be10");
         // get_domains_aggregate is a trait default over get_aggregate, so it is
         // memoized by the same cache with no dedicated handling.
         for _ in 0..3 {
-            let _: DomainsAggregate = client
-                .get_domains_aggregate(&PRICING_ADDRESS)
-                .await
-                .unwrap();
+            let _: DomainsAggregate = client.get_domains_aggregate(&address).await.unwrap();
         }
 
         assert_eq!(inner.domains_calls.load(Ordering::SeqCst), 1);
