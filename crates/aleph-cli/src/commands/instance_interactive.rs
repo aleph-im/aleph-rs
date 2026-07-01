@@ -14,7 +14,7 @@ use crate::commands::instance::{
 };
 use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, GpuModel, PricingPerEntity};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
-use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+use aleph_sdk::client::AlephAggregateClient;
 use aleph_sdk::crns_list::{CrnFilter, CrnListEntry, CrnListResponse};
 use aleph_sdk::ssh::AlephSshClient;
 use aleph_types::chain::Address;
@@ -25,7 +25,8 @@ use tokio::task::JoinHandle;
 
 pub async fn resolve_interactive(
     args: &mut InstanceCreateArgs,
-    aleph_client: &AlephClient,
+    aggregates: &impl AlephAggregateClient,
+    ssh_client: &impl AlephSshClient,
     owner_address: &Address,
 ) -> Result<()> {
     // Kick off the CRN list fetch in parallel with the early prompts, but only
@@ -36,7 +37,7 @@ pub async fn resolve_interactive(
     let crn_list_fut = args.crn_hash.is_none().then(spawn_crn_list_fetch);
 
     if args.image.is_none() {
-        let vm_images = aleph_client
+        let vm_images = aggregates
             .get_vm_images_aggregate()
             .await
             .map_err(|e| {
@@ -54,11 +55,11 @@ pub async fn resolve_interactive(
     // regular (non-GPU) size prompt.
     let mut gpu_selected = false;
     if args.gpu.is_none() {
-        gpu_selected = prompt_gpu(args, aleph_client).await?;
+        gpu_selected = prompt_gpu(args, aggregates).await?;
     }
 
     if !gpu_selected && args.size.is_none() && args.disk_size.is_none() {
-        args.size = Some(prompt_size(aleph_client).await?);
+        args.size = Some(prompt_size(aggregates).await?);
     }
 
     // Node placement: let the scheduler pick automatically (leaving `crn_hash`
@@ -72,11 +73,11 @@ pub async fn resolve_interactive(
             .await
             .map_err(|e| anyhow!("background task error: {e}"))?
             .map_err(anyhow::Error::msg)?;
-        let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aleph_client).await?;
+        let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aggregates).await?;
         // Build the GPU catalog once: it drives both the CRN filter and (after a
         // node is picked) resolving that node's exact GPU device.
         let gpu_options = match &args.gpu {
-            Some(_) => Some(load_gpu_options(aleph_client).await?),
+            Some(_) => Some(load_gpu_options(aggregates).await?),
             None => None,
         };
         // Filter by the requested GPU model, accepting any of its PCI variants,
@@ -132,7 +133,7 @@ pub async fn resolve_interactive(
     // --ssh-key labels were given, or the owner already has registered keys,
     // the resolver in handle_instance_create will attach those instead.
     if args.ssh_pubkey_file.is_empty() && args.ssh_key.is_empty() {
-        let registered = aleph_client
+        let registered = ssh_client
             .list_ssh_keys(owner_address)
             .await
             .unwrap_or_default();
@@ -149,7 +150,7 @@ pub async fn resolve_interactive(
     Ok(())
 }
 
-async fn prompt_size(aleph_client: &AlephClient) -> Result<String> {
+async fn prompt_size(aleph_client: &impl AlephAggregateClient) -> Result<String> {
     let pricing = aleph_client
         .get_pricing_aggregate()
         .await
@@ -267,7 +268,10 @@ fn prompt_gpu_size(model: &GpuModel, entity: &PricingPerEntity) -> Result<u32> {
 /// Prompt for an optional GPU. Returns `true` if a GPU was chosen (in which case
 /// `args.gpu` and explicit `vcpus`/`memory`/`disk_size` are set and `args.size` is
 /// left `None`), or `false` for "No GPU" (the caller then runs the regular size prompt).
-async fn prompt_gpu(args: &mut InstanceCreateArgs, aleph_client: &AlephClient) -> Result<bool> {
+async fn prompt_gpu(
+    args: &mut InstanceCreateArgs,
+    aleph_client: &impl AlephAggregateClient,
+) -> Result<bool> {
     let pricing = aleph_client
         .get_pricing_aggregate()
         .await
@@ -335,7 +339,7 @@ fn spawn_crn_list_fetch() -> JoinHandle<Result<CrnListResponse, String>> {
 /// Uses the size tier if set, otherwise flag values with defaults matching `handle_instance_create`.
 async fn resolve_specs_for_filter(
     args: &InstanceCreateArgs,
-    aleph_client: &AlephClient,
+    aleph_client: &impl AlephAggregateClient,
 ) -> Result<(u32, u64, u64)> {
     if let Some(slug) = &args.size {
         let pricing = aleph_client.get_pricing_aggregate().await?;

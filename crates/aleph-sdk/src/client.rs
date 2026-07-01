@@ -1406,10 +1406,23 @@ pub trait AlephAggregateClient {
     /// * `404 Not Found` -> empty.
     ///
     /// Other transport errors (timeouts, 5xx, parse failures, etc.) are propagated.
+    ///
+    /// Default implementation: a single-key `get_aggregate` read of the
+    /// `websites` key, with the empty-response handling described above.
+    #[allow(clippy::manual_async_fn)]
     fn get_websites_aggregate(
         &self,
         address: &Address,
-    ) -> impl Future<Output = Result<WebsitesAggregate, MessageError>> + Send;
+    ) -> impl Future<Output = Result<WebsitesAggregate, MessageError>> + Send {
+        // Build the inner future in the sync prefix so the async block captures
+        // only that (already-`Send`) future, not `&self` across the await; this
+        // keeps the returned future `Send` without a `Self: Sync` bound.
+        let raw = self.get_aggregate::<Option<serde_json::Value>>(address, WEBSITES_AGGREGATE_KEY);
+        async move {
+            let raw = map_aggregate_404_to_empty(raw.await)?;
+            extract_aggregate_value(raw, WEBSITES_AGGREGATE_KEY)
+        }
+    }
 
     /// Returns the `domains` aggregate for the given address.
     ///
@@ -1420,10 +1433,20 @@ pub trait AlephAggregateClient {
     /// * `404 Not Found` -> empty.
     ///
     /// Other transport errors (timeouts, 5xx, parse failures, etc.) are propagated.
+    ///
+    /// Default implementation: a single-key `get_aggregate` read of the
+    /// `domains` key, with the empty-response handling described above.
+    #[allow(clippy::manual_async_fn)]
     fn get_domains_aggregate(
         &self,
         address: &Address,
-    ) -> impl Future<Output = Result<DomainsAggregate, MessageError>> + Send;
+    ) -> impl Future<Output = Result<DomainsAggregate, MessageError>> + Send {
+        let raw = self.get_aggregate::<Option<serde_json::Value>>(address, DOMAINS_AGGREGATE_KEY);
+        async move {
+            let raw = map_aggregate_404_to_empty(raw.await)?;
+            extract_aggregate_value(raw, DOMAINS_AGGREGATE_KEY)
+        }
+    }
 
     /// Returns the `port-forwarding` aggregate for the given address.
     ///
@@ -1434,10 +1457,21 @@ pub trait AlephAggregateClient {
     /// * `404 Not Found` -> empty.
     ///
     /// Other transport errors (timeouts, 5xx, parse failures, etc.) are propagated.
+    ///
+    /// Default implementation: a single-key `get_aggregate` read of the
+    /// `port-forwarding` key, with the empty-response handling described above.
+    #[allow(clippy::manual_async_fn)]
     fn get_port_forwarding_aggregate(
         &self,
         address: &Address,
-    ) -> impl Future<Output = Result<PortForwardingAggregate, MessageError>> + Send;
+    ) -> impl Future<Output = Result<PortForwardingAggregate, MessageError>> + Send {
+        let raw =
+            self.get_aggregate::<Option<serde_json::Value>>(address, PORT_FORWARDING_AGGREGATE_KEY);
+        async move {
+            let raw = map_aggregate_404_to_empty(raw.await)?;
+            extract_aggregate_value(raw, PORT_FORWARDING_AGGREGATE_KEY)
+        }
+    }
 
     /// Returns the most recent version of the vm-images aggregate that lists
     /// rootfs presets, runtimes, and confidential UEFI firmware curated on the
@@ -3261,38 +3295,9 @@ impl AlephAggregateClient for AlephClient {
         Ok(aggregate_response.data)
     }
 
-    async fn get_websites_aggregate(
-        &self,
-        address: &Address,
-    ) -> Result<WebsitesAggregate, MessageError> {
-        let raw = map_aggregate_404_to_empty(
-            self.get_aggregate::<Option<serde_json::Value>>(address, WEBSITES_AGGREGATE_KEY)
-                .await,
-        )?;
-        extract_aggregate_value(raw, WEBSITES_AGGREGATE_KEY)
-    }
-
-    async fn get_domains_aggregate(
-        &self,
-        address: &Address,
-    ) -> Result<DomainsAggregate, MessageError> {
-        let raw = map_aggregate_404_to_empty(
-            self.get_aggregate::<Option<serde_json::Value>>(address, DOMAINS_AGGREGATE_KEY)
-                .await,
-        )?;
-        extract_aggregate_value(raw, DOMAINS_AGGREGATE_KEY)
-    }
-
-    async fn get_port_forwarding_aggregate(
-        &self,
-        address: &Address,
-    ) -> Result<PortForwardingAggregate, MessageError> {
-        let raw = map_aggregate_404_to_empty(
-            self.get_aggregate::<Option<serde_json::Value>>(address, PORT_FORWARDING_AGGREGATE_KEY)
-                .await,
-        )?;
-        extract_aggregate_value(raw, PORT_FORWARDING_AGGREGATE_KEY)
-    }
+    // get_websites_aggregate / get_domains_aggregate / get_port_forwarding_aggregate
+    // use the trait's default implementations (single-key `get_aggregate` reads
+    // with empty-response handling).
 
     async fn get_aggregates(
         &self,
