@@ -1099,7 +1099,7 @@ async fn handle_instance_create(
         || (args.confidential && !matches!(args.confidential_firmware, Some(ImageRef::Hash(_))));
 
     let vm_images = if needs_aggregate {
-        aleph_client
+        aggregates
             .get_vm_images_aggregate()
             .await
             .map_err(|e| {
