@@ -2,6 +2,7 @@ use std::io::Read;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aleph_sdk::client::{AlephMessageClient, MessageError, MessageWithStatus};
+use aleph_sdk::upload_timeout::UploadTimeout;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::pending::PendingMessage;
 use anyhow::{Result, anyhow, bail};
@@ -503,6 +504,25 @@ pub fn resolve_ccn_url_with_store(
 pub fn resolve_ccn_url(ccn: Option<&str>, network: Option<&str>) -> Result<Url> {
     let store = ConfigStore::open().map_err(|e| anyhow!("failed to open config store: {e}"))?;
     resolve_ccn_url_with_store(&store, ccn, network)
+}
+
+/// Environment variable that overrides the upload idle-timeout policy.
+pub const UPLOAD_TIMEOUT_ENV_VAR: &str = "ALEPH_UPLOAD_TIMEOUT";
+
+/// Resolve the upload timeout policy, honouring the `ALEPH_UPLOAD_TIMEOUT`
+/// escape hatch. When unset, the SDK default applies (a 120s idle window). When
+/// set, the value is a whole number of seconds for the idle window, or
+/// `none`/`0` to disable the SDK-managed deadline for stubbornly slow links.
+pub fn resolve_upload_timeout() -> Result<UploadTimeout> {
+    match std::env::var(UPLOAD_TIMEOUT_ENV_VAR) {
+        Ok(raw) => raw
+            .parse()
+            .map_err(|e| anyhow!("invalid {UPLOAD_TIMEOUT_ENV_VAR}: {e}")),
+        Err(std::env::VarError::NotPresent) => Ok(UploadTimeout::default()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("invalid {UPLOAD_TIMEOUT_ENV_VAR}: not valid UTF-8")
+        }
+    }
 }
 
 /// Resolve a network entry from an explicit name or the config's current default.
