@@ -16,6 +16,7 @@ pub mod scheduler;
 pub mod ssh;
 #[cfg(feature = "swap")]
 pub mod swap;
+pub mod upload_timeout;
 pub mod verify;
 pub mod ws;
 

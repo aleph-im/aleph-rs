@@ -1,7 +1,9 @@
 use crate::cli::Cli;
 use aleph_sdk::client::AlephClient;
+use aleph_sdk::upload_timeout::UploadTimeout;
 use clap::{CommandFactory, Parser};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 mod account;
 mod cli;
@@ -95,7 +97,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let ccn_url = common::resolve_ccn_url(cli.ccn.as_deref(), cli.network.as_deref())?;
-    let aleph_client = AlephClient::new(ccn_url.clone());
+    // Uploads use an idle timeout, not a total deadline: a large file on a slow
+    // but healthy connection must not be cut while bytes are still flowing. The
+    // upload is only aborted after 60s of no progress. This matches the SDK
+    // default but is set explicitly so the CLI's intent survives a default change.
+    let aleph_client = AlephClient::builder(ccn_url.clone())
+        .upload_timeout(UploadTimeout::Idle(Duration::from_secs(60)))
+        .build();
 
     match cli.command {
         cli::Commands::Message {
