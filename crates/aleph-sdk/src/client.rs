@@ -4,6 +4,7 @@ use crate::aggregate_models::port_forwarding::{
     PORT_FORWARDING_AGGREGATE_KEY, PortForwardingAggregate,
 };
 use crate::aggregate_models::pricing::{PRICING_ADDRESS, PricingAggregate};
+use crate::aggregate_models::settings::{SETTINGS_ADDRESS, SETTINGS_KEY, SettingsAggregate};
 use crate::aggregate_models::vm_images::{VM_IMAGES_KEY, VmImagesAggregate};
 use crate::aggregate_models::websites::{WEBSITES_AGGREGATE_KEY, WebsitesAggregate};
 use crate::authorization::{AlephAuthorizationClient, ReceivedAuthorization};
@@ -1432,6 +1433,15 @@ pub trait AlephAggregateClient {
         &self,
     ) -> impl Future<Output = Result<VmImagesAggregate, MessageError>> + Send {
         self.get_aggregate(&PRICING_ADDRESS, VM_IMAGES_KEY)
+    }
+
+    /// Returns the most recent version of the foundation `settings` aggregate,
+    /// which lists (among other network settings) the GPU models compatible
+    /// with the network in `compatible_gpus`.
+    fn get_settings_aggregate(
+        &self,
+    ) -> impl Future<Output = Result<SettingsAggregate, MessageError>> + Send {
+        self.get_aggregate(&SETTINGS_ADDRESS, SETTINGS_KEY)
     }
 
     /// Returns the most recent version of multiple aggregates, keyed by their aggregate key.

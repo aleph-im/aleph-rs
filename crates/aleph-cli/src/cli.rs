@@ -859,7 +859,9 @@ pub struct AggregateEditArgs {
 
     /// New content as JSON. With --subkey it is the subkey's value; without it,
     /// the desired full content for the key (removed subkeys are nulled).
-    /// If both --subkey and --content are omitted, $EDITOR is opened.
+    /// If both --subkey and --content are omitted, the content is read from stdin
+    /// when piped (e.g. `cat file | aleph aggregate edit ...`), otherwise $EDITOR
+    /// is opened.
     #[arg(long)]
     pub content: Option<String>,
 
@@ -1525,10 +1527,12 @@ the network. The signed STORE message anchors a content-addressed pin: \
 its item hash is the file's hash, and the network keeps the content as \
 long as the pin is paid for.
 
-Storage engine defaults to `storage` (Aleph native, ≤ 100 MB) for files \
-and `ipfs` for directories. Pass `--storage-engine ipfs` to put a single \
-file on IPFS instead. Payment defaults to credits; pass \
-`--payment-type hold` to fall back to locked-stake.
+When `--storage-engine` is unset, a single file uses `storage` (Aleph \
+native) up to 100 MiB and switches to `ipfs` automatically above that, \
+since native storage rejects larger uploads. Directories always use \
+`ipfs`. Pass `--storage-engine` to force a specific engine. Payment \
+defaults to credits; pass `--payment-type hold` to fall back to \
+locked-stake.
 
 Use `--ref <NAME>` to give the file a stable user-defined identifier \
 (e.g. `report/latest`) — useful for in-place updates and for downloading \
@@ -1545,7 +1549,7 @@ Examples:
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum StorageEngineCli {
-    /// Aleph native storage (default, recommended for files up to 100 MB).
+    /// Aleph native storage (default for files up to 100 MiB).
     Storage,
     /// IPFS storage.
     Ipfs,
@@ -1564,8 +1568,9 @@ pub struct FileUploadArgs {
     /// Path of the file to upload.
     pub path: std::path::PathBuf,
 
-    /// Storage engine to use. Defaults to `storage` for files and `ipfs` for
-    /// directories (native storage does not support directory uploads).
+    /// Storage engine to use. When unset, a single file uses `storage` up to
+    /// 100 MiB and `ipfs` above that; directories always use `ipfs` (native
+    /// storage does not support directory uploads).
     #[arg(long, value_enum)]
     pub storage_engine: Option<StorageEngineCli>,
 
@@ -1936,7 +1941,7 @@ pub struct InstancePriceArgs {
     #[arg(long, value_parser = parse_size_to_mib)]
     pub disk_size: Option<u64>,
 
-    /// GPU model name (e.g. h100, a100, rtx-4090). Pass --gpu without a value to list models
+    /// GPU model id (e.g. h100, a100, rtx4090). Pass --gpu without a value to list models
     /// (or use --list-gpus).
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub gpu: Option<String>,
@@ -2020,7 +2025,7 @@ pub struct InstanceCreateArgs {
     #[arg(long, value_parser = parse_image_ref)]
     pub confidential_firmware: Option<ImageRef>,
 
-    /// GPU model name (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
+    /// GPU model id (e.g. rtx4090, a100, l40s). Can be repeated for multiple GPUs.
     /// Use `aleph instance price --list-gpus` to list available models. The VM is
     /// sized at the GPU's minimum; pass `--size`, `--vcpus`, or `--memory` to request
     /// more. `--disk-size` is optional for GPU instances (defaults to the tier disk).

@@ -15,6 +15,7 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value};
+use std::io::{IsTerminal, Read};
 use url::Url;
 
 /// Parse `--content` (or edited buffer) and validate it is well-formed JSON.
@@ -163,7 +164,10 @@ async fn handle_aggregate_edit(
             )
         })?;
 
-    // Build the content to post (a merge patch).
+    // Build the content to post (a merge patch). `content_from_stdin` records
+    // whether stdin was consumed reading it, so the confirmation below knows it
+    // can no longer prompt on stdin.
+    let mut content_from_stdin = false;
     let patch: Value = match (args.subkey.as_deref(), args.content.as_deref()) {
         // Targeted subkey: post {subkey: content} verbatim (content may be null).
         (Some(subkey), Some(raw)) => {
@@ -178,11 +182,29 @@ async fn handle_aggregate_edit(
             let desired = parse_content_json(raw)?;
             content_to_post(&current, &desired)
         }
-        // Interactive: open the current content in $EDITOR, then diff.
+        // Neither subkey nor content: take the desired whole content from piped
+        // stdin (e.g. `cat file | aleph aggregate edit ...`), otherwise open the
+        // current content in $EDITOR. Either way, diff against current.
+        //
+        // We only read stdin when it is NOT a terminal (reading an interactive
+        // TTY would block). A non-terminal but *empty* stdin - e.g. a parent
+        // process, test harness, or CI that pipes nothing - falls back to the
+        // editor too, preserving the original behavior; only actual piped data
+        // is treated as content.
         (None, None) => {
-            let initial = serde_json::to_string_pretty(&current)?;
-            let edited = edit_via_editor(&initial)?;
-            content_to_post(&current, &edited)
+            let piped = if std::io::stdin().is_terminal() {
+                None
+            } else {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                (!buf.trim().is_empty()).then_some(buf)
+            };
+            content_from_stdin = piped.is_some();
+            let desired = match piped {
+                Some(raw) => parse_content_json(&raw)?,
+                None => edit_via_editor(&serde_json::to_string_pretty(&current)?)?,
+            };
+            content_to_post(&current, &desired)
         }
     };
 
@@ -194,6 +216,14 @@ async fn handle_aggregate_edit(
     }
 
     if !dry_run {
+        // Content read from stdin has consumed it, so we cannot prompt there.
+        // Require -y, mirroring the "no TTY -> pass --yes" convention.
+        if content_from_stdin && !args.yes {
+            bail!(
+                "content was read from stdin, so the confirmation prompt can't read your \
+                 answer. Re-run with -y to apply non-interactively."
+            );
+        }
         let preview = serde_json::to_string_pretty(&patch)?;
         let prompt = format!("Apply this patch to `{}` for {owner}?\n{preview}", args.key);
         if !confirm_action(&prompt, args.yes)? {

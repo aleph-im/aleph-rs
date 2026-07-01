@@ -9,7 +9,7 @@
 //! never prompted for.
 
 use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
-use crate::commands::instance::validate_ssh_pubkey;
+use crate::commands::instance::{gpu_filter_device_ids, validate_ssh_pubkey};
 use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, GpuModel, PricingPerEntity};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
@@ -73,6 +73,12 @@ pub async fn resolve_interactive(
             .map_err(|e| anyhow!("background task error: {e}"))?
             .map_err(anyhow::Error::msg)?;
         let (vcpus, memory_mib, disk_mib) = resolve_specs_for_filter(args, aleph_client).await?;
+        // Filter by the requested GPU model's PCI id, not merely "has a GPU", so
+        // the picker matches the GPU requirement put in the instance message.
+        let gpu_filter = match &args.gpu {
+            Some(model_ids) => Some(gpu_filter_device_ids(aleph_client, model_ids).await?),
+            None => None,
+        };
         // `ipv6: true` filters the CRN's own infrastructure. CRNs without working IPv6
         // can't route traffic to their VMs, so they can't host usable instances. This is
         // unrelated to the user's local IPv6 connectivity. Matches the Python CLI.
@@ -82,10 +88,14 @@ pub async fn resolve_interactive(
             min_memory_mib: Some(memory_mib),
             min_disk_mib: Some(disk_mib),
             confidential: args.confidential,
-            gpu: args.gpu.is_some(),
+            gpu: gpu_filter,
         };
         let filtered = crn_list.filter(&filter);
         if filtered.is_empty() {
+            let gpu_desc = match &args.gpu {
+                Some(names) => names.join(","),
+                None => "none".into(),
+            };
             bail!(
                 "No CRN matches the requirements (vcpus={}, memory_mib={}, disk_mib={}, confidential={}, gpu={}). \
                  Try a smaller size or wait for capacity.",
@@ -93,7 +103,7 @@ pub async fn resolve_interactive(
                 memory_mib,
                 disk_mib,
                 filter.confidential,
-                filter.gpu
+                gpu_desc
             );
         }
         let chosen = prompt_crn(&filtered)?;
@@ -256,6 +266,13 @@ async fn prompt_gpu(args: &mut InstanceCreateArgs, aleph_client: &AlephClient) -
         // No GPU models on the network: silently fall back to the regular flow.
         return Ok(false);
     }
+    // The settings aggregate provides the canonical `model_id` slug (the value
+    // the non-interactive `--gpu` path accepts). Fetched here so the picker emits
+    // exactly that slug into `args.gpu`.
+    let settings = aleph_client
+        .get_settings_aggregate()
+        .await
+        .map_err(|e| anyhow!("failed to fetch network settings: {e}"))?;
 
     let mut items: Vec<String> = vec!["No GPU".to_string()];
     items.extend(models.iter().map(|m| {
@@ -281,7 +298,7 @@ async fn prompt_gpu(args: &mut InstanceCreateArgs, aleph_client: &AlephClient) -
     let cu = prompt_gpu_size(model, entity)?;
     let (vcpus, memory_mib, disk_mib) = specs_for_cu(cu, &entity.compute_unit);
 
-    args.gpu = Some(vec![model.slug()]);
+    args.gpu = Some(vec![settings.settings.model_id_for_name(&model.name)]);
     args.vcpus = Some(vcpus);
     args.memory = Some(memory_mib);
     args.disk_size = Some(disk_mib);
