@@ -1400,15 +1400,13 @@ pub trait AlephAggregateClient {
     fn get_websites_aggregate(
         &self,
         address: &Address,
-    ) -> impl Future<Output = Result<WebsitesAggregate, MessageError>> + Send
-    where
-        Self: Sync,
-    {
+    ) -> impl Future<Output = Result<WebsitesAggregate, MessageError>> + Send {
+        // Build the inner future in the sync prefix so the async block captures
+        // only that (already-`Send`) future, not `&self` across the await; this
+        // keeps the returned future `Send` without a `Self: Sync` bound.
+        let raw = self.get_aggregate::<Option<serde_json::Value>>(address, WEBSITES_AGGREGATE_KEY);
         async move {
-            let raw = map_aggregate_404_to_empty(
-                self.get_aggregate::<Option<serde_json::Value>>(address, WEBSITES_AGGREGATE_KEY)
-                    .await,
-            )?;
+            let raw = map_aggregate_404_to_empty(raw.await)?;
             extract_aggregate_value(raw, WEBSITES_AGGREGATE_KEY)
         }
     }
@@ -1429,15 +1427,10 @@ pub trait AlephAggregateClient {
     fn get_domains_aggregate(
         &self,
         address: &Address,
-    ) -> impl Future<Output = Result<DomainsAggregate, MessageError>> + Send
-    where
-        Self: Sync,
-    {
+    ) -> impl Future<Output = Result<DomainsAggregate, MessageError>> + Send {
+        let raw = self.get_aggregate::<Option<serde_json::Value>>(address, DOMAINS_AGGREGATE_KEY);
         async move {
-            let raw = map_aggregate_404_to_empty(
-                self.get_aggregate::<Option<serde_json::Value>>(address, DOMAINS_AGGREGATE_KEY)
-                    .await,
-            )?;
+            let raw = map_aggregate_404_to_empty(raw.await)?;
             extract_aggregate_value(raw, DOMAINS_AGGREGATE_KEY)
         }
     }
@@ -1458,18 +1451,11 @@ pub trait AlephAggregateClient {
     fn get_port_forwarding_aggregate(
         &self,
         address: &Address,
-    ) -> impl Future<Output = Result<PortForwardingAggregate, MessageError>> + Send
-    where
-        Self: Sync,
-    {
+    ) -> impl Future<Output = Result<PortForwardingAggregate, MessageError>> + Send {
+        let raw =
+            self.get_aggregate::<Option<serde_json::Value>>(address, PORT_FORWARDING_AGGREGATE_KEY);
         async move {
-            let raw = map_aggregate_404_to_empty(
-                self.get_aggregate::<Option<serde_json::Value>>(
-                    address,
-                    PORT_FORWARDING_AGGREGATE_KEY,
-                )
-                .await,
-            )?;
+            let raw = map_aggregate_404_to_empty(raw.await)?;
             extract_aggregate_value(raw, PORT_FORWARDING_AGGREGATE_KEY)
         }
     }
