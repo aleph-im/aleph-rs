@@ -1599,7 +1599,7 @@ pub struct TimeoutConfig {
     /// because a fixed total deadline cuts large uploads on slow-but-healthy links.
     pub request_timeout: Option<Duration>,
     /// Policy governing how long an upload may run. Default: [`UploadTimeout::Idle`]
-    /// of 60s, so a slow upload that keeps making progress is never cut.
+    /// of 120s, so a slow upload that keeps making progress is never cut.
     pub upload_timeout: UploadTimeout,
 }
 

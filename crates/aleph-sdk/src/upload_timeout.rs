@@ -60,10 +60,35 @@ pub enum UploadTimeout {
 }
 
 impl Default for UploadTimeout {
-    /// Idle timeout of 60s: forgiving of slow links, quick to give up on a
+    /// Idle timeout of 120s: forgiving of slow links, quick to give up on a
     /// genuinely dead connection.
     fn default() -> Self {
-        UploadTimeout::Idle(Duration::from_secs(60))
+        UploadTimeout::Idle(Duration::from_secs(120))
+    }
+}
+
+impl std::str::FromStr for UploadTimeout {
+    type Err = String;
+
+    /// Parse an idle-timeout override, as used by the CLI's
+    /// `ALEPH_UPLOAD_TIMEOUT` escape hatch. Accepts a whole number of seconds
+    /// for the idle window, or `none`/`off`/`0` to disable the SDK-managed
+    /// deadline entirely. Surrounding whitespace is trimmed and the keywords are
+    /// case-insensitive.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("none") || s.eq_ignore_ascii_case("off") {
+            return Ok(UploadTimeout::None);
+        }
+        let secs: u64 = s
+            .parse()
+            .map_err(|_| format!("expected a number of seconds or `none`, got {s:?}"))?;
+        // A zero-second idle window would abort instantly; read it as "disable".
+        if secs == 0 {
+            Ok(UploadTimeout::None)
+        } else {
+            Ok(UploadTimeout::Idle(Duration::from_secs(secs)))
+        }
     }
 }
 
@@ -215,11 +240,38 @@ mod tests {
     }
 
     #[test]
-    fn default_is_idle_60s() {
+    fn default_is_idle_120s() {
         assert_eq!(
             UploadTimeout::default(),
-            UploadTimeout::Idle(Duration::from_secs(60))
+            UploadTimeout::Idle(Duration::from_secs(120))
         );
+    }
+
+    #[test]
+    fn parses_seconds_as_idle() {
+        assert_eq!(
+            "300".parse::<UploadTimeout>().unwrap(),
+            UploadTimeout::Idle(Duration::from_secs(300))
+        );
+        // Trimmed and tolerant of surrounding whitespace.
+        assert_eq!(
+            "  90 ".parse::<UploadTimeout>().unwrap(),
+            UploadTimeout::Idle(Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn parses_disable_keywords() {
+        for s in ["none", "OFF", "0", " none "] {
+            assert_eq!(s.parse::<UploadTimeout>().unwrap(), UploadTimeout::None);
+        }
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!("soon".parse::<UploadTimeout>().is_err());
+        assert!("-5".parse::<UploadTimeout>().is_err());
+        assert!("".parse::<UploadTimeout>().is_err());
     }
 
     #[tokio::test]
