@@ -313,4 +313,57 @@ mod test {
         let json = vprogram_content_json("null");
         assert!(serde_json::from_str::<VerifiableProgramContent>(&json).is_err());
     }
+
+    use crate::message::base_message::{Message, MessageContent, MessageContentEnum};
+    use crate::message::MessageType;
+    use assert_matches::assert_matches;
+
+    const VPROGRAM_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/messages/vprogram/vprogram-credit.json"
+    ));
+
+    #[test]
+    fn test_deserialize_vprogram_message() {
+        let message: Message = serde_json::from_str(VPROGRAM_FIXTURE).unwrap();
+
+        assert_matches!(message.message_type, MessageType::VProgram);
+        let content = match message.content() {
+            MessageContentEnum::VProgram(content) => content,
+            other => panic!("Expected MessageContentEnum::VProgram, got {:?}", other),
+        };
+
+        assert!(!content.base.allow_amend);
+        assert_eq!(content.base.resources.vcpus, 2);
+        assert!(content.is_confidential());
+        assert_eq!(content.runtime.comment, "compose-runner snp bundle");
+        assert_eq!(content.workload.roothash.as_str(), "cd".repeat(32));
+        assert_eq!(content.verification.policy, 0x30000);
+        assert_eq!(content.attestation_port, None);
+        assert!(content.base.volumes.is_empty());
+        assert!(!message.confirmed());
+
+        message.verify_item_hash().unwrap();
+    }
+
+    #[test]
+    fn test_typed_dispatch_vprogram() {
+        // the verified message path dispatches by MessageType, not untagged matching
+        let fixture: serde_json::Value = serde_json::from_str(VPROGRAM_FIXTURE).unwrap();
+        let raw = fixture["item_content"].as_str().unwrap().as_bytes();
+        let content = MessageContent::deserialize_with_type(MessageType::VProgram, raw).unwrap();
+        assert_matches!(content.content, MessageContentEnum::VProgram(_));
+    }
+
+    #[test]
+    fn test_typed_dispatch_rejects_non_credit_vprogram() {
+        let fixture: serde_json::Value = serde_json::from_str(VPROGRAM_FIXTURE).unwrap();
+        let raw = fixture["item_content"]
+            .as_str()
+            .unwrap()
+            .replace("\"type\":\"credit\"", "\"type\":\"hold\"");
+        assert!(
+            MessageContent::deserialize_with_type(MessageType::VProgram, raw.as_bytes()).is_err()
+        );
+    }
 }

@@ -7,6 +7,7 @@ use crate::message::instance::InstanceContent;
 use crate::message::post::PostContent;
 use crate::message::program::ProgramContent;
 use crate::message::store::StoreContent;
+use crate::message::vprogram::VerifiableProgramContent;
 use crate::timestamp::Timestamp;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,7 @@ pub enum MessageContentEnum {
     Post(PostContent),
     Program(ProgramContent),
     Store(StoreContent),
+    VProgram(VerifiableProgramContent),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,9 +135,7 @@ impl MessageContent {
             }
             MessageType::Store => MessageContentEnum::Store(StoreContent::deserialize(value)?),
             MessageType::VProgram => {
-                return Err(serde::de::Error::custom(
-                    "V-PROGRAM dispatch is not wired yet",
-                ));
+                MessageContentEnum::VProgram(VerifiableProgramContent::deserialize(value)?)
             }
         };
 
