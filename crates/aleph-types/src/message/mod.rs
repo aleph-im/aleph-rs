@@ -9,6 +9,7 @@ pub mod pending;
 mod post;
 mod program;
 mod store;
+mod vprogram;
 pub mod unsigned;
 
 #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
@@ -24,3 +25,7 @@ pub use instance::InstanceContent;
 pub use post::PostContent;
 pub use program::{CodeContent, DataContent, Export, FunctionRuntime, ProgramContent};
 pub use store::{FileRef, RawFileRef, StorageBackend, StorageEngine, StoreContent};
+pub use vprogram::{
+    ConfidentialRuntime, TeeBackend, TeeVerification, VerifiableProgramEnvironment,
+    VerifiedWorkload, VerityRoothash,
+};
