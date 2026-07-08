@@ -21,7 +21,7 @@ pub use base_message::{
     MessageStatus, MessageType, MessageVerificationError,
 };
 pub use forget::ForgetContent;
-pub use instance::InstanceContent;
+pub use instance::{InstanceContent, InstanceContentError};
 pub use post::PostContent;
 pub use program::{CodeContent, DataContent, Export, FunctionRuntime, ProgramContent};
 pub use store::{FileRef, RawFileRef, StorageBackend, StorageEngine, StoreContent};
