@@ -1150,6 +1150,10 @@ async fn handle_instance_create(
         builder = builder.trusted_execution(TrustedExecutionEnvironment {
             firmware: Some(firmware),
             policy: 0x1, // NoDebug
+            mode: None,
+            runtime: None,
+            measurements: None,
+            attestation_port: None,
         });
     }
 

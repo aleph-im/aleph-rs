@@ -2,6 +2,7 @@ use crate::chain::Address;
 use crate::item_hash::ItemHash;
 use memsizes::MiB;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU16;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionTriggers {
@@ -267,18 +268,120 @@ impl TryFrom<RawLaunchMeasurement> for LaunchMeasurement {
     }
 }
 
-fn default_amd_sev_policy() -> u32 {
-    AmdSevPolicy::NoDebug as u32
+fn default_amd_sev_policy() -> u64 {
+    AmdSevPolicy::NoDebug as u64
 }
 
+/// TEE mode discriminator. Absent on legacy messages, which are SEV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TeeMode {
+    #[serde(rename = "sev")]
+    Sev,
+    #[serde(rename = "sev_snp")]
+    SevSnp,
+}
+
+/// Trusted Execution Environment properties.
+///
+/// Two modes coexist:
+/// - mode None or Sev (legacy): AMD SEV/SEV-ES with the CRN-mediated
+///   launch-secret flow; `firmware` references the confidential OVMF and
+///   `policy` uses AMD SEV bit semantics (AmdSevPolicy).
+/// - mode SevSnp: measured boot from a runtime bundle with direct
+///   client-to-guest attestation; `policy` uses SEV-SNP 64-bit semantics
+///   and `measurements` carry the expected launch digests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawTrustedExecutionEnvironment")]
 pub struct TrustedExecutionEnvironment {
-    /// OVMF firmware to use.
+    /// OVMF firmware to use (SEV mode only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware: Option<ItemHash>,
-    /// SEV Policy. The default value is 0x01 for SEV without debugging.
+    /// TEE policy. SEV bit semantics in SEV mode (default 0x01, no debugging);
+    /// SEV-SNP 64-bit guest policy in sev_snp mode.
     #[serde(default = "default_amd_sev_policy")]
-    pub policy: u32,
+    pub policy: u64,
+    /// TEE mode; None means legacy SEV (kept for wire stability).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TeeMode>,
+    /// Measured runtime bundle store message (sev_snp mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<ItemHash>,
+    /// Expected launch digests (sev_snp mode only); CCN-validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurements: Option<Vec<LaunchMeasurement>>,
+    /// In-guest attestation port (sev_snp mode only); None means the runtime
+    /// bundle default (8443).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_port: Option<NonZeroU16>,
+}
+
+impl TrustedExecutionEnvironment {
+    pub fn is_snp(&self) -> bool {
+        self.mode == Some(TeeMode::SevSnp)
+    }
+
+    fn check_mode_consistency(&self) -> Result<(), TeeError> {
+        if self.is_snp() {
+            if self.firmware.is_some() {
+                return Err(TeeError::FirmwareInSnpMode);
+            }
+            if self.runtime.is_none() {
+                return Err(TeeError::SnpModeRequires("runtime"));
+            }
+            match self.measurements.as_deref() {
+                None | Some([]) => return Err(TeeError::SnpModeRequires("measurements")),
+                Some(m) if m.len() > MAX_MEASUREMENTS => {
+                    return Err(TeeError::TooManyMeasurements(m.len()));
+                }
+                Some(_) => {}
+            }
+            validate_snp_policy(self.policy)?;
+        } else {
+            if self.runtime.is_some() {
+                return Err(TeeError::SnpOnlyField("runtime"));
+            }
+            if self.measurements.is_some() {
+                return Err(TeeError::SnpOnlyField("measurements"));
+            }
+            if self.attestation_port.is_some() {
+                return Err(TeeError::SnpOnlyField("attestation_port"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct RawTrustedExecutionEnvironment {
+    #[serde(default)]
+    firmware: Option<ItemHash>,
+    #[serde(default = "default_amd_sev_policy")]
+    policy: u64,
+    #[serde(default)]
+    mode: Option<TeeMode>,
+    #[serde(default)]
+    runtime: Option<ItemHash>,
+    #[serde(default)]
+    measurements: Option<Vec<LaunchMeasurement>>,
+    #[serde(default)]
+    attestation_port: Option<NonZeroU16>,
+}
+
+impl TryFrom<RawTrustedExecutionEnvironment> for TrustedExecutionEnvironment {
+    type Error = TeeError;
+
+    fn try_from(raw: RawTrustedExecutionEnvironment) -> Result<Self, Self::Error> {
+        let tee = TrustedExecutionEnvironment {
+            firmware: raw.firmware,
+            policy: raw.policy,
+            mode: raw.mode,
+            runtime: raw.runtime,
+            measurements: raw.measurements,
+            attestation_port: raw.attestation_port,
+        };
+        tee.check_mode_consistency()?;
+        Ok(tee)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,6 +438,102 @@ mod test {
 
     const SNP_DIGEST: &str =
         "abababababababababababababababababababababababababababababababababababababababababababababababab";
+
+    const ITEM_HASH_HEX: &str = "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe";
+
+    fn snp_tee_json(policy: &str) -> String {
+        format!(
+            r#"{{"mode": "sev_snp", "policy": {policy}, "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn test_trusted_execution_legacy_sev_unchanged() {
+        let legacy = r#"{"policy": 1, "firmware": "e258d248fda94c63753607f7c4494ee0fcbe92f1a76bfdac795c9d84101eb317"}"#;
+        let tee: TrustedExecutionEnvironment = serde_json::from_str(legacy).unwrap();
+        assert_eq!(tee.mode, None); // None means legacy SEV
+        assert!(!tee.is_snp());
+        assert_eq!(tee.policy, 1);
+        // serialization stability: no new keys appear on legacy content
+        let value = serde_json::to_value(&tee).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["firmware", "policy"]);
+    }
+
+    #[test]
+    fn test_trusted_execution_snp_valid() {
+        let tee: TrustedExecutionEnvironment =
+            serde_json::from_str(&snp_tee_json("196608")).unwrap();
+        assert!(tee.is_snp());
+        assert_eq!(tee.policy, 0x30000);
+        assert!(tee.runtime.is_some());
+        assert_eq!(tee.measurements.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_trusted_execution_snp_policy_above_u32() {
+        // policy is u64: values beyond the old u32 field must parse
+        let policy = (1u64 << 40) | (1 << 17);
+        let tee: TrustedExecutionEnvironment =
+            serde_json::from_str(&snp_tee_json(&policy.to_string())).unwrap();
+        assert_eq!(tee.policy, policy);
+    }
+
+    #[test]
+    fn test_trusted_execution_snp_rejects_invalid() {
+        // SEV-style policy value (bit 17 unset)
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&snp_tee_json("1")).is_err());
+        // negative policy is unrepresentable in u64
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&snp_tee_json("-1")).is_err());
+        // missing runtime
+        let json = format!(
+            r#"{{"mode": "sev_snp", "policy": 196608,
+                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+        );
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+        // missing measurements
+        let json = format!(
+            r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}"}}"#
+        );
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+        // firmware forbidden in snp mode
+        let json = format!(
+            r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}",
+                 "firmware": "{ITEM_HASH_HEX}",
+                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+        );
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+    }
+
+    #[test]
+    fn test_trusted_execution_sev_forbids_snp_fields() {
+        for extra in [
+            format!(r#""runtime": "{ITEM_HASH_HEX}""#),
+            format!(r#""measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]"#),
+            r#""attestation_port": 8443"#.to_string(),
+        ] {
+            let json = format!(r#"{{"policy": 1, {extra}}}"#);
+            assert!(
+                serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err(),
+                "{extra} should be rejected outside sev_snp mode"
+            );
+        }
+    }
+
+    #[test]
+    fn test_trusted_execution_attestation_port_bounds() {
+        let json = format!(
+            r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}],
+                 "attestation_port": 0}}"#
+        );
+        // 0 is unrepresentable in NonZeroU16
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+        let json = json.replace("\"attestation_port\": 0", "\"attestation_port\": 65536");
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+    }
 
     #[test]
     fn test_launch_measurement_valid() {
