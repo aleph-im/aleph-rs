@@ -9,8 +9,8 @@ pub mod pending;
 mod post;
 mod program;
 mod store;
-mod vprogram;
 pub mod unsigned;
+mod vprogram;
 
 #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
 pub use crate::verify_signature::SignatureVerificationError;
@@ -26,6 +26,6 @@ pub use post::PostContent;
 pub use program::{CodeContent, DataContent, Export, FunctionRuntime, ProgramContent};
 pub use store::{FileRef, RawFileRef, StorageBackend, StorageEngine, StoreContent};
 pub use vprogram::{
-    ConfidentialRuntime, TeeBackend, TeeVerification, VerifiableProgramContent,
-    VerifiableProgramEnvironment, VerifiedWorkload, VerityRoothash, VProgramError,
+    ConfidentialRuntime, TeeBackend, TeeVerification, VProgramError, VerifiableProgramContent,
+    VerifiableProgramEnvironment, VerifiedWorkload, VerityRoothash,
 };

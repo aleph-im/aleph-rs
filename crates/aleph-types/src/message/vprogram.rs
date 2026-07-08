@@ -6,7 +6,7 @@
 use crate::item_hash::ItemHash;
 use crate::message::execution::base::{ExecutableContent, PaymentType};
 use crate::message::execution::environment::{
-    validate_snp_policy, LaunchMeasurement, TeeError, DEFAULT_SNP_POLICY, MAX_MEASUREMENTS,
+    DEFAULT_SNP_POLICY, LaunchMeasurement, MAX_MEASUREMENTS, TeeError, validate_snp_policy,
 };
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU16;
@@ -33,7 +33,10 @@ impl TryFrom<String> for VerityRoothash {
                 got: value.len(),
             });
         }
-        if !value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        if !value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
             return Err(TeeError::DigestNotLowercaseHex);
         }
         Ok(Self(value))
@@ -128,9 +131,7 @@ pub struct VerifiableProgramEnvironment {
 
 #[derive(thiserror::Error, Debug)]
 pub enum VProgramError {
-    #[error(
-        "V-Programs are credit-only: holder-tier and PAYG stream payments are not supported"
-    )]
+    #[error("V-Programs are credit-only: holder-tier and PAYG stream payments are not supported")]
     CreditOnly,
 }
 
@@ -205,10 +206,8 @@ impl TryFrom<RawVerifiableProgramContent> for VerifiableProgramContent {
 mod test {
     use super::*;
 
-    const SNP_DIGEST: &str =
-        "abababababababababababababababababababababababababababababababababababababababababababababababab";
-    const ITEM_HASH_HEX: &str =
-        "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe";
+    const SNP_DIGEST: &str = "abababababababababababababababababababababababababababababababababababababababababababababababab";
+    const ITEM_HASH_HEX: &str = "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe";
 
     #[test]
     fn test_verity_roothash_validation() {
@@ -246,8 +245,8 @@ mod test {
         let json = json.replace("\"backend\"", "\"policy\": 1, \"backend\"");
         assert!(serde_json::from_str::<TeeVerification>(&json).is_err()); // bit 17 unset
 
-        let json = format!(r#"{{"backend": "sev_snp", "measurements": []}}"#);
-        assert!(serde_json::from_str::<TeeVerification>(&json).is_err()); // min 1
+        let json = r#"{"backend": "sev_snp", "measurements": []}"#;
+        assert!(serde_json::from_str::<TeeVerification>(json).is_err()); // min 1
     }
 
     #[test]
@@ -296,7 +295,10 @@ mod test {
             Some("EPYC-v4")
         );
 
-        for payment in [r#"{"type": "hold"}"#, r#"{"type": "superfluid", "chain": "AVAX"}"#] {
+        for payment in [
+            r#"{"type": "hold"}"#,
+            r#"{"type": "superfluid", "chain": "AVAX"}"#,
+        ] {
             assert!(
                 serde_json::from_str::<VerifiableProgramContent>(&vprogram_content_json(payment))
                     .is_err(),
@@ -314,8 +316,8 @@ mod test {
         assert!(serde_json::from_str::<VerifiableProgramContent>(&json).is_err());
     }
 
-    use crate::message::base_message::{Message, MessageContent, MessageContentEnum};
     use crate::message::MessageType;
+    use crate::message::base_message::{Message, MessageContent, MessageContentEnum};
     use assert_matches::assert_matches;
 
     const VPROGRAM_FIXTURE: &str = include_str!(concat!(

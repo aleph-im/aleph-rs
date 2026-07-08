@@ -37,15 +37,15 @@ impl TryFrom<RawInstanceContent> for InstanceContent {
     fn try_from(raw: RawInstanceContent) -> Result<Self, Self::Error> {
         // SEV-SNP confidential instances are credit-only (see the confidential
         // VM protocol design, aleph-vm docs/plans/2026-07-08).
-        if let Some(tee) = &raw.environment.trusted_execution {
-            if tee.is_snp() {
-                let is_credit = matches!(
-                    &raw.base.payment,
-                    Some(payment) if payment.payment_type == PaymentType::Credit
-                );
-                if !is_credit {
-                    return Err(InstanceContentError::SnpCreditOnly);
-                }
+        if let Some(tee) = &raw.environment.trusted_execution
+            && tee.is_snp()
+        {
+            let is_credit = matches!(
+                &raw.base.payment,
+                Some(payment) if payment.payment_type == PaymentType::Credit
+            );
+            if !is_credit {
+                return Err(InstanceContentError::SnpCreditOnly);
             }
         }
         Ok(Self {
@@ -225,8 +225,7 @@ mod test {
         message.verify_item_hash().unwrap();
     }
 
-    const SNP_DIGEST: &str =
-        "abababababababababababababababababababababababababababababababababababababababababababababababab";
+    const SNP_DIGEST: &str = "abababababababababababababababababababababababababababababababababababababababababababababababab";
 
     fn snp_instance_json(payment: &str) -> String {
         format!(
@@ -261,9 +260,19 @@ mod test {
     fn test_snp_instance_requires_credit_payment() {
         let content: InstanceContent =
             serde_json::from_str(&snp_instance_json(r#"{"type": "credit"}"#)).unwrap();
-        assert!(content.environment.trusted_execution.as_ref().unwrap().is_snp());
+        assert!(
+            content
+                .environment
+                .trusted_execution
+                .as_ref()
+                .unwrap()
+                .is_snp()
+        );
 
-        for payment in [r#"{"type": "hold"}"#, r#"{"type": "superfluid", "chain": "AVAX"}"#] {
+        for payment in [
+            r#"{"type": "hold"}"#,
+            r#"{"type": "superfluid", "chain": "AVAX"}"#,
+        ] {
             assert!(
                 serde_json::from_str::<InstanceContent>(&snp_instance_json(payment)).is_err(),
                 "{payment} must be rejected for SNP instances"
@@ -273,31 +282,36 @@ mod test {
 
     #[test]
     fn test_legacy_sev_instance_payment_unrestricted() {
-        let json = format!(
-            r#"{{
-                "address": "0x9319Ad3B7A8E0eE24f2E639c40D8eD124C5520Ba",
-                "time": 1719502000.0,
-                "allow_amend": false,
-                "payment": {{"type": "hold"}},
-                "environment": {{
-                    "internet": true,
-                    "aleph_api": false,
-                    "hypervisor": "qemu",
-                    "trusted_execution": {{
-                        "policy": 1,
-                        "firmware": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe"
-                    }}
-                }},
-                "resources": {{"vcpus": 2, "memory": 2048, "seconds": 30}},
-                "rootfs": {{
-                    "parent": {{"ref": "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717", "use_latest": false}},
-                    "persistence": "host",
-                    "size_mib": 4096
-                }},
-                "volumes": []
-            }}"#
+        let json = r#"{
+            "address": "0x9319Ad3B7A8E0eE24f2E639c40D8eD124C5520Ba",
+            "time": 1719502000.0,
+            "allow_amend": false,
+            "payment": {"type": "hold"},
+            "environment": {
+                "internet": true,
+                "aleph_api": false,
+                "hypervisor": "qemu",
+                "trusted_execution": {
+                    "policy": 1,
+                    "firmware": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe"
+                }
+            },
+            "resources": {"vcpus": 2, "memory": 2048, "seconds": 30},
+            "rootfs": {
+                "parent": {"ref": "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717", "use_latest": false},
+                "persistence": "host",
+                "size_mib": 4096
+            },
+            "volumes": []
+        }"#;
+        let content: InstanceContent = serde_json::from_str(json).unwrap();
+        assert!(
+            !content
+                .environment
+                .trusted_execution
+                .as_ref()
+                .unwrap()
+                .is_snp()
         );
-        let content: InstanceContent = serde_json::from_str(&json).unwrap();
-        assert!(!content.environment.trusted_execution.as_ref().unwrap().is_snp());
     }
 }

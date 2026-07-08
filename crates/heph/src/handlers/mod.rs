@@ -208,11 +208,9 @@ fn check_balance(db: &Db, msg: &IncomingMessage, content: &MessageContent) -> Pr
                 crate::cost::calculate_vm_cost(vcpus, memory_mib_u32, total_volume_mib);
             crate::cost::check_credit_balance(db, content.address.as_str(), per_second)
         }
-        MessageType::VProgram => {
-            return Err(ProcessingError::InternalError(
-                "check_balance: V-PROGRAM processing is not yet implemented".into(),
-            ));
-        }
+        MessageType::VProgram => Err(ProcessingError::InternalError(
+            "check_balance: V-PROGRAM processing is not yet implemented".into(),
+        )),
     }
 }
 

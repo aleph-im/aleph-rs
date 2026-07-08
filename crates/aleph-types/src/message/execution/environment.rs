@@ -171,7 +171,9 @@ pub enum TeeError {
     },
     #[error("digest must be lowercase hex")]
     DigestNotLowercaseHex,
-    #[error("firmware belongs to the SEV flow and must not be set in sev_snp mode; use runtime instead")]
+    #[error(
+        "firmware belongs to the SEV flow and must not be set in sev_snp mode; use runtime instead"
+    )]
     FirmwareInSnpMode,
     #[error("sev_snp mode requires {0}")]
     SnpModeRequires(&'static str),
@@ -436,8 +438,7 @@ pub struct HostRequirements {
 mod test {
     use super::*;
 
-    const SNP_DIGEST: &str =
-        "abababababababababababababababababababababababababababababababababababababababababababababababab";
+    const SNP_DIGEST: &str = "abababababababababababababababababababababababababababababababababababababababababababababababab";
 
     const ITEM_HASH_HEX: &str = "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe";
 
@@ -457,7 +458,12 @@ mod test {
         assert_eq!(tee.policy, 1);
         // serialization stability: no new keys appear on legacy content
         let value = serde_json::to_value(&tee).unwrap();
-        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         keys.sort();
         assert_eq!(keys, vec!["firmware", "policy"]);
     }
@@ -494,9 +500,8 @@ mod test {
         );
         assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
         // missing measurements
-        let json = format!(
-            r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}"}}"#
-        );
+        let json =
+            format!(r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}"}}"#);
         assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
         // firmware forbidden in snp mode
         let json = format!(
@@ -576,8 +581,12 @@ mod test {
         ))
         .unwrap();
         let value = serde_json::to_value(&m).unwrap();
-        let mut keys: Vec<&str> =
-            value.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         keys.sort();
         // no vcpu_type key when None (serde_json orders keys alphabetically)
         assert_eq!(keys, vec!["digest", "platform"]);
