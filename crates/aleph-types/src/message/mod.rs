@@ -26,6 +26,6 @@ pub use post::PostContent;
 pub use program::{CodeContent, DataContent, Export, FunctionRuntime, ProgramContent};
 pub use store::{FileRef, RawFileRef, StorageBackend, StorageEngine, StoreContent};
 pub use vprogram::{
-    ConfidentialRuntime, TeeBackend, TeeVerification, VerifiableProgramEnvironment,
-    VerifiedWorkload, VerityRoothash,
+    ConfidentialRuntime, TeeBackend, TeeVerification, VerifiableProgramContent,
+    VerifiableProgramEnvironment, VerifiedWorkload, VerityRoothash, VProgramError,
 };

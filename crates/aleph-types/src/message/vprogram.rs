@@ -4,10 +4,12 @@
 //! Design: aleph-vm docs/plans/2026-07-08-confidential-vm-protocol-design.md
 
 use crate::item_hash::ItemHash;
+use crate::message::execution::base::{ExecutableContent, PaymentType};
 use crate::message::execution::environment::{
     validate_snp_policy, LaunchMeasurement, TeeError, DEFAULT_SNP_POLICY, MAX_MEASUREMENTS,
 };
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU16;
 
 /// dm-verity root hash as printed by veritysetup format: 64 lowercase hex chars (sha256).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +126,81 @@ pub struct VerifiableProgramEnvironment {
     pub aleph_api: bool,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum VProgramError {
+    #[error(
+        "V-Programs are credit-only: holder-tier and PAYG stream payments are not supported"
+    )]
+    CreditOnly,
+}
+
+/// Message content for scheduling a verifiable program (V-Program): an
+/// auto-booting SEV-SNP VM whose full software stack is attestable.
+///
+/// Unlike classic programs there is no code/entrypoint/triggers model (the
+/// workload contract belongs to the runtime bundle) and no hypervisor choice
+/// (always QEMU). Unlike instances, the rootfs is Aleph-provided and measured;
+/// the user contribution is the verity-bound workload volume.
+///
+/// Extra `volumes` are allowed but are OUTSIDE the attested TCB: they are
+/// neither measured nor verity-verified.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawVerifiableProgramContent")]
+pub struct VerifiableProgramContent {
+    #[serde(flatten)]
+    pub base: ExecutableContent,
+    /// Properties of the execution environment.
+    pub environment: VerifiableProgramEnvironment,
+    /// The measured platform (runtime bundle).
+    pub runtime: ConfidentialRuntime,
+    /// The user's verity-bound workload volume.
+    pub workload: VerifiedWorkload,
+    /// TEE launch config and expected launch measurements.
+    pub verification: TeeVerification,
+    /// In-guest attestation port; None means the runtime bundle's declared
+    /// default (8443). Plumbed through the measured cmdline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_port: Option<NonZeroU16>,
+}
+
+impl VerifiableProgramContent {
+    /// V-Programs always run in a confidential VM.
+    pub fn is_confidential(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Deserialize)]
+struct RawVerifiableProgramContent {
+    #[serde(flatten)]
+    base: ExecutableContent,
+    environment: VerifiableProgramEnvironment,
+    runtime: ConfidentialRuntime,
+    workload: VerifiedWorkload,
+    verification: TeeVerification,
+    #[serde(default)]
+    attestation_port: Option<NonZeroU16>,
+}
+
+impl TryFrom<RawVerifiableProgramContent> for VerifiableProgramContent {
+    type Error = VProgramError;
+
+    fn try_from(raw: RawVerifiableProgramContent) -> Result<Self, Self::Error> {
+        match &raw.base.payment {
+            Some(payment) if payment.payment_type == PaymentType::Credit => {}
+            _ => return Err(VProgramError::CreditOnly),
+        }
+        Ok(Self {
+            base: raw.base,
+            environment: raw.environment,
+            runtime: raw.runtime,
+            workload: raw.workload,
+            verification: raw.verification,
+            attestation_port: raw.attestation_port,
+        })
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -178,5 +255,62 @@ mod test {
         let env: VerifiableProgramEnvironment = serde_json::from_str("{}").unwrap();
         assert!(!env.internet);
         assert!(!env.aleph_api);
+    }
+
+    fn vprogram_content_json(payment: &str) -> String {
+        format!(
+            r#"{{
+                "address": "0x9319Ad3B7A8E0eE24f2E639c40D8eD124C5520Ba",
+                "time": 1719502000.0,
+                "allow_amend": false,
+                "payment": {payment},
+                "environment": {{"internet": true, "aleph_api": false}},
+                "resources": {{"vcpus": 2, "memory": 2048, "seconds": 30}},
+                "runtime": {{"ref": "{ITEM_HASH_HEX}", "comment": "compose-runner snp bundle"}},
+                "workload": {{
+                    "ref": "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
+                    "hash_tree": "feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed",
+                    "roothash": "{roothash}"
+                }},
+                "verification": {{
+                    "backend": "sev_snp",
+                    "policy": 196608,
+                    "measurements": [
+                        {{"platform": "sev_snp", "digest": "{SNP_DIGEST}", "vcpu_type": "EPYC-v4"}}
+                    ]
+                }},
+                "volumes": []
+            }}"#,
+            roothash = "cd".repeat(32),
+        )
+    }
+
+    #[test]
+    fn test_vprogram_content_valid_and_credit_only() {
+        let content: VerifiableProgramContent =
+            serde_json::from_str(&vprogram_content_json(r#"{"type": "credit"}"#)).unwrap();
+        assert!(content.is_confidential());
+        assert_eq!(content.attestation_port, None);
+        assert_eq!(
+            content.verification.measurements[0].vcpu_type.as_deref(),
+            Some("EPYC-v4")
+        );
+
+        for payment in [r#"{"type": "hold"}"#, r#"{"type": "superfluid", "chain": "AVAX"}"#] {
+            assert!(
+                serde_json::from_str::<VerifiableProgramContent>(&vprogram_content_json(payment))
+                    .is_err(),
+                "{payment} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vprogram_content_payment_required() {
+        let json = vprogram_content_json(r#"{"type": "credit"}"#)
+            .replace(r#""payment": {"type": "credit"},"#, "");
+        assert!(serde_json::from_str::<VerifiableProgramContent>(&json).is_err());
+        let json = vprogram_content_json("null");
+        assert!(serde_json::from_str::<VerifiableProgramContent>(&json).is_err());
     }
 }
