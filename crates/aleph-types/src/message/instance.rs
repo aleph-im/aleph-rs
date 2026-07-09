@@ -35,8 +35,7 @@ impl TryFrom<RawInstanceContent> for InstanceContent {
     type Error = InstanceContentError;
 
     fn try_from(raw: RawInstanceContent) -> Result<Self, Self::Error> {
-        // SEV-SNP confidential instances are credit-only (see the confidential
-        // VM protocol design, aleph-vm docs/plans/2026-07-08).
+        // SEV-SNP confidential instances are credit-only.
         if let Some(tee) = &raw.environment.trusted_execution
             && tee.is_snp()
         {
