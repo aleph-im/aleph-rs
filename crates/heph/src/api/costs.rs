@@ -660,7 +660,7 @@ mod tests {
         // workload, and verification blocks. Mirrors the cross-SDK fixture.
         let snp_digest = "ab".repeat(48);
         let item_content = format!(
-            r#"{{"address":"{addr}","time":1000.0,"allow_amend":false,"payment":{{"type":"credit"}},"environment":{{"internet":true,"aleph_api":false}},"resources":{{"vcpus":2,"memory":2048,"seconds":30}},"runtime":{{"ref":"cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe","comment":"compose-runner snp bundle"}},"workload":{{"ref":"beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef","hash_tree":"feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed","roothash":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"}},"verification":{{"backend":"sev_snp","policy":196608,"measurements":[{{"platform":"sev_snp","digest":"{snp_digest}","vcpu_type":"EPYC-v4"}}]}},"volumes":[]}}"#,
+            r#"{{"address":"{addr}","time":1000.0,"allow_amend":false,"payment":{{"type":"credit"}},"environment":{{"internet":true}},"resources":{{"vcpus":2,"memory":2048,"seconds":30}},"runtime":{{"ref":"cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe","comment":"compose-runner snp bundle"}},"workload":{{"ref":"beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef","hash_tree":"feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed","roothash":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"}},"verification":{{"backend":"sev_snp","policy":196608,"measurements":[{{"platform":"sev_snp","digest":"{snp_digest}","vcpu_type":"EPYC-v4"}}]}},"volumes":[]}}"#,
         );
         let msg = sign_inline(&key, MessageType::VProgram, item_content);
 
