@@ -5,6 +5,7 @@ use crate::api::AppState;
 use crate::db::costs;
 use crate::db::messages;
 use crate::handlers::{IncomingMessage, ProcessingError, compute_cost_records, validate};
+use aleph_types::message::MessageType;
 
 // ---------------------------------------------------------------------------
 // GET /api/v0/messages/{hash}/consumed_credits  (spec 9.24)
@@ -283,6 +284,11 @@ fn bad_request(msg: impl Into<String>) -> HttpResponse {
 /// credit cost, in `cost_credit`); POST/AGGREGATE/FORGET return zero with an
 /// empty detail array.
 ///
+/// V-PROGRAM is not yet supported (Plan 3 implements cost calculation); reject
+/// here with the same error the submission pipeline returns in
+/// `handlers::check_balance`, so the estimate cannot underquote a message that
+/// would be rejected on submission.
+///
 /// Inline messages are validated and parsed in-process. Non-inline (storage)
 /// messages fall back to the local `FileStore`, matching the
 /// `process_message_with_store` flow used at submission time.
@@ -324,6 +330,15 @@ pub async fn estimate_price(
 
     let item_hash = msg.item_hash.to_string();
     let charged_address = content.address.as_str().to_string();
+
+    // V-PROGRAM cost calculation is not yet implemented (Plan 3). Reject here
+    // with the same error the submission pipeline returns in `check_balance`,
+    // so the estimate cannot underquote (quote 0 credits for) a message that
+    // would be rejected on submission.
+    if msg.message_type == MessageType::VProgram {
+        return bad_request("V-PROGRAM cost estimation is not yet implemented");
+    }
+
     let records = compute_cost_records(&msg, &content, &item_hash);
 
     let total_cost: f64 = records
@@ -628,5 +643,36 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
+    }
+
+    /// V-PROGRAM cost estimation is not yet implemented (Plan 3). The endpoint
+    /// must reject with 400, matching the submission pipeline's rejection in
+    /// `check_balance`, rather than underquoting 0 credits via the empty
+    /// `compute_cost_records` arm.
+    #[actix_web::test]
+    async fn test_estimate_vprogram_rejected_not_zero() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let state = make_test_state(&tmpdir);
+
+        let key = [93u8; 32];
+        let addr = addr_for_key(&key);
+        // A minimal valid V-PROGRAM content: credit-only payment, runtime,
+        // workload, and verification blocks. Mirrors the cross-SDK fixture.
+        let snp_digest = "ab".repeat(48);
+        let item_content = format!(
+            r#"{{"address":"{addr}","time":1000.0,"allow_amend":false,"payment":{{"type":"credit"}},"environment":{{"internet":true,"aleph_api":false}},"resources":{{"vcpus":2,"memory":2048,"seconds":30}},"runtime":{{"ref":"cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe","comment":"compose-runner snp bundle"}},"workload":{{"ref":"beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef","hash_tree":"feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed","roothash":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"}},"verification":{{"backend":"sev_snp","policy":196608,"measurements":[{{"platform":"sev_snp","digest":"{snp_digest}","vcpu_type":"EPYC-v4"}}]}},"volumes":[]}}"#,
+        );
+        let msg = sign_inline(&key, MessageType::VProgram, item_content);
+
+        let (status, body) = post_estimate(&state, msg).await;
+        assert_eq!(
+            status, 400,
+            "V-PROGRAM estimate must be rejected, not quoted 0"
+        );
+        let err = body["error"].as_str().expect("error field must be present");
+        assert!(
+            err.contains("not yet implemented"),
+            "error should mention not-yet-implemented, got: {err}"
+        );
     }
 }
