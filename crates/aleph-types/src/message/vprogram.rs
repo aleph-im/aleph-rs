@@ -174,6 +174,11 @@ pub enum VProgramError {
          an attested VM"
     )]
     UnmeasuredAuthorizedKeys,
+    #[error(
+        "V-Programs are immutable: amendment would let the measured stack change under a fixed \
+         deployment identity; publish a new message instead"
+    )]
+    NotAmendable,
 }
 
 /// Message content for scheduling a verifiable program (V-Program): an
@@ -188,6 +193,11 @@ pub enum VProgramError {
 /// must be verified (`VerifiedVolume`), and the inherited unmeasured input
 /// channels (`variables`, `authorized_keys`) are rejected. Workload
 /// environment variables belong in the verity-bound workload contract.
+///
+/// V-Programs are also immutable: the inherited amendment channel
+/// (`allow_amend`, `replaces`) is rejected, because an amend would let the
+/// measured stack change under a fixed deployment identity. Upgrading is an
+/// explicit redeployment: publish a new message, clients re-target it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(try_from = "RawVerifiableProgramContent")]
 pub struct VerifiableProgramContent {
@@ -272,6 +282,9 @@ impl TryFrom<RawVerifiableProgramContent> for VerifiableProgramContent {
             .is_some_and(|v| !v.is_empty())
         {
             return Err(VProgramError::UnmeasuredAuthorizedKeys);
+        }
+        if raw.base.allow_amend || raw.base.replaces.is_some() {
+            return Err(VProgramError::NotAmendable);
         }
         if raw.volumes.len() > MAX_VERIFIED_VOLUMES {
             return Err(VProgramError::TooManyVerifiedVolumes(raw.volumes.len()));
@@ -502,6 +515,23 @@ mod test {
         );
         let err = serde_json::from_str::<VerifiableProgramContent>(&json).unwrap_err();
         assert!(err.to_string().contains("authorized_keys"));
+    }
+
+    #[test]
+    fn test_vprogram_content_rejects_amendment() {
+        // an amend would let the measured stack change under a fixed
+        // deployment identity; upgrades are explicit redeployments
+        let json = vprogram_content_json(r#"{"type": "credit"}"#)
+            .replace("\"allow_amend\": false", "\"allow_amend\": true");
+        let err = serde_json::from_str::<VerifiableProgramContent>(&json).unwrap_err();
+        assert!(err.to_string().contains("immutable"));
+
+        let json = vprogram_content_json(r#"{"type": "credit"}"#).replace(
+            "\"volumes\": []",
+            &format!("\"volumes\": [], \"replaces\": \"{ITEM_HASH_HEX}\""),
+        );
+        let err = serde_json::from_str::<VerifiableProgramContent>(&json).unwrap_err();
+        assert!(err.to_string().contains("immutable"));
     }
 
     use crate::message::MessageType;
