@@ -2847,10 +2847,6 @@ pub struct TransferCreditArgs {
     #[arg(long, value_parser = parse_rfc3339_utc)]
     pub expiration: Option<DateTime<Utc>>,
 
-    /// Optional channel for the underlying POST message.
-    #[arg(long)]
-    pub channel: Option<String>,
-
     /// Skip the confirmation prompt and submit immediately.
     #[arg(short = 'y', long)]
     pub yes: bool,
