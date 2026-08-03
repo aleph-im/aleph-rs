@@ -277,6 +277,8 @@ fn default_amd_sev_policy() -> u64 {
 /// TEE mode discriminator. Absent on legacy messages, which are SEV.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TeeMode {
+    /// Explicit spelling of the legacy default: behaves exactly like leaving
+    /// `mode` absent (see `check_mode_consistency`).
     #[serde(rename = "sev")]
     Sev,
     #[serde(rename = "sev_snp")]
@@ -528,16 +530,44 @@ mod test {
     }
 
     #[test]
+    fn test_trusted_execution_explicit_sev_mode_matches_legacy() {
+        // "sev" spelled out behaves exactly like `mode` absent
+        let json = r#"{"mode": "sev", "policy": 1, "firmware": "e258d248fda94c63753607f7c4494ee0fcbe92f1a76bfdac795c9d84101eb317"}"#;
+        let tee: TrustedExecutionEnvironment = serde_json::from_str(json).unwrap();
+        assert_eq!(tee.mode, Some(TeeMode::Sev));
+        assert!(!tee.is_snp());
+        assert!(tee.firmware.is_some());
+        assert_eq!(tee.policy, 1);
+
+        // policy keeps informational SEV bit semantics: an SNP-style value is
+        // not rejected, exactly as with `mode` absent
+        let json = r#"{"mode": "sev", "policy": 196608}"#;
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(json).is_ok());
+
+        // SNP-only fields stay rejected
+        let json = format!(r#"{{"mode": "sev", "policy": 1, "runtime": "{ITEM_HASH_HEX}"}}"#);
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+    }
+
+    #[test]
     fn test_trusted_execution_attestation_port_bounds() {
         let json = format!(
             r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}",
                  "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}],
-                 "attestation_port": 0}}"#
+                 "attestation_port": 8443}}"#
+        );
+        // a valid port is accepted and round-trips
+        let tee: TrustedExecutionEnvironment = serde_json::from_str(&json).unwrap();
+        assert_eq!(tee.attestation_port.map(NonZeroU16::get), Some(8443));
+        assert_eq!(
+            serde_json::to_value(&tee).unwrap()["attestation_port"],
+            8443
         );
         // 0 is unrepresentable in NonZeroU16
-        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
-        let json = json.replace("\"attestation_port\": 0", "\"attestation_port\": 65536");
-        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+        let bad = json.replace("\"attestation_port\": 8443", "\"attestation_port\": 0");
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&bad).is_err());
+        let bad = json.replace("\"attestation_port\": 8443", "\"attestation_port\": 65536");
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&bad).is_err());
     }
 
     #[test]
