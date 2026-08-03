@@ -15,6 +15,22 @@ use serde::{Deserialize, Serialize, Serializer};
 /// measured verified_volumes= slot.
 pub const MAX_VERIFIED_VOLUMES: usize = 8;
 
+/// Upper bound on runtime/volume comment length in characters, matching
+/// aleph-message's MAX_RUNTIME_COMMENT_LENGTH.
+pub const MAX_RUNTIME_COMMENT_LENGTH: usize = 1024;
+
+fn deserialize_comment<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let comment = String::deserialize(deserializer)?;
+    let len = comment.chars().count();
+    if len > MAX_RUNTIME_COMMENT_LENGTH {
+        return Err(serde::de::Error::custom(VProgramError::CommentTooLong(len)));
+    }
+    Ok(comment)
+}
+
 /// dm-verity root hash as printed by veritysetup format: 64 lowercase hex chars (sha256).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]
@@ -60,7 +76,7 @@ pub struct VerifiableProgramRuntime {
     /// Store message of the runtime manifest.
     #[serde(rename = "ref")]
     pub reference: ItemHash,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_comment")]
     pub comment: String,
 }
 
@@ -96,7 +112,7 @@ pub struct VerifiedVolume {
     pub hash_tree: ItemHash,
     /// dm-verity root hash; measured via the kernel cmdline.
     pub roothash: VerityRoothash,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_comment")]
     pub comment: String,
 }
 
@@ -135,6 +151,8 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
     type Error = TeeError;
 
     fn try_from(raw: RawTeeVerification) -> Result<Self, Self::Error> {
+        // TeeBackend only has SevSnp today; dispatch policy validation per
+        // backend when other backends (e.g. TDX) are added.
         validate_snp_policy(raw.policy)?;
         if raw.measurements.is_empty() {
             return Err(TeeError::SnpModeRequires("measurements"));
@@ -179,6 +197,8 @@ pub enum VProgramError {
          deployment identity; publish a new message instead"
     )]
     NotAmendable,
+    #[error("comment must be at most {MAX_RUNTIME_COMMENT_LENGTH} characters, got {0}")]
+    CommentTooLong(usize),
 }
 
 /// Message content for scheduling a verifiable program (V-Program): an
@@ -329,6 +349,25 @@ mod test {
         let value = serde_json::to_value(&r).unwrap();
         assert!(value.get("ref").is_some());
         assert!(value.get("reference").is_none());
+    }
+
+    #[test]
+    fn test_comment_length_capped() {
+        let long = "x".repeat(MAX_RUNTIME_COMMENT_LENGTH + 1);
+        let json = format!(r#"{{"ref": "{ITEM_HASH_HEX}", "comment": "{long}"}}"#);
+        assert!(serde_json::from_str::<VerifiableProgramRuntime>(&json).is_err());
+
+        let max = "x".repeat(MAX_RUNTIME_COMMENT_LENGTH);
+        let json = format!(r#"{{"ref": "{ITEM_HASH_HEX}", "comment": "{max}"}}"#);
+        assert!(serde_json::from_str::<VerifiableProgramRuntime>(&json).is_ok());
+
+        // VerifiedVolume comments share the bound
+        let json = format!(
+            r#"{{"ref": "{ITEM_HASH_HEX}", "hash_tree": "{ITEM_HASH_HEX}",
+                 "roothash": "{}", "comment": "{long}"}}"#,
+            "ab".repeat(32),
+        );
+        assert!(serde_json::from_str::<VerifiedVolume>(&json).is_err());
     }
 
     #[test]
