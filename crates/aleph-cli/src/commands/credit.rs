@@ -15,14 +15,15 @@ use aleph_sdk::client::{
 };
 use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
 use aleph_sdk::credit_transfer::{
-    CREDIT_TRANSFER_POST_TYPE, CreditTransferContent, CreditTransferEntry, CreditTransferError,
-    CreditTransferList,
+    CREDIT_CHANNEL, CREDIT_TRANSFER_POST_TYPE, CreditTransferContent, CreditTransferEntry,
+    CreditTransferError, CreditTransferList,
 };
 use aleph_types::account::{Account, EvmAccount};
 use aleph_types::chain::Address as AlephAddress;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
+use aleph_types::message::pending::PendingMessage;
 use alloy_network::EthereumWallet;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{Provider, ProviderBuilder};
@@ -527,15 +528,7 @@ async fn handle_transfer(
         return Err(CreditTransferError::SelfTransfer(recipient).into());
     }
 
-    let envelope = serde_json::json!({
-        "type": CREDIT_TRANSFER_POST_TYPE,
-        "content": content,
-    });
-    let mut builder = MessageBuilder::new(&account, MessageType::Post, envelope);
-    if let Some(ch) = args.channel {
-        builder = builder.channel(Channel::from(ch));
-    }
-    let pending = builder.build()?;
+    let pending = build_transfer_message(&account, &content)?;
 
     if !json && !dry_run {
         print_transfer_summary(&args.to, &recipient, args.amount, args.expiration);
@@ -545,6 +538,19 @@ async fn handle_transfer(
         }
     }
     submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+}
+
+fn build_transfer_message<A: Account>(
+    account: &A,
+    content: &CreditTransferContent,
+) -> Result<PendingMessage> {
+    let envelope = serde_json::json!({
+        "type": CREDIT_TRANSFER_POST_TYPE,
+        "content": content,
+    });
+    Ok(MessageBuilder::new(account, MessageType::Post, envelope)
+        .channel(Channel::from(CREDIT_CHANNEL.to_string()))
+        .build()?)
 }
 
 fn print_transfer_summary(
@@ -694,6 +700,34 @@ fn print_submission_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aleph_types::chain::Chain;
+
+    fn test_account() -> EvmAccount {
+        EvmAccount::new(Chain::Ethereum, &[7u8; 32]).unwrap()
+    }
+
+    fn sample_content() -> CreditTransferContent {
+        CreditTransferContent {
+            transfer: CreditTransferList {
+                credits: vec![CreditTransferEntry {
+                    address: AlephAddress::from(
+                        "0x0000000000000000000000000000000000000001".to_string(),
+                    ),
+                    amount: 1_000_000,
+                    expiration: None,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn transfer_is_published_on_the_credit_channel() {
+        let pending = build_transfer_message(&test_account(), &sample_content()).unwrap();
+        assert_eq!(
+            pending.channel,
+            Some(Channel::from(CREDIT_CHANNEL.to_string()))
+        );
+    }
 
     #[test]
     fn credit_token_cli_maps_to_sdk_enum() {

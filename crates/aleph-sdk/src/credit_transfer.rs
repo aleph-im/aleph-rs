@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 /// POST `type` value for credit transfer messages on the Aleph network.
 pub const CREDIT_TRANSFER_POST_TYPE: &str = "aleph_credit_transfer";
 
+/// Channel credit messages must carry. The CCN applies credit balance updates
+/// only for messages on this channel; others are stored but never applied, with
+/// no error reported.
+pub const CREDIT_CHANNEL: &str = "ALEPH_CREDIT";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreditTransferEntry {
     pub address: AlephAddress,
