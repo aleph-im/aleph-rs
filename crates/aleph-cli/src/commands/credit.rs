@@ -20,7 +20,7 @@ use aleph_sdk::credit_transfer::{
 };
 use aleph_types::account::{Account, EvmAccount};
 use aleph_types::chain::Address as AlephAddress;
-use aleph_types::channel::Channel;
+use aleph_types::channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::MessageType;
 use aleph_types::message::pending::PendingMessage;
@@ -549,7 +549,7 @@ fn build_transfer_message<A: Account>(
         "content": content,
     });
     Ok(MessageBuilder::new(account, MessageType::Post, envelope)
-        .channel(Channel::from(CREDIT_CHANNEL.to_string()))
+        .channel(channel!(CREDIT_CHANNEL))
         .build()?)
 }
 
@@ -723,10 +723,7 @@ mod tests {
     #[test]
     fn transfer_is_published_on_the_credit_channel() {
         let pending = build_transfer_message(&test_account(), &sample_content()).unwrap();
-        assert_eq!(
-            pending.channel,
-            Some(Channel::from(CREDIT_CHANNEL.to_string()))
-        );
+        assert_eq!(pending.channel, Some(channel!(CREDIT_CHANNEL)));
     }
 
     #[test]
