@@ -10,6 +10,7 @@ mod common;
 mod config;
 mod program;
 mod sevctl;
+mod veritysetup;
 
 #[cfg(unix)]
 static ORIGINAL_TERMIOS: OnceLock<libc::termios> = OnceLock::new();
