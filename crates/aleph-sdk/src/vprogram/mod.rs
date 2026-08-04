@@ -4,3 +4,4 @@
 pub mod bundle;
 pub mod cmdline;
 pub mod manifest;
+pub mod measure;

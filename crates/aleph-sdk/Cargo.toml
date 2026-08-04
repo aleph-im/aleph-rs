@@ -51,6 +51,7 @@ hex = { workspace = true }
 hmac = { workspace = true }
 p256 = { workspace = true }
 tempfile = { workspace = true }
+sev = { version = "8", default-features = false, features = ["snp", "crypto_nossl"] }
 
 [dev-dependencies]
 alloy-network = { workspace = true }
