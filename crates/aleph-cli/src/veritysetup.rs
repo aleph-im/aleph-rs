@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum VerityError {
     #[error(
         "veritysetup not found in PATH. Install cryptsetup (which includes veritysetup) and ensure it is executable."
@@ -12,15 +13,19 @@ pub enum VerityError {
     NotFound,
     #[error("veritysetup command failed (exit code {code}):\n{stderr}")]
     CommandFailed { code: i32, stderr: String },
+    #[error("veritysetup format output did not contain a valid root hash: {0}")]
+    InvalidOutput(String),
     #[error("failed to invoke veritysetup: {0}")]
     Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Veritysetup {
     pub(crate) path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl Veritysetup {
     /// Locate the `veritysetup` binary on PATH. Returns `VerityError::NotFound`
     /// (with an install hint in the message) if it's missing.
@@ -63,17 +68,16 @@ impl Veritysetup {
                 {
                     return Ok(hash.to_string());
                 } else {
-                    return Err(VerityError::CommandFailed {
-                        code: -1,
-                        stderr: format!("Invalid root hash format: {}", hash),
-                    });
+                    return Err(VerityError::InvalidOutput(format!(
+                        "invalid root hash format: {}",
+                        hash
+                    )));
                 }
             }
         }
-        Err(VerityError::CommandFailed {
-            code: -1,
-            stderr: "Root hash not found in output".to_string(),
-        })
+        Err(VerityError::InvalidOutput(
+            "root hash not found in output".to_string(),
+        ))
     }
 }
 
@@ -100,6 +104,7 @@ Root hash:       cb121a317be7dc7969dd633ca9b6c3718ffe9ea6715b64e0e35a871d484b56b
 
     #[test]
     fn missing_root_hash_is_an_error() {
-        assert!(Veritysetup::parse_root_hash("no hash here").is_err());
+        let err = Veritysetup::parse_root_hash("no hash here").unwrap_err();
+        assert!(matches!(err, VerityError::InvalidOutput(_)));
     }
 }
