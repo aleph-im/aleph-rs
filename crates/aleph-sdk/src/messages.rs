@@ -21,7 +21,7 @@ use aleph_types::message::{
 };
 use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
 use memsizes::MiB;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -901,6 +901,9 @@ impl<'a, A: Account> VProgramBuilder<'a, A> {
                 resources: MachineResources {
                     vcpus: self.vcpus,
                     memory: self.memory,
+                    // Per-invocation duration inherited from the shared
+                    // resources shape; meaningless for a persistent VM. 30
+                    // matches the cross-SDK V-Program fixture.
                     seconds: 30,
                     published_ports: None,
                 },
@@ -927,8 +930,9 @@ impl<'a, A: Account> VProgramBuilder<'a, A> {
         };
         let value = serde_json::to_value(&content)?;
         // Struct-literal construction bypasses the parse-time validators; a serde
-        // round-trip re-applies them so an invalid combination fails here, not at the CCN.
-        serde_json::from_value::<VerifiableProgramContent>(value.clone())?;
+        // round-trip re-applies them so an invalid combination fails here, not at
+        // the CCN. Deserializing from &value avoids cloning the whole tree.
+        VerifiableProgramContent::deserialize(&value)?;
         let mut builder = MessageBuilder::new(self.account, MessageType::VProgram, value);
         if let Some(owner) = self.owner {
             builder = builder.on_behalf_of(owner);
