@@ -171,6 +171,12 @@ fn extract_members(bytes: &[u8], members: &BundleMembers, dir: &Path) -> Result<
                 path.to_string_lossy().into_owned(),
             ));
         }
+        // Only regular file entries can be bundle members: a symlink or
+        // directory entry at a member path would otherwise be io::copy'd
+        // into an empty artifact instead of surfacing as MissingMember.
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
         let path_str = path.to_string_lossy().into_owned();
 
         for (i, (member_path, role)) in roles.iter().enumerate() {
@@ -243,6 +249,23 @@ mod test {
             platform_rootfs: "image/rootfs.ext4".to_string(),
             platform_hash_tree: "image/rootfs.ext4.verity".to_string(),
         }
+    }
+
+    fn make_symlink_bundle(path: &str, target: &str) -> Vec<u8> {
+        let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+        let mut header = tar::Header::new_gnu();
+        let name_bytes = path.as_bytes();
+        assert!(name_bytes.len() < 100, "test entry name too long: {path}");
+        header.as_old_mut().name[..name_bytes.len()].copy_from_slice(name_bytes);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        builder.append(&header, &b""[..]).unwrap();
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap()
     }
 
     #[test]
@@ -326,5 +349,18 @@ mod test {
             extract_members(&bytes, &test_members(), dir.path()).unwrap_err(),
             BundleError::MissingMember(_)
         ));
+    }
+
+    #[test]
+    fn extract_skips_non_file_entries() {
+        // a symlink entry at a member path must not satisfy the member: it
+        // would yield an empty artifact instead of the declared content
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = make_symlink_bundle("image/OVMF.fd", "/etc/passwd");
+        assert!(matches!(
+            extract_members(&bytes, &test_members(), dir.path()).unwrap_err(),
+            BundleError::MissingMember("ovmf")
+        ));
+        assert!(!dir.path().join("ovmf").exists());
     }
 }
