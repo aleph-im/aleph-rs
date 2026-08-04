@@ -49,6 +49,9 @@ pub fn compute_measurements(
                 vmm_type: Some(VMMType::QEMU),
             })
             .map_err(|e| MeasureError::Measurement(e.to_string()))?;
+            // `digest` is the sev crate's SnpLaunchDigest newtype over the
+            // 48-byte SHA-384 digest; TryInto<Vec<u8>> is its only byte
+            // accessor (fallible via the crate's encoder plumbing only).
             let bytes: Vec<u8> = digest
                 .try_into()
                 .map_err(|e| MeasureError::Measurement(format!("{e:?}")))?;

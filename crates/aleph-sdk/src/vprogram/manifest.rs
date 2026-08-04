@@ -66,6 +66,9 @@ pub struct BootSpec {
 pub struct AttestationDescriptor {
     pub protocol: String,
     pub version: String,
+    /// Deliberately opaque: the transport schema varies per attestation
+    /// protocol, and the v1 CLI validates the manifest without
+    /// interpreting transports (that is the verifier client's job).
     pub transport: serde_json::Value,
 }
 
