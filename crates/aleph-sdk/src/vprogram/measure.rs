@@ -80,21 +80,37 @@ mod test {
 
     /// Parity against sev-snp-measure for the reference bundle.
     ///
-    /// Run with: ALEPH_VPROGRAM_TEST_BUNDLE=/path/to/extracted cargo test -p aleph-sdk -- --ignored parity
-    /// where the dir contains files `ovmf`, `kernel`, `initrd` from bundle
-    /// 1db0d69c96dc7ed6c8a6cbb8c63f8de516ef4ed668e95c468cc216e4c44d911b.
-    /// EXPECTED was produced by:
-    ///   sev-snp-measure --mode snp --vcpus 1 --vcpu-type EPYC-v4 \
-    ///     --ovmf ovmf --kernel kernel --initrd initrd \
-    ///     --append "console=ttyS0 root=/dev/mapper/verity-root ro roothash=cb121a317be7dc7969dd633ca9b6c3718ffe9ea6715b64e0e35a871d484b56b8"
-    /// Record the tool's output as EXPECTED before first run of this test.
+    /// **Deferred**: recording the actual parity digest is deferred to the
+    /// real-VM validation milestone, since V-PROGRAM is not yet accepted by
+    /// the network and no sandbox here has `sev-snp-measure` installed. Do
+    /// not install it from the network to unblock this test; it must be run
+    /// on a machine that already has the reference tool available.
+    ///
+    /// To record EXPECTED once that tool is available:
+    /// 1. Download and extract the reference bundle
+    ///    (1db0d69c96dc7ed6c8a6cbb8c63f8de516ef4ed668e95c468cc216e4c44d911b)
+    ///    so its `image/OVMF.fd`, `image/bzImage`, `image/initrd` land in a
+    ///    directory as `ovmf`, `kernel`, `initrd`.
+    /// 2. Run:
+    ///    `sev-snp-measure --mode snp --vcpus 1 --vcpu-type EPYC-v4
+    ///    --ovmf ovmf --kernel kernel --initrd initrd
+    ///    --append "console=ttyS0 root=/dev/mapper/verity-root ro roothash=cb121a317be7dc7969dd633ca9b6c3718ffe9ea6715b64e0e35a871d484b56b8"`
+    /// 3. Replace the `UNRECORDED-SEE-DOC-COMMENT` placeholder below with
+    ///    that output, then run:
+    ///    `ALEPH_VPROGRAM_TEST_BUNDLE=/path/to/extracted cargo test -p aleph-sdk -- --ignored parity`
     #[test]
     #[ignore = "needs a local runtime bundle; see doc comment"]
     fn parity_with_sev_snp_measure() {
         let dir = std::path::PathBuf::from(
             std::env::var("ALEPH_VPROGRAM_TEST_BUNDLE").expect("set ALEPH_VPROGRAM_TEST_BUNDLE"),
         );
-        const EXPECTED: &str = "RECORD-ME-BEFORE-FIRST-RUN";
+        const EXPECTED: &str = "UNRECORDED-SEE-DOC-COMMENT";
+        assert_ne!(
+            EXPECTED, "UNRECORDED-SEE-DOC-COMMENT",
+            "parity_with_sev_snp_measure: EXPECTED was never recorded against the \
+             real sev-snp-measure tool. See this test's doc comment for how to \
+             record it before relying on this test."
+        );
         let artifacts = BundleArtifacts {
             ovmf: dir.join("ovmf"),
             kernel: dir.join("kernel"),

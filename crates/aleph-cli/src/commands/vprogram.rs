@@ -11,6 +11,7 @@ use aleph_sdk::vprogram::manifest::RuntimeManifest;
 use aleph_sdk::vprogram::measure::compute_measurements;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::execution::environment::validate_snp_policy;
 use aleph_types::message::{
     MAX_VERIFIED_VOLUMES, StorageEngine, TeeVerification, VerifiedVolume, VerifiedWorkload,
 };
@@ -44,6 +45,7 @@ async fn handle_create(
     // 0. Fail fast on local prerequisites before any network call.
     let veritysetup = Veritysetup::find()?;
     let account = resolve_account(&args.signing.identity)?;
+    validate_snp_policy(args.policy)?;
     if args.volumes.len() > MAX_VERIFIED_VOLUMES {
         bail!("at most {MAX_VERIFIED_VOLUMES} --volume flags are supported");
     }
@@ -64,9 +66,22 @@ async fn handle_create(
     let manifest_bytes = aleph_client
         .download_file_by_message_hash(&args.runtime)
         .await?
+        .with_verification()
         .bytes()
         .await?;
     let manifest = RuntimeManifest::parse(&manifest_bytes)?;
+
+    // Cheap slot check right after the manifest is known: instantiate_cmdline
+    // only needs the template, the platform roothash, and how many volumes
+    // were passed, so a bad template fails here instead of after verity
+    // hashing and uploads. Placeholder roothashes are fine since only slot
+    // presence/absence is being checked; the real cmdline is built at step 5.
+    instantiate_cmdline(
+        &manifest.boot.cmdline_template,
+        &manifest.boot.platform_roothash,
+        &"0".repeat(64),
+        &vec!["0".repeat(64); args.volumes.len()],
+    )?;
 
     // 2. Bundle artifacts (cached locally by bundle sha256).
     if !json {
