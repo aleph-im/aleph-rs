@@ -208,6 +208,9 @@ fn check_balance(db: &Db, msg: &IncomingMessage, content: &MessageContent) -> Pr
                 crate::cost::calculate_vm_cost(vcpus, memory_mib_u32, total_volume_mib);
             crate::cost::check_credit_balance(db, content.address.as_str(), per_second)
         }
+        MessageType::VProgram => Err(ProcessingError::InternalError(
+            "check_balance: V-PROGRAM processing is not yet implemented".into(),
+        )),
     }
 }
 
@@ -260,6 +263,9 @@ fn dispatch_type_specific(
         MessageType::Forget => forget::process_forget(db, msg, content),
         MessageType::Program => program::process_program(db, msg, content),
         MessageType::Instance => instance::process_instance(db, msg, content),
+        MessageType::VProgram => Err(ProcessingError::InternalError(
+            "V-PROGRAM processing is not yet implemented".into(),
+        )),
     }
 }
 
@@ -515,6 +521,7 @@ pub(crate) fn compute_cost_records(
                 cost_credit: per_second.to_string(),
             }]
         }
+        MessageType::VProgram => Vec::new(),
     }
 }
 

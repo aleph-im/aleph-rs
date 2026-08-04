@@ -569,6 +569,13 @@ impl DenormalizedFields {
                     fields.payment_type = pt.as_str().map(|s| s.to_string());
                 }
             }
+            MessageContentEnum::VProgram(vprog) => {
+                if let Some(v) = serde_json::to_value(vprog).ok()
+                    && let Some(pt) = v.get("payment").and_then(|p| p.get("type"))
+                {
+                    fields.payment_type = pt.as_str().map(|s| s.to_string());
+                }
+            }
             MessageContentEnum::Forget(_) => {}
         }
 

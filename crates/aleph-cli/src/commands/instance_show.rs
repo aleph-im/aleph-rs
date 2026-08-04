@@ -82,7 +82,7 @@ pub(crate) struct GpuSummary {
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct TrustedExecutionSummary {
     pub firmware: Option<String>,
-    pub policy: u32,
+    pub policy: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
