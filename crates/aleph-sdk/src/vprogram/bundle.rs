@@ -50,7 +50,8 @@ pub async fn fetch_bundle_artifacts(
     manifest: &RuntimeManifest,
     cache_dir: &Path,
 ) -> Result<BundleArtifacts, BundleError> {
-    let bundle_dir = cache_dir.join(&manifest.bundle.sha256);
+    let cache_key = bundle_cache_key(&manifest.bundle.sha256)?;
+    let bundle_dir = cache_dir.join(cache_key);
     let artifacts = BundleArtifacts {
         ovmf: bundle_dir.join("ovmf"),
         kernel: bundle_dir.join("kernel"),
@@ -79,6 +80,39 @@ pub async fn fetch_bundle_artifacts(
     extract_members(&bytes, &manifest.bundle.members, &bundle_dir)?;
 
     Ok(artifacts)
+}
+
+/// Validates `sha256` as a well-formed 64-character lowercase hex digest
+/// before it is ever used as a filesystem path segment, and returns it
+/// unchanged as the cache directory key.
+///
+/// `manifest.bundle.sha256` is untrusted input (it comes from a downloaded
+/// manifest). Without this check a crafted value such as `"../../etc"` (or
+/// an absolute path) would be joined directly onto `cache_dir`, escaping it;
+/// the cache-hit fast path in `fetch_bundle_artifacts` would then treat
+/// attacker-placed files at that location as "verified" bundle artifacts
+/// without ever hashing anything.
+///
+/// This deliberately does *not* reuse `ItemHash`'s `FromStr`/`TryFrom<&str>`
+/// for the safety check: `Cid::try_from` (the IPFS-CID arm `ItemHash`
+/// falls back to for anything that isn't a 64-hex native hash) only checks
+/// the first character and a minimum length, not the actual base32/58/64
+/// charset, so a string like `"b" + "../".repeat(13)` (40 chars, starts with
+/// `b`) parses as a "valid" CID while still containing `..` components. A
+/// field literally named `sha256` should be a raw digest, not a CID, so
+/// enforcing the strict hex format here is both the correct semantics and
+/// the only check immune to that parser's leniency.
+fn bundle_cache_key(sha256: &str) -> Result<&str, BundleError> {
+    let is_hex64 = sha256.len() == 64
+        && sha256
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !is_hex64 {
+        return Err(BundleError::BadBundleHash(format!(
+            "expected 64 lowercase hex characters, got {sha256:?}"
+        )));
+    }
+    Ok(sha256)
 }
 
 /// Verify that `bytes` matches the manifest-declared sha256 digest and size.
@@ -209,6 +243,44 @@ mod test {
             platform_rootfs: "image/rootfs.ext4".to_string(),
             platform_hash_tree: "image/rootfs.ext4.verity".to_string(),
         }
+    }
+
+    #[test]
+    fn cache_key_rejects_path_traversal() {
+        assert!(matches!(
+            bundle_cache_key("../escape"),
+            Err(BundleError::BadBundleHash(_))
+        ));
+    }
+
+    #[test]
+    fn cache_key_rejects_absolute_path() {
+        assert!(matches!(
+            bundle_cache_key("/etc/passwd"),
+            Err(BundleError::BadBundleHash(_))
+        ));
+    }
+
+    #[test]
+    fn cache_key_rejects_cid_shaped_traversal() {
+        // `Cid::try_from` (which `ItemHash`'s `FromStr` falls back to for
+        // non-hex strings) only checks the first character and a minimum
+        // length, not the actual base32/58/64 charset. A 40+ char string
+        // starting with a multibase prefix like `b` would pass that check
+        // even though it's still full of `..` components; bundle_cache_key
+        // must not rely on ItemHash parsing alone.
+        let sneaky = format!("b{}", "../".repeat(13));
+        assert_eq!(sneaky.len(), 40);
+        assert!(matches!(
+            bundle_cache_key(&sneaky),
+            Err(BundleError::BadBundleHash(_))
+        ));
+    }
+
+    #[test]
+    fn cache_key_accepts_valid_hash() {
+        let good = "0".repeat(64);
+        assert_eq!(bundle_cache_key(&good).unwrap(), good);
     }
 
     #[test]
