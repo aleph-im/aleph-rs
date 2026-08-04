@@ -7,6 +7,7 @@ use crate::message::instance::InstanceContent;
 use crate::message::post::PostContent;
 use crate::message::program::ProgramContent;
 use crate::message::store::StoreContent;
+use crate::message::vprogram::VerifiableProgramContent;
 use crate::timestamp::Timestamp;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,9 @@ pub enum MessageType {
     Post,
     Program,
     Store,
+    /// Verifiable program: auto-booting SEV-SNP confidential VM.
+    #[serde(rename = "V-PROGRAM")]
+    VProgram,
 }
 
 impl std::fmt::Display for MessageType {
@@ -44,6 +48,7 @@ impl std::fmt::Display for MessageType {
             MessageType::Post => "POST",
             MessageType::Program => "PROGRAM",
             MessageType::Store => "STORE",
+            MessageType::VProgram => "V-PROGRAM",
         };
 
         f.write_str(s)
@@ -86,6 +91,7 @@ pub enum MessageContentEnum {
     Post(PostContent),
     Program(ProgramContent),
     Store(StoreContent),
+    VProgram(VerifiableProgramContent),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +134,9 @@ impl MessageContent {
                 MessageContentEnum::Program(ProgramContent::deserialize(value)?)
             }
             MessageType::Store => MessageContentEnum::Store(StoreContent::deserialize(value)?),
+            MessageType::VProgram => {
+                MessageContentEnum::VProgram(VerifiableProgramContent::deserialize(value)?)
+            }
         };
 
         Ok(MessageContent {
@@ -514,6 +523,19 @@ mod tests {
     use super::*;
     use crate::item_hash;
     use assert_matches::assert_matches;
+
+    #[test]
+    fn test_message_type_v_program_wire_value() {
+        assert_eq!(
+            serde_json::to_string(&MessageType::VProgram).unwrap(),
+            "\"V-PROGRAM\""
+        );
+        assert_eq!(
+            serde_json::from_str::<MessageType>("\"V-PROGRAM\"").unwrap(),
+            MessageType::VProgram
+        );
+        assert_eq!(MessageType::VProgram.to_string(), "V-PROGRAM");
+    }
 
     #[test]
     fn test_deserialize_item_type_inline() {

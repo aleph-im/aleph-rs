@@ -10,6 +10,7 @@ mod post;
 mod program;
 mod store;
 pub mod unsigned;
+mod vprogram;
 
 #[cfg(any(feature = "signature-evm", feature = "signature-sol"))]
 pub use crate::verify_signature::SignatureVerificationError;
@@ -20,7 +21,12 @@ pub use base_message::{
     MessageStatus, MessageType, MessageVerificationError,
 };
 pub use forget::ForgetContent;
-pub use instance::InstanceContent;
+pub use instance::{InstanceContent, InstanceContentError};
 pub use post::PostContent;
 pub use program::{CodeContent, DataContent, Export, FunctionRuntime, ProgramContent};
 pub use store::{FileRef, RawFileRef, StorageBackend, StorageEngine, StoreContent};
+pub use vprogram::{
+    MAX_VERIFIED_VOLUMES, TeeBackend, TeeVerification, VProgramError, VerifiableProgramContent,
+    VerifiableProgramEnvironment, VerifiableProgramRuntime, VerifiedVolume, VerifiedWorkload,
+    VerityRoothash,
+};

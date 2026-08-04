@@ -12,7 +12,7 @@ pub const MAX_INLINE_SIZE: usize = 200_000;
 /// deserialize twice.
 ///
 /// Validation steps:
-/// 1. Message type is one of the 6 supported types (enforced by `MessageType` enum, so
+/// 1. Message type is one of the 7 supported types (enforced by `MessageType` enum, so
 ///    a deserialization failure catches this already; we check explicitly here for clarity).
 /// 2. item_type / item_content consistency:
 ///    - `inline` requires `item_content` to be present.
