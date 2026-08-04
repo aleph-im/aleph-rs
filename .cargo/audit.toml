@@ -1,0 +1,29 @@
+# cargo-audit configuration.
+#
+# Ignored advisories are listed here with a rationale so that `cargo audit`
+# (run in CI by .github/workflows/audit.yml) remains green without weakening
+# the workflow itself. Each entry must be revisited on every release and
+# removed as soon as the underlying dependency either drops the affected
+# crate from its lockfile resolution or ships a fixed version.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0235 — rkyv 0.7.46: insufficient archive validation can
+    # cause out-of-bounds reads in archives containing Rc/Arc.
+    #
+    # rkyv reaches our Cargo.lock only as an *optional*, feature-gated
+    # dependency of rust_decimal (required by heph). heph enables solely
+    # rust_decimal's `serde-with-str` feature; the `rkyv` feature is never
+    # turned on anywhere in the workspace, so the vulnerable code is not
+    # compiled into any of our crates (verified via
+    # `cargo tree -i rkyv -e features` → "nothing to print").
+    #
+    # rust_decimal 1.42.1 (latest) still declares `rkyv = "^0.7.46"` as an
+    # optional normal dependency, so cargo keeps a 0.7.x in the lockfile and
+    # cargo-audit flags it by lockfile presence regardless of feature
+    # activation. Dropping the advisory properly requires either an upstream
+    # rust_decimal release that removes the optional rkyv 0.7 dep, or
+    # removing our dependency on rust_decimal in heph — both out of scope for
+    # the v0.16.0 fix release.
+    "RUSTSEC-2026-0235",
+]
