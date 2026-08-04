@@ -181,6 +181,11 @@ pub enum Commands {
         #[clap(subcommand)]
         command: ProgramCommand,
     },
+    /// Manage verifiable programs (attestable SEV-SNP VMs).
+    Vprogram {
+        #[command(subcommand)]
+        command: VProgramCommand,
+    },
     /// Buy and manage Aleph credits
     Credit {
         #[clap(subcommand)]
@@ -3094,6 +3099,72 @@ pub struct ProgramShowArgs {
     pub item_hash: ItemHash,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum VProgramCommand {
+    /// Create and publish a verifiable program from a prebuilt workload image.
+    ///
+    /// The workload is an ext4 image whose content convention is set by the
+    /// runtime bundle (e.g. OCI images + compose file). The CLI computes
+    /// dm-verity hashes, uploads the artifacts, computes the SEV-SNP launch
+    /// measurements from the runtime bundle, and publishes the V-PROGRAM
+    /// message. Payment is always credit; the network scheduler starts the VM.
+    Create(Box<VProgramCreateArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct VProgramCreateArgs {
+    /// Path to the prebuilt workload ext4 image.
+    #[arg(long)]
+    pub workload: PathBuf,
+
+    /// Item hash of the runtime manifest store message.
+    #[arg(long)]
+    pub runtime: ItemHash,
+
+    /// Extra read-only data volume image (repeatable, max 8); each is
+    /// verity-bound into the attested TCB in flag order.
+    #[arg(long = "volume")]
+    pub volumes: Vec<PathBuf>,
+
+    /// Number of virtual CPUs.
+    #[arg(long, default_value_t = 1)]
+    pub vcpus: u32,
+
+    /// Memory in MiB.
+    #[arg(long, default_value_t = 2048)]
+    pub memory: u32,
+
+    /// Disable guest internet access (enabled by default).
+    #[arg(long)]
+    pub no_internet: bool,
+
+    /// SEV-SNP 64-bit guest policy (accepts 0x-prefixed hex).
+    #[arg(long, value_parser = parse_u64_maybe_hex, default_value = "0x30000")]
+    pub policy: u64,
+
+    /// Pin scheduling to a specific CRN by node hash.
+    #[arg(long)]
+    pub node_hash: Option<String>,
+
+    /// Channel to publish the message on.
+    #[arg(long)]
+    pub channel: Option<String>,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
+}
+
+/// Clap value parser for `--policy`: accepts a decimal integer or a
+/// `0x`-prefixed hex string (matching how SEV-SNP guest policies are usually
+/// quoted, e.g. `0x30000`).
+pub fn parse_u64_maybe_hex(s: &str) -> Result<u64, String> {
+    let parsed = match s.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => s.parse(),
+    };
+    parsed.map_err(|e| format!("invalid policy value {s:?}: {e}"))
+}
+
 #[cfg(test)]
 mod credit_transfer_args_tests {
     use super::*;
@@ -4078,5 +4149,65 @@ mod confidential_parser_tests {
         else {
             panic!("wrong subcommand");
         };
+    }
+}
+
+#[cfg(test)]
+mod vprogram_create_args_tests {
+    use super::*;
+
+    #[test]
+    fn vprogram_create_parses_with_defaults() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--workload",
+            "/tmp/w.ext4",
+            "--runtime",
+            &"cafe".repeat(16),
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.vcpus, 1);
+        assert_eq!(args.memory, 2048);
+        assert!(!args.no_internet);
+        assert_eq!(args.policy, 0x30000);
+        assert!(args.volumes.is_empty());
+    }
+
+    #[test]
+    fn vprogram_create_parses_hex_policy_and_volumes() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--workload",
+            "/tmp/w.ext4",
+            "--runtime",
+            &"cafe".repeat(16),
+            "--policy",
+            "0x30001",
+            "--volume",
+            "/tmp/a.ext4",
+            "--volume",
+            "/tmp/b.ext4",
+            "--no-internet",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.policy, 0x30001);
+        assert_eq!(args.volumes.len(), 2);
+        assert!(args.no_internet);
     }
 }

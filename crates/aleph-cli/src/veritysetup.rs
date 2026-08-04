@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-#[allow(dead_code)]
 pub enum VerityError {
     #[error(
         "veritysetup not found in PATH. Install cryptsetup (which includes veritysetup) and ensure it is executable."
@@ -20,12 +19,10 @@ pub enum VerityError {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Veritysetup {
     pub(crate) path: PathBuf,
 }
 
-#[allow(dead_code)]
 impl Veritysetup {
     /// Locate the `veritysetup` binary on PATH. Returns `VerityError::NotFound`
     /// (with an install hint in the message) if it's missing.
