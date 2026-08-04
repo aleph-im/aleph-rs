@@ -3142,9 +3142,9 @@ pub struct VProgramCreateArgs {
     #[arg(long, value_parser = parse_u64_maybe_hex, default_value = "0x30000")]
     pub policy: u64,
 
-    /// Pin scheduling to a specific CRN by node hash.
+    /// CRN node hash. Pins the V-Program to a specific compute node.
     #[arg(long)]
-    pub node_hash: Option<String>,
+    pub crn_hash: Option<NodeHash>,
 
     /// Channel to publish the message on.
     #[arg(long)]
@@ -4198,6 +4198,8 @@ mod vprogram_create_args_tests {
             "--volume",
             "/tmp/b.ext4",
             "--no-internet",
+            "--crn-hash",
+            &"ab".repeat(32),
         ])
         .unwrap();
         let Commands::Vprogram {
@@ -4209,5 +4211,6 @@ mod vprogram_create_args_tests {
         assert_eq!(args.policy, 0x30001);
         assert_eq!(args.volumes.len(), 2);
         assert!(args.no_internet);
+        assert_eq!(args.crn_hash.unwrap().to_string(), "ab".repeat(32));
     }
 }

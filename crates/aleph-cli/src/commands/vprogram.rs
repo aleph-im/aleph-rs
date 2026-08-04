@@ -152,13 +152,13 @@ async fn handle_create(
         )?);
     }
 
-    let mut builder = VProgramBuilder::new(&account, args.runtime.clone(), workload, verification)
+    let mut builder = VProgramBuilder::new(&account, args.runtime, workload, verification)
         .vcpus(args.vcpus)
         .memory(MiB::from(u64::from(args.memory)))
         .internet(!args.no_internet)
         .volumes(volumes);
-    if let Some(node_hash) = args.node_hash {
-        builder = builder.node_hash(node_hash);
+    if let Some(crn_hash) = args.crn_hash {
+        builder = builder.node_hash(crn_hash.to_string());
     }
     if let Some(channel) = args.channel {
         builder = builder.channel(Channel::from(channel));
