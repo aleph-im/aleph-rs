@@ -48,12 +48,17 @@ pub fn instantiate_cmdline(
     out = out.replace("{workload_roothash}", workload_roothash);
     out = out.replace("{verified_volumes}", &volume_roothashes.join(","));
 
-    if let (Some(start), Some(end)) = (out.find('{'), out.find('}'))
-        && start < end
-    {
-        return Err(CmdlineError::UnknownPlaceholder(
-            out[start + 1..end].to_string(),
-        ));
+    if let Some(start) = out.find('{') {
+        if let Some(relative_end) = out[start..].find('}') {
+            let end = start + relative_end;
+            return Err(CmdlineError::UnknownPlaceholder(
+                out[start + 1..end].to_string(),
+            ));
+        } else {
+            return Err(CmdlineError::UnknownPlaceholder(
+                out[start + 1..].to_string(),
+            ));
+        }
     }
     Ok(out)
 }
@@ -105,6 +110,15 @@ mod tests {
     #[test]
     fn unknown_placeholder_is_an_error() {
         let t = "roothash={platform_roothash} workload_roothash={workload_roothash} ip={guest_ip}";
+        match instantiate_cmdline(t, "aa", "bb", &[]).unwrap_err() {
+            CmdlineError::UnknownPlaceholder(p) => assert_eq!(p, "guest_ip"),
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn stray_brace_before_unknown_placeholder() {
+        let t = "workload_roothash={workload_roothash} label}=x ip={guest_ip}";
         match instantiate_cmdline(t, "aa", "bb", &[]).unwrap_err() {
             CmdlineError::UnknownPlaceholder(p) => assert_eq!(p, "guest_ip"),
             other => panic!("unexpected: {other}"),
