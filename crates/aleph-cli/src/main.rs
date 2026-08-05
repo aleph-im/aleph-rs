@@ -199,7 +199,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "vprogram")]
         cli::Commands::Vprogram {
             command: vprogram_command,
-        } => commands::vprogram::dispatch(&aleph_client, &ccn_url, json, vprogram_command).await?,
+        } => {
+            commands::vprogram::dispatch(
+                &aleph_client,
+                &ccn_url,
+                cli.network.as_deref(),
+                json,
+                vprogram_command,
+            )
+            .await?
+        }
         cli::Commands::Credit {
             command: credit_command,
         } => {
