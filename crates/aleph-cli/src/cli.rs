@@ -3119,6 +3119,16 @@ pub enum VProgramCommand {
     /// hasn't been placed yet or the CRN is unreachable, only the
     /// message-side fields are shown.
     Show(VProgramShowArgs),
+    /// Make an attested HTTP call to a running V-PROGRAM guest.
+    ///
+    /// Resolves the guest's attested (RA-TLS) endpoint (from `--url`, or via
+    /// the scheduler + CRN discovery used by `show`) and the expected
+    /// SEV-SNP launch measurement (from `--expected-measurement`, or from
+    /// the message's pinned `verification.measurements`). The request is
+    /// only made - and the response only trusted - if the full attestation
+    /// report chain verifies and the measurement matches; any attestation
+    /// failure or mismatch aborts before the response body is ever printed.
+    Call(Box<VProgramCallArgs>),
 }
 
 #[cfg(feature = "vprogram")]
@@ -3170,6 +3180,55 @@ pub struct VProgramCreateArgs {
 pub struct VProgramShowArgs {
     /// Item hash of the V-PROGRAM message to inspect.
     pub item_hash: ItemHash,
+}
+
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Args)]
+pub struct VProgramCallArgs {
+    /// Item hash of the V-PROGRAM message to call.
+    pub item_hash: ItemHash,
+
+    /// HTTP path to request on the guest, e.g. `/fib/10`.
+    pub path: String,
+
+    /// HTTP method.
+    #[arg(short = 'X', long = "request", value_parser = parse_method, default_value = "GET")]
+    pub method: reqwest::Method,
+
+    /// Request body, sent as-is.
+    #[arg(short = 'd', long = "data")]
+    pub data: Option<String>,
+
+    /// Extra request header as `"Key: Value"` (repeatable).
+    #[arg(short = 'H', long = "header")]
+    pub header: Vec<String>,
+
+    /// Call this URL directly instead of discovering the endpoint via the
+    /// scheduler + CRN.
+    #[arg(long)]
+    pub url: Option<Url>,
+
+    /// AMD product line to verify the SEV-SNP certificate chain against.
+    #[arg(long, value_parser = parse_amd_product, default_value = "Genoa")]
+    pub amd_product: aleph_sdk::attest::AmdProduct,
+
+    /// Expected launch measurement, hex-encoded. Overrides the measurement(s)
+    /// pinned on the V-PROGRAM message.
+    #[arg(long)]
+    pub expected_measurement: Option<String>,
+}
+
+/// Clap adapter for `reqwest::Method::from_str` (`-X`/`--request`).
+#[cfg(feature = "vprogram")]
+fn parse_method(s: &str) -> Result<reqwest::Method, String> {
+    s.parse::<reqwest::Method>()
+        .map_err(|e| format!("invalid HTTP method '{s}': {e}"))
+}
+
+/// Clap adapter for [`aleph_sdk::attest::AmdProduct::from_str`] (`--amd-product`).
+#[cfg(feature = "vprogram")]
+fn parse_amd_product(s: &str) -> Result<aleph_sdk::attest::AmdProduct, String> {
+    s.parse()
 }
 
 /// Clap value parser for `--policy`: accepts a decimal integer or a
@@ -4244,5 +4303,93 @@ mod vprogram_create_args_tests {
             panic!("wrong variant");
         };
         assert_eq!(args.item_hash.to_string(), hash);
+    }
+}
+
+#[cfg(all(test, feature = "vprogram"))]
+mod vprogram_call_args_tests {
+    use super::*;
+    use aleph_sdk::attest::AmdProduct;
+
+    #[test]
+    fn vprogram_call_parses_with_defaults() {
+        let hash = "cafe".repeat(16);
+        let cli = Cli::try_parse_from(["aleph", "vprogram", "call", &hash, "/fib/10"]).unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.item_hash.to_string(), hash);
+        assert_eq!(args.path, "/fib/10");
+        assert_eq!(args.method, reqwest::Method::GET);
+        assert!(args.data.is_none());
+        assert!(args.header.is_empty());
+        assert!(args.url.is_none());
+        assert_eq!(args.amd_product, AmdProduct::Genoa);
+        assert!(args.expected_measurement.is_none());
+    }
+
+    #[test]
+    fn vprogram_call_parses_method_data_and_headers() {
+        let hash = "cafe".repeat(16);
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "call",
+            &hash,
+            "/echo",
+            "-X",
+            "POST",
+            "-d",
+            "{\"a\":1}",
+            "-H",
+            "X-Y: z",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.method, reqwest::Method::POST);
+        assert_eq!(args.data.as_deref(), Some("{\"a\":1}"));
+        assert_eq!(args.header, vec!["X-Y: z".to_string()]);
+    }
+
+    #[test]
+    fn vprogram_call_url_override_bypasses_discovery_fields() {
+        let hash = "cafe".repeat(16);
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "call",
+            &hash,
+            "/status",
+            "--url",
+            "https://203.0.113.5:24101",
+            "--amd-product",
+            "milan",
+            "--expected-measurement",
+            &"ab".repeat(48),
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(
+            args.url.as_ref().map(Url::as_str),
+            Some("https://203.0.113.5:24101/")
+        );
+        assert_eq!(args.amd_product, AmdProduct::Milan);
+        assert_eq!(
+            args.expected_measurement.as_deref(),
+            Some("ab".repeat(48)).as_deref()
+        );
     }
 }
