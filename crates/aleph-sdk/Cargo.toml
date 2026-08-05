@@ -52,8 +52,11 @@ hmac = { workspace = true }
 p256 = { workspace = true }
 tempfile = { workspace = true }
 sev = { version = "8", default-features = false, features = ["snp", "crypto_nossl"], optional = true }
+der = { version = "0.7", optional = true }
+x509-parser = { version = "0.16", optional = true }
 
 [dev-dependencies]
+rcgen = "0.14"
 alloy-network = { workspace = true }
 alloy-node-bindings = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
@@ -84,7 +87,7 @@ swap = [
 ]
 # Verifiable programs (attestable SEV-SNP VMs): launch measurement, runtime
 # bundle handling, and the VProgramBuilder message builder.
-vprogram = ["dep:sev"]
+vprogram = ["dep:sev", "dep:der", "dep:x509-parser"]
 # Gates network-tier integration tests (kept out of plain `cargo test`).
 test-helpers = []
 
