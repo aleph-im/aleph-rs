@@ -3171,6 +3171,13 @@ pub struct VProgramCreateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
+    /// After submitting, poll until the V-Program is reachable (networking
+    /// populated on its allocated CRN) and print its attested endpoint.
+    /// Optionally takes a timeout in seconds (default 300): `--wait` or
+    /// `--wait 600`.
+    #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "300")]
+    pub wait: Option<u64>,
+
     #[command(flatten)]
     pub signing: SigningArgs,
 }
@@ -4290,6 +4297,72 @@ mod vprogram_create_args_tests {
         assert_eq!(args.volumes.len(), 2);
         assert!(args.no_internet);
         assert_eq!(args.crn_hash.unwrap().to_string(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn vprogram_create_wait_absent_by_default() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--workload",
+            "/tmp/w.ext4",
+            "--runtime",
+            &"cafe".repeat(16),
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.wait, None);
+    }
+
+    #[test]
+    fn vprogram_create_bare_wait_defaults_to_300() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--workload",
+            "/tmp/w.ext4",
+            "--runtime",
+            &"cafe".repeat(16),
+            "--wait",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.wait, Some(300));
+    }
+
+    #[test]
+    fn vprogram_create_wait_with_explicit_seconds() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--workload",
+            "/tmp/w.ext4",
+            "--runtime",
+            &"cafe".repeat(16),
+            "--wait",
+            "600",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.wait, Some(600));
     }
 
     #[test]
