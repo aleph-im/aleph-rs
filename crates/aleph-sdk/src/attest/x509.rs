@@ -32,6 +32,31 @@ pub enum AttestError {
     CertParse(String),
     #[error("failed to construct attestation OID: {0}")]
     Oid(String),
+    /// The raw bytes in [`AttestationReport::data`](crate::attest::AttestationReport::data)
+    /// don't decode as a well-formed SEV-SNP attestation report.
+    #[error("failed to parse SEV-SNP attestation report: {0}")]
+    Parse(std::io::Error),
+    /// `sev`'s single combined check failed: either the AMD certificate chain
+    /// (ARK self-signed, ARK signs ASK, ASK signs VCEK) or the report's
+    /// ECDSA P-384/SHA-384 signature over the VCEK public key did not verify.
+    #[error("SEV-SNP certificate chain or report signature verification failed: {0}")]
+    Chain(std::io::Error),
+    /// Failed to decode an AMD SEV-SNP certificate (ARK, ASK, or VCEK) from
+    /// its DER/PEM bytes.
+    #[error("failed to decode AMD SEV-SNP certificate: {0}")]
+    CertDecode(#[from] std::io::Error),
+    /// The report was generated at a VMPL more privileged callers must not
+    /// trust (only VMPL 0-1, the firmware/kernel stack, are accepted).
+    #[error("attestation report from VMPL {0} — only VMPL 0-1 are accepted")]
+    Vmpl(u32),
+    /// The ARK certificate does not carry AMD's expected subject identity
+    /// (this is a policy check `sev` itself does not perform).
+    #[error("ARK certificate identity verification failed: {0}")]
+    ArkIdentity(String),
+    /// Fetching or caching the VCEK certificate from AMD's Key Distribution
+    /// Service failed.
+    #[error("failed to fetch VCEK certificate from AMD KDS: {0}")]
+    Kds(String),
 }
 
 /// Encode an AttestationReport as a DER-encoded OctetString.

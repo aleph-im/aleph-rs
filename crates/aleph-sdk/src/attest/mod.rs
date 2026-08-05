@@ -13,11 +13,14 @@
 //! `data`/`report_data`/`measurement`. Do not change field names or the
 //! encoding without also updating the deployed guest agent.
 //!
-//! This module grows in later tasks: `verify.rs` (attestation policy
-//! verification) and `ratls.rs` (the RA-TLS client transport).
+//! This module grows in a later task: `ratls.rs` (the RA-TLS client
+//! transport).
 
+pub mod certs;
+pub mod verify;
 pub mod x509;
 
+pub use verify::{AmdProduct, VerificationResult, verify_sev_snp_report};
 pub use x509::{
     ATTESTATION_OID, ATTESTATION_OID_STR, AttestError, decode_attestation_extension,
     encode_attestation_extension, extract_attestation_from_cert,
