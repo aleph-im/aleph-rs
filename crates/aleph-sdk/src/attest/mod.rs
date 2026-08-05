@@ -13,13 +13,12 @@
 //! `data`/`report_data`/`measurement`. Do not change field names or the
 //! encoding without also updating the deployed guest agent.
 //!
-//! This module grows in a later task: `ratls.rs` (the RA-TLS client
-//! transport).
-
 pub mod certs;
+pub mod ratls;
 pub mod verify;
 pub mod x509;
 
+pub use ratls::{AttestedResponse, attested_request};
 pub use verify::{AmdProduct, VerificationResult, verify_sev_snp_report};
 pub use x509::{
     ATTESTATION_OID, ATTESTATION_OID_STR, AttestError, decode_attestation_extension,

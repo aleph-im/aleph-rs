@@ -57,6 +57,25 @@ pub enum AttestError {
     /// Service failed.
     #[error("failed to fetch VCEK certificate from AMD KDS: {0}")]
     Kds(String),
+    /// The RA-TLS handshake's server certificate verification failed: no
+    /// attestation extension, a key-binding mismatch (`report_data` doesn't
+    /// hash the TLS public key), or a measurement pin mismatch.
+    #[error("RA-TLS server certificate verification failed: {0}")]
+    Tls(String),
+    /// Failed to build the RA-TLS-aware HTTP client or send/read a request
+    /// over it.
+    #[error("RA-TLS HTTP request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    /// The request `path` did not join cleanly onto the client's `base_url`.
+    #[error("invalid request URL: {0}")]
+    Url(#[from] url::ParseError),
+    /// The TLS handshake completed without a `SnpCertVerifier` ever stashing
+    /// an attestation report. This should not happen if the handshake
+    /// succeeded (the verifier itself fails closed when no extension is
+    /// present), but is checked again here so `attested_request` never
+    /// silently reports `attestation_valid: false` instead of erroring.
+    #[error("no attestation report was extracted during the TLS handshake")]
+    MissingReport,
 }
 
 /// Encode an AttestationReport as a DER-encoded OctetString.
