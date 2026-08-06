@@ -71,6 +71,10 @@ pub async fn fetch_bundle_artifacts(
                 BundleError::BadBundleHash(e.to_string())
             })?;
 
+    // Deliberately no `.with_verification()`: `verify_bundle_bytes` below
+    // checks both size and sha256 against the manifest, which is strictly
+    // stronger than the download-layer hash-only check and avoids hashing
+    // the payload twice.
     let download = client.download_file_by_hash(&hash).await?;
     let bytes = download.bytes().await?;
 
