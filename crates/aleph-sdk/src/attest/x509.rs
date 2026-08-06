@@ -47,7 +47,7 @@ pub enum AttestError {
     CertDecode(#[from] std::io::Error),
     /// The report was generated at a VMPL more privileged callers must not
     /// trust (only VMPL 0-1, the firmware/kernel stack, are accepted).
-    #[error("attestation report from VMPL {0} — only VMPL 0-1 are accepted")]
+    #[error("attestation report from VMPL {0} - only VMPL 0-1 are accepted")]
     Vmpl(u32),
     /// The ARK certificate does not carry AMD's expected subject identity
     /// (this is a policy check `sev` itself does not perform).
