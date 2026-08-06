@@ -520,7 +520,12 @@ async fn fetch_live_networking(
             return None;
         }
     };
-    let addr = node.address.as_deref()?;
+    let Some(addr) = node.address.as_deref() else {
+        eprintln!(
+            "warning: scheduler reports no address for node {node_hash}; live status unavailable"
+        );
+        return None;
+    };
     let crn_url = match Url::parse(addr) {
         Ok(url) => url,
         Err(e) => {
