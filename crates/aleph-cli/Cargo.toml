@@ -7,6 +7,13 @@ license = "MIT"
 repository = "https://github.com/aleph-im/aleph-rs"
 homepage = "https://github.com/aleph-im/aleph-rs"
 
+[features]
+default = ["vprogram"]
+# Verifiable programs (attestable SEV-SNP VMs): `aleph vprogram create`.
+# Gated so the CLI's own vprogram command tree can be excluded from stripped-down
+# builds, forwarding to aleph-sdk's `vprogram` feature (which pulls in `sev`).
+vprogram = ["aleph-sdk/vprogram"]
+
 [dependencies]
 aleph-sdk = { workspace = true, features = ["account-evm", "account-sol", "credits", "swap"] }
 alloy-network = { workspace = true }

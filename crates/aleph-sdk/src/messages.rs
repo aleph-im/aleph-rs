@@ -2,12 +2,14 @@ use aleph_types::account::{Account, SignError};
 use aleph_types::chain::{Address, Chain};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::message::execution::base::{
-    Encoding, ExecutableContent, Interface, Payment, PaymentType,
-};
+#[cfg(feature = "vprogram")]
+use aleph_types::message::execution::base::PaymentType;
+use aleph_types::message::execution::base::{Encoding, ExecutableContent, Interface, Payment};
+#[cfg(feature = "vprogram")]
+use aleph_types::message::execution::environment::NodeRequirements;
 use aleph_types::message::execution::environment::{
     FunctionEnvironment, FunctionTriggers, HostRequirements, Hypervisor, InstanceEnvironment,
-    MachineResources, NodeRequirements, PublishedPort, TrustedExecutionEnvironment,
+    MachineResources, PublishedPort, TrustedExecutionEnvironment,
 };
 use aleph_types::message::execution::volume::{
     MachineVolume, ParentVolume, PersistentVolumeSize, RootfsVolume, VolumePersistence,
@@ -15,13 +17,18 @@ use aleph_types::message::execution::volume::{
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
     AggregateContent, AggregateKey, Authorization, CodeContent, DataContent, Export, ForgetContent,
-    FunctionRuntime, InstanceContent, MessageType, PostContent, ProgramContent, TeeVerification,
-    VerifiableProgramContent, VerifiableProgramEnvironment, VerifiableProgramRuntime,
-    VerifiedVolume, VerifiedWorkload,
+    FunctionRuntime, InstanceContent, MessageType, PostContent, ProgramContent,
 };
 use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
+#[cfg(feature = "vprogram")]
+use aleph_types::message::{
+    TeeVerification, VerifiableProgramContent, VerifiableProgramEnvironment,
+    VerifiableProgramRuntime, VerifiedVolume, VerifiedWorkload,
+};
 use memsizes::MiB;
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "vprogram")]
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -804,6 +811,7 @@ impl<'a, A: Account> InstanceBuilder<'a, A> {
     }
 }
 
+#[cfg(feature = "vprogram")]
 pub struct VProgramBuilder<'a, A: Account> {
     account: &'a A,
     owner: Option<Address>,
@@ -825,6 +833,7 @@ pub struct VProgramBuilder<'a, A: Account> {
     channel: Option<Channel>,
 }
 
+#[cfg(feature = "vprogram")]
 impl<'a, A: Account> VProgramBuilder<'a, A> {
     pub fn new(
         account: &'a A,
@@ -1644,6 +1653,7 @@ mod tests {
         assert_on_behalf_of(&msg, "0xOwnerAddress");
     }
 
+    #[cfg(feature = "vprogram")]
     #[test]
     fn vprogram_builder_builds_valid_credit_content() {
         let account = TestAccount::new();
