@@ -10,6 +10,7 @@ mod common;
 mod config;
 mod program;
 mod sevctl;
+#[cfg(feature = "vprogram")]
 mod veritysetup;
 
 #[cfg(unix)]
@@ -196,6 +197,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?
         }
+        #[cfg(feature = "vprogram")]
         cli::Commands::Vprogram {
             command: vprogram_command,
         } => commands::vprogram::dispatch(&aleph_client, &ccn_url, json, vprogram_command).await?,
