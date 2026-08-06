@@ -1,4 +1,6 @@
 pub mod account;
+#[cfg(feature = "admin")]
+pub mod admin;
 pub mod aggregate;
 pub mod authorization;
 pub mod confidential;
