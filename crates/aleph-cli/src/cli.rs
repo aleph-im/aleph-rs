@@ -182,6 +182,7 @@ pub enum Commands {
         command: ProgramCommand,
     },
     /// Manage verifiable programs (attestable SEV-SNP VMs).
+    #[cfg(feature = "vprogram")]
     Vprogram {
         #[command(subcommand)]
         command: VProgramCommand,
@@ -3099,6 +3100,7 @@ pub struct ProgramShowArgs {
     pub item_hash: ItemHash,
 }
 
+#[cfg(feature = "vprogram")]
 #[derive(Debug, Subcommand)]
 pub enum VProgramCommand {
     /// Create and publish a verifiable program from a prebuilt workload image.
@@ -3111,6 +3113,7 @@ pub enum VProgramCommand {
     Create(Box<VProgramCreateArgs>),
 }
 
+#[cfg(feature = "vprogram")]
 #[derive(Debug, Args)]
 pub struct VProgramCreateArgs {
     /// Path to the prebuilt workload ext4 image.
@@ -3157,6 +3160,7 @@ pub struct VProgramCreateArgs {
 /// Clap value parser for `--policy`: accepts a decimal integer or a
 /// `0x`-prefixed hex string (matching how SEV-SNP guest policies are usually
 /// quoted, e.g. `0x30000`).
+#[cfg(feature = "vprogram")]
 pub fn parse_u64_maybe_hex(s: &str) -> Result<u64, String> {
     let parsed = match s.strip_prefix("0x") {
         Some(hex) => u64::from_str_radix(hex, 16),
@@ -4152,7 +4156,7 @@ mod confidential_parser_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vprogram"))]
 mod vprogram_create_args_tests {
     use super::*;
 

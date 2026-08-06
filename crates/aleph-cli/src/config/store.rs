@@ -374,6 +374,7 @@ impl ConfigStore {
     /// bundle artifacts (`ovmf`, `kernel`, `initrd`) are cached, keyed by the
     /// bundle's declared sha256. See
     /// `aleph_sdk::vprogram::bundle::fetch_bundle_artifacts`.
+    #[cfg(feature = "vprogram")]
     pub fn vprogram_bundle_cache_dir() -> Result<std::path::PathBuf, ConfigError> {
         let proj = directories::ProjectDirs::from("", "", "aleph").ok_or_else(|| {
             ConfigError::Io(std::io::Error::new(
