@@ -317,7 +317,7 @@ mod tests {
     /// `report_data` / `measurement` to synthesize the SIGNED report bytes a
     /// test needs. The AMD signature is left untouched (garbage relative to
     /// the mutated fields), which is fine: `verify_server_cert` never checks
-    /// the signature — that happens post-handshake in `verify_sev_snp_report`.
+    /// the signature - that happens post-handshake in `verify_sev_snp_report`.
     const MILAN_REPORT_HEX: &[u8] = include_bytes!("testdata/report_milan.hex");
 
     /// Build valid raw SEV-SNP report bytes (`AttestationReport::data`)
@@ -514,7 +514,7 @@ mod tests {
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
 
-        // Pin to m_expected — which the DTO sibling matches but the SIGNED
+        // Pin to m_expected - which the DTO sibling matches but the SIGNED
         // report does not.
         let verifier = SnpCertVerifier::new(Some(m_expected.to_vec()));
         let result = verifier.verify_server_cert(
