@@ -21,10 +21,9 @@
 //! [`attested_request`] rejects the whole call (`Err`) if, after a
 //! successful handshake, no report was stashed (should be unreachable, but
 //! checked anyway), or if the post-handshake AMD certificate-chain check
-//! ([`verify_sev_snp_report`]) fails. There is no code path that produces an
-//! `Ok(AttestedResponse { attestation_valid: false, .. })`: a bad
-//! attestation is always an `Err`, never a successful response with a false
-//! flag.
+//! ([`verify_sev_snp_report`]) fails. An `Ok(AttestedResponse)` therefore
+//! always means the attestation verified: a bad attestation is an `Err`,
+//! never a successful response.
 
 use std::sync::{Arc, Mutex};
 
@@ -39,18 +38,13 @@ use super::verify::{AmdProduct, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
 
 /// The result of an attested HTTP request: the HTTP response plus the
-/// attestation verification outcome it was gated on.
+/// verified launch measurement the connection was gated on.
 ///
-/// `attestation_valid` is always `true` when this struct is returned:
-/// [`attested_request`] returns `Err` instead of ever constructing one with
-/// a false flag. It is kept as an explicit field (mirroring
-/// [`super::verify::VerificationResult`]) rather than being collapsed away,
-/// so callers have a single, uniform shape to render regardless of which
-/// TEE backend produced the report.
+/// Constructing this type implies the attestation verified:
+/// [`attested_request`] returns `Err` on any attestation failure, so there
+/// is no validity flag to check.
 #[derive(Debug, Clone)]
 pub struct AttestedResponse {
-    /// Always `true`; see the struct-level docs.
-    pub attestation_valid: bool,
     /// Hex-encoded launch measurement from the verified report.
     pub measurement: String,
     /// The HTTP status code of the response.
@@ -227,8 +221,8 @@ fn build_attested_client(verifier: Arc<SnpCertVerifier>) -> Result<reqwest::Clie
 /// `Url::join`'s usual rules).
 ///
 /// Fails closed: if the handshake never stashes a report, or if
-/// `verify_sev_snp_report` errors, this returns `Err` — never
-/// `Ok(AttestedResponse { attestation_valid: false, .. })`.
+/// `verify_sev_snp_report` errors, this returns `Err`; an `Ok` response
+/// always carries a fully verified attestation.
 pub async fn attested_request(
     base_url: &url::Url,
     method: reqwest::Method,
@@ -271,12 +265,11 @@ pub async fn attested_request(
     // rather than trust that invariant silently.
     let report = verifier.get_report().ok_or(AttestError::MissingReport)?;
 
-    // Propagate on failure rather than mapping to `attestation_valid: false`
-    // — an unverifiable report must never look like a successful response.
+    // Propagate on failure rather than degrading to a partial response: an
+    // unverifiable report must never look like a successful response.
     let result = verify_sev_snp_report(&report, product).await?;
 
     Ok(AttestedResponse {
-        attestation_valid: result.valid,
         measurement: result.measurement,
         status,
         headers: response_headers,
@@ -412,7 +405,7 @@ mod tests {
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
 
-        // No measurement pin configured — this must still fail purely on
+        // No measurement pin configured - this must still fail purely on
         // the key-binding check.
         let verifier = SnpCertVerifier::new(None);
         let result = verifier.verify_server_cert(

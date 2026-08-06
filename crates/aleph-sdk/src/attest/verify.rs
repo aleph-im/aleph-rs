@@ -5,12 +5,13 @@
 //! signature check (delegated to the `sev` crate's pure-Rust `crypto_nossl`
 //! backend, no OpenSSL), the VMPL policy check, and the ARK subject-identity
 //! check (both of which `sev` does *not* perform). It does **not** check the
-//! launch measurement or bind `report_data` to a TLS key — those live in the
+//! launch measurement or bind `report_data` to a TLS key - those live in the
 //! RA-TLS handshake (a later task) which has the expected measurement and
 //! public key to compare against.
 //!
 //! Fails closed: any parse, chain, signature, VMPL, or ARK-identity failure
-//! returns `Err`, never a `VerificationResult { valid: true, .. }`.
+//! returns `Err`; an `Ok(VerificationResult)` always means a fully verified
+//! report.
 
 use sev::certs::snp::{Certificate, Chain, Verifiable, builtin, ca};
 use sev::firmware::guest::AttestationReport as SnpReport;
@@ -85,11 +86,6 @@ impl std::str::FromStr for AmdProduct {
 /// chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationResult {
-    /// Always `true` on `Ok` — [`verify_sev_snp_report`] returns `Err` on any
-    /// failure, it never produces a `false` value here. Kept as a field
-    /// (rather than collapsing to `Result<(), _>`) so callers get a uniform
-    /// shape across TEE backends that may report a soft-fail summary.
-    pub valid: bool,
     /// Hex-encoded 48-byte launch measurement from the report.
     pub measurement: String,
     /// Human-readable summary of what was checked.
@@ -119,7 +115,7 @@ pub async fn verify_sev_snp_report(
 ///
 /// Verifies, in order:
 /// 1. The AMD certificate chain (ARK self-signed, ARK signs ASK, ASK signs
-///    VCEK) and the report's ECDSA P-384/SHA-384 signature under the VCEK —
+///    VCEK) and the report's ECDSA P-384/SHA-384 signature under the VCEK -
 ///    all in one `sev` crate call.
 /// 2. VMPL: only 0-1 (firmware/kernel, the trusted measured stack) are
 ///    accepted; `sev` does not enforce this.
@@ -149,7 +145,6 @@ fn verify_report_with_vcek(
     verify_ark_identity(&chain.ca.ark)?;
 
     Ok(VerificationResult {
-        valid: true,
         measurement: hex::encode(report.measurement),
         summary: format!(
             "SEV-SNP verified against AMD {product} chain (VMPL {})",
@@ -167,7 +162,7 @@ fn verify_report_with_vcek(
 ///
 /// This guards against a cache-poisoning or supply-chain attack where an
 /// attacker substitutes a self-signed certificate from a different issuer
-/// for the (supposedly AMD-bundled) ARK — the chain math alone can't catch
+/// for the (supposedly AMD-bundled) ARK - the chain math alone can't catch
 /// that, since a self-signed cert always "verifies" against itself.
 fn verify_ark_identity(ark: &Certificate) -> Result<(), AttestError> {
     let der = ark.to_der().map_err(AttestError::CertDecode)?;
@@ -250,7 +245,6 @@ mod tests {
         let result = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER)
             .expect("verification of a genuine, untampered Milan report must succeed");
 
-        assert!(result.valid);
         // Pinned to the fixture's real launch measurement (also cross-checked
         // against the `sev` crate's own parsed `report.measurement` below),
         // so a regression that silently accepts a *different* measurement
@@ -267,7 +261,7 @@ mod tests {
         let mut report_bytes = milan_report_bytes();
         // Flip a byte inside the signed region (offset 21, within the
         // `policy` field), mirroring the `sev` crate's own
-        // `milan_report_invalid` test — this must break the report's
+        // `milan_report_invalid` test - this must break the report's
         // signature over that region.
         report_bytes[21] ^= 0x80;
         let report = SnpReport::from_bytes(&report_bytes)
@@ -276,7 +270,7 @@ mod tests {
         let result = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER);
         assert!(
             result.is_err(),
-            "a tampered report must fail closed, never report valid:true"
+            "a tampered report must fail closed, never verify successfully"
         );
     }
 }
