@@ -10,6 +10,7 @@ mod common;
 mod config;
 mod program;
 mod sevctl;
+#[cfg(feature = "vprogram")]
 mod veritysetup;
 
 #[cfg(unix)]
