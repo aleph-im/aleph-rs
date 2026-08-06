@@ -19,6 +19,7 @@ pub mod ssh;
 pub mod swap;
 pub mod upload_timeout;
 pub mod verify;
+pub mod vprogram;
 pub mod ws;
 
 // CID computation (hashing, UnixFS folder DAGs, CARv1 framing) lives in the
