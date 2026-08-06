@@ -370,6 +370,20 @@ impl ConfigStore {
         Ok(proj.config_dir().join("confidential_sessions"))
     }
 
+    /// Returns the per-user directory where extracted V-Program runtime
+    /// bundle artifacts (`ovmf`, `kernel`, `initrd`) are cached, keyed by the
+    /// bundle's declared sha256. See
+    /// `aleph_sdk::vprogram::bundle::fetch_bundle_artifacts`.
+    pub fn vprogram_bundle_cache_dir() -> Result<std::path::PathBuf, ConfigError> {
+        let proj = directories::ProjectDirs::from("", "", "aleph").ok_or_else(|| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not determine home directory",
+            ))
+        })?;
+        Ok(proj.config_dir().join("vprogram").join("bundles"))
+    }
+
     fn ensure_builtin(&self) -> Result<(), ConfigError> {
         let mut manifest = self.load_manifest()?;
         if !manifest.networks.is_empty() {

@@ -2,10 +2,12 @@ use aleph_types::account::{Account, SignError};
 use aleph_types::chain::{Address, Chain};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::message::execution::base::{Encoding, ExecutableContent, Interface, Payment};
+use aleph_types::message::execution::base::{
+    Encoding, ExecutableContent, Interface, Payment, PaymentType,
+};
 use aleph_types::message::execution::environment::{
     FunctionEnvironment, FunctionTriggers, HostRequirements, Hypervisor, InstanceEnvironment,
-    MachineResources, PublishedPort, TrustedExecutionEnvironment,
+    MachineResources, NodeRequirements, PublishedPort, TrustedExecutionEnvironment,
 };
 use aleph_types::message::execution::volume::{
     MachineVolume, ParentVolume, PersistentVolumeSize, RootfsVolume, VolumePersistence,
@@ -13,11 +15,13 @@ use aleph_types::message::execution::volume::{
 use aleph_types::message::pending::PendingMessage;
 use aleph_types::message::{
     AggregateContent, AggregateKey, Authorization, CodeContent, DataContent, Export, ForgetContent,
-    FunctionRuntime, InstanceContent, MessageType, PostContent, ProgramContent,
+    FunctionRuntime, InstanceContent, MessageType, PostContent, ProgramContent, TeeVerification,
+    VerifiableProgramContent, VerifiableProgramEnvironment, VerifiableProgramRuntime,
+    VerifiedVolume, VerifiedWorkload,
 };
 use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
 use memsizes::MiB;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -800,6 +804,146 @@ impl<'a, A: Account> InstanceBuilder<'a, A> {
     }
 }
 
+pub struct VProgramBuilder<'a, A: Account> {
+    account: &'a A,
+    owner: Option<Address>,
+    // The measured platform
+    runtime: ItemHash,
+    // The user's verity-bound workload volume
+    workload: VerifiedWorkload,
+    // TEE launch config and expected launch measurements
+    verification: TeeVerification,
+    // Extra verity-bound volumes
+    volumes: Vec<VerifiedVolume>,
+    // Environment
+    internet: bool,
+    // Resources
+    vcpus: u32,
+    memory: MiB,
+    // Placement
+    node_hash: Option<String>,
+    channel: Option<Channel>,
+}
+
+impl<'a, A: Account> VProgramBuilder<'a, A> {
+    pub fn new(
+        account: &'a A,
+        runtime: ItemHash,
+        workload: VerifiedWorkload,
+        verification: TeeVerification,
+    ) -> Self {
+        Self {
+            account,
+            owner: None,
+            runtime,
+            workload,
+            verification,
+            volumes: vec![],
+            internet: true,
+            vcpus: 1,
+            memory: MiB::from(2048),
+            node_hash: None,
+            channel: None,
+        }
+    }
+
+    pub fn vcpus(mut self, vcpus: u32) -> Self {
+        self.vcpus = vcpus;
+        self
+    }
+
+    pub fn memory(mut self, memory: MiB) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    pub fn internet(mut self, internet: bool) -> Self {
+        self.internet = internet;
+        self
+    }
+
+    pub fn volumes(mut self, volumes: Vec<VerifiedVolume>) -> Self {
+        self.volumes = volumes;
+        self
+    }
+
+    pub fn node_hash(mut self, node_hash: String) -> Self {
+        self.node_hash = Some(node_hash);
+        self
+    }
+
+    pub fn channel(mut self, channel: Channel) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    pub fn on_behalf_of(mut self, owner: Address) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+
+    pub fn build(self) -> Result<PendingMessage, MessageBuildError> {
+        let requirements = self.node_hash.map(|node_hash| HostRequirements {
+            cpu: None,
+            gpu: None,
+            node: Some(NodeRequirements {
+                node_hash: Some(node_hash),
+                owner: None,
+                address_regex: None,
+                terms_and_conditions: None,
+            }),
+        });
+        let content = VerifiableProgramContent {
+            base: ExecutableContent {
+                allow_amend: false,
+                metadata: None,
+                variables: None,
+                resources: MachineResources {
+                    vcpus: self.vcpus,
+                    memory: self.memory,
+                    // Per-invocation duration inherited from the shared
+                    // resources shape; meaningless for a persistent VM. 30
+                    // matches the cross-SDK V-Program fixture.
+                    seconds: 30,
+                    published_ports: None,
+                },
+                payment: Some(Payment {
+                    chain: None,
+                    receiver: None,
+                    payment_type: PaymentType::Credit,
+                }),
+                requirements,
+                volumes: vec![],
+                replaces: None,
+                authorized_keys: None,
+            },
+            environment: VerifiableProgramEnvironment {
+                internet: self.internet,
+            },
+            runtime: VerifiableProgramRuntime {
+                reference: self.runtime,
+                comment: String::new(),
+            },
+            workload: self.workload,
+            verification: self.verification,
+            volumes: self.volumes,
+        };
+        let value = serde_json::to_value(&content)?;
+        // Struct-literal construction bypasses the parse-time validators; a serde
+        // round-trip re-applies them so an invalid combination fails here, not at
+        // the CCN. Deserializing from &value avoids cloning the whole tree.
+        VerifiableProgramContent::deserialize(&value)?;
+        let mut builder = MessageBuilder::new(self.account, MessageType::VProgram, value);
+        if let Some(owner) = self.owner {
+            builder = builder.on_behalf_of(owner);
+        }
+        if let Some(channel) = self.channel {
+            builder = builder.channel(channel);
+        }
+        Ok(builder.build()?)
+    }
+}
+
 pub struct AuthorizationBuilder {
     address: Address,
     chain: Option<Chain>,
@@ -1498,5 +1642,36 @@ mod tests {
             .build()
             .unwrap();
         assert_on_behalf_of(&msg, "0xOwnerAddress");
+    }
+
+    #[test]
+    fn vprogram_builder_builds_valid_credit_content() {
+        let account = TestAccount::new();
+        let workload = serde_json::from_value::<VerifiedWorkload>(serde_json::json!({
+            "ref": "beef".repeat(16), "hash_tree": "feed".repeat(16), "roothash": "cd".repeat(32),
+        }))
+        .unwrap();
+        let verification = serde_json::from_value::<TeeVerification>(serde_json::json!({
+            "backend": "sev_snp",
+            "measurements": [{"platform": "sev_snp", "digest": "ab".repeat(48)}],
+        }))
+        .unwrap();
+        let pending = VProgramBuilder::new(
+            &account,
+            "cafe".repeat(16).parse().unwrap(),
+            workload,
+            verification,
+        )
+        .vcpus(2)
+        .build()
+        .unwrap();
+        assert_eq!(pending.message_type, MessageType::VProgram);
+        let content: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        assert_eq!(content["payment"]["type"], "credit");
+        assert_eq!(content["environment"]["internet"], true); // CLI default: on
+        assert_eq!(content["resources"]["vcpus"], 2);
+        assert_eq!(content["allow_amend"], false);
+        // exactly one volumes key, and it is the verified-volume list
+        assert_eq!(pending.item_content.matches("\"volumes\"").count(), 1);
     }
 }
