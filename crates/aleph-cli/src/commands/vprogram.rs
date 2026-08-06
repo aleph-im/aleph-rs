@@ -679,8 +679,9 @@ pub(crate) fn render_call_result(
         let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
             serde_json::Value::String(String::from_utf8_lossy(&response.body).into_owned())
         });
+        // No validity flag: `attested_request` only ever returns a response
+        // whose attestation verified, so the measurement is the evidence.
         let out = serde_json::json!({
-            "attestation_valid": response.attestation_valid,
             "measurement": response.measurement,
             "status": response.status,
             "body": body,
@@ -992,7 +993,6 @@ mod call_tests {
 
     fn dummy_response(measurement: &str, body: &[u8]) -> AttestedResponse {
         AttestedResponse {
-            attestation_valid: true,
             measurement: measurement.to_string(),
             status: 200,
             headers: vec![],
@@ -1007,7 +1007,10 @@ mod call_tests {
         let out = render_call_result(&response, true);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
-        assert_eq!(v["attestation_valid"], serde_json::json!(true));
+        assert!(
+            v.get("attestation_valid").is_none(),
+            "no redundant always-true validity flag in call output"
+        );
         assert_eq!(v["measurement"], serde_json::json!("ab".repeat(48)));
         assert_eq!(v["status"], serde_json::json!(200));
         assert_eq!(v["body"]["fib"], serde_json::json!(55));
