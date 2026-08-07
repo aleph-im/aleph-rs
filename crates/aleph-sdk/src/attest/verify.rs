@@ -98,7 +98,7 @@ pub struct VerificationResult {
 /// Steps:
 /// 1. Parse `dto.data` (the raw `SNP_GET_REPORT` bytes) as a SEV-SNP report.
 /// 2. Fetch the VCEK certificate from AMD's KDS for this report's chip/TCB.
-/// 3. Delegate to [`verify_report_with_vcek`] for the actual chain +
+/// 3. Delegate to `verify_report_with_vcek` for the actual chain +
 ///    signature + policy checks.
 pub async fn verify_sev_snp_report(
     dto: &AttestationReport,

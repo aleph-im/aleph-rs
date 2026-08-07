@@ -13,7 +13,7 @@
 //!
 //! # Fail-closed
 //!
-//! [`SnpCertVerifier::verify_server_cert`] rejects the handshake (`Err`) if:
+//! `SnpCertVerifier::verify_server_cert` rejects the handshake (`Err`) if:
 //! - the certificate has no attestation extension,
 //! - the key-binding check fails (`report_data != SHA-384(pubkey) || zeros`),
 //! - an `expected_measurement` was given and doesn't match.
