@@ -3111,6 +3111,14 @@ pub enum VProgramCommand {
     /// measurements from the runtime bundle, and publishes the V-PROGRAM
     /// message. Payment is always credit; the network scheduler starts the VM.
     Create(Box<VProgramCreateArgs>),
+    /// Show a published V-PROGRAM message plus its CRN's live status.
+    ///
+    /// Fetches the message (pinned measurements, runtime/workload refs) and,
+    /// when the scheduler has placed the VM, its live networking (mapped
+    /// ports, host IPv4) and the attested (RA-TLS) endpoint. When the VM
+    /// hasn't been placed yet or the CRN is unreachable, only the
+    /// message-side fields are shown.
+    Show(VProgramShowArgs),
 }
 
 #[cfg(feature = "vprogram")]
@@ -3155,6 +3163,13 @@ pub struct VProgramCreateArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Args)]
+pub struct VProgramShowArgs {
+    /// Item hash of the V-PROGRAM message to inspect.
+    pub item_hash: ItemHash,
 }
 
 /// Clap value parser for `--policy`: accepts a decimal integer or a
@@ -4216,5 +4231,18 @@ mod vprogram_create_args_tests {
         assert_eq!(args.volumes.len(), 2);
         assert!(args.no_internet);
         assert_eq!(args.crn_hash.unwrap().to_string(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn vprogram_show_parses_item_hash() {
+        let hash = "cafe".repeat(16);
+        let cli = Cli::try_parse_from(["aleph", "vprogram", "show", &hash]).unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Show(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.item_hash.to_string(), hash);
     }
 }
