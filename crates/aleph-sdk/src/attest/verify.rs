@@ -18,8 +18,8 @@ use sev::firmware::guest::AttestationReport as SnpReport;
 use sev::parser::ByteParser;
 
 use super::AttestError;
-use super::AttestationReport;
 use super::certs;
+use super::{AttestationReport, TeeType};
 
 /// AMD ARK certificates use CN = "ARK-{product}" (e.g. "ARK-Milan").
 const AMD_ARK_CN_PREFIX: &str = "ARK-";
@@ -104,6 +104,9 @@ pub async fn verify_sev_snp_report(
     dto: &AttestationReport,
     product: AmdProduct,
 ) -> Result<VerificationResult, AttestError> {
+    if dto.tee_type != TeeType::SevSnp {
+        return Err(AttestError::UnsupportedTeeType(dto.tee_type));
+    }
     let report = SnpReport::from_bytes(&dto.data).map_err(AttestError::Parse)?;
     let vcek_der = certs::fetch_vcek(product, &report.chip_id, &report.reported_tcb).await?;
     verify_report_with_vcek(&report, product, &vcek_der)
@@ -221,6 +224,24 @@ mod tests {
             .expect("fixture is ASCII hex")
             .trim();
         hex::decode(hex_str).expect("fixture is valid hex")
+    }
+
+    #[tokio::test]
+    async fn rejects_a_dto_declaring_a_non_sev_snp_tee_type() {
+        let dto = AttestationReport {
+            tee_type: TeeType::Tdx,
+            data: milan_report_bytes(),
+            report_data: [0u8; 64],
+            measurement: vec![0u8; 48],
+        };
+
+        let err = verify_sev_snp_report(&dto, AmdProduct::Milan)
+            .await
+            .expect_err("a non-SEV-SNP tee_type must be rejected before parsing");
+        assert!(
+            matches!(err, AttestError::UnsupportedTeeType(TeeType::Tdx)),
+            "expected UnsupportedTeeType, got: {err:?}"
+        );
     }
 
     #[test]
