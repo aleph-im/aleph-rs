@@ -244,6 +244,82 @@ mod tests {
         );
     }
 
+    /// Build a `sev` [`Certificate`] with the given subject CN and O,
+    /// either self-signed or signed by an unrelated issuer, to probe
+    /// `verify_ark_identity`'s rejection branches.
+    fn ark_like_cert(cn: &str, org: &str, self_issued: bool) -> Certificate {
+        use rcgen::DnType;
+
+        let key = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let mut params =
+            rcgen::CertificateParams::new(vec![]).expect("CertificateParams should be valid");
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, cn);
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, org);
+
+        let der = if self_issued {
+            params
+                .self_signed(&key)
+                .expect("self-signing should succeed")
+                .der()
+                .to_vec()
+        } else {
+            let issuer_key = rcgen::KeyPair::generate().expect("issuer key generation");
+            let mut issuer_params = rcgen::CertificateParams::new(vec![])
+                .expect("issuer CertificateParams should be valid");
+            issuer_params.distinguished_name = rcgen::DistinguishedName::new();
+            issuer_params
+                .distinguished_name
+                .push(DnType::CommonName, "Definitely Not AMD");
+            let issuer = rcgen::Issuer::new(issuer_params, issuer_key);
+            params
+                .signed_by(&key, &issuer)
+                .expect("cross-signing should succeed")
+                .der()
+                .to_vec()
+        };
+        Certificate::from_der(&der).expect("generated cert should decode as a sev Certificate")
+    }
+
+    fn ark_identity_error(cert: &Certificate) -> String {
+        match verify_ark_identity(cert) {
+            Err(AttestError::ArkIdentity(msg)) => msg,
+            other => panic!("expected ArkIdentity error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ark_identity_accepts_the_builtin_milan_ark() {
+        let ark = builtin::milan::ark().expect("builtin ARK should decode");
+        verify_ark_identity(&ark).expect("the genuine builtin ARK must pass");
+    }
+
+    #[test]
+    fn ark_identity_rejects_wrong_cn_prefix() {
+        let cert = ark_like_cert("NOT-Milan", AMD_ORG_NAME, true);
+        let msg = ark_identity_error(&cert);
+        assert!(
+            msg.contains("does not start with expected prefix"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn ark_identity_rejects_wrong_organization() {
+        let cert = ark_like_cert("ARK-Milan", "Evil Corp", true);
+        let msg = ark_identity_error(&cert);
+        assert!(msg.contains("Organization"), "unexpected message: {msg}");
+    }
+
+    #[test]
+    fn ark_identity_rejects_a_cert_that_is_not_self_issued() {
+        let cert = ark_like_cert("ARK-Milan", AMD_ORG_NAME, false);
+        let msg = ark_identity_error(&cert);
+        assert!(msg.contains("not self-issued"), "unexpected message: {msg}");
+    }
+
     #[test]
     fn amd_product_from_str_is_case_insensitive_and_rejects_unknown() {
         assert_eq!("milan".parse(), Ok(AmdProduct::Milan));
