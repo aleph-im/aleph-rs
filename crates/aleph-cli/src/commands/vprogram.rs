@@ -45,7 +45,9 @@ pub async fn dispatch(
     cmd: VProgramCommand,
 ) -> Result<()> {
     match cmd {
-        VProgramCommand::Create(args) => handle_create(aleph_client, ccn_url, json, *args).await,
+        VProgramCommand::Create(args) => {
+            handle_create(aleph_client, ccn_url, network_override, json, *args).await
+        }
         VProgramCommand::Show(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             handle_show(aleph_client, scheduler_url, json, args).await
@@ -59,6 +61,7 @@ pub async fn dispatch(
 async fn handle_create(
     aleph_client: &AlephClient,
     ccn_url: &Url,
+    network_override: Option<&str>,
     json: bool,
     args: VProgramCreateArgs,
 ) -> Result<()> {
@@ -172,6 +175,7 @@ async fn handle_create(
         )?);
     }
 
+    let wait = args.wait;
     let mut builder = VProgramBuilder::new(&account, args.runtime, workload, verification)
         .vcpus(args.vcpus)
         .memory(MiB::from(u64::from(args.memory)))
@@ -184,8 +188,72 @@ async fn handle_create(
         builder = builder.channel(Channel::from(channel));
     }
     let pending = builder.build()?;
+    let vm_id = pending.item_hash.clone();
 
-    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await?;
+
+    // The scheduler auto-dispatches V-Programs same as instances, so creation
+    // does not notify a CRN; with --wait we only poll until it is reachable.
+    // Skip on --dry-run (nothing was submitted).
+    if let Some(secs) = wait
+        && !dry_run
+    {
+        let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+        let wait_timeout = std::time::Duration::from_secs(secs);
+        match crate::commands::instance_wait::wait_until_ready(&scheduler_url, &vm_id, wait_timeout)
+            .await?
+        {
+            crate::commands::instance_wait::WaitOutcome::Ready(_) => {
+                let scheduler = SchedulerClient::new(scheduler_url);
+                let net = fetch_live_networking(&scheduler, &vm_id).await;
+                let attested_endpoint = net
+                    .as_ref()
+                    .and_then(|n| resolve_attested_endpoint(n, ATTEST_PORT));
+                report_create_ready(&vm_id, attested_endpoint.as_ref(), json);
+            }
+            crate::commands::instance_wait::WaitOutcome::Timeout => {
+                report_create_timeout(&vm_id, json);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Report a successful `--wait` to the user: the V-Program is reachable and
+/// (usually) its attestation port is mapped. Human output goes to stderr,
+/// mirroring `instance create --wait`'s `report_ready`; `--json` merges the
+/// endpoint into a small JSON object instead.
+fn report_create_ready(vm_id: &ItemHash, attested_endpoint: Option<&Url>, json: bool) {
+    if json {
+        let payload = serde_json::json!({
+            "ready": true,
+            "attested_endpoint": attested_endpoint.map(|u| u.to_string()),
+        });
+        println!("{payload}");
+    } else {
+        eprintln!("V-Program ready.");
+        match attested_endpoint {
+            Some(url) => eprintln!("  Attested endpoint: {url}"),
+            None => eprintln!(
+                "  warning: attestation port ({ATTEST_PORT}) not yet mapped by the CRN; \
+                 check with `aleph vprogram show {vm_id}`"
+            ),
+        }
+    }
+}
+
+/// Report a `--wait` timeout: the create itself succeeded, this only says the
+/// V-Program is not reachable yet.
+fn report_create_timeout(vm_id: &ItemHash, json: bool) {
+    if json {
+        let payload = serde_json::json!({
+            "ready": false,
+            "attested_endpoint": serde_json::Value::Null,
+        });
+        println!("{payload}");
+    } else {
+        eprintln!("warning: V-Program not reachable yet; check with `aleph vprogram show {vm_id}`");
+    }
 }
 
 /// A verity-formatted data image: the original image path, the generated
