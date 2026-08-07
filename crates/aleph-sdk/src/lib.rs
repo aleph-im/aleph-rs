@@ -1,4 +1,6 @@
 pub mod aggregate_models;
+#[cfg(feature = "vprogram")]
+pub mod attest;
 pub mod authorization;
 pub mod builder;
 pub mod caching_aggregate_client;
