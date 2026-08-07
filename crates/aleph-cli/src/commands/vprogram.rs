@@ -37,6 +37,9 @@ use crate::veritysetup::Veritysetup;
 /// manifest instead of hardcoding it here.
 const ATTEST_PORT: u16 = 8443;
 
+/// A SEV-SNP launch measurement is a SHA-384 digest: 48 bytes, 96 hex chars.
+const SEV_SNP_MEASUREMENT_BYTES: usize = 48;
+
 pub async fn dispatch(
     aleph_client: &AlephClient,
     ccn_url: &Url,
@@ -689,6 +692,18 @@ pub(crate) fn resolve_expected_measurement(
     if let Some(hex_str) = override_hex {
         let bytes = hex::decode(hex_str)
             .with_context(|| format!("--expected-measurement is not valid hex: {hex_str:?}"))?;
+        // A SEV-SNP launch measurement is a 48-byte SHA-384 digest; anything
+        // else can never match a real report, so fail here with a clear
+        // message instead of a cryptic measurement mismatch at call time.
+        if bytes.len() != SEV_SNP_MEASUREMENT_BYTES {
+            bail!(
+                "--expected-measurement must be {} hex characters (a {}-byte SEV-SNP launch \
+                 measurement), got {}",
+                SEV_SNP_MEASUREMENT_BYTES * 2,
+                SEV_SNP_MEASUREMENT_BYTES,
+                hex_str.len()
+            );
+        }
         return Ok(MeasurementExpectation::Pin(bytes));
     }
 
@@ -983,6 +998,26 @@ mod call_tests {
             "vcpu_type": vcpu_type,
         });
         serde_json::from_value(json).expect("valid measurement fixture")
+    }
+
+    #[test]
+    fn resolve_expected_measurement_rejects_wrong_length_override() {
+        let err = resolve_expected_measurement(&[], Some("ab"))
+            .expect_err("a 1-byte override must be rejected");
+        assert!(
+            err.to_string().contains("96 hex characters"),
+            "error should state the expected length, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_expected_measurement_accepts_a_full_length_override() {
+        let digest = "cd".repeat(48);
+        let expected = resolve_expected_measurement(&[], Some(&digest)).unwrap();
+        assert_eq!(
+            expected,
+            MeasurementExpectation::Pin(hex::decode(&digest).unwrap())
+        );
     }
 
     #[test]
