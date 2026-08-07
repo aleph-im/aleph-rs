@@ -832,21 +832,40 @@ async fn handle_call(
     .await
     .map_err(|e| anyhow!("attestation failed: {e}"))?;
 
-    // For the multi-model fleet case, the handshake pinned nothing (it
-    // couldn't know which model the guest would present); check the
-    // now-verified measurement against the on-chain set before trusting the
-    // response. The report chain, signature, and key binding are already
-    // fully verified at this point (`attested_request` fails closed on all
-    // of that) - only this pin-membership check is deferred.
-    if let MeasurementExpectation::MemberOf(set) = &expected {
-        let got = hex::decode(&response.measurement)
-            .context("attested_request returned a non-hex measurement")?;
-        if !set.iter().any(|m| m == &got) {
-            bail!(
-                "measurement mismatch: guest presented {} which matches none of the \
-                 measurements pinned on the V-Program message",
-                response.measurement
-            );
+    // Post-handshake measurement checks against the now-verified (SIGNED)
+    // measurement `attested_request` returns. The report chain, signature,
+    // and key binding are already fully verified at this point
+    // (`attested_request` fails closed on all of that).
+    match &expected {
+        // Multi-model fleet: the handshake pinned nothing (it couldn't know
+        // which model the guest would present), so the membership check is
+        // deferred to here.
+        MeasurementExpectation::MemberOf(set) => {
+            let got = hex::decode(&response.measurement)
+                .context("attested_request returned a non-hex measurement")?;
+            if !set.iter().any(|m| m == &got) {
+                bail!(
+                    "measurement mismatch: guest presented {} which matches none of the \
+                     measurements pinned on the V-Program message",
+                    response.measurement
+                );
+            }
+        }
+        // Single pin: already enforced at the handshake against the SIGNED
+        // measurement (see `SnpCertVerifier::verify_server_cert`). This is a
+        // belt-and-suspenders re-check on the verified value, mirroring the
+        // `MemberOf` post-check above, so the trust decision never rests on a
+        // single site.
+        MeasurementExpectation::Pin(pin) => {
+            let got = hex::decode(&response.measurement)
+                .context("attested_request returned a non-hex measurement")?;
+            if &got != pin {
+                bail!(
+                    "measurement mismatch: guest presented {} which does not match the \
+                     pinned launch measurement",
+                    response.measurement
+                );
+            }
         }
     }
 
