@@ -275,6 +275,20 @@ pub async fn attested_request(
 
     let response = request.send().await.map_err(AttestError::Http)?;
 
+    // Verify the attestation BEFORE reading the response body: the handshake
+    // already enforced key binding and the measurement pin, but the AMD
+    // chain check below is post-handshake, and body bytes from a peer whose
+    // chain does not verify should never enter this process's memory.
+    //
+    // Fail closed: a successful handshake against `SnpCertVerifier` always
+    // stashes a report (it errors the handshake otherwise), but check again
+    // rather than trust that invariant silently.
+    let report = verifier.get_report().ok_or(AttestError::MissingReport)?;
+
+    // Propagate on failure rather than degrading to a partial response: an
+    // unverifiable report must never look like a successful response.
+    let result = verify_sev_snp_report(&report, product).await?;
+
     let status = response.status().as_u16();
     let response_headers = response
         .headers()
@@ -287,15 +301,6 @@ pub async fn attested_request(
         })
         .collect();
     let body = response.bytes().await.map_err(AttestError::Http)?;
-
-    // Fail closed: a successful handshake against `SnpCertVerifier` always
-    // stashes a report (it errors the handshake otherwise), but check again
-    // rather than trust that invariant silently.
-    let report = verifier.get_report().ok_or(AttestError::MissingReport)?;
-
-    // Propagate on failure rather than degrading to a partial response: an
-    // unverifiable report must never look like a successful response.
-    let result = verify_sev_snp_report(&report, product).await?;
 
     Ok(AttestedResponse {
         measurement: result.measurement,
