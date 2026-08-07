@@ -228,11 +228,7 @@ async fn handle_create(
 /// endpoint into a small JSON object instead.
 fn report_create_ready(vm_id: &ItemHash, attested_endpoint: Option<&Url>, json: bool) {
     if json {
-        let payload = serde_json::json!({
-            "ready": true,
-            "attested_endpoint": attested_endpoint.map(|u| u.to_string()),
-        });
-        println!("{payload}");
+        println!("{}", create_ready_payload(attested_endpoint));
     } else {
         eprintln!("V-Program ready.");
         match attested_endpoint {
@@ -249,14 +245,29 @@ fn report_create_ready(vm_id: &ItemHash, attested_endpoint: Option<&Url>, json: 
 /// V-Program is not reachable yet.
 fn report_create_timeout(vm_id: &ItemHash, json: bool) {
     if json {
-        let payload = serde_json::json!({
-            "ready": false,
-            "attested_endpoint": serde_json::Value::Null,
-        });
-        println!("{payload}");
+        println!("{}", create_timeout_payload());
     } else {
         eprintln!("warning: V-Program not reachable yet; check with `aleph vprogram show {vm_id}`");
     }
+}
+
+/// The `--json` payload for a successful `--wait`. Pure so the output shape
+/// (`ready` + `attested_endpoint`), which `--json` consumers rely on, stays
+/// unit-tested.
+fn create_ready_payload(attested_endpoint: Option<&Url>) -> serde_json::Value {
+    serde_json::json!({
+        "ready": true,
+        "attested_endpoint": attested_endpoint.map(|u| u.to_string()),
+    })
+}
+
+/// The `--json` payload for a `--wait` timeout; same shape as
+/// [`create_ready_payload`] so consumers can parse both uniformly.
+fn create_timeout_payload() -> serde_json::Value {
+    serde_json::json!({
+        "ready": false,
+        "attested_endpoint": serde_json::Value::Null,
+    })
 }
 
 /// A verity-formatted data image: the original image path, the generated
@@ -887,6 +898,42 @@ async fn handle_call(
     let out = render_call_result(&response, json);
     println!("{out}");
     Ok(())
+}
+
+#[cfg(test)]
+mod wait_report_tests {
+    use super::*;
+
+    #[test]
+    fn create_ready_payload_includes_endpoint_when_resolved() {
+        let url = Url::parse("https://203.0.113.5:24101/").unwrap();
+        let v = create_ready_payload(Some(&url));
+
+        assert_eq!(v["ready"], serde_json::json!(true));
+        assert_eq!(
+            v["attested_endpoint"],
+            serde_json::json!("https://203.0.113.5:24101/")
+        );
+    }
+
+    #[test]
+    fn create_ready_payload_has_explicit_null_endpoint_when_unmapped() {
+        let v = create_ready_payload(None);
+
+        assert_eq!(v["ready"], serde_json::json!(true));
+        assert!(v["attested_endpoint"].is_null());
+        // The key must be present (not absent) so consumers can rely on it.
+        assert!(v.as_object().unwrap().contains_key("attested_endpoint"));
+    }
+
+    #[test]
+    fn create_timeout_payload_mirrors_the_ready_shape() {
+        let v = create_timeout_payload();
+
+        assert_eq!(v["ready"], serde_json::json!(false));
+        assert!(v["attested_endpoint"].is_null());
+        assert!(v.as_object().unwrap().contains_key("attested_endpoint"));
+    }
 }
 
 #[cfg(test)]
