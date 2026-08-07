@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use aleph_sdk::attest::attested_request;
 use aleph_sdk::client::{
     AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus, hash_file,
 };
@@ -16,17 +17,17 @@ use aleph_sdk::vprogram::measure::compute_measurements;
 use aleph_sdk::vprogram::status::resolve_attested_endpoint;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::message::execution::environment::validate_snp_policy;
+use aleph_types::message::execution::environment::{LaunchMeasurement, validate_snp_policy};
 use aleph_types::message::{
     MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType, StorageEngine, TeeVerification,
     VerifiableProgramContent, VerifiedVolume, VerifiedWorkload,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use memsizes::MiB;
 use url::Url;
 
 use crate::account::CliAccount;
-use crate::cli::{VProgramCommand, VProgramCreateArgs, VProgramShowArgs};
+use crate::cli::{VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramShowArgs};
 use crate::common::{render_upload_progress, resolve_account, submit_or_preview};
 use crate::config::store::ConfigStore;
 use crate::veritysetup::Veritysetup;
@@ -48,6 +49,9 @@ pub async fn dispatch(
         VProgramCommand::Show(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             handle_show(aleph_client, scheduler_url, json, args).await
+        }
+        VProgramCommand::Call(args) => {
+            handle_call(aleph_client, network_override, json, *args).await
         }
     }
 }
@@ -579,6 +583,210 @@ async fn handle_show(
     Ok(())
 }
 
+// ---------------------------------------------------------------------
+// `aleph vprogram call <hash> <path>`
+// ---------------------------------------------------------------------
+
+/// The expected launch measurement(s) an attested call must match, resolved
+/// by [`resolve_expected_measurement`].
+///
+/// - `Pin`: a single digest, known before the TLS handshake. Passed straight
+///   into `attested_request`'s `expected_measurement`, so a mismatch fails
+///   the handshake itself.
+/// - `MemberOf`: more than one digest is pinned on the message (a
+///   mixed-CPU-model fleet where different nodes measure differently).
+///   Nothing can be pinned at handshake time since it isn't known in advance
+///   which one the guest will present, so the handshake pins nothing and the
+///   caller must check the verified measurement against this set
+///   *after* `attested_request` returns - before trusting the response body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MeasurementExpectation {
+    Pin(Vec<u8>),
+    MemberOf(Vec<Vec<u8>>),
+}
+
+/// Resolve which measurement(s) an attested call must match, per the
+/// security invariant: the call is only trusted if the verified report's
+/// measurement is among the ones pinned on-chain (or the explicit
+/// `--expected-measurement` override).
+///
+/// Pure and I/O-free so it's directly unit-testable. `measurements` should
+/// be `content.verification.measurements` restricted to whatever platform
+/// the caller is targeting (currently always `sev_snp`, the only platform
+/// V-PROGRAM messages carry).
+pub(crate) fn resolve_expected_measurement(
+    measurements: &[LaunchMeasurement],
+    override_hex: Option<&str>,
+) -> Result<MeasurementExpectation> {
+    if let Some(hex_str) = override_hex {
+        let bytes = hex::decode(hex_str)
+            .with_context(|| format!("--expected-measurement is not valid hex: {hex_str:?}"))?;
+        return Ok(MeasurementExpectation::Pin(bytes));
+    }
+
+    match measurements.len() {
+        0 => bail!(
+            "V-Program message pins no launch measurements; cannot verify attestation without \
+             --expected-measurement"
+        ),
+        1 => {
+            let bytes = hex::decode(&measurements[0].digest).with_context(|| {
+                format!(
+                    "message measurement digest is not valid hex: {:?}",
+                    measurements[0].digest
+                )
+            })?;
+            Ok(MeasurementExpectation::Pin(bytes))
+        }
+        _ => {
+            let mut digests = Vec::with_capacity(measurements.len());
+            for m in measurements {
+                let bytes = hex::decode(&m.digest).with_context(|| {
+                    format!(
+                        "message measurement digest is not valid hex: {:?}",
+                        m.digest
+                    )
+                })?;
+                digests.push(bytes);
+            }
+            Ok(MeasurementExpectation::MemberOf(digests))
+        }
+    }
+}
+
+/// Parse a curl-style `-H "Key: Value"` header into `(name, value)`. Accepts
+/// both `"Key: Value"` and `"Key:Value"` (splits on the first colon, trims
+/// surrounding whitespace off both sides).
+pub(crate) fn parse_header(raw: &str) -> Result<(String, String)> {
+    let (name, value) = raw
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid header {raw:?}: expected \"Key: Value\""))?;
+    let name = name.trim();
+    let value = value.trim();
+    if name.is_empty() {
+        bail!("invalid header {raw:?}: header name is empty");
+    }
+    Ok((name.to_string(), value.to_string()))
+}
+
+/// Render an [`aleph_sdk::attest::AttestedResponse`] for `call`'s output.
+/// Pure (no I/O), so it's unit-testable without a network or TLS server.
+pub(crate) fn render_call_result(
+    response: &aleph_sdk::attest::AttestedResponse,
+    json: bool,
+) -> String {
+    if json {
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(&response.body).into_owned())
+        });
+        // No validity flag: `attested_request` only ever returns a response
+        // whose attestation verified, so the measurement is the evidence.
+        let out = serde_json::json!({
+            "measurement": response.measurement,
+            "status": response.status,
+            "body": body,
+        });
+        serde_json::to_string_pretty(&out).expect("call result always serializes")
+    } else {
+        format!(
+            "HTTP {}\n{}",
+            response.status,
+            String::from_utf8_lossy(&response.body)
+        )
+    }
+}
+
+async fn handle_call(
+    aleph_client: &AlephClient,
+    network_override: Option<&str>,
+    json: bool,
+    args: VProgramCallArgs,
+) -> Result<()> {
+    let message = fetch_vprogram_message(aleph_client, &args.item_hash).await?;
+    let MessageContentEnum::VProgram(content) = message.content() else {
+        bail!(
+            "item {} is not a V-PROGRAM message (got {:?})",
+            args.item_hash,
+            message.message_type
+        );
+    };
+
+    let expected = resolve_expected_measurement(
+        &content.verification.measurements,
+        args.expected_measurement.as_deref(),
+    )?;
+
+    let base_url = match &args.url {
+        Some(url) => url.clone(),
+        None => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            let scheduler = SchedulerClient::new(scheduler_url);
+            let net = fetch_live_networking(&scheduler, &args.item_hash)
+                .await
+                .ok_or_else(|| {
+                    anyhow!(
+                        "V-Program {} is not running (not yet placed on a CRN, or the \
+                         scheduler/CRN is unreachable); pass --url to bypass discovery",
+                        args.item_hash
+                    )
+                })?;
+            resolve_attested_endpoint(&net, ATTEST_PORT).ok_or_else(|| {
+                anyhow!(
+                    "V-Program {} is running but its attestation port ({ATTEST_PORT}) is not \
+                     yet mapped by the CRN; try again shortly",
+                    args.item_hash
+                )
+            })?
+        }
+    };
+
+    let headers = args
+        .header
+        .iter()
+        .map(|h| parse_header(h))
+        .collect::<Result<Vec<_>>>()?;
+    let body = args.data.clone().map(bytes::Bytes::from);
+
+    let handshake_pin = match &expected {
+        MeasurementExpectation::Pin(bytes) => Some(bytes.as_slice()),
+        MeasurementExpectation::MemberOf(_) => None,
+    };
+
+    let response = attested_request(
+        &base_url,
+        args.method.clone(),
+        &args.path,
+        &headers,
+        body,
+        handshake_pin,
+        args.amd_product,
+    )
+    .await
+    .map_err(|e| anyhow!("attestation failed: {e}"))?;
+
+    // For the multi-model fleet case, the handshake pinned nothing (it
+    // couldn't know which model the guest would present); check the
+    // now-verified measurement against the on-chain set before trusting the
+    // response. The report chain, signature, and key binding are already
+    // fully verified at this point (`attested_request` fails closed on all
+    // of that) - only this pin-membership check is deferred.
+    if let MeasurementExpectation::MemberOf(set) = &expected {
+        let got = hex::decode(&response.measurement)
+            .context("attested_request returned a non-hex measurement")?;
+        if !set.iter().any(|m| m == &got) {
+            bail!(
+                "measurement mismatch: guest presented {} which matches none of the \
+                 measurements pinned on the V-Program message",
+                response.measurement
+            );
+        }
+    }
+
+    let out = render_call_result(&response, json);
+    println!("{out}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod show_tests {
     use super::*;
@@ -673,5 +881,158 @@ mod show_tests {
         assert!(v.get("host_ipv4").is_none());
         assert!(v.get("mapped_ports").is_none());
         assert!(v.get("attested_endpoint").is_none());
+    }
+}
+
+#[cfg(test)]
+mod call_tests {
+    use super::*;
+    use aleph_sdk::attest::AttestedResponse;
+
+    fn measurement(digest: &str, vcpu_type: Option<&str>) -> LaunchMeasurement {
+        let json = serde_json::json!({
+            "platform": "sev_snp",
+            "digest": digest,
+            "vcpu_type": vcpu_type,
+        });
+        serde_json::from_value(json).expect("valid measurement fixture")
+    }
+
+    #[test]
+    fn resolve_expected_measurement_pins_the_single_measurement() {
+        let digest = "ab".repeat(48);
+        let measurements = vec![measurement(&digest, Some("EPYC-v4"))];
+
+        let expected = resolve_expected_measurement(&measurements, None).unwrap();
+
+        assert_eq!(
+            expected,
+            MeasurementExpectation::Pin(hex::decode(&digest).unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_expected_measurement_override_takes_precedence() {
+        let digest = "ab".repeat(48);
+        let override_digest = "cd".repeat(48);
+        let measurements = vec![measurement(&digest, Some("EPYC-v4"))];
+
+        let expected = resolve_expected_measurement(&measurements, Some(&override_digest)).unwrap();
+
+        assert_eq!(
+            expected,
+            MeasurementExpectation::Pin(hex::decode(&override_digest).unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_expected_measurement_multiple_yields_member_of_set() {
+        let digest_a = "ab".repeat(48);
+        let digest_b = "cd".repeat(48);
+        let measurements = vec![
+            measurement(&digest_a, Some("EPYC-v4")),
+            measurement(&digest_b, Some("EPYC-Genoa")),
+        ];
+
+        let expected = resolve_expected_measurement(&measurements, None).unwrap();
+
+        assert_eq!(
+            expected,
+            MeasurementExpectation::MemberOf(vec![
+                hex::decode(&digest_a).unwrap(),
+                hex::decode(&digest_b).unwrap(),
+            ])
+        );
+    }
+
+    #[test]
+    fn resolve_expected_measurement_zero_measurements_errors() {
+        let result = resolve_expected_measurement(&[], None);
+
+        assert!(
+            result.is_err(),
+            "a message pinning no measurements must fail closed without --expected-measurement"
+        );
+    }
+
+    #[test]
+    fn resolve_expected_measurement_bad_override_hex_errors() {
+        let digest = "ab".repeat(48);
+        let measurements = vec![measurement(&digest, Some("EPYC-v4"))];
+
+        let result = resolve_expected_measurement(&measurements, Some("not-hex"));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_header_splits_on_colon_and_trims() {
+        assert_eq!(
+            parse_header("X-Y: z").unwrap(),
+            ("X-Y".to_string(), "z".to_string())
+        );
+        assert_eq!(
+            parse_header("X-Y:z").unwrap(),
+            ("X-Y".to_string(), "z".to_string())
+        );
+        assert_eq!(
+            parse_header("  X-Y  :   z  ").unwrap(),
+            ("X-Y".to_string(), "z".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_header_rejects_missing_colon() {
+        assert!(parse_header("no-colon-here").is_err());
+    }
+
+    #[test]
+    fn parse_header_rejects_empty_name() {
+        assert!(parse_header(": value").is_err());
+    }
+
+    fn dummy_response(measurement: &str, body: &[u8]) -> AttestedResponse {
+        AttestedResponse {
+            measurement: measurement.to_string(),
+            status: 200,
+            headers: vec![],
+            body: bytes::Bytes::copy_from_slice(body),
+        }
+    }
+
+    #[test]
+    fn render_call_result_json_parses_json_body() {
+        let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
+
+        let out = render_call_result(&response, true);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+
+        assert!(
+            v.get("attestation_valid").is_none(),
+            "no redundant always-true validity flag in call output"
+        );
+        assert_eq!(v["measurement"], serde_json::json!("ab".repeat(48)));
+        assert_eq!(v["status"], serde_json::json!(200));
+        assert_eq!(v["body"]["fib"], serde_json::json!(55));
+    }
+
+    #[test]
+    fn render_call_result_json_falls_back_to_string_body_for_non_json() {
+        let response = dummy_response(&"ab".repeat(48), b"plain text body");
+
+        let out = render_call_result(&response, true);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+
+        assert_eq!(v["body"], serde_json::json!("plain text body"));
+    }
+
+    #[test]
+    fn render_call_result_text_includes_status_and_body() {
+        let response = dummy_response(&"ab".repeat(48), b"55");
+
+        let out = render_call_result(&response, false);
+
+        assert!(out.contains("HTTP 200"));
+        assert!(out.contains("55"));
     }
 }
