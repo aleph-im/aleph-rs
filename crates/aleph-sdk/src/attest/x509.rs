@@ -45,6 +45,10 @@ pub enum AttestError {
     /// its DER/PEM bytes.
     #[error("failed to decode AMD SEV-SNP certificate: {0}")]
     CertDecode(#[from] std::io::Error),
+    /// The attestation DTO declares a TEE type this verifier does not
+    /// implement (only SEV-SNP is supported).
+    #[error("unsupported TEE type {0:?}: only SEV-SNP attestation is supported")]
+    UnsupportedTeeType(crate::attest::TeeType),
     /// The report was generated at a VMPL more privileged callers must not
     /// trust (only VMPL 0-1, the firmware/kernel stack, are accepted).
     #[error("attestation report from VMPL {0} - only VMPL 0-1 are accepted")]
