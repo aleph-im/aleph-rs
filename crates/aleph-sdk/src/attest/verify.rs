@@ -15,6 +15,8 @@
 
 use sev::certs::snp::{Certificate, Chain, Verifiable, builtin, ca};
 use sev::firmware::guest::AttestationReport as SnpReport;
+// Not referenced by name: this trait provides `SnpReport::from_bytes` and
+// must stay in scope for it to resolve.
 use sev::parser::ByteParser;
 
 use super::AttestError;

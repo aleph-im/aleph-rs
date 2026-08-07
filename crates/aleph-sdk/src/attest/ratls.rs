@@ -42,6 +42,8 @@ use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signat
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use sev::firmware::guest::AttestationReport as SnpReport;
+// Not referenced by name: this trait provides `SnpReport::from_bytes` (and
+// `to_bytes` in tests) and must stay in scope for them to resolve.
 use sev::parser::ByteParser;
 use sha2::{Digest, Sha384};
 
