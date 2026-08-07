@@ -73,7 +73,7 @@ pub enum AttestError {
     /// an attestation report. This should not happen if the handshake
     /// succeeded (the verifier itself fails closed when no extension is
     /// present), but is checked again here so `attested_request` never
-    /// silently reports `attestation_valid: false` instead of erroring.
+    /// silently returns an unattested response instead of erroring.
     #[error("no attestation report was extracted during the TLS handshake")]
     MissingReport,
 }
