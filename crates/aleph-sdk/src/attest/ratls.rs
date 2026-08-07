@@ -15,6 +15,7 @@
 //!
 //! `SnpCertVerifier::verify_server_cert` rejects the handshake (`Err`) if:
 //! - the certificate has no attestation extension,
+//! - the extension declares a TEE type other than SEV-SNP,
 //! - the raw report bytes (`data`) don't parse as a SEV-SNP report,
 //! - the key-binding check fails (`report_data != SHA-384(pubkey) || zeros`),
 //! - an `expected_measurement` was given and doesn't match.
@@ -44,9 +45,9 @@ use sev::firmware::guest::AttestationReport as SnpReport;
 use sev::parser::ByteParser;
 use sha2::{Digest, Sha384};
 
-use super::AttestationReport;
 use super::verify::{AmdProduct, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
+use super::{AttestationReport, TeeType};
 
 /// The result of an attested HTTP request: the HTTP response plus the
 /// verified launch measurement the connection was gated on.
@@ -123,6 +124,16 @@ impl ServerCertVerifier for SnpCertVerifier {
                     "certificate does not contain an attestation extension".to_string(),
                 )
             })?;
+
+        // Only SEV-SNP is implemented. Reject other TEE types before trying
+        // to parse `data` as an SNP report, so the error names the actual
+        // problem instead of surfacing as a confusing parse failure.
+        if report.tee_type != TeeType::SevSnp {
+            return Err(RustlsError::General(format!(
+                "unsupported TEE type {:?}: only SEV-SNP attestation is supported",
+                report.tee_type
+            )));
+        }
 
         // 2. Parse the SEV-SNP report out of the DTO's raw `data`. Every
         //    security check below uses these SIGNED fields, never the DTO's
@@ -370,6 +381,42 @@ mod tests {
 
     fn dummy_server_name() -> ServerName<'static> {
         ServerName::try_from("localhost").unwrap()
+    }
+
+    #[test]
+    fn rejects_a_cert_declaring_a_non_sev_snp_tee_type() {
+        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let probe_der = self_signed_der(&key_pair, None);
+        let hash = subject_pubkey_sha384(&probe_der);
+        let report_data = key_bound_report_data(hash);
+        let measurement = [0xAB; 48];
+
+        // Everything else is valid (key-bound report_data, matching pin);
+        // only the declared TEE type is wrong, so a failure can only come
+        // from the tee_type check.
+        let report = AttestationReport {
+            tee_type: TeeType::Tdx,
+            data: signed_report_bytes(report_data, measurement),
+            report_data,
+            measurement: measurement.to_vec(),
+        };
+        let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
+        let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
+
+        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()));
+        let result = verifier.verify_server_cert(
+            &CertificateDer::from(cert_der),
+            &[],
+            &dummy_server_name(),
+            &[],
+            UnixTime::now(),
+        );
+
+        let err = result.expect_err("a non-SEV-SNP tee_type must be rejected");
+        assert!(
+            err.to_string().contains("unsupported TEE type"),
+            "error should name the unsupported TEE type, got: {err}"
+        );
     }
 
     #[test]
