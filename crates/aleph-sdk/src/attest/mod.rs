@@ -4,14 +4,15 @@
 //! # Wire compatibility
 //!
 //! [`AttestationReport`]'s JSON serialization is a cross-repo wire format:
-//! the guest `aleph-attest-agent` (aleph-cvm `crates/aleph-attest-agent`)
-//! embeds this exact JSON encoding in a TLS certificate's custom X.509
-//! extension using aleph-cvm's `aleph-tee::x509::encode_attestation_extension`
-//! and `aleph-tee::types::AttestationReport`. This DTO must serialize and
-//! deserialize byte-identically to that one: same field names, the same
-//! `#[serde(rename_all = "kebab-case")]` on [`TeeType`], and hex-encoding on
-//! `data`/`report_data`/`measurement`. Do not change field names or the
-//! encoding without also updating the deployed guest agent.
+//! the guest `aleph-attest-agent` (built from aleph-vm
+//! `rust/crates/aleph-tee`, originally aleph-cvm) embeds this exact JSON
+//! encoding in a TLS certificate's custom X.509 extension using that
+//! crate's `x509::encode_attestation_extension` and
+//! `types::AttestationReport`. This DTO must serialize and deserialize
+//! byte-identically to that one: same field names, the same
+//! `#[serde(rename_all = "kebab-case")]` on [`TeeType`], and hex-encoding
+//! on `data`. Do not change field names or the encoding without also
+//! updating the deployed guest agent.
 //!
 pub mod certs;
 pub mod ratls;
@@ -44,22 +45,23 @@ pub enum TeeType {
 /// A TEE attestation report, as embedded in an RA-TLS certificate's custom
 /// X.509 extension by the guest `aleph-attest-agent`.
 ///
-/// Mirrors aleph-cvm `aleph-tee::types::AttestationReport` field-for-field;
-/// see the module-level docs for why this must stay byte-identical.
+/// Mirrors the emitter's `aleph-tee::types::AttestationReport`
+/// (aleph-vm `rust/crates/aleph-tee`) field-for-field: `tee_type` plus the
+/// raw signed report. The emitter dropped the legacy `report_data` /
+/// `measurement` sibling fields (both are derived by parsing `data`, which
+/// this SDK's verifier already treats as the single source of truth), and
+/// requiring them here rejected real guests (aleph-testnets#35 run
+/// 31407307278). Legacy emitters that still send the siblings keep parsing:
+/// serde ignores unknown fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationReport {
     pub tee_type: TeeType,
     /// Raw attestation report bytes, as returned by the TEE's attestation
-    /// device (e.g. the SEV-SNP `SNP_GET_REPORT` ioctl output).
+    /// device (e.g. the SEV-SNP `SNP_GET_REPORT` ioctl output). Every
+    /// verified quantity (`report_data` key binding, launch measurement) is
+    /// parsed out of these signed bytes.
     #[serde(with = "hex_serde")]
     pub data: Vec<u8>,
-    /// The 64-byte `REPORT_DATA` field the guest bound into the report
-    /// (typically a hash of the RA-TLS certificate's public key).
-    #[serde(with = "hex_serde_array")]
-    pub report_data: [u8; 64],
-    /// The TEE launch measurement extracted from the report.
-    #[serde(with = "hex_serde")]
-    pub measurement: Vec<u8>,
 }
 
 /// Serde helper for hex-encoding `Vec<u8>` fields.
@@ -79,30 +81,6 @@ mod hex_serde {
     {
         let s = String::deserialize(deserializer)?;
         hex::decode(&s).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Serde helper for hex-encoding `[u8; 64]` fields.
-mod hex_serde_array {
-    use serde::{self, Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&hex::encode(bytes))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        let array: [u8; 64] = bytes
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("expected exactly 64 bytes"))?;
-        Ok(array)
     }
 }
 
@@ -129,19 +107,37 @@ mod tests {
         let report = AttestationReport {
             tee_type: TeeType::SevSnp,
             data: vec![0xde, 0xad, 0xbe, 0xef],
-            report_data: [0x42; 64],
-            measurement: vec![0x01, 0x02, 0x03],
         };
 
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("deadbeef"));
-        assert!(json.contains(&"42".repeat(64)));
-        assert!(json.contains("010203"));
 
         let deserialized: AttestationReport = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.tee_type, report.tee_type);
         assert_eq!(deserialized.data, report.data);
-        assert_eq!(deserialized.report_data, report.report_data);
-        assert_eq!(deserialized.measurement, report.measurement);
+    }
+
+    /// Regression for aleph-testnets#35 run 31407307278: the guest agent
+    /// emits only `{tee_type, data}`; requiring the legacy sibling fields
+    /// rejected every real V-Program.
+    #[test]
+    fn attestation_report_parses_the_emitter_schema_without_siblings() {
+        let report: AttestationReport =
+            serde_json::from_str(r#"{"tee_type":"sev-snp","data":"deadbeef"}"#).unwrap();
+        assert_eq!(report.tee_type, TeeType::SevSnp);
+        assert_eq!(report.data, vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    /// Legacy emitters still carrying `report_data` / `measurement` siblings
+    /// keep parsing: serde ignores unknown fields.
+    #[test]
+    fn attestation_report_ignores_legacy_sibling_fields() {
+        let json = format!(
+            r#"{{"tee_type":"sev-snp","data":"deadbeef","report_data":"{}","measurement":"{}"}}"#,
+            "42".repeat(64),
+            "ab".repeat(48),
+        );
+        let report: AttestationReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(report.data, vec![0xde, 0xad, 0xbe, 0xef]);
     }
 }
