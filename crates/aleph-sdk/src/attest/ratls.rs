@@ -21,12 +21,10 @@
 //! - an `expected_measurement` was given and doesn't match.
 //!
 //! Crucially, the key-binding and measurement checks are made against the
-//! fields parsed out of the AMD-signed report bytes (`data`), *not* the DTO's
-//! sibling `report_data`/`measurement` fields. Those siblings are decoded
-//! straight from attacker-controlled JSON in the certificate extension and are
-//! not covered by the AMD signature, so trusting them would let a malicious
-//! node serve a genuine signed report while lying about which TLS key it is
-//! bound to (or which measurement it carries). See the C1 regression tests.
+//! fields parsed out of the AMD-signed report bytes (`data`). The DTO carries
+//! no other copies of them: the legacy `report_data`/`measurement` sibling
+//! fields were unsigned JSON a malicious node could lie in (the C1 finding),
+//! and the wire schema has since dropped them on both sides.
 //!
 //! [`attested_request`] rejects the whole call (`Err`) if, after a
 //! successful handshake, no report was stashed (should be unreachable, but
@@ -144,12 +142,10 @@ impl SnpCertVerifier {
         }
 
         // 2. Parse the SEV-SNP report out of the DTO's raw `data`. Every
-        //    security check below uses these SIGNED fields, never the DTO's
-        //    sibling `report_data`/`measurement`: the AMD signature covers
-        //    report bytes 0x000..0x2A0 (which include the report's own
-        //    report_data and measurement), but the DTO siblings are just
-        //    JSON in the cert extension and are trivially forgeable. The
-        //    signature over `data` itself is checked post-handshake in
+        //    security check below uses these SIGNED fields (the AMD
+        //    signature covers report bytes 0x000..0x2A0, which include the
+        //    report's own report_data and measurement). The signature over
+        //    `data` itself is checked post-handshake in
         //    `verify_sev_snp_report`; a forged `data` fails closed there, so
         //    checking the parsed fields here (pre-signature) is still sound.
         //    Fail closed if the bytes don't parse.
@@ -440,8 +436,6 @@ mod tests {
         let report = AttestationReport {
             tee_type: TeeType::Tdx,
             data: signed_report_bytes(report_data, measurement),
-            report_data,
-            measurement: measurement.to_vec(),
         };
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
@@ -483,8 +477,6 @@ mod tests {
         let report = AttestationReport {
             tee_type: TeeType::SevSnp,
             data: signed_report_bytes(report_data, measurement),
-            report_data,
-            measurement: measurement.to_vec(),
         };
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
@@ -505,8 +497,7 @@ mod tests {
         let stashed = verifier
             .get_report()
             .expect("a successful verification must stash the report");
-        assert_eq!(stashed.measurement, measurement.to_vec());
-        assert_eq!(stashed.report_data, report_data);
+        assert_eq!(stashed.data, signed_report_bytes(report_data, measurement));
         assert!(
             verifier.get_rejection().is_none(),
             "an accepted handshake must not record a rejection"
@@ -528,8 +519,6 @@ mod tests {
         let report = AttestationReport {
             tee_type: TeeType::SevSnp,
             data: signed_report_bytes(report_data, measurement),
-            report_data,
-            measurement: measurement.to_vec(),
         };
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let good_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
@@ -575,8 +564,6 @@ mod tests {
         let report = AttestationReport {
             tee_type: TeeType::SevSnp,
             data: signed_report_bytes(report_data, measurement),
-            report_data,
-            measurement: measurement.to_vec(),
         };
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
@@ -618,8 +605,6 @@ mod tests {
         let report = AttestationReport {
             tee_type: TeeType::SevSnp,
             data: signed_report_bytes([0u8; 64], measurement),
-            report_data: [0u8; 64],
-            measurement: measurement.to_vec(),
         };
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
@@ -640,102 +625,6 @@ mod tests {
             verifier.get_report().is_none(),
             "a rejected handshake must not stash a report"
         );
-        let rejection = verifier
-            .get_rejection()
-            .expect("rejection must be recorded");
-        assert!(rejection.contains("key binding"), "{rejection}");
-    }
-
-    /// C1 regression (measurement): the SIGNED report carries measurement
-    /// `M_signed`, but the DTO sibling lies with `M_expected` that matches the
-    /// pin. The old, vulnerable code pinned against the DTO sibling and would
-    /// have accepted this; the fix pins against the SIGNED measurement, so it
-    /// must reject. Revert step 4 to use `report.measurement` and this fails.
-    #[test]
-    fn rejects_when_dto_measurement_lies_to_match_the_pin() {
-        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
-        let probe_der = self_signed_der(&key_pair, None);
-        let hash = subject_pubkey_sha384(&probe_der);
-
-        let report_data = key_bound_report_data(hash);
-        let m_signed = [0x11; 48];
-        let m_expected = [0x22; 48]; // what the node claims / what is pinned
-        assert_ne!(m_signed, m_expected);
-
-        let report = AttestationReport {
-            tee_type: TeeType::SevSnp,
-            // Genuine signed bytes: key-bound, measurement = m_signed.
-            data: signed_report_bytes(report_data, m_signed),
-            // DTO siblings: report_data honest, measurement is the LIE.
-            report_data,
-            measurement: m_expected.to_vec(),
-        };
-        let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
-        let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
-
-        // Pin to m_expected - which the DTO sibling matches but the SIGNED
-        // report does not.
-        let verifier = SnpCertVerifier::new(Some(m_expected.to_vec()));
-        let result = verifier.verify_server_cert(
-            &CertificateDer::from(cert_der),
-            &[],
-            &dummy_server_name(),
-            &[],
-            UnixTime::now(),
-        );
-
-        assert!(
-            result.is_err(),
-            "measurement pin must be checked against the SIGNED report, not the DTO sibling"
-        );
-        assert!(verifier.get_report().is_none());
-        let rejection = verifier
-            .get_rejection()
-            .expect("rejection must be recorded");
-        assert!(rejection.contains("measurement mismatch"), "{rejection}");
-    }
-
-    /// C1 regression (key binding): the SIGNED report_data is NOT bound to
-    /// this TLS key, but the DTO sibling lies with the correct
-    /// `SHA-384(pubkey)`. The old code key-bound against the DTO sibling and
-    /// would have accepted; the fix key-binds against the SIGNED report_data,
-    /// so it must reject. Revert step 3 to use `report.report_data` and this
-    /// fails.
-    #[test]
-    fn rejects_when_dto_report_data_lies_to_match_the_key() {
-        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
-        let probe_der = self_signed_der(&key_pair, None);
-        let hash = subject_pubkey_sha384(&probe_der);
-
-        let honest_binding = key_bound_report_data(hash);
-        let measurement = [0xAB; 48];
-
-        let report = AttestationReport {
-            tee_type: TeeType::SevSnp,
-            // SIGNED report_data is some other value (NOT bound to this key).
-            data: signed_report_bytes([0x33; 64], measurement),
-            // DTO sibling LIES: it carries the correct key binding.
-            report_data: honest_binding,
-            measurement: measurement.to_vec(),
-        };
-        let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
-        let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
-
-        // Pin the (matching) measurement so only the key binding can fail.
-        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()));
-        let result = verifier.verify_server_cert(
-            &CertificateDer::from(cert_der),
-            &[],
-            &dummy_server_name(),
-            &[],
-            UnixTime::now(),
-        );
-
-        assert!(
-            result.is_err(),
-            "key binding must be checked against the SIGNED report, not the DTO sibling"
-        );
-        assert!(verifier.get_report().is_none());
         let rejection = verifier
             .get_rejection()
             .expect("rejection must be recorded");
