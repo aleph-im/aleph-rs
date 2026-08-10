@@ -4,14 +4,15 @@
 //! # Wire compatibility
 //!
 //! [`AttestationReport`]'s JSON serialization is a cross-repo wire format:
-//! the guest `aleph-attest-agent` (aleph-cvm `crates/aleph-attest-agent`)
-//! embeds this exact JSON encoding in a TLS certificate's custom X.509
-//! extension using aleph-cvm's `aleph-tee::x509::encode_attestation_extension`
-//! and `aleph-tee::types::AttestationReport`. This DTO must serialize and
-//! deserialize byte-identically to that one: same field names, the same
-//! `#[serde(rename_all = "kebab-case")]` on [`TeeType`], and hex-encoding on
-//! `data`/`report_data`/`measurement`. Do not change field names or the
-//! encoding without also updating the deployed guest agent.
+//! the guest `aleph-attest-agent` (built from aleph-vm
+//! `rust/crates/aleph-tee`, originally aleph-cvm) embeds this exact JSON
+//! encoding in a TLS certificate's custom X.509 extension using that
+//! crate's `x509::encode_attestation_extension` and
+//! `types::AttestationReport`. This DTO must serialize and deserialize
+//! byte-identically to that one: same field names, the same
+//! `#[serde(rename_all = "kebab-case")]` on [`TeeType`], and hex-encoding
+//! on `data`. Do not change field names or the encoding without also
+//! updating the deployed guest agent.
 //!
 pub mod certs;
 pub mod ratls;
