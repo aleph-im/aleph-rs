@@ -206,10 +206,13 @@ impl ServerCertVerifier for SnpCertVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
+        // Record a rejection, and clear any prior one on acceptance: one
+        // request can drive several handshakes through the same verifier
+        // (address fallback, redirects), and a stale rejection from an
+        // earlier attempt must not relabel a later transport failure as
+        // an attestation verdict.
         let result = self.verify_snp_cert(end_entity);
-        if let Err(error) = &result {
-            *self.last_rejection.lock().unwrap() = Some(error.to_string());
-        }
+        *self.last_rejection.lock().unwrap() = result.as_ref().err().map(ToString::to_string);
         result
     }
 
@@ -507,6 +510,56 @@ mod tests {
         assert!(
             verifier.get_rejection().is_none(),
             "an accepted handshake must not record a rejection"
+        );
+    }
+
+    #[test]
+    fn an_accepted_handshake_clears_a_prior_rejection() {
+        // One request can drive several handshakes through the same verifier
+        // (address fallback, redirects). A rejection recorded by an earlier
+        // attempt must not survive a later accepted handshake, or a
+        // subsequent transport failure would be misattributed to attestation.
+        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let probe_der = self_signed_der(&key_pair, None);
+        let hash = subject_pubkey_sha384(&probe_der);
+        let report_data = key_bound_report_data(hash);
+        let measurement = [0xAB; 48];
+
+        let report = AttestationReport {
+            tee_type: TeeType::SevSnp,
+            data: signed_report_bytes(report_data, measurement),
+            report_data,
+            measurement: measurement.to_vec(),
+        };
+        let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
+        let good_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
+        // No extension at all: guaranteed rejection.
+        let bad_der = self_signed_der(&key_pair, None);
+
+        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()));
+        verifier
+            .verify_server_cert(
+                &CertificateDer::from(bad_der),
+                &[],
+                &dummy_server_name(),
+                &[],
+                UnixTime::now(),
+            )
+            .expect_err("the extension-less cert must be rejected");
+        assert!(verifier.get_rejection().is_some());
+
+        verifier
+            .verify_server_cert(
+                &CertificateDer::from(good_der),
+                &[],
+                &dummy_server_name(),
+                &[],
+                UnixTime::now(),
+            )
+            .expect("the valid cert must be accepted");
+        assert!(
+            verifier.get_rejection().is_none(),
+            "acceptance must clear the recorded rejection"
         );
     }
 
