@@ -231,8 +231,6 @@ mod tests {
         let dto = AttestationReport {
             tee_type: TeeType::Tdx,
             data: milan_report_bytes(),
-            report_data: [0u8; 64],
-            measurement: vec![0u8; 48],
         };
 
         let err = verify_sev_snp_report(&dto, AmdProduct::Milan)
