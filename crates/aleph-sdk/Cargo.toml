@@ -111,3 +111,7 @@ required-features = ["swap"]
 [[test]]
 name = "uniswap_integration"
 required-features = ["swap"]
+
+[[example]]
+name = "measure_parity"
+required-features = ["vprogram"]
