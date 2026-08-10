@@ -472,8 +472,8 @@ mod tests {
         let report_data = key_bound_report_data(hash);
         let measurement = [0xAB; 48];
 
-        // SIGNED report bytes carry the key-bound report_data and the pinned
-        // measurement; the DTO siblings mirror them (honest node).
+        // The SIGNED report bytes carry the key-bound report_data and the
+        // pinned measurement.
         let report = AttestationReport {
             tee_type: TeeType::SevSnp,
             data: signed_report_bytes(report_data, measurement),
