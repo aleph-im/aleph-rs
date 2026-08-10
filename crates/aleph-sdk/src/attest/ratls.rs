@@ -80,6 +80,12 @@ pub struct AttestedResponse {
 #[derive(Debug)]
 struct SnpCertVerifier {
     extracted_report: Mutex<Option<AttestationReport>>,
+    /// Why this verifier last rejected a handshake, if it did. reqwest
+    /// surfaces a mid-handshake rejection only as an opaque "error sending
+    /// request", so `attested_request` reads this back to name the actual
+    /// attestation failure (a measurement mismatch looks identical to a
+    /// connection refusal otherwise).
+    last_rejection: Mutex<Option<String>>,
     expected_measurement: Option<Vec<u8>>,
     provider: Arc<CryptoProvider>,
 }
@@ -92,6 +98,7 @@ impl SnpCertVerifier {
     fn new(expected_measurement: Option<Vec<u8>>) -> Arc<Self> {
         Arc::new(Self {
             extracted_report: Mutex::new(None),
+            last_rejection: Mutex::new(None),
             expected_measurement,
             provider: Arc::new(rustls::crypto::ring::default_provider()),
         })
@@ -101,16 +108,17 @@ impl SnpCertVerifier {
     fn get_report(&self) -> Option<AttestationReport> {
         self.extracted_report.lock().unwrap().clone()
     }
-}
 
-impl ServerCertVerifier for SnpCertVerifier {
-    fn verify_server_cert(
+    /// Why the last handshake was rejected, if this verifier rejected one.
+    fn get_rejection(&self) -> Option<String> {
+        self.last_rejection.lock().unwrap().clone()
+    }
+
+    /// The attestation checks behind [`ServerCertVerifier::verify_server_cert`],
+    /// split out so the trait impl can record a rejection before returning it.
+    fn verify_snp_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
         // 1. Extract the attestation report from the certificate extension.
         let report = extract_attestation_from_cert(end_entity.as_ref())
@@ -186,6 +194,23 @@ impl ServerCertVerifier for SnpCertVerifier {
 
         *self.extracted_report.lock().unwrap() = Some(report);
         Ok(ServerCertVerified::assertion())
+    }
+}
+
+impl ServerCertVerifier for SnpCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        let result = self.verify_snp_cert(end_entity);
+        if let Err(error) = &result {
+            *self.last_rejection.lock().unwrap() = Some(error.to_string());
+        }
+        result
     }
 
     fn verify_tls12_signature(
@@ -284,7 +309,17 @@ pub async fn attested_request(
         request = request.body(body);
     }
 
-    let response = request.send().await.map_err(AttestError::Http)?;
+    // A request that died mid-handshake because OUR verifier rejected the
+    // peer's attestation surfaces from reqwest as an opaque "error sending
+    // request"; name the recorded rejection instead, so a measurement
+    // mismatch is distinguishable from a plain connection failure.
+    let response = request
+        .send()
+        .await
+        .map_err(|error| match verifier.get_rejection() {
+            Some(reason) => AttestError::HandshakeRejected(reason),
+            None => AttestError::Http(error),
+        })?;
 
     // Verify the attestation BEFORE reading the response body: the handshake
     // already enforced key binding and the measurement pin, but the AMD
@@ -465,6 +500,10 @@ mod tests {
             .expect("a successful verification must stash the report");
         assert_eq!(stashed.measurement, measurement.to_vec());
         assert_eq!(stashed.report_data, report_data);
+        assert!(
+            verifier.get_rejection().is_none(),
+            "an accepted handshake must not record a rejection"
+        );
     }
 
     #[test]
@@ -502,6 +541,13 @@ mod tests {
         assert!(
             verifier.get_report().is_none(),
             "a rejected handshake must not stash a report"
+        );
+        let rejection = verifier
+            .get_rejection()
+            .expect("a rejected handshake must record its reason for attested_request to surface");
+        assert!(
+            rejection.contains("measurement mismatch"),
+            "recorded reason should name the failed check: {rejection}"
         );
     }
 
