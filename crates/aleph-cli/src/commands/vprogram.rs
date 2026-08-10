@@ -203,15 +203,22 @@ async fn handle_create(
     {
         let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
         let wait_timeout = std::time::Duration::from_secs(secs);
+        let wait_started = std::time::Instant::now();
         match crate::commands::instance_wait::wait_until_ready(&scheduler_url, &vm_id, wait_timeout)
             .await?
         {
             crate::commands::instance_wait::WaitOutcome::Ready(_) => {
                 let scheduler = SchedulerClient::new(scheduler_url);
-                let net = fetch_live_networking(&scheduler, &vm_id).await;
-                let attested_endpoint = net
-                    .as_ref()
-                    .and_then(|n| resolve_attested_endpoint(n, ATTEST_PORT));
+                if !json {
+                    eprintln!("V-Program reachable; waiting for the attestation port mapping...");
+                }
+                let attested_endpoint = poll_attested_endpoint(
+                    || fetch_attested_endpoint(&scheduler, &vm_id),
+                    tokio::time::sleep,
+                    wait_timeout.saturating_sub(wait_started.elapsed()),
+                    crate::commands::instance_wait::WAIT_POLL_INTERVAL,
+                )
+                .await;
                 report_create_ready(&vm_id, attested_endpoint.as_ref(), json);
             }
             crate::commands::instance_wait::WaitOutcome::Timeout => {
@@ -220,6 +227,46 @@ async fn handle_create(
         }
     }
     Ok(())
+}
+
+/// One sample of the VM's attested endpoint via the scheduler + CRN.
+async fn fetch_attested_endpoint(scheduler: &SchedulerClient, vm_id: &ItemHash) -> Option<Url> {
+    let net = fetch_live_networking(scheduler, vm_id).await?;
+    resolve_attested_endpoint(&net, ATTEST_PORT)
+}
+
+/// Poll `fetch` until it yields an attested endpoint, or until `timeout`
+/// elapses (always sampling at least once).
+///
+/// The CRN maps the attestation port to a host port only after the guest
+/// finishes booting, which for a SEV-SNP V-Program (runtime bundle download
+/// and measured boot) comes well after the scheduler/networking readiness
+/// that `--wait` observes first; a single sample taken right at readiness
+/// would nearly always miss the mapping. Generic over `fetch` and `sleep`,
+/// mirroring `instance_wait::poll_until_ready`, so tests drive it without a
+/// network or a clock.
+async fn poll_attested_endpoint<F, Fut, S, SFut>(
+    mut fetch: F,
+    mut sleep: S,
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> Option<Url>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<Url>>,
+    S: FnMut(std::time::Duration) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(endpoint) = fetch().await {
+            return Some(endpoint);
+        }
+        if start.elapsed() >= timeout {
+            return None;
+        }
+        sleep(poll_interval).await;
+    }
 }
 
 /// Report a successful `--wait` to the user: the V-Program is reachable and
@@ -898,6 +945,62 @@ async fn handle_call(
     let out = render_call_result(&response, json);
     println!("{out}");
     Ok(())
+}
+
+#[cfg(test)]
+mod wait_endpoint_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn resolves_once_the_mapping_appears() {
+        let calls = AtomicUsize::new(0);
+        let url = Url::parse("https://203.0.113.5:24101/").unwrap();
+
+        let got = poll_attested_endpoint(
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                let url = url.clone();
+                async move { (n >= 2).then_some(url) }
+            },
+            |_| async {},
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(got, Some(url));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn samples_at_least_once_then_gives_up_at_the_deadline() {
+        let calls = AtomicUsize::new(0);
+        let sleeps = AtomicUsize::new(0);
+
+        let got = poll_attested_endpoint(
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { None }
+            },
+            |_| {
+                sleeps.fetch_add(1, Ordering::SeqCst);
+                async {}
+            },
+            Duration::ZERO,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(got, None);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "an exhausted budget still samples once"
+        );
+        assert_eq!(sleeps.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[cfg(test)]
