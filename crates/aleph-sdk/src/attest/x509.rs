@@ -166,8 +166,6 @@ mod tests {
         AttestationReport {
             tee_type: TeeType::SevSnp,
             data: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04],
-            report_data: [0x42; 64],
-            measurement: vec![0xAB; 48],
         }
     }
 
@@ -199,8 +197,6 @@ mod tests {
         let got = extract_attestation_from_cert(&cert_der).unwrap().unwrap();
         assert_eq!(got.tee_type, report.tee_type);
         assert_eq!(got.data, report.data);
-        assert_eq!(got.report_data, report.report_data);
-        assert_eq!(got.measurement, report.measurement);
     }
 
     #[test]
@@ -217,8 +213,6 @@ mod tests {
 
         assert_eq!(decoded.tee_type, original.tee_type);
         assert_eq!(decoded.data, original.data);
-        assert_eq!(decoded.report_data, original.report_data);
-        assert_eq!(decoded.measurement, original.measurement);
     }
 
     #[test]
@@ -232,8 +226,6 @@ mod tests {
             let report = AttestationReport {
                 tee_type,
                 data: vec![0x01],
-                report_data: [0x00; 64],
-                measurement: vec![0xFF; 32],
             };
 
             let encoded = encode_attestation_extension(&report).expect("encoding should succeed");
@@ -275,8 +267,6 @@ mod tests {
         let extracted = extracted.unwrap();
         assert_eq!(extracted.tee_type, report.tee_type);
         assert_eq!(extracted.data, report.data);
-        assert_eq!(extracted.report_data, report.report_data);
-        assert_eq!(extracted.measurement, report.measurement);
     }
 
     #[test]
