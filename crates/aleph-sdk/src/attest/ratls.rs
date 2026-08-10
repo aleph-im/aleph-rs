@@ -457,6 +457,10 @@ mod tests {
             err.to_string().contains("unsupported TEE type"),
             "error should name the unsupported TEE type, got: {err}"
         );
+        let rejection = verifier
+            .get_rejection()
+            .expect("rejection must be recorded");
+        assert!(rejection.contains("unsupported TEE type"), "{rejection}");
     }
 
     #[test]
@@ -583,6 +587,10 @@ mod tests {
             verifier.get_report().is_none(),
             "a rejected handshake must not stash a report"
         );
+        let rejection = verifier
+            .get_rejection()
+            .expect("rejection must be recorded");
+        assert!(rejection.contains("key binding"), "{rejection}");
     }
 
     /// C1 regression (measurement): the SIGNED report carries measurement
@@ -628,6 +636,10 @@ mod tests {
             "measurement pin must be checked against the SIGNED report, not the DTO sibling"
         );
         assert!(verifier.get_report().is_none());
+        let rejection = verifier
+            .get_rejection()
+            .expect("rejection must be recorded");
+        assert!(rejection.contains("measurement mismatch"), "{rejection}");
     }
 
     /// C1 regression (key binding): the SIGNED report_data is NOT bound to
@@ -671,6 +683,10 @@ mod tests {
             "key binding must be checked against the SIGNED report, not the DTO sibling"
         );
         assert!(verifier.get_report().is_none());
+        let rejection = verifier
+            .get_rejection()
+            .expect("rejection must be recorded");
+        assert!(rejection.contains("key binding"), "{rejection}");
     }
 
     #[test]
@@ -691,5 +707,9 @@ mod tests {
             result.is_err(),
             "a certificate with no attestation extension must fail closed"
         );
+        let rejection = verifier
+            .get_rejection()
+            .expect("rejection must be recorded");
+        assert!(rejection.contains("attestation extension"), "{rejection}");
     }
 }
