@@ -70,6 +70,13 @@ pub enum AttestError {
     /// over it.
     #[error("RA-TLS HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
+    /// Our own verifier rejected the peer's attestation during the TLS
+    /// handshake (bad report extension, key-binding failure, measurement
+    /// mismatch, ...). Split from [`AttestError::Http`] because reqwest
+    /// reports a mid-handshake rejection as a generic send error, which
+    /// reads like a network problem instead of an attestation verdict.
+    #[error("attestation rejected during the RA-TLS handshake: {0}")]
+    HandshakeRejected(String),
     /// The request `path` did not join cleanly onto the client's `base_url`.
     #[error("invalid request URL: {0}")]
     Url(#[from] url::ParseError),
