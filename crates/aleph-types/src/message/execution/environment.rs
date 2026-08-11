@@ -181,6 +181,11 @@ pub enum TeeError {
     SnpOnlyField(&'static str),
     #[error("at most {MAX_MEASUREMENTS} measurements are allowed, got {0}")]
     TooManyMeasurements(usize),
+    #[error("measurement platform {got} does not match the declared backend {expected}")]
+    MeasurementPlatformMismatch {
+        expected: &'static str,
+        got: &'static str,
+    },
 }
 
 /// Raise an error unless the value is a plausible SEV-SNP guest policy.
@@ -203,7 +208,7 @@ pub enum TeePlatform {
 }
 
 impl TeePlatform {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             TeePlatform::SevSnp => "sev_snp",
         }
