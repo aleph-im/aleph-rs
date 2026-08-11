@@ -810,12 +810,15 @@ pub(crate) fn parse_header(raw: &str) -> Result<(String, String)> {
     Ok((name.to_string(), value.to_string()))
 }
 
-/// Render an [`aleph_sdk::attest::AttestedResponse`] for `call`'s output.
+/// Render an [`aleph_sdk::attest::AttestedResponse`] for `call`'s output as
+/// `(stdout, stderr_meta)`. In text mode stdout is the raw response body so
+/// the command pipes like curl; the `HTTP <status>` line goes to stderr. In
+/// JSON mode everything is in the stdout document and there is no meta line.
 /// Pure (no I/O), so it's unit-testable without a network or TLS server.
 pub(crate) fn render_call_result(
     response: &aleph_sdk::attest::AttestedResponse,
     json: bool,
-) -> String {
+) -> (String, Option<String>) {
     if json {
         let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
             serde_json::Value::String(String::from_utf8_lossy(&response.body).into_owned())
@@ -827,12 +830,14 @@ pub(crate) fn render_call_result(
             "status": response.status,
             "body": body,
         });
-        serde_json::to_string_pretty(&out).expect("call result always serializes")
+        (
+            serde_json::to_string_pretty(&out).expect("call result always serializes"),
+            None,
+        )
     } else {
-        format!(
-            "HTTP {}\n{}",
-            response.status,
-            String::from_utf8_lossy(&response.body)
+        (
+            String::from_utf8_lossy(&response.body).into_owned(),
+            Some(format!("HTTP {}", response.status)),
         )
     }
 }
@@ -942,7 +947,10 @@ async fn handle_call(
         }
     }
 
-    let out = render_call_result(&response, json);
+    let (out, meta) = render_call_result(&response, json);
+    if let Some(meta) = meta {
+        eprintln!("{meta}");
+    }
     println!("{out}");
     Ok(())
 }
@@ -1276,7 +1284,7 @@ mod call_tests {
     fn render_call_result_json_parses_json_body() {
         let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
 
-        let out = render_call_result(&response, true);
+        let (out, meta) = render_call_result(&response, true);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert!(
@@ -1286,25 +1294,30 @@ mod call_tests {
         assert_eq!(v["measurement"], serde_json::json!("ab".repeat(48)));
         assert_eq!(v["status"], serde_json::json!(200));
         assert_eq!(v["body"]["fib"], serde_json::json!(55));
+        assert_eq!(meta, None, "JSON mode carries the status in the document");
     }
 
     #[test]
     fn render_call_result_json_falls_back_to_string_body_for_non_json() {
         let response = dummy_response(&"ab".repeat(48), b"plain text body");
 
-        let out = render_call_result(&response, true);
+        let (out, _meta) = render_call_result(&response, true);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["body"], serde_json::json!("plain text body"));
     }
 
     #[test]
-    fn render_call_result_text_includes_status_and_body() {
-        let response = dummy_response(&"ab".repeat(48), b"55");
+    fn render_call_result_text_puts_only_the_body_on_stdout() {
+        let response = dummy_response(&"ab".repeat(48), br#"{"status":"ok"}"#);
 
-        let out = render_call_result(&response, false);
+        let (out, meta) = render_call_result(&response, false);
 
-        assert!(out.contains("HTTP 200"));
-        assert!(out.contains("55"));
+        // The body must be machine-consumable as-is (aleph-testnets#35 run
+        // 31474678768: `json.loads` on stdout choked on the status line).
+        serde_json::from_str::<serde_json::Value>(&out)
+            .expect("stdout is exactly the response body");
+        assert_eq!(out, r#"{"status":"ok"}"#);
+        assert_eq!(meta.as_deref(), Some("HTTP 200"));
     }
 }
