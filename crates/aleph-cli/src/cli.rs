@@ -3128,6 +3128,11 @@ pub enum VProgramCommand {
     /// only made - and the response only trusted - if the full attestation
     /// report chain verifies and the measurement matches; any attestation
     /// failure or mismatch aborts before the response body is ever printed.
+    ///
+    /// On success the response body is written verbatim to stdout (pipe it
+    /// like curl); the `HTTP <status>` line goes to stderr. With `--json`,
+    /// stdout is a single JSON document with the status, verified
+    /// measurement and body.
     Call(Box<VProgramCallArgs>),
 }
 
