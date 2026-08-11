@@ -19,7 +19,8 @@
 //! - the raw report bytes (`data`) don't parse as a SEV-SNP report,
 //! - the key-binding check fails
 //!   (`report_data != SHA-384(DOMAIN_KEY || pubkey) || zeros`),
-//! - an `expected_measurement` was given and doesn't match.
+//! - an `expected_measurement` was given and doesn't match,
+//! - an `expected_policy` was given and the signed guest policy doesn't match.
 //!
 //! Crucially, the key-binding and measurement checks are made against the
 //! fields parsed out of the AMD-signed report bytes (`data`). The DTO carries
@@ -69,6 +70,8 @@ const KEY_BINDING_DOMAIN: &[u8] = b"aleph-attest-tls-key-v1\x00";
 pub struct AttestedResponse {
     /// Hex-encoded launch measurement from the verified report.
     pub measurement: String,
+    /// SEV-SNP guest policy from the verified report.
+    pub policy: u64,
     /// The HTTP status code of the response.
     pub status: u16,
     /// The HTTP response headers, in wire order (a header repeated multiple
@@ -97,6 +100,7 @@ struct SnpCertVerifier {
     /// connection refusal otherwise).
     last_rejection: Mutex<Option<String>>,
     expected_measurement: Option<Vec<u8>>,
+    expected_policy: Option<u64>,
     provider: Arc<CryptoProvider>,
 }
 
@@ -105,11 +109,18 @@ impl SnpCertVerifier {
     ///
     /// If `expected_measurement` is `Some`, the handshake is rejected unless
     /// the report's measurement matches exactly (a "measurement pin").
-    fn new(expected_measurement: Option<Vec<u8>>) -> Arc<Self> {
+    /// If `expected_policy` is `Some`, the handshake is rejected unless the
+    /// SIGNED report's guest policy matches exactly (a "policy pin"): the
+    /// policy is not part of the launch measurement, so without this check a
+    /// malicious host could launch the measured stack with a weaker policy
+    /// (e.g. debug allowed, exposing guest memory) and still pass the
+    /// measurement pin.
+    fn new(expected_measurement: Option<Vec<u8>>, expected_policy: Option<u64>) -> Arc<Self> {
         Arc::new(Self {
             extracted_report: Mutex::new(None),
             last_rejection: Mutex::new(None),
             expected_measurement,
+            expected_policy,
             provider: Arc::new(rustls::crypto::ring::default_provider()),
         })
     }
@@ -204,6 +215,20 @@ impl SnpCertVerifier {
                 hex::encode(expected),
                 hex::encode(signed.measurement),
             )));
+        }
+
+        // 5. Optional policy pin, against the SIGNED guest policy. The
+        //    policy is not covered by the launch measurement, so this check
+        //    is all that stands between the client and a host that launched
+        //    the same measured stack with a weaker policy (e.g. debug
+        //    allowed, letting the host decrypt guest memory).
+        if let Some(expected) = self.expected_policy {
+            let got = u64::from(signed.policy);
+            if got != expected {
+                return Err(RustlsError::General(format!(
+                    "guest policy mismatch: expected {expected:#x}, got {got:#x}"
+                )));
+            }
         }
 
         *self.extracted_report.lock().unwrap() = Some(report);
@@ -304,6 +329,7 @@ fn build_attested_client(verifier: Arc<SnpCertVerifier>) -> Result<reqwest::Clie
 /// Fails closed: if the handshake never stashes a report, or if
 /// `verify_sev_snp_report` errors, this returns `Err`; an `Ok` response
 /// always carries a fully verified attestation.
+#[allow(clippy::too_many_arguments)]
 pub async fn attested_request(
     base_url: &url::Url,
     method: reqwest::Method,
@@ -311,11 +337,12 @@ pub async fn attested_request(
     headers: &[(String, String)],
     body: Option<bytes::Bytes>,
     expected_measurement: Option<&[u8]>,
+    expected_policy: Option<u64>,
     product: AmdProduct,
 ) -> Result<AttestedResponse, AttestError> {
     let url = base_url.join(path)?;
 
-    let verifier = SnpCertVerifier::new(expected_measurement.map(<[u8]>::to_vec));
+    let verifier = SnpCertVerifier::new(expected_measurement.map(<[u8]>::to_vec), expected_policy);
     let client = build_attested_client(verifier.clone())?;
 
     let mut request = client.request(method, url);
@@ -367,6 +394,7 @@ pub async fn attested_request(
 
     Ok(AttestedResponse {
         measurement: result.measurement,
+        policy: result.policy,
         status,
         headers: response_headers,
         body,
@@ -398,6 +426,24 @@ mod tests {
         let mut report = SnpReport::from_bytes(&bytes).expect("fixture report should parse");
         report.report_data = report_data;
         report.measurement = measurement;
+        report
+            .to_bytes()
+            .expect("re-encoding the report should succeed")
+            .as_ref()
+            .to_vec()
+    }
+
+    /// Like [`signed_report_bytes`], but also sets the SIGNED guest policy.
+    fn signed_report_bytes_with_policy(
+        report_data: [u8; 64],
+        measurement: [u8; 48],
+        policy: u64,
+    ) -> Vec<u8> {
+        use sev::firmware::guest::GuestPolicy;
+
+        let bytes = signed_report_bytes(report_data, measurement);
+        let mut report = SnpReport::from_bytes(&bytes).expect("fixture report should parse");
+        report.policy = GuestPolicy::from(policy);
         report
             .to_bytes()
             .expect("re-encoding the report should succeed")
@@ -463,7 +509,7 @@ mod tests {
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
 
-        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()));
+        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()), None);
         let result = verifier.verify_server_cert(
             &CertificateDer::from(cert_der),
             &[],
@@ -504,7 +550,7 @@ mod tests {
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
 
-        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()));
+        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()), None);
         let result = verifier.verify_server_cert(
             &CertificateDer::from(cert_der),
             &[],
@@ -548,7 +594,7 @@ mod tests {
         // No extension at all: guaranteed rejection.
         let bad_der = self_signed_der(&key_pair, None);
 
-        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()));
+        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()), None);
         verifier
             .verify_server_cert(
                 &CertificateDer::from(bad_der),
@@ -592,7 +638,7 @@ mod tests {
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
 
         // Pin to a *different* measurement than the SIGNED report carries.
-        let verifier = SnpCertVerifier::new(Some(vec![0xFF; 48]));
+        let verifier = SnpCertVerifier::new(Some(vec![0xFF; 48]), None);
         let result = verifier.verify_server_cert(
             &CertificateDer::from(cert_der),
             &[],
@@ -634,7 +680,7 @@ mod tests {
 
         // No measurement pin configured - this must still fail purely on
         // the key-binding check.
-        let verifier = SnpCertVerifier::new(None);
+        let verifier = SnpCertVerifier::new(None, None);
         let result = verifier.verify_server_cert(
             &CertificateDer::from(cert_der),
             &[],
@@ -677,7 +723,7 @@ mod tests {
         let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
         let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
 
-        let verifier = SnpCertVerifier::new(None);
+        let verifier = SnpCertVerifier::new(None, None);
         let result = verifier.verify_server_cert(
             &CertificateDer::from(cert_der),
             &[],
@@ -696,12 +742,88 @@ mod tests {
         assert!(rejection.contains("key binding"), "{rejection}");
     }
 
+    /// Policy pin: the SIGNED report's guest policy must match the expected
+    /// policy exactly. The policy is NOT part of the launch measurement, so
+    /// a malicious host can launch the same measured stack with a weaker
+    /// policy (e.g. debug allowed, which lets the host decrypt guest
+    /// memory); only this check catches that.
+    #[test]
+    fn rejects_a_policy_mismatch_against_the_signed_report() {
+        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let probe_der = self_signed_der(&key_pair, None);
+        let hash = subject_pubkey_sha384(&probe_der);
+
+        let report_data = key_bound_report_data(hash);
+        let measurement = [0xAB; 48];
+        // Launched with debug allowed (bit 19) on top of the expected policy.
+        let launched_policy = 0x30000_u64 | (1 << 19);
+
+        let report = AttestationReport {
+            tee_type: TeeType::SevSnp,
+            data: signed_report_bytes_with_policy(report_data, measurement, launched_policy),
+        };
+        let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
+        let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
+
+        // Key binding and measurement pin both match; only the policy
+        // differs, so a rejection can only come from the policy check.
+        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()), Some(0x30000));
+        let result = verifier.verify_server_cert(
+            &CertificateDer::from(cert_der),
+            &[],
+            &dummy_server_name(),
+            &[],
+            UnixTime::now(),
+        );
+
+        assert!(
+            result.is_err(),
+            "a guest policy mismatch must fail closed: the same measured stack \
+             launched with a weaker policy is not the attested deployment"
+        );
+        assert!(
+            verifier.get_report().is_none(),
+            "a rejected handshake must not stash a report"
+        );
+    }
+
+    #[test]
+    fn accepts_a_matching_policy_pin() {
+        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let probe_der = self_signed_der(&key_pair, None);
+        let hash = subject_pubkey_sha384(&probe_der);
+
+        let report_data = key_bound_report_data(hash);
+        let measurement = [0xAB; 48];
+
+        let report = AttestationReport {
+            tee_type: TeeType::SevSnp,
+            data: signed_report_bytes_with_policy(report_data, measurement, 0x30000),
+        };
+        let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
+        let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
+
+        let verifier = SnpCertVerifier::new(Some(measurement.to_vec()), Some(0x30000));
+        let result = verifier.verify_server_cert(
+            &CertificateDer::from(cert_der),
+            &[],
+            &dummy_server_name(),
+            &[],
+            UnixTime::now(),
+        );
+
+        assert!(
+            result.is_ok(),
+            "a key-bound report with matching measurement and policy must be accepted: {result:?}"
+        );
+    }
+
     #[test]
     fn rejects_a_certificate_without_an_attestation_extension() {
         let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
         let cert_der = self_signed_der(&key_pair, None);
 
-        let verifier = SnpCertVerifier::new(None);
+        let verifier = SnpCertVerifier::new(None, None);
         let result = verifier.verify_server_cert(
             &CertificateDer::from(cert_der),
             &[],
