@@ -464,16 +464,6 @@ pub(crate) struct VProgramShow {
     pub attested_endpoint: Option<String>,
 }
 
-/// `TeePlatform` has no public string accessor outside its own module; go
-/// through its serde representation (the wire form, e.g. `"sev_snp"`)
-/// instead, mirroring how `instance_show::render_text` reads `Channel`.
-fn platform_str(p: aleph_types::message::execution::environment::TeePlatform) -> String {
-    serde_json::to_value(p)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 /// Pure builder: assembles the render model from a V-PROGRAM message's
 /// content plus optional live CRN state. No I/O, so it is unit-testable
 /// without a network.
@@ -488,7 +478,7 @@ pub(crate) fn build_show(
         .measurements
         .iter()
         .map(|m| MeasurementSummary {
-            platform: platform_str(m.platform),
+            platform: m.platform.as_str().to_string(),
             digest: m.digest.clone(),
             vcpu_type: m.vcpu_type.clone(),
         })
