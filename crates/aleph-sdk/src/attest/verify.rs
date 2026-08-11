@@ -88,6 +88,12 @@ impl std::str::FromStr for AmdProduct {
 pub struct VerificationResult {
     /// Hex-encoded 48-byte launch measurement from the report.
     pub measurement: String,
+    /// SEV-SNP guest policy the VM was actually launched with, from the
+    /// signed report. Callers comparing against an expected policy (e.g. the
+    /// one pinned on a V-PROGRAM message) must use this value: a host that
+    /// launches the same measured stack with a weaker policy (e.g. debug
+    /// allowed) changes this field but not the measurement.
+    pub policy: u64,
     /// Human-readable summary of what was checked.
     pub summary: String,
 }
@@ -149,9 +155,11 @@ fn verify_report_with_vcek(
 
     Ok(VerificationResult {
         measurement: hex::encode(report.measurement),
+        policy: u64::from(report.policy),
         summary: format!(
-            "SEV-SNP verified against AMD {product} chain (VMPL {})",
-            report.vmpl
+            "SEV-SNP verified against AMD {product} chain (VMPL {}, policy {:#x})",
+            report.vmpl,
+            u64::from(report.policy),
         ),
     })
 }
@@ -349,6 +357,15 @@ mod tests {
             "7a1e5c266c0108dbc9bb94fa926951320940915d0aafb42464bd88b579ea158d3e1a0dc39b2c60bd95b9c480cd81841f"
         );
         assert_eq!(result.measurement, hex::encode(report.measurement));
+
+        // The policy must be surfaced from the SIGNED report so callers can
+        // compare it against the expected (message-pinned) policy. Cross-check
+        // against the parsed report; a stub value here would let a debug-
+        // enabled launch masquerade as the pinned policy.
+        assert_eq!(result.policy, u64::from(report.policy));
+        // Pinned to the fixture's real policy (0x30000: reserved bit 17 +
+        // SMT allowed), mirroring the pinned measurement above.
+        assert_eq!(result.policy, 0x30000);
     }
 
     #[test]
