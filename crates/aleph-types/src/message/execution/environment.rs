@@ -208,7 +208,9 @@ pub enum TeePlatform {
 }
 
 impl TeePlatform {
-    pub(crate) fn as_str(self) -> &'static str {
+    /// The platform's wire string (its serde rename, e.g. "sev_snp"), for
+    /// display sites that would otherwise round-trip through serde to get it.
+    pub fn as_str(self) -> &'static str {
         match self {
             TeePlatform::SevSnp => "sev_snp",
         }
