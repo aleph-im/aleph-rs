@@ -17,7 +17,8 @@
 //! - the certificate has no attestation extension,
 //! - the extension declares a TEE type other than SEV-SNP,
 //! - the raw report bytes (`data`) don't parse as a SEV-SNP report,
-//! - the key-binding check fails (`report_data != SHA-384(pubkey) || zeros`),
+//! - the key-binding check fails
+//!   (`report_data != SHA-384(DOMAIN_KEY || pubkey) || zeros`),
 //! - an `expected_measurement` was given and doesn't match.
 //!
 //! Crucially, the key-binding and measurement checks are made against the
@@ -46,6 +47,17 @@ use sha2::{Digest, Sha384};
 use super::verify::{AmdProduct, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
 use super::{AttestationReport, TeeType};
+
+/// Domain tag the guest agent mixes into the key-binding hash:
+/// `report_data = SHA-384(KEY_BINDING_DOMAIN || public_key) || zeros`.
+///
+/// Mirrors `aleph_tee::report_data::DOMAIN_KEY` (aleph-vm
+/// `rust/crates/aleph-tee`) byte-for-byte, trailing `0x00` separator
+/// included. The emitter domain-separates its two report shapes (key binding
+/// vs. nonce freshness) so an attacker cannot request a fresh report whose
+/// `report_data` collides with a key-bound one; verifying without the domain
+/// rejected every real guest (aleph-testnets#35 run 31433603211).
+const KEY_BINDING_DOMAIN: &[u8] = b"aleph-attest-tls-key-v1\x00";
 
 /// The result of an attested HTTP request: the HTTP response plus the
 /// verified launch measurement the connection was gated on.
@@ -156,22 +168,28 @@ impl SnpCertVerifier {
         })?;
 
         // 3. Key binding: the SIGNED report_data must equal
-        //    SHA-384(public_key) || zeros. This proves the report was
-        //    generated for *this* TLS key, not replayed from a different
-        //    (possibly still-valid) one.
+        //    SHA-384(KEY_BINDING_DOMAIN || public_key) || zeros. This proves
+        //    the report was generated for *this* TLS key, not replayed from a
+        //    different (possibly still-valid) one. The hashed key bytes are
+        //    the certificate's raw subjectPublicKey bit-string (the
+        //    uncompressed EC point), the same bytes the agent feeds to
+        //    `key_bound_report_data`.
         let (_, cert) = x509_parser::parse_x509_certificate(end_entity.as_ref()).map_err(|e| {
             RustlsError::General(format!("failed to parse certificate for key binding: {e}"))
         })?;
         let public_key_bytes = cert.tbs_certificate.subject_pki.subject_public_key.data;
 
-        let hash = Sha384::digest(public_key_bytes);
+        let mut hasher = Sha384::new();
+        hasher.update(KEY_BINDING_DOMAIN);
+        hasher.update(public_key_bytes);
+        let hash = hasher.finalize();
         let mut expected_report_data = [0u8; 64];
         expected_report_data[..48].copy_from_slice(&hash);
 
         if signed.report_data != expected_report_data {
             return Err(RustlsError::General(format!(
-                "key binding verification failed: report_data does not match SHA-384(public_key). \
-                 expected {}, got {}",
+                "key binding verification failed: report_data does not match \
+                 SHA-384(domain || public_key). expected {}, got {}",
                 hex::encode(expected_report_data),
                 hex::encode(signed.report_data),
             )));
@@ -388,7 +406,8 @@ mod tests {
     }
 
     /// The 64-byte `REPORT_DATA` value that binds a report to a TLS key whose
-    /// SPKI hashes to `hash`: `SHA-384(pubkey) || zeros[16]`.
+    /// domained SPKI hash is `hash`:
+    /// `SHA-384(KEY_BINDING_DOMAIN || pubkey) || zeros[16]`.
     fn key_bound_report_data(hash: [u8; 48]) -> [u8; 64] {
         let mut report_data = [0u8; 64];
         report_data[..48].copy_from_slice(&hash);
@@ -410,12 +429,16 @@ mod tests {
         cert.der().to_vec()
     }
 
-    /// SHA-384 of the SubjectPublicKeyInfo `BIT STRING` content of `der`, as
-    /// `verify_server_cert`'s key-binding check computes it.
+    /// `SHA-384(KEY_BINDING_DOMAIN || pubkey)` over the SubjectPublicKeyInfo
+    /// `BIT STRING` content of `der`, as `verify_server_cert`'s key-binding
+    /// check (and the guest agent's `key_bound_report_data`) computes it.
     fn subject_pubkey_sha384(der: &[u8]) -> [u8; 48] {
         let (_, cert) =
             x509_parser::parse_x509_certificate(der).expect("cert should parse for the probe");
-        Sha384::digest(cert.tbs_certificate.subject_pki.subject_public_key.data).into()
+        let mut hasher = Sha384::new();
+        hasher.update(KEY_BINDING_DOMAIN);
+        hasher.update(cert.tbs_certificate.subject_pki.subject_public_key.data);
+        hasher.finalize().into()
     }
 
     fn dummy_server_name() -> ServerName<'static> {
@@ -624,6 +647,48 @@ mod tests {
         assert!(
             verifier.get_report().is_none(),
             "a rejected handshake must not stash a report"
+        );
+        let rejection = verifier
+            .get_rejection()
+            .expect("rejection must be recorded");
+        assert!(rejection.contains("key binding"), "{rejection}");
+    }
+
+    /// Regression for aleph-testnets#35 run 31433603211: the guest agent
+    /// domain-separates the key-binding hash
+    /// (`SHA-384(KEY_BINDING_DOMAIN || pubkey)`); a report bound with the
+    /// plain, undomained `SHA-384(pubkey)` (what this SDK expected before)
+    /// must NOT verify. This pins the domain tag on the verifier side: if
+    /// either side drops or changes it, this test or the accept test breaks.
+    #[test]
+    fn rejects_a_key_binding_without_the_domain_tag() {
+        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let probe_der = self_signed_der(&key_pair, None);
+        let (_, cert) = x509_parser::parse_x509_certificate(&probe_der)
+            .expect("cert should parse for the probe");
+        let undomained: [u8; 48] =
+            Sha384::digest(cert.tbs_certificate.subject_pki.subject_public_key.data).into();
+
+        let measurement = [0xAB; 48];
+        let report = AttestationReport {
+            tee_type: TeeType::SevSnp,
+            data: signed_report_bytes(key_bound_report_data(undomained), measurement),
+        };
+        let ext_value = encode_attestation_extension(&report).expect("encoding should succeed");
+        let cert_der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext_value)));
+
+        let verifier = SnpCertVerifier::new(None);
+        let result = verifier.verify_server_cert(
+            &CertificateDer::from(cert_der),
+            &[],
+            &dummy_server_name(),
+            &[],
+            UnixTime::now(),
+        );
+
+        assert!(
+            result.is_err(),
+            "an undomained key-binding hash must be rejected"
         );
         let rejection = verifier
             .get_rejection()
