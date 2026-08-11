@@ -6,7 +6,8 @@
 use crate::item_hash::ItemHash;
 use crate::message::execution::base::{ExecutableContent, PaymentType};
 use crate::message::execution::environment::{
-    DEFAULT_SNP_POLICY, LaunchMeasurement, MAX_MEASUREMENTS, TeeError, validate_snp_policy,
+    DEFAULT_SNP_POLICY, LaunchMeasurement, MAX_MEASUREMENTS, TeeError, TeePlatform,
+    validate_snp_policy,
 };
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -116,13 +117,6 @@ pub struct VerifiedVolume {
     pub comment: String,
 }
 
-/// TEE attestation backend the VM launches with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TeeBackend {
-    #[serde(rename = "sev_snp")]
-    SevSnp,
-}
-
 fn default_snp_policy() -> u64 {
     DEFAULT_SNP_POLICY
 }
@@ -131,7 +125,8 @@ fn default_snp_policy() -> u64 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawTeeVerification")]
 pub struct TeeVerification {
-    pub backend: TeeBackend,
+    /// TEE attestation platform the VM launches with.
+    pub backend: TeePlatform,
     /// SEV-SNP 64-bit guest policy (not SEV bit semantics).
     #[serde(default = "default_snp_policy")]
     pub policy: u64,
@@ -141,7 +136,7 @@ pub struct TeeVerification {
 
 #[derive(Deserialize)]
 struct RawTeeVerification {
-    backend: TeeBackend,
+    backend: TeePlatform,
     #[serde(default = "default_snp_policy")]
     policy: u64,
     measurements: Vec<LaunchMeasurement>,
@@ -151,14 +146,25 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
     type Error = TeeError;
 
     fn try_from(raw: RawTeeVerification) -> Result<Self, Self::Error> {
-        // TeeBackend only has SevSnp today; dispatch policy validation per
-        // backend when other backends (e.g. TDX) are added.
+        // TeePlatform only has SevSnp today; dispatch policy validation per
+        // backend when other platforms (e.g. TDX) are added.
         validate_snp_policy(raw.policy)?;
         if raw.measurements.is_empty() {
             return Err(TeeError::SnpModeRequires("measurements"));
         }
         if raw.measurements.len() > MAX_MEASUREMENTS {
             return Err(TeeError::TooManyMeasurements(raw.measurements.len()));
+        }
+        // Unreachable while TeePlatform has a single variant, but load-bearing
+        // the day a second platform (e.g. TDX) lands: a sev_snp backend must
+        // not carry tdx measurements, or vice versa.
+        for measurement in &raw.measurements {
+            if measurement.platform != raw.backend {
+                return Err(TeeError::MeasurementPlatformMismatch {
+                    expected: raw.backend.as_str(),
+                    got: measurement.platform.as_str(),
+                });
+            }
         }
         Ok(Self {
             backend: raw.backend,
@@ -384,6 +390,22 @@ mod test {
 
         let json = r#"{"backend": "sev_snp", "measurements": []}"#;
         assert!(serde_json::from_str::<TeeVerification>(json).is_err()); // min 1
+    }
+
+    #[test]
+    fn test_tee_verification_backend_wire_roundtrip() {
+        let json = format!(
+            r#"{{"backend": "sev_snp",
+                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+        );
+        let v: TeeVerification = serde_json::from_str(&json).unwrap();
+        assert_eq!(v.backend, TeePlatform::SevSnp);
+
+        let value = serde_json::to_value(&v).unwrap();
+        assert_eq!(value["backend"], "sev_snp");
+
+        let back: TeeVerification = serde_json::from_value(value).unwrap();
+        assert_eq!(back, v);
     }
 
     #[test]
