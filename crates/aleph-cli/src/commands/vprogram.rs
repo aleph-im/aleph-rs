@@ -72,6 +72,13 @@ async fn handle_create(
     let veritysetup = Veritysetup::find()?;
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
+    if policy_debug_allowed(args.policy) {
+        eprintln!(
+            "warning: --policy {:#x} has the SEV-SNP DEBUG bit (19) set: the host will be \
+             able to decrypt guest memory, so this deployment will NOT be confidential",
+            args.policy
+        );
+    }
     if args.volumes.len() > MAX_VERIFIED_VOLUMES {
         bail!("at most {MAX_VERIFIED_VOLUMES} --volume flags are supported");
     }
@@ -795,6 +802,14 @@ pub(crate) fn resolve_expected_measurement(
     }
 }
 
+/// True if `policy` has the SEV-SNP DEBUG bit (19) set: the host may then
+/// decrypt guest memory via the firmware debug API, so the deployment is
+/// not confidential in any meaningful sense.
+pub(crate) fn policy_debug_allowed(policy: u64) -> bool {
+    const SNP_POLICY_DEBUG_BIT: u64 = 1 << 19;
+    policy & SNP_POLICY_DEBUG_BIT != 0
+}
+
 /// Parse a curl-style `-H "Key: Value"` header into `(name, value)`. Accepts
 /// both `"Key: Value"` and `"Key:Value"` (splits on the first colon, trims
 /// surrounding whitespace off both sides).
@@ -827,6 +842,7 @@ pub(crate) fn render_call_result(
         // whose attestation verified, so the measurement is the evidence.
         let out = serde_json::json!({
             "measurement": response.measurement,
+            "policy": format!("{:#x}", response.policy),
             "status": response.status,
             "body": body,
         });
@@ -905,6 +921,7 @@ async fn handle_call(
         &headers,
         body,
         handshake_pin,
+        Some(content.verification.policy),
         args.amd_product,
     )
     .await
@@ -945,6 +962,28 @@ async fn handle_call(
                 );
             }
         }
+    }
+
+    // Policy re-check on the verified value, mirroring the measurement
+    // re-check above: the handshake already pinned the SIGNED policy, but
+    // the trust decision never rests on a single site. The policy is not
+    // part of the launch measurement, so this (and the handshake pin) is
+    // what stops a host from launching the measured stack with a weaker
+    // policy, e.g. debug allowed.
+    if response.policy != content.verification.policy {
+        bail!(
+            "guest policy mismatch: the V-Program message pins {:#x}, but the guest was \
+             launched with {:#x}",
+            content.verification.policy,
+            response.policy
+        );
+    }
+    if policy_debug_allowed(response.policy) {
+        eprintln!(
+            "warning: this V-Program's guest policy ({:#x}) allows debugging: the host \
+             can decrypt guest memory, so the response is not confidential",
+            response.policy
+        );
     }
 
     let (out, meta) = render_call_result(&response, json);
@@ -1274,10 +1313,19 @@ mod call_tests {
     fn dummy_response(measurement: &str, body: &[u8]) -> AttestedResponse {
         AttestedResponse {
             measurement: measurement.to_string(),
+            policy: 0x30000,
             status: 200,
             headers: vec![],
             body: bytes::Bytes::copy_from_slice(body),
         }
+    }
+
+    #[test]
+    fn policy_debug_allowed_detects_the_snp_debug_bit() {
+        // 0x30000 is the recommended default: SMT allowed, no debug.
+        assert!(!policy_debug_allowed(0x30000));
+        // Bit 19 set: the host may decrypt guest memory.
+        assert!(policy_debug_allowed(0x30000 | (1 << 19)));
     }
 
     #[test]
@@ -1292,6 +1340,9 @@ mod call_tests {
             "no redundant always-true validity flag in call output"
         );
         assert_eq!(v["measurement"], serde_json::json!("ab".repeat(48)));
+        // The verified policy is evidence alongside the measurement: hex,
+        // matching the format used in --policy and error messages.
+        assert_eq!(v["policy"], serde_json::json!("0x30000"));
         assert_eq!(v["status"], serde_json::json!(200));
         assert_eq!(v["body"]["fib"], serde_json::json!(55));
         assert_eq!(meta, None, "JSON mode carries the status in the document");
