@@ -13,6 +13,8 @@
 //! returns `Err`; an `Ok(VerificationResult)` always means a fully verified
 //! report.
 
+use sha2::{Digest, Sha384};
+
 use sev::certs::snp::{Certificate, Chain, Verifiable, builtin, ca};
 use sev::firmware::guest::AttestationReport as SnpReport;
 use sev::parser::ByteParser;
@@ -25,6 +27,36 @@ use super::{AttestationReport, TeeType};
 const AMD_ARK_CN_PREFIX: &str = "ARK-";
 /// AMD ARK certificates' Organization is always this exact string.
 const AMD_ORG_NAME: &str = "Advanced Micro Devices";
+
+/// Expected SHA-384 hash of the ARK's SubjectPublicKeyInfo (algorithm OID
+/// bytes + subject public key bit-string) per AMD product.
+///
+/// These are pinned independently of the `sev` crate's bundled ARK PEMs.
+/// `verify_ark_identity` checks the cert's CN/O strings (forgeable metadata);
+/// this pin checks the actual public key bytes. Together they guard against a
+/// supply-chain attack where the `sev` crate's bundled ARK PEM is replaced
+/// with a forged cert carrying the right CN/O but a different key: the chain
+/// math would still "verify" (a self-signed cert always verifies against
+/// itself), the identity strings would match, but the SPKI hash would not.
+///
+/// Extracted from the `sev` crate 8.0.0 builtin ARKs (Milan, Genoa, Turin).
+/// If the `sev` crate is ever upgraded and AMD rotates an ARK, these pins
+/// must be updated to match, and the upgrade should be reviewed.
+const MILAN_ARK_SPKI_SHA384: [u8; 48] = [
+    0x91, 0x9a, 0x91, 0xfb, 0x2c, 0x03, 0xc0, 0x67, 0xe9, 0x3d, 0x6f, 0x5b, 0xa4, 0xef, 0xd1, 0xa9,
+    0xb6, 0x39, 0x5d, 0x82, 0x63, 0x70, 0xe7, 0xc7, 0xa3, 0x16, 0x6b, 0x44, 0x0f, 0x50, 0xbd, 0xba,
+    0x2f, 0x92, 0xcb, 0x60, 0x63, 0x1e, 0xea, 0x6d, 0xe0, 0xe4, 0xc4, 0x17, 0x6d, 0xff, 0x01, 0x53,
+];
+const GENOA_ARK_SPKI_SHA384: [u8; 48] = [
+    0x9b, 0x28, 0xcb, 0x71, 0x10, 0x72, 0xd0, 0x27, 0xa7, 0x94, 0xeb, 0xd9, 0x9f, 0x7d, 0x5b, 0xe3,
+    0xe8, 0x7e, 0x30, 0x02, 0x32, 0x0a, 0x76, 0x87, 0xaf, 0x11, 0xa1, 0xed, 0x04, 0xf3, 0x21, 0xad,
+    0x86, 0x22, 0x66, 0x49, 0x1a, 0x83, 0xfa, 0xa6, 0xa7, 0x29, 0xa2, 0x09, 0xdf, 0x17, 0xba, 0x27,
+];
+const TURIN_ARK_SPKI_SHA384: [u8; 48] = [
+    0x67, 0x6e, 0x42, 0x9d, 0x42, 0xb8, 0x2b, 0x18, 0x47, 0xc9, 0x92, 0x70, 0x6b, 0xb0, 0xc8, 0x1a,
+    0x1e, 0xbc, 0x15, 0xbc, 0x0e, 0x18, 0x1b, 0x6f, 0x59, 0xc0, 0x3d, 0x36, 0xb0, 0xeb, 0xd6, 0x17,
+    0x8e, 0x06, 0xb5, 0x91, 0x92, 0x32, 0xb6, 0x7d, 0xc7, 0xb2, 0xef, 0xce, 0xee, 0xf1, 0xb4, 0x3d,
+];
 
 /// AMD EPYC product line a SEV-SNP report/VCEK was issued for.
 ///
@@ -152,6 +184,11 @@ pub async fn verify_sev_snp_report(
 /// 3. ARK subject identity (CN prefix + Organization + self-issued): guards
 ///    against a poisoned/substituted "builtin" ARK; `sev` does not check
 ///    this either, it only checks the signature math.
+/// 4. ARK SPKI pin: the ARK's SubjectPublicKeyInfo hash must match the
+///    hardcoded expected hash for this product. This is the second line
+///    beyond `verify_ark_identity`: a forged ARK carrying the right CN/O
+///    strings but a different key passes the identity check but fails the
+///    SPKI pin.
 fn verify_report_with_vcek(
     report: &SnpReport,
     product: AmdProduct,
@@ -171,6 +208,7 @@ fn verify_report_with_vcek(
     // Policy checks the `sev` crate does not perform:
     check_vmpl(report.vmpl)?;
     verify_ark_identity(&chain.ca.ark)?;
+    verify_ark_spki_pin(&chain.ca.ark, product)?;
 
     Ok(VerificationResult {
         measurement: hex::encode(report.measurement),
@@ -232,6 +270,48 @@ fn verify_ark_identity(ark: &Certificate) -> Result<(), AttestError> {
         return Err(AttestError::ArkIdentity(
             "ARK certificate issuer does not match subject (not self-issued)".to_string(),
         ));
+    }
+
+    Ok(())
+}
+
+/// Verify that the ARK's SubjectPublicKeyInfo matches the pinned expected
+/// hash for this AMD product.
+///
+/// `verify_ark_identity` checks the cert's CN/O strings, which are forgeable
+/// metadata. This pin checks the actual public key bytes, so a forged ARK
+/// carrying the right CN/O but a different key is rejected. The hash covers
+/// the algorithm OID bytes + the subject public key bit-string (the same
+/// fields `x509_parser` exposes on `SubjectPublicKeyInfo`).
+///
+/// The pins are extracted from the `sev` crate 8.0.0 builtin ARK PEMs. If the
+/// `sev` crate is upgraded and AMD rotates an ARK, these must be updated.
+fn verify_ark_spki_pin(ark: &Certificate, product: AmdProduct) -> Result<(), AttestError> {
+    let expected = match product {
+        AmdProduct::Milan => &MILAN_ARK_SPKI_SHA384,
+        AmdProduct::Genoa => &GENOA_ARK_SPKI_SHA384,
+        AmdProduct::Turin => &TURIN_ARK_SPKI_SHA384,
+    };
+
+    let der = ark.to_der().map_err(AttestError::CertDecode)?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&der).map_err(|e| {
+        AttestError::ArkIdentity(format!("failed to parse ARK certificate for SPKI pin: {e}"))
+    })?;
+
+    let spki = &cert.tbs_certificate.subject_pki;
+    let alg_oid = spki.algorithm.oid();
+    let key_bytes: &[u8] = &spki.subject_public_key.data;
+
+    let mut hasher = Sha384::new();
+    hasher.update(alg_oid.as_bytes());
+    hasher.update(key_bytes);
+    let actual = hasher.finalize();
+
+    if actual.as_slice() != expected.as_slice() {
+        return Err(AttestError::ArkIdentity(format!(
+            "ARK SubjectPublicKeyInfo hash does not match the pinned expected hash for {product} \
+             (possible forged or supply-chain-substituted ARK)"
+        )));
     }
 
     Ok(())
@@ -422,5 +502,59 @@ mod tests {
                 "expected AttestError::Vmpl({vmpl}), got: {err:?}"
             );
         }
+    }
+
+    // ---- ARK SPKI pinning ----
+
+    #[test]
+    fn ark_spki_pin_accepts_all_builtin_arks() {
+        for (product, ark_fn) in [
+            (
+                AmdProduct::Milan,
+                builtin::milan::ark as fn() -> Result<_, _>,
+            ),
+            (
+                AmdProduct::Genoa,
+                builtin::genoa::ark as fn() -> Result<_, _>,
+            ),
+            (
+                AmdProduct::Turin,
+                builtin::turin::ark as fn() -> Result<_, _>,
+            ),
+        ] {
+            let ark = ark_fn().expect("builtin ARK should decode");
+            verify_ark_spki_pin(&ark, product)
+                .unwrap_or_else(|e| panic!("builtin {product} ARK must pass the SPKI pin: {e}"));
+        }
+    }
+
+    /// A freshly generated self-signed cert with AMD's CN/O strings (matching
+    /// `verify_ark_identity`) but a different key must be REJECTED by the SPKI
+    /// pin. This is the core defense: identity strings alone are not enough.
+    #[test]
+    fn ark_spki_pin_rejects_forged_ark_with_correct_identity_but_wrong_key() {
+        let forged = ark_like_cert("ARK-Milan", AMD_ORG_NAME, true);
+        let err = verify_ark_spki_pin(&forged, AmdProduct::Milan)
+            .expect_err("forged ARK must be rejected by the SPKI pin");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SubjectPublicKeyInfo hash does not match"),
+            "expected SPKI pin mismatch, got: {msg}"
+        );
+    }
+
+    /// The SPKI pin must use the product's own expected hash, not a different
+    /// product's. Verifying the builtin Milan ARK against the Genoa pin must
+    /// fail.
+    #[test]
+    fn ark_spki_pin_rejects_cross_product_mismatch() {
+        let milan_ark = builtin::milan::ark().expect("Milan ARK should decode");
+        let err = verify_ark_spki_pin(&milan_ark, AmdProduct::Genoa)
+            .expect_err("Milan ARK must not match the Genoa SPKI pin");
+        assert!(
+            err.to_string()
+                .contains("SubjectPublicKeyInfo hash does not match"),
+            "expected SPKI pin mismatch, got: {err}"
+        );
     }
 }
