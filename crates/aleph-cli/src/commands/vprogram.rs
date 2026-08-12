@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use aleph_sdk::attest::attested_request;
 use aleph_sdk::client::{
-    AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus, hash_file,
+    AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
+    hash_file,
 };
 use aleph_sdk::crn::{ActiveVmNetworking, fetch_active_vms};
 use aleph_sdk::messages::{StoreBuilder, VProgramBuilder};
@@ -817,6 +818,57 @@ pub(crate) fn check_debug_policy(policy: u64, allow_debug: bool) -> Result<()> {
     Ok(())
 }
 
+/// Pure: fold an override patch onto the network floor, gating any lowering
+/// behind `accept_outdated`. I/O-free so it is directly unit-testable.
+pub(crate) fn resolve_effective_floor(
+    network: &aleph_sdk::attest::TcbFloor,
+    override_patch: Option<&aleph_sdk::attest::TcbFloorOverride>,
+    accept_outdated: bool,
+) -> Result<aleph_sdk::attest::TcbFloor> {
+    let Some(patch) = override_patch else {
+        return Ok(*network);
+    };
+    let (eff, lowered) = patch.apply_to(network);
+    if !lowered.is_empty() {
+        if !accept_outdated {
+            bail!(
+                "--min-tcb lowers {lowered:?} below the network floor; \
+                 pass --accept-outdated-tcb to accept the risk"
+            );
+        }
+        eprintln!(
+            "warning: accepting a TCB below the network floor for {lowered:?}: the node \
+             runs known-outdated firmware, so the guest may be exposed"
+        );
+    }
+    Ok(eff)
+}
+
+/// Resolve the network floor (builtin baseline raised by the settings
+/// aggregate), then apply the override. Aggregate failure falls back to the
+/// baseline with a warning.
+async fn resolve_tcb_floor(
+    aleph_client: &AlephClient,
+    product: aleph_sdk::attest::AmdProduct,
+    override_patch: Option<&aleph_sdk::attest::TcbFloorOverride>,
+    accept_outdated: bool,
+) -> Result<aleph_sdk::attest::TcbFloor> {
+    let baseline = aleph_sdk::attest::builtin_baseline(product);
+    let network = match aleph_client.get_settings_aggregate().await {
+        Ok(agg) => match agg.settings.snp_min_tcb.floor_for(product) {
+            Some(f) => baseline.raise_to(&f),
+            None => baseline,
+        },
+        Err(e) => {
+            eprintln!(
+                "warning: could not fetch the network TCB floor ({e}); using the built-in baseline"
+            );
+            baseline
+        }
+    };
+    resolve_effective_floor(&network, override_patch, accept_outdated)
+}
+
 /// Parse a curl-style `-H "Key: Value"` header into `(name, value)`. Accepts
 /// both `"Key: Value"` and `"Key:Value"` (splits on the first colon, trims
 /// surrounding whitespace off both sides).
@@ -832,13 +884,36 @@ pub(crate) fn parse_header(raw: &str) -> Result<(String, String)> {
     Ok((name.to_string(), value.to_string()))
 }
 
+/// Format a TCB (floor or reported/launch view) as `"bl=.. tee=.. snp=..
+/// ucode=.."`, prefixed with `"fmc=.."` when set (Turin only).
+fn format_tcb(fmc: Option<u8>, bootloader: u8, tee: u8, snp: u8, microcode: u8) -> String {
+    let rest = format!("bl={bootloader} tee={tee} snp={snp} ucode={microcode}");
+    match fmc {
+        Some(fmc) => format!("fmc={fmc} {rest}"),
+        None => rest,
+    }
+}
+
+fn format_tcb_floor(floor: &aleph_sdk::attest::TcbFloor) -> String {
+    format_tcb(
+        floor.fmc,
+        floor.bootloader,
+        floor.tee,
+        floor.snp,
+        floor.microcode,
+    )
+}
+
 /// Render an [`aleph_sdk::attest::AttestedResponse`] for `call`'s output as
 /// `(stdout, stderr_meta)`. In text mode stdout is the raw response body so
 /// the command pipes like curl; the `HTTP <status>` line goes to stderr. In
-/// JSON mode everything is in the stdout document and there is no meta line.
+/// JSON mode everything is in the stdout document and there is no meta line,
+/// and the effective TCB floor plus the verified launch/reported TCB are
+/// included as evidence alongside the measurement/policy.
 /// Pure (no I/O), so it's unit-testable without a network or TLS server.
 pub(crate) fn render_call_result(
     response: &aleph_sdk::attest::AttestedResponse,
+    min_tcb: &aleph_sdk::attest::TcbFloor,
     json: bool,
 ) -> (String, Option<String>) {
     if json {
@@ -850,6 +925,21 @@ pub(crate) fn render_call_result(
         let out = serde_json::json!({
             "measurement": response.measurement,
             "policy": format!("{:#x}", response.policy),
+            "effective_tcb_floor": format_tcb_floor(min_tcb),
+            "launch_tcb": format_tcb(
+                response.launch_tcb.fmc,
+                response.launch_tcb.bootloader,
+                response.launch_tcb.tee,
+                response.launch_tcb.snp,
+                response.launch_tcb.microcode,
+            ),
+            "reported_tcb": format_tcb(
+                response.reported_tcb.fmc,
+                response.reported_tcb.bootloader,
+                response.reported_tcb.tee,
+                response.reported_tcb.snp,
+                response.reported_tcb.microcode,
+            ),
             "status": response.status,
             "body": body,
         });
@@ -921,6 +1011,14 @@ async fn handle_call(
         MeasurementExpectation::MemberOf(_) => None,
     };
 
+    let min_tcb = resolve_tcb_floor(
+        aleph_client,
+        args.amd_product,
+        args.min_tcb.as_ref(),
+        args.accept_outdated_tcb,
+    )
+    .await?;
+
     let response = attested_request(
         &base_url,
         args.method.clone(),
@@ -930,9 +1028,7 @@ async fn handle_call(
         handshake_pin,
         Some(content.verification.policy),
         args.amd_product,
-        // Temporary until Task 5 resolves the effective floor (network
-        // aggregate raised by the release baseline, patched by --min-tcb).
-        &aleph_sdk::attest::builtin_baseline(args.amd_product),
+        &min_tcb,
     )
     .await
     .map_err(|e| anyhow!("attestation failed: {e}"))?;
@@ -996,7 +1092,15 @@ async fn handle_call(
         );
     }
 
-    let (out, meta) = render_call_result(&response, json);
+    // Belt-and-suspenders TCB re-check on the verified evidence, mirroring
+    // the measurement/policy re-checks above: `attested_request` already
+    // enforced `min_tcb` internally, but the trust decision never rests on a
+    // single site.
+    if let Err(defs) = min_tcb.satisfied_by(&response.launch_tcb) {
+        bail!("guest launch TCB is below the required floor: {defs:?}");
+    }
+
+    let (out, meta) = render_call_result(&response, &min_tcb, json);
     if let Some(meta) = meta {
         eprintln!("{meta}");
     }
@@ -1196,7 +1300,7 @@ mod show_tests {
 #[cfg(test)]
 mod call_tests {
     use super::*;
-    use aleph_sdk::attest::AttestedResponse;
+    use aleph_sdk::attest::{AttestedResponse, TcbFloor, TcbFloorOverride};
 
     fn measurement(digest: &str, vcpu_type: Option<&str>) -> LaunchMeasurement {
         let json = serde_json::json!({
@@ -1324,6 +1428,8 @@ mod call_tests {
         AttestedResponse {
             measurement: measurement.to_string(),
             policy: 0x30000,
+            launch_tcb: Default::default(),
+            reported_tcb: Default::default(),
             status: 200,
             headers: vec![],
             body: bytes::Bytes::copy_from_slice(body),
@@ -1336,6 +1442,16 @@ mod call_tests {
         assert!(!policy_debug_allowed(0x30000));
         // Bit 19 set: the host may decrypt guest memory.
         assert!(policy_debug_allowed(0x30000 | (1 << 19)));
+    }
+
+    fn dummy_floor() -> TcbFloor {
+        TcbFloor {
+            fmc: None,
+            bootloader: 4,
+            tee: 0,
+            snp: 21,
+            microcode: 84,
+        }
     }
 
     #[test]
@@ -1367,7 +1483,7 @@ mod call_tests {
     fn render_call_result_json_parses_json_body() {
         let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
 
-        let (out, meta) = render_call_result(&response, true);
+        let (out, meta) = render_call_result(&response, &dummy_floor(), true);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert!(
@@ -1378,6 +1494,14 @@ mod call_tests {
         // The verified policy is evidence alongside the measurement: hex,
         // matching the format used in --policy and error messages.
         assert_eq!(v["policy"], serde_json::json!("0x30000"));
+        // The effective floor and verified TCB views are evidence alongside
+        // the measurement/policy.
+        assert_eq!(
+            v["effective_tcb_floor"],
+            serde_json::json!("bl=4 tee=0 snp=21 ucode=84")
+        );
+        assert!(v.get("launch_tcb").is_some());
+        assert!(v.get("reported_tcb").is_some());
         assert_eq!(v["status"], serde_json::json!(200));
         assert_eq!(v["body"]["fib"], serde_json::json!(55));
         assert_eq!(meta, None, "JSON mode carries the status in the document");
@@ -1387,7 +1511,7 @@ mod call_tests {
     fn render_call_result_json_falls_back_to_string_body_for_non_json() {
         let response = dummy_response(&"ab".repeat(48), b"plain text body");
 
-        let (out, _meta) = render_call_result(&response, true);
+        let (out, _meta) = render_call_result(&response, &dummy_floor(), true);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["body"], serde_json::json!("plain text body"));
@@ -1397,7 +1521,7 @@ mod call_tests {
     fn render_call_result_text_puts_only_the_body_on_stdout() {
         let response = dummy_response(&"ab".repeat(48), br#"{"status":"ok"}"#);
 
-        let (out, meta) = render_call_result(&response, false);
+        let (out, meta) = render_call_result(&response, &dummy_floor(), false);
 
         // The body must be machine-consumable as-is (aleph-testnets#35 run
         // 31474678768: `json.loads` on stdout choked on the status line).
@@ -1405,5 +1529,40 @@ mod call_tests {
             .expect("stdout is exactly the response body");
         assert_eq!(out, r#"{"status":"ok"}"#);
         assert_eq!(meta.as_deref(), Some("HTTP 200"));
+    }
+
+    fn net() -> TcbFloor {
+        TcbFloor {
+            fmc: None,
+            bootloader: 4,
+            tee: 0,
+            snp: 21,
+            microcode: 84,
+        }
+    }
+
+    #[test]
+    fn no_override_yields_the_network_floor() {
+        assert_eq!(resolve_effective_floor(&net(), None, false).unwrap(), net());
+    }
+
+    #[test]
+    fn raising_override_needs_no_acknowledgement() {
+        let o: TcbFloorOverride = "snp=30".parse().unwrap();
+        let eff = resolve_effective_floor(&net(), Some(&o), false).unwrap();
+        assert_eq!(eff.snp, 30);
+    }
+
+    #[test]
+    fn lowering_override_without_ack_is_rejected() {
+        let o: TcbFloorOverride = "snp=9".parse().unwrap();
+        assert!(resolve_effective_floor(&net(), Some(&o), false).is_err());
+    }
+
+    #[test]
+    fn lowering_override_with_ack_is_accepted() {
+        let o: TcbFloorOverride = "snp=9".parse().unwrap();
+        let eff = resolve_effective_floor(&net(), Some(&o), true).unwrap();
+        assert_eq!(eff.snp, 9);
     }
 }

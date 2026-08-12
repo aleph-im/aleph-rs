@@ -3235,6 +3235,19 @@ pub struct VProgramCallArgs {
     /// pinned on the V-PROGRAM message.
     #[arg(long)]
     pub expected_measurement: Option<String>,
+
+    /// Raise (or, with --accept-outdated-tcb, surgically lower) the minimum
+    /// SEV-SNP TCB. Comma-separated component=value pairs, e.g.
+    /// `snp=9,microcode=15`. Components: fmc (Turin), bootloader, tee, snp,
+    /// microcode. Scoped by --amd-product.
+    #[arg(long)]
+    pub min_tcb: Option<aleph_sdk::attest::TcbFloorOverride>,
+
+    /// Acknowledge accepting a TCB below the network floor (required when
+    /// --min-tcb lowers any component). The node runs known-outdated firmware
+    /// and the guest may be exposed.
+    #[arg(long)]
+    pub accept_outdated_tcb: bool,
 }
 
 /// Clap adapter for `reqwest::Method::from_str` (`-X`/`--request`).
