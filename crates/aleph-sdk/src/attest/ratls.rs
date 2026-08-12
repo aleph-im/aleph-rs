@@ -46,6 +46,7 @@ use sev::parser::ByteParser;
 use sha2::{Digest, Sha384};
 use subtle::ConstantTimeEq;
 
+use super::tcb::TcbFloor;
 use super::verify::{AmdProduct, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
 use super::{AttestationReport, TeeType};
@@ -73,6 +74,10 @@ pub struct AttestedResponse {
     pub measurement: String,
     /// SEV-SNP guest policy from the verified report.
     pub policy: u64,
+    /// TCB the VM was launched under (Option A gates on this).
+    pub launch_tcb: sev::firmware::host::TcbVersion,
+    /// TCB the VCEK is keyed to (from the signed report).
+    pub reported_tcb: sev::firmware::host::TcbVersion,
     /// The HTTP status code of the response.
     pub status: u16,
     /// The HTTP response headers, in wire order (a header repeated multiple
@@ -347,6 +352,7 @@ pub async fn attested_request(
     expected_measurement: Option<&[u8]>,
     expected_policy: Option<u64>,
     product: AmdProduct,
+    min_tcb: &TcbFloor,
 ) -> Result<AttestedResponse, AttestError> {
     let url = base_url.join(path)?;
 
@@ -385,7 +391,7 @@ pub async fn attested_request(
 
     // Propagate on failure rather than degrading to a partial response: an
     // unverifiable report must never look like a successful response.
-    let result = verify_sev_snp_report(&report, product).await?;
+    let result = verify_sev_snp_report(&report, product, min_tcb).await?;
 
     let status = response.status().as_u16();
     let response_headers = response
@@ -403,6 +409,8 @@ pub async fn attested_request(
     Ok(AttestedResponse {
         measurement: result.measurement,
         policy: result.policy,
+        launch_tcb: result.launch_tcb,
+        reported_tcb: result.reported_tcb,
         status,
         headers: response_headers,
         body,

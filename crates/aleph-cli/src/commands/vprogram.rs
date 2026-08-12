@@ -930,6 +930,9 @@ async fn handle_call(
         handshake_pin,
         Some(content.verification.policy),
         args.amd_product,
+        // Temporary until Task 5 resolves the effective floor (network
+        // aggregate raised by the release baseline, patched by --min-tcb).
+        &aleph_sdk::attest::builtin_baseline(args.amd_product),
     )
     .await
     .map_err(|e| anyhow!("attestation failed: {e}"))?;
