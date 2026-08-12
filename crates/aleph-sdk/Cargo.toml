@@ -40,6 +40,7 @@ serde_json = { workspace = true }
 serde_qs = { workspace = true }
 serde_with = { workspace = true }
 sha2 = { workspace = true }
+subtle = { workspace = true }
 tar = { workspace = true }
 thiserror = { workspace = true }
 tokio-tungstenite = { workspace = true }
