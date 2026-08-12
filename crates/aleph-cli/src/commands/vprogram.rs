@@ -72,6 +72,14 @@ async fn handle_create(
     let veritysetup = Veritysetup::find()?;
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
+    if policy_debug_allowed(args.policy) && !args.allow_debug {
+        bail!(
+            "--policy {:#x} has the SEV-SNP DEBUG bit (19) set: the host will be able to \
+             decrypt guest memory, so this deployment will NOT be confidential. \
+             Pass --allow-debug to acknowledge and publish anyway",
+            args.policy
+        );
+    }
     if policy_debug_allowed(args.policy) {
         eprintln!(
             "warning: --policy {:#x} has the SEV-SNP DEBUG bit (19) set: the host will be \

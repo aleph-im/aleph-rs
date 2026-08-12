@@ -3168,6 +3168,13 @@ pub struct VProgramCreateArgs {
     #[arg(long, value_parser = parse_u64_maybe_hex, default_value = "0x30000")]
     pub policy: u64,
 
+    /// Allow the DEBUG bit (19) in the guest policy. The host can then
+    /// decrypt guest memory via the firmware debug API, so the deployment
+    /// is NOT confidential. This flag is required to publish a V-Program
+    /// with a debug-enabled policy.
+    #[arg(long)]
+    pub allow_debug: bool,
+
     /// CRN node hash. Pins the V-Program to a specific compute node.
     #[arg(long)]
     pub crn_hash: Option<NodeHash>,
@@ -4302,6 +4309,52 @@ mod vprogram_create_args_tests {
         assert_eq!(args.volumes.len(), 2);
         assert!(args.no_internet);
         assert_eq!(args.crn_hash.unwrap().to_string(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn vprogram_create_allow_debug_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--workload",
+            "/tmp/w.ext4",
+            "--runtime",
+            &"cafe".repeat(16),
+            "--policy",
+            "0x90000",
+            "--allow-debug",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.policy, 0x90000);
+        assert!(args.allow_debug);
+    }
+
+    #[test]
+    fn vprogram_create_allow_debug_defaults_to_false() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--workload",
+            "/tmp/w.ext4",
+            "--runtime",
+            &"cafe".repeat(16),
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert!(!args.allow_debug);
     }
 
     #[test]
