@@ -656,12 +656,9 @@ async fn fetch_live_networking(
         );
         return None;
     };
-    let crn_url = match Url::parse(addr) {
-        Ok(url) => url,
-        Err(e) => {
-            eprintln!("warning: invalid CRN address `{addr}` for node {node_hash}: {e}");
-            return None;
-        }
+    let crn_url = match crate::common::parse_crn_address(addr, &node_hash.to_string()) {
+        Some(url) => url,
+        None => return None,
     };
     let http = reqwest::Client::new();
     match fetch_active_vms(&http, &crn_url).await {
