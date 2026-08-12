@@ -676,15 +676,13 @@ mod tests {
             snp: 21,
             microcode: 0,
         };
-        let good = {
-            let mut v = TcbVersion::default();
-            v.snp = 25;
-            v
+        let good = TcbVersion {
+            snp: 25,
+            ..Default::default()
         };
-        let old_launch = {
-            let mut v = TcbVersion::default();
-            v.snp = 20;
-            v
+        let old_launch = TcbVersion {
+            snp: 20,
+            ..Default::default()
         };
         // reported/current/committed all fine, launch below -> reject, naming launch.
         let err = check_tcb_floor(&old_launch, &good, &good, &good, &floor).unwrap_err();

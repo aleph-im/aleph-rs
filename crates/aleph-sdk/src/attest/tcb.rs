@@ -221,13 +221,13 @@ mod tests {
     use sev::firmware::host::TcbVersion;
 
     fn tcb(bootloader: u8, tee: u8, snp: u8, microcode: u8) -> TcbVersion {
-        let mut v = TcbVersion::default();
-        v.fmc = None;
-        v.bootloader = bootloader;
-        v.tee = tee;
-        v.snp = snp;
-        v.microcode = microcode;
-        v
+        TcbVersion {
+            fmc: None,
+            bootloader,
+            tee,
+            snp,
+            microcode,
+        }
     }
 
     #[test]

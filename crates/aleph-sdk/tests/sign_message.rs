@@ -1,4 +1,6 @@
+#[cfg(any(feature = "account-evm", feature = "account-sol"))]
 use aleph_sdk::builder::MessageBuilder;
+#[cfg(any(feature = "account-evm", feature = "account-sol"))]
 use aleph_types::message::MessageType;
 
 #[cfg(feature = "account-evm")]
