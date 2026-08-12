@@ -121,6 +121,100 @@ pub fn builtin_baseline(product: AmdProduct) -> TcbFloor {
     }
 }
 
+use std::str::FromStr;
+
+/// A partial `--min-tcb` patch: only the named components. Unnamed components
+/// keep the network floor value when applied.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TcbFloorOverride {
+    fmc: Option<u8>,
+    bootloader: Option<u8>,
+    tee: Option<u8>,
+    snp: Option<u8>,
+    microcode: Option<u8>,
+}
+
+impl TcbFloorOverride {
+    pub fn is_empty(&self) -> bool {
+        self.fmc.is_none()
+            && self.bootloader.is_none()
+            && self.tee.is_none()
+            && self.snp.is_none()
+            && self.microcode.is_none()
+    }
+
+    /// Apply this patch onto `network`. Returns the effective floor (named
+    /// components set to the patch value, others kept from `network`) and the
+    /// list of components the patch set strictly below `network`.
+    pub fn apply_to(&self, network: &TcbFloor) -> (TcbFloor, Vec<Component>) {
+        let mut eff = *network;
+        let mut lowered = Vec::new();
+        let mut set = |component: Component, patch: Option<u8>, field: &mut u8, net: u8| {
+            if let Some(v) = patch {
+                if v < net {
+                    lowered.push(component);
+                }
+                *field = v;
+            }
+        };
+        set(
+            Component::Bootloader,
+            self.bootloader,
+            &mut eff.bootloader,
+            network.bootloader,
+        );
+        set(Component::Tee, self.tee, &mut eff.tee, network.tee);
+        set(Component::Snp, self.snp, &mut eff.snp, network.snp);
+        set(
+            Component::Microcode,
+            self.microcode,
+            &mut eff.microcode,
+            network.microcode,
+        );
+        if let Some(v) = self.fmc {
+            let net = network.fmc.unwrap_or(0);
+            if v < net {
+                lowered.push(Component::Fmc);
+            }
+            eff.fmc = Some(v);
+        }
+        (eff, lowered)
+    }
+}
+
+impl FromStr for TcbFloorOverride {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut out = TcbFloorOverride::default();
+        for pair in s.split(',') {
+            let (name, value) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("expected component=value, got {pair:?}"))?;
+            let value: u8 = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("component value must be 0-255, got {value:?}"))?;
+            match name.trim() {
+                "fmc" => out.fmc = Some(value),
+                "bootloader" => out.bootloader = Some(value),
+                "tee" => out.tee = Some(value),
+                "snp" => out.snp = Some(value),
+                "microcode" => out.microcode = Some(value),
+                other => {
+                    return Err(format!(
+                        "unknown TCB component {other:?} (expected fmc, bootloader, tee, snp, microcode)"
+                    ));
+                }
+            }
+        }
+        if out.is_empty() {
+            return Err("--min-tcb needs at least one component=value pair".to_string());
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +331,84 @@ mod tests {
     fn builtin_baseline_is_nonzero_per_generation() {
         assert!(builtin_baseline(AmdProduct::Genoa).snp > 0);
         assert!(builtin_baseline(AmdProduct::Turin).fmc.is_some());
+    }
+
+    #[test]
+    fn override_parses_component_value_pairs() {
+        let o: TcbFloorOverride = "snp=9,microcode=15".parse().unwrap();
+        let net = TcbFloor {
+            fmc: None,
+            bootloader: 4,
+            tee: 0,
+            snp: 21,
+            microcode: 84,
+        };
+        let (eff, lowered) = o.apply_to(&net);
+        // named components replace; unnamed keep the network value
+        assert_eq!(
+            eff,
+            TcbFloor {
+                fmc: None,
+                bootloader: 4,
+                tee: 0,
+                snp: 9,
+                microcode: 15
+            }
+        );
+        // both were lowered below the network floor
+        assert_eq!(lowered.len(), 2);
+        assert!(lowered.contains(&Component::Snp));
+        assert!(lowered.contains(&Component::Microcode));
+    }
+
+    #[test]
+    fn override_raising_reports_no_lowered_components() {
+        let o: TcbFloorOverride = "snp=30".parse().unwrap();
+        let net = TcbFloor {
+            fmc: None,
+            bootloader: 4,
+            tee: 0,
+            snp: 21,
+            microcode: 84,
+        };
+        let (eff, lowered) = o.apply_to(&net);
+        assert_eq!(eff.snp, 30);
+        assert!(lowered.is_empty());
+    }
+
+    #[test]
+    fn override_mixing_raise_and_lower_flags_only_the_lowered() {
+        let o: TcbFloorOverride = "snp=30,microcode=15".parse().unwrap();
+        let net = TcbFloor {
+            fmc: None,
+            bootloader: 4,
+            tee: 0,
+            snp: 21,
+            microcode: 84,
+        };
+        let (eff, lowered) = o.apply_to(&net);
+        assert_eq!(
+            eff,
+            TcbFloor {
+                fmc: None,
+                bootloader: 4,
+                tee: 0,
+                snp: 30,
+                microcode: 15
+            }
+        );
+        assert_eq!(lowered, vec![Component::Microcode]);
+    }
+
+    #[test]
+    fn override_rejects_unknown_component_and_non_numeric_value() {
+        assert!("bogus=1".parse::<TcbFloorOverride>().is_err());
+        assert!("snp=notanum".parse::<TcbFloorOverride>().is_err());
+        assert!("snp".parse::<TcbFloorOverride>().is_err());
+    }
+
+    #[test]
+    fn empty_override_string_is_rejected() {
+        assert!("".parse::<TcbFloorOverride>().is_err());
     }
 }
