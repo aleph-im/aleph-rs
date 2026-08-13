@@ -18,10 +18,12 @@ use x509_parser::certificate::X509Certificate;
 
 use sev::certs::snp::{Certificate, Chain, Verifiable, builtin, ca};
 use sev::firmware::guest::AttestationReport as SnpReport;
+use sev::firmware::host::TcbVersion;
 use sev::parser::ByteParser;
 
 use super::AttestError;
 use super::certs;
+use super::tcb::TcbFloor;
 use super::{AttestationReport, TeeType};
 
 /// AMD ARK certificates use CN = "ARK-{product}" (e.g. "ARK-Milan").
@@ -128,6 +130,10 @@ pub struct VerificationResult {
     /// launches the same measured stack with a weaker policy (e.g. debug
     /// allowed) changes this field but not the measurement.
     pub policy: u64,
+    /// TCB the VM was launched under (Option A gates on this).
+    pub launch_tcb: TcbVersion,
+    /// TCB the VCEK is keyed to (from the signed report).
+    pub reported_tcb: TcbVersion,
     /// Human-readable summary of what was checked.
     pub summary: String,
 }
@@ -164,13 +170,14 @@ fn check_vmpl(vmpl: u32) -> Result<(), AttestError> {
 pub async fn verify_sev_snp_report(
     dto: &AttestationReport,
     product: AmdProduct,
+    min_tcb: &TcbFloor,
 ) -> Result<VerificationResult, AttestError> {
     if dto.tee_type != TeeType::SevSnp {
         return Err(AttestError::UnsupportedTeeType(dto.tee_type));
     }
     let report = SnpReport::from_bytes(&dto.data).map_err(AttestError::Parse)?;
     let vcek_der = certs::fetch_vcek(product, &report.chip_id, &report.reported_tcb).await?;
-    verify_report_with_vcek(&report, product, &vcek_der)
+    verify_report_with_vcek(&report, product, &vcek_der, min_tcb)
 }
 
 /// Synchronous core of [`verify_sev_snp_report`]: everything after the VCEK
@@ -195,6 +202,7 @@ fn verify_report_with_vcek(
     report: &SnpReport,
     product: AmdProduct,
     vcek_der: &[u8],
+    min_tcb: &TcbFloor,
 ) -> Result<VerificationResult, AttestError> {
     let (ark, ask) = product.builtin_ca()?;
     let vek = Certificate::from_der(vcek_der)?;
@@ -211,9 +219,21 @@ fn verify_report_with_vcek(
     check_vmpl(report.vmpl)?;
     verify_ark(&chain.ca.ark, product)?;
 
+    // TCB floor: the report is now chain- and signature-verified, so its TCB
+    // views are trustworthy. Gate before returning success.
+    check_tcb_floor(
+        &report.launch_tcb,
+        &report.reported_tcb,
+        &report.current_tcb,
+        &report.committed_tcb,
+        min_tcb,
+    )?;
+
     Ok(VerificationResult {
         measurement: hex::encode(report.measurement),
         policy: u64::from(report.policy),
+        launch_tcb: report.launch_tcb,
+        reported_tcb: report.reported_tcb,
         summary: format!(
             "SEV-SNP verified against AMD {product} chain (VMPL {}, policy {:#x})",
             report.vmpl,
@@ -230,6 +250,35 @@ fn verify_ark(ark: &Certificate, product: AmdProduct) -> Result<(), AttestError>
         .map_err(|e| AttestError::ArkIdentity(format!("failed to parse ARK certificate: {e}")))?;
     verify_ark_identity(&cert)?;
     verify_ark_spki_pin(&cert, product)
+}
+
+/// Gate all four report TCB views against the floor (Option A: a VM passes
+/// only if it was *launched* under a satisfying TCB, and no view is below).
+fn check_tcb_floor(
+    launch: &TcbVersion,
+    reported: &TcbVersion,
+    current: &TcbVersion,
+    committed: &TcbVersion,
+    floor: &TcbFloor,
+) -> Result<(), AttestError> {
+    for (view, tcb) in [
+        ("launch", launch),
+        ("reported", reported),
+        ("current", current),
+        ("committed", committed),
+    ] {
+        if let Err(defs) = floor.satisfied_by(tcb) {
+            let detail = defs
+                .iter()
+                .map(|d| format!("{:?} {}<{}", d.component, d.actual, d.required))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(AttestError::TcbBelowFloor(format!(
+                "{view} TCB below floor ({detail})"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Verify that an ARK certificate has AMD's expected subject identity.
@@ -338,7 +387,7 @@ mod tests {
             data: milan_report_bytes(),
         };
 
-        let err = verify_sev_snp_report(&dto, AmdProduct::Milan)
+        let err = verify_sev_snp_report(&dto, AmdProduct::Milan, &TcbFloor::UNRESTRICTED)
             .await
             .expect_err("a non-SEV-SNP tee_type must be rejected before parsing");
         assert!(
@@ -460,8 +509,13 @@ mod tests {
         let report_bytes = milan_report_bytes();
         let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
 
-        let result = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER)
-            .expect("verification of a genuine, untampered Milan report must succeed");
+        let result = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            &TcbFloor::UNRESTRICTED,
+        )
+        .expect("verification of a genuine, untampered Milan report must succeed");
 
         // Pinned to the fixture's real launch measurement (also cross-checked
         // against the `sev` crate's own parsed `report.measurement` below),
@@ -494,7 +548,12 @@ mod tests {
         let report = SnpReport::from_bytes(&report_bytes)
             .expect("bit-flipped bytes still decode structurally");
 
-        let result = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER);
+        let result = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            &TcbFloor::UNRESTRICTED,
+        );
         assert!(
             result.is_err(),
             "a tampered report must fail closed, never verify successfully"
@@ -572,5 +631,66 @@ mod tests {
                 .contains("SubjectPublicKeyInfo hash does not match"),
             "expected SPKI pin mismatch, got: {err}"
         );
+    }
+
+    // ---- TCB floor gate ----
+
+    #[test]
+    fn accepts_a_report_meeting_an_unrestricted_floor() {
+        let report = SnpReport::from_bytes(&milan_report_bytes()).unwrap();
+        verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            &TcbFloor::UNRESTRICTED,
+        )
+        .expect("UNRESTRICTED floor accepts the genuine fixture");
+    }
+
+    #[test]
+    fn rejects_a_report_below_the_tcb_floor() {
+        let report = SnpReport::from_bytes(&milan_report_bytes()).unwrap();
+        // One above the fixture's real snp SVN: the genuine, correctly-signed
+        // report must now be rejected on the TCB gate (not the signature).
+        let floor = TcbFloor {
+            fmc: None,
+            bootloader: report.reported_tcb.bootloader,
+            tee: report.reported_tcb.tee,
+            snp: report.reported_tcb.snp.saturating_add(1),
+            microcode: report.reported_tcb.microcode,
+        };
+        let err = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &floor)
+            .unwrap_err();
+        assert!(matches!(err, AttestError::TcbBelowFloor(_)), "got {err:?}");
+    }
+
+    // Option A, tested on the pure multi-view gate with synthetic TCBs so we can
+    // make launch_tcb lag the others: a VM launched under a below-floor TCB is
+    // rejected even when the platform's current/committed TCB is above the floor.
+    #[test]
+    fn gate_rejects_when_only_launch_tcb_is_below_floor() {
+        let floor = TcbFloor {
+            fmc: None,
+            bootloader: 0,
+            tee: 0,
+            snp: 21,
+            microcode: 0,
+        };
+        let good = TcbVersion {
+            snp: 25,
+            ..Default::default()
+        };
+        let old_launch = TcbVersion {
+            snp: 20,
+            ..Default::default()
+        };
+        // reported/current/committed all fine, launch below -> reject, naming launch.
+        let err = check_tcb_floor(&old_launch, &good, &good, &good, &floor).unwrap_err();
+        match err {
+            AttestError::TcbBelowFloor(msg) => assert!(msg.contains("launch"), "msg: {msg}"),
+            other => panic!("expected TcbBelowFloor, got {other:?}"),
+        }
+        // All four above -> ok.
+        assert!(check_tcb_floor(&good, &good, &good, &good, &floor).is_ok());
     }
 }
