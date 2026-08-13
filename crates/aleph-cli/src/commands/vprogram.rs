@@ -72,13 +72,7 @@ async fn handle_create(
     let veritysetup = Veritysetup::find()?;
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
-    if policy_debug_allowed(args.policy) {
-        eprintln!(
-            "warning: --policy {:#x} has the SEV-SNP DEBUG bit (19) set: the host will be \
-             able to decrypt guest memory, so this deployment will NOT be confidential",
-            args.policy
-        );
-    }
+    check_debug_policy(args.policy, args.allow_debug)?;
     if args.volumes.len() > MAX_VERIFIED_VOLUMES {
         bail!("at most {MAX_VERIFIED_VOLUMES} --volume flags are supported");
     }
@@ -800,6 +794,32 @@ pub(crate) fn policy_debug_allowed(policy: u64) -> bool {
     policy & SNP_POLICY_DEBUG_BIT != 0
 }
 
+/// Reject a DEBUG-enabled policy unless the caller explicitly acknowledged
+/// it with `--allow-debug`. When the DEBUG bit is set and acknowledged, emit
+/// a loud warning so the operator knows the deployment is not confidential.
+///
+/// Extracted from `handle_create` so the guard logic is unit-testable without
+/// a network client.
+pub(crate) fn check_debug_policy(policy: u64, allow_debug: bool) -> Result<()> {
+    if !policy_debug_allowed(policy) {
+        return Ok(());
+    }
+    if !allow_debug {
+        bail!(
+            "--policy {:#x} has the SEV-SNP DEBUG bit (19) set: the host will be able to \
+             decrypt guest memory, so this deployment will NOT be confidential. \
+             Pass --allow-debug to acknowledge and publish anyway",
+            policy
+        );
+    }
+    eprintln!(
+        "warning: --policy {:#x} has the SEV-SNP DEBUG bit (19) set: the host will be \
+         able to decrypt guest memory, so this deployment will NOT be confidential",
+        policy
+    );
+    Ok(())
+}
+
 /// Parse a curl-style `-H "Key: Value"` header into `(name, value)`. Accepts
 /// both `"Key: Value"` and `"Key:Value"` (splits on the first colon, trims
 /// surrounding whitespace off both sides).
@@ -1316,6 +1336,31 @@ mod call_tests {
         assert!(!policy_debug_allowed(0x30000));
         // Bit 19 set: the host may decrypt guest memory.
         assert!(policy_debug_allowed(0x30000 | (1 << 19)));
+    }
+
+    #[test]
+    fn check_debug_policy_accepts_non_debug_policy() {
+        assert!(check_debug_policy(0x30000, false).is_ok());
+        // allow_debug is irrelevant when the DEBUG bit is not set.
+        assert!(check_debug_policy(0x30000, true).is_ok());
+    }
+
+    #[test]
+    fn check_debug_policy_rejects_debug_without_allow_debug() {
+        // 0xa0000 = bit 17 (reserved) | bit 19 (DEBUG): a valid policy that
+        // passes validate_snp_policy but has the DEBUG bit set.
+        let err = check_debug_policy(0xa0000, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DEBUG bit (19) set") && msg.contains("--allow-debug"),
+            "expected a DEBUG rejection mentioning --allow-debug, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_debug_policy_accepts_debug_with_allow_debug() {
+        // The --allow-debug ack clears the gate; the warning goes to stderr.
+        assert!(check_debug_policy(0xa0000, true).is_ok());
     }
 
     #[test]
