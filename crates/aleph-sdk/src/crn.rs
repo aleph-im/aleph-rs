@@ -941,6 +941,7 @@ fn build_signed_pubkey_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aleph_types::chain::Chain;
 
     #[test]
     fn deserialize_allocation_response_success() {

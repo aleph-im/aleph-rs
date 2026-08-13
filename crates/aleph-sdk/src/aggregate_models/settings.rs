@@ -6,6 +6,7 @@
 //! go into an instance message, so no GPU data has to be hardcoded in the
 //! client.
 
+#[cfg(feature = "vprogram")]
 use crate::attest::{AmdProduct, TcbFloor};
 use aleph_types::address;
 use aleph_types::chain::Address;
@@ -61,6 +62,12 @@ pub struct TcbFloorDto {
     pub microcode: u8,
 }
 
+// The conversion to the attest crate's `TcbFloor` and the per-generation
+// lookup are only meaningful when the attestation stack is compiled in; the
+// `attest` module is gated behind the `vprogram` feature, so gate these with
+// it. `SnpMinTcb`/`TcbFloorDto` and the `snp_min_tcb` field stay ungated so
+// `SettingsData` deserializes identically regardless of the feature.
+#[cfg(feature = "vprogram")]
 impl From<&TcbFloorDto> for TcbFloor {
     fn from(d: &TcbFloorDto) -> Self {
         TcbFloor {
@@ -73,6 +80,7 @@ impl From<&TcbFloorDto> for TcbFloor {
     }
 }
 
+#[cfg(feature = "vprogram")]
 impl SnpMinTcb {
     pub fn floor_for(&self, product: AmdProduct) -> Option<TcbFloor> {
         let dto = match product {
@@ -249,6 +257,7 @@ mod tests {
         assert_eq!(data.model_id_for_name("RTX 3090"), "rtx3090");
     }
 
+    #[cfg(feature = "vprogram")]
     #[test]
     fn parses_snp_min_tcb_and_resolves_per_generation() {
         let json = r#"{
@@ -295,11 +304,10 @@ mod tests {
     fn settings_without_snp_min_tcb_still_deserializes() {
         let json = r#"{ "settings": { "compatible_gpus": [] } }"#;
         let agg: SettingsAggregate = serde_json::from_str(json).unwrap();
-        assert!(
-            agg.settings
-                .snp_min_tcb
-                .floor_for(crate::attest::AmdProduct::Genoa)
-                .is_none()
-        );
+        // Backward compatible: an aggregate without `snp_min_tcb` deserializes,
+        // with every generation absent. Checked via the ungated DTO fields so
+        // this holds regardless of the `vprogram` feature.
+        let tcb = &agg.settings.snp_min_tcb;
+        assert!(tcb.milan.is_none() && tcb.genoa.is_none() && tcb.turin.is_none());
     }
 }
