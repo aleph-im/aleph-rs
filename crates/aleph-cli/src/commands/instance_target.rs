@@ -83,7 +83,15 @@ fn node_entry_to_url(node: &NodeEntry) -> Result<Url> {
             node.status.as_deref().unwrap_or("unknown")
         )
     })?;
-    Url::parse(address).with_context(|| format!("invalid CRN address `{address}`"))
+    // Route through `parse_crn_address` so a non-HTTPS CRN address gets the
+    // same warning as the discovery paths, but keep this site's hard-error
+    // semantics: the caller needs a usable URL, so `None` is an error here.
+    crate::common::parse_crn_address(address, &node.node_hash).ok_or_else(|| {
+        anyhow!(
+            "invalid CRN address `{address}` for node {}",
+            node.node_hash
+        )
+    })
 }
 
 /// Resolve a node-hash fragment (an anchored prefix or suffix) to the node's
