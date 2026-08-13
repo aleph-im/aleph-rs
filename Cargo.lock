@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-cli"
-version = "0.17.0-rc6"
+version = "0.17.0-rc7"
 dependencies = [
  "actix-web",
  "aes",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-sdk"
-version = "0.17.0-rc6"
+version = "0.17.0-rc7"
 dependencies = [
  "aes",
  "aleph-cid",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "aleph-types"
-version = "0.17.0-rc6"
+version = "0.17.0-rc7"
 dependencies = [
  "aleph-cid",
  "assert_matches",
