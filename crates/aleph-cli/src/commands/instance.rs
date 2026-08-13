@@ -3180,6 +3180,7 @@ mod tests {
                         "10de:2331",
                     ),
                 ],
+                ..Default::default()
             }
         }
 
@@ -3233,6 +3234,7 @@ mod tests {
                     Some("0300"),
                     "10de:2204",
                 )],
+                ..Default::default()
             };
             let options = build_gpu_options(&pricing(), &settings);
             let h100 = resolve_gpu_option(&options, "h100").unwrap();
@@ -3262,6 +3264,7 @@ mod tests {
                     None,
                     "10de:2204",
                 )],
+                ..Default::default()
             };
             let options = build_gpu_options(&pricing(), &settings);
             let rtx = resolve_gpu_option(&options, "rtx3090").unwrap();
