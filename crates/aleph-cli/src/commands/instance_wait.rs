@@ -93,8 +93,9 @@ where
 ///
 /// Returns [`ReadyState::Pending`] when the VM is not allocated yet, when the
 /// node has no reachable address, or when the CRN does not (yet) list the VM
-/// with usable networking. Errors only on hard failures (malformed scheduler
-/// data, CRN HTTP errors).
+/// with usable networking. A malformed CRN address also counts as pending
+/// (warned, then retried until timeout). Errors only on hard failures
+/// (scheduler API errors, CRN HTTP errors).
 async fn fetch_ready_state(
     scheduler: &SchedulerClient,
     http: &reqwest::Client,
