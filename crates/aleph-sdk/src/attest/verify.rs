@@ -98,6 +98,27 @@ pub struct VerificationResult {
     pub summary: String,
 }
 
+/// Highest VMPL accepted for an attestation report.
+///
+/// VMPL 0 = firmware (OVMF), VMPL 1 = kernel/attestation agent. Both are part
+/// of the measured platform stack and trusted. VMPL 2-3 are less privileged
+/// and could be driven by untrusted guest code, so reports from them are
+/// rejected.
+const MAX_ACCEPTED_VMPL: u32 = 1;
+
+/// Enforce the privileged-VMPL gate: reject reports from unprivileged levels.
+///
+/// Only VMPL 0-1 (firmware/kernel, the trusted measured stack) are accepted;
+/// `sev` does not enforce this. VMPL 2-3 could be driven by untrusted guest
+/// code, so a report from those levels must not be trusted as evidence of
+/// the measured platform's state.
+fn check_vmpl(vmpl: u32) -> Result<(), AttestError> {
+    if vmpl > MAX_ACCEPTED_VMPL {
+        return Err(AttestError::Vmpl(vmpl));
+    }
+    Ok(())
+}
+
 /// Verify a SEV-SNP attestation report's AMD certificate chain and report
 /// signature.
 ///
@@ -148,9 +169,7 @@ fn verify_report_with_vcek(
     (&chain, report).verify().map_err(AttestError::Chain)?;
 
     // Policy checks the `sev` crate does not perform:
-    if report.vmpl > 1 {
-        return Err(AttestError::Vmpl(report.vmpl));
-    }
+    check_vmpl(report.vmpl)?;
     verify_ark_identity(&chain.ca.ark)?;
 
     Ok(VerificationResult {
@@ -384,5 +403,24 @@ mod tests {
             result.is_err(),
             "a tampered report must fail closed, never verify successfully"
         );
+    }
+
+    // ---- VMPL gate ----
+
+    #[test]
+    fn vmpl_gate_accepts_privileged_levels() {
+        assert!(check_vmpl(0).is_ok(), "VMPL 0 (firmware) must be accepted");
+        assert!(check_vmpl(1).is_ok(), "VMPL 1 (kernel) must be accepted");
+    }
+
+    #[test]
+    fn vmpl_gate_rejects_unprivileged_levels() {
+        for vmpl in [2u32, 3] {
+            let err = check_vmpl(vmpl).expect_err(&format!("VMPL {vmpl} must be rejected"));
+            assert!(
+                matches!(err, AttestError::Vmpl(v) if v == vmpl),
+                "expected AttestError::Vmpl({vmpl}), got: {err:?}"
+            );
+        }
     }
 }
