@@ -6,6 +6,8 @@
 //! go into an instance message, so no GPU data has to be hardcoded in the
 //! client.
 
+#[cfg(feature = "vprogram")]
+use crate::attest::{AmdProduct, TcbFloor};
 use aleph_types::address;
 use aleph_types::chain::Address;
 use serde::Deserialize;
@@ -32,6 +34,62 @@ pub struct SettingsAggregate {
 pub struct SettingsData {
     #[serde(default)]
     pub compatible_gpus: Vec<CompatibleGpu>,
+    #[serde(default)]
+    pub snp_min_tcb: SnpMinTcb,
+}
+
+/// Per-generation minimum SEV-SNP TCB from `settings.snp_min_tcb`. Absent
+/// generations resolve to `None`; the client falls back to its builtin
+/// baseline.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SnpMinTcb {
+    #[serde(default)]
+    pub milan: Option<TcbFloorDto>,
+    #[serde(default)]
+    pub genoa: Option<TcbFloorDto>,
+    #[serde(default)]
+    pub turin: Option<TcbFloorDto>,
+}
+
+/// Wire form of a floor in the aggregate.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TcbFloorDto {
+    #[serde(default)]
+    pub fmc: Option<u8>,
+    pub bootloader: u8,
+    pub tee: u8,
+    pub snp: u8,
+    pub microcode: u8,
+}
+
+// The conversion to the attest crate's `TcbFloor` and the per-generation
+// lookup are only meaningful when the attestation stack is compiled in; the
+// `attest` module is gated behind the `vprogram` feature, so gate these with
+// it. `SnpMinTcb`/`TcbFloorDto` and the `snp_min_tcb` field stay ungated so
+// `SettingsData` deserializes identically regardless of the feature.
+#[cfg(feature = "vprogram")]
+impl From<&TcbFloorDto> for TcbFloor {
+    fn from(d: &TcbFloorDto) -> Self {
+        TcbFloor {
+            fmc: d.fmc,
+            bootloader: d.bootloader,
+            tee: d.tee,
+            snp: d.snp,
+            microcode: d.microcode,
+        }
+    }
+}
+
+#[cfg(feature = "vprogram")]
+impl SnpMinTcb {
+    pub fn floor_for(&self, product: AmdProduct) -> Option<TcbFloor> {
+        let dto = match product {
+            AmdProduct::Milan => self.milan.as_ref(),
+            AmdProduct::Genoa => self.genoa.as_ref(),
+            AmdProduct::Turin => self.turin.as_ref(),
+        };
+        dto.map(TcbFloor::from)
+    }
 }
 
 /// One GPU device variant compatible with the network, from
@@ -173,6 +231,7 @@ mod tests {
                 gpu(None, "RTX 3090", "10de:2203"),
                 gpu(None, "L40S", "10de:26b9"),
             ],
+            snp_min_tcb: SnpMinTcb::default(),
         };
         let variants = data.gpu_variants_for_model_id("rtx3090");
         assert_eq!(variants.len(), 2);
@@ -188,6 +247,7 @@ mod tests {
                 "RTX PRO 6000 Blackwell Max-Q",
                 "10de:2bb4",
             )],
+            snp_min_tcb: SnpMinTcb::default(),
         };
         assert_eq!(
             data.model_id_for_name("RTX PRO 6000 Blackwell Max-Q"),
@@ -195,5 +255,59 @@ mod tests {
         );
         // Absent model falls back to derivation.
         assert_eq!(data.model_id_for_name("RTX 3090"), "rtx3090");
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn parses_snp_min_tcb_and_resolves_per_generation() {
+        let json = r#"{
+      "settings": {
+        "compatible_gpus": [],
+        "snp_min_tcb": {
+          "genoa": { "bootloader": 9, "tee": 0, "snp": 21, "microcode": 84 },
+          "turin": { "fmc": 3, "bootloader": 4, "tee": 0, "snp": 8, "microcode": 12 }
+        }
+      }
+    }"#;
+        let agg: SettingsAggregate = serde_json::from_str(json).unwrap();
+        let genoa = agg
+            .settings
+            .snp_min_tcb
+            .floor_for(crate::attest::AmdProduct::Genoa)
+            .unwrap();
+        assert_eq!(
+            genoa,
+            crate::attest::TcbFloor {
+                fmc: None,
+                bootloader: 9,
+                tee: 0,
+                snp: 21,
+                microcode: 84
+            }
+        );
+        let turin = agg
+            .settings
+            .snp_min_tcb
+            .floor_for(crate::attest::AmdProduct::Turin)
+            .unwrap();
+        assert_eq!(turin.fmc, Some(3));
+        // Milan absent from this aggregate -> None (caller falls back to baseline).
+        assert!(
+            agg.settings
+                .snp_min_tcb
+                .floor_for(crate::attest::AmdProduct::Milan)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn settings_without_snp_min_tcb_still_deserializes() {
+        let json = r#"{ "settings": { "compatible_gpus": [] } }"#;
+        let agg: SettingsAggregate = serde_json::from_str(json).unwrap();
+        // Backward compatible: an aggregate without `snp_min_tcb` deserializes,
+        // with every generation absent. Checked via the ungated DTO fields so
+        // this holds regardless of the `vprogram` feature.
+        let tcb = &agg.settings.snp_min_tcb;
+        assert!(tcb.milan.is_none() && tcb.genoa.is_none() && tcb.turin.is_none());
     }
 }

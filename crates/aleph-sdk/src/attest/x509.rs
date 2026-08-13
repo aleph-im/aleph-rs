@@ -53,6 +53,10 @@ pub enum AttestError {
     /// trust (only VMPL 0-1, the firmware/kernel stack, are accepted).
     #[error("attestation report from VMPL {0} - only VMPL 0-1 are accepted")]
     Vmpl(u32),
+    /// The report's TCB is below the required minimum (a component of one of
+    /// the report's TCB views is lower than the configured floor).
+    #[error("SEV-SNP TCB below the required floor: {0}")]
+    TcbBelowFloor(String),
     /// The ARK certificate does not carry AMD's expected subject identity
     /// (this is a policy check `sev` itself does not perform).
     #[error("ARK certificate identity verification failed: {0}")]
