@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn vmpl_gate_rejects_unprivileged_levels() {
         for vmpl in [2u32, 3] {
-            let err = check_vmpl(vmpl).expect_err("VMPL {vmpl} must be rejected");
+            let err = check_vmpl(vmpl).expect_err(&format!("VMPL {vmpl} must be rejected"));
             assert!(
                 matches!(err, AttestError::Vmpl(v) if v == vmpl),
                 "expected AttestError::Vmpl({vmpl}), got: {err:?}"
