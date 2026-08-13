@@ -4313,6 +4313,10 @@ mod vprogram_create_args_tests {
 
     #[test]
     fn vprogram_create_allow_debug_flag_parses() {
+        // 0xa0000 = bit 17 (reserved, required by validate_snp_policy) | bit 19 (DEBUG).
+        // This is a realistic debug-enabled policy that would pass validate_snp_policy
+        // and reach the DEBUG gate, unlike 0x90000 which lacks bit 17 and would be
+        // rejected before the DEBUG check runs.
         let cli = Cli::try_parse_from([
             "aleph",
             "vprogram",
@@ -4322,7 +4326,7 @@ mod vprogram_create_args_tests {
             "--runtime",
             &"cafe".repeat(16),
             "--policy",
-            "0x90000",
+            "0xa0000",
             "--allow-debug",
         ])
         .unwrap();
@@ -4332,7 +4336,7 @@ mod vprogram_create_args_tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(args.policy, 0x90000);
+        assert_eq!(args.policy, 0xa0000);
         assert!(args.allow_debug);
     }
 
