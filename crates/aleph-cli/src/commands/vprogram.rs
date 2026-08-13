@@ -884,18 +884,23 @@ pub(crate) fn parse_header(raw: &str) -> Result<(String, String)> {
     Ok((name.to_string(), value.to_string()))
 }
 
-/// Format a TCB (floor or reported/launch view) as `"bl=.. tee=.. snp=..
-/// ucode=.."`, prefixed with `"fmc=.."` when set (Turin only).
-fn format_tcb(fmc: Option<u8>, bootloader: u8, tee: u8, snp: u8, microcode: u8) -> String {
-    let rest = format!("bl={bootloader} tee={tee} snp={snp} ucode={microcode}");
-    match fmc {
-        Some(fmc) => format!("fmc={fmc} {rest}"),
-        None => rest,
-    }
+/// Structured `--json` representation of a TCB view or floor:
+/// `{"fmc": <null|n>, "bootloader": n, "tee": n, "snp": n, "microcode": n}`.
+/// Keys match the component names `--min-tcb` accepts (so input and evidence
+/// are symmetric), and `fmc` is `null` off Turin. Structured rather than a
+/// flat string so downstream consumers of `--json` need no ad-hoc parsing.
+fn tcb_json(fmc: Option<u8>, bootloader: u8, tee: u8, snp: u8, microcode: u8) -> serde_json::Value {
+    serde_json::json!({
+        "fmc": fmc,
+        "bootloader": bootloader,
+        "tee": tee,
+        "snp": snp,
+        "microcode": microcode,
+    })
 }
 
-fn format_tcb_floor(floor: &aleph_sdk::attest::TcbFloor) -> String {
-    format_tcb(
+fn tcb_floor_json(floor: &aleph_sdk::attest::TcbFloor) -> serde_json::Value {
+    tcb_json(
         floor.fmc,
         floor.bootloader,
         floor.tee,
@@ -925,15 +930,15 @@ pub(crate) fn render_call_result(
         let out = serde_json::json!({
             "measurement": response.measurement,
             "policy": format!("{:#x}", response.policy),
-            "effective_tcb_floor": format_tcb_floor(min_tcb),
-            "launch_tcb": format_tcb(
+            "effective_tcb_floor": tcb_floor_json(min_tcb),
+            "launch_tcb": tcb_json(
                 response.launch_tcb.fmc,
                 response.launch_tcb.bootloader,
                 response.launch_tcb.tee,
                 response.launch_tcb.snp,
                 response.launch_tcb.microcode,
             ),
-            "reported_tcb": format_tcb(
+            "reported_tcb": tcb_json(
                 response.reported_tcb.fmc,
                 response.reported_tcb.bootloader,
                 response.reported_tcb.tee,
@@ -1094,8 +1099,11 @@ async fn handle_call(
 
     // Belt-and-suspenders TCB re-check on the verified evidence, mirroring
     // the measurement/policy re-checks above: `attested_request` already
-    // enforced `min_tcb` internally, but the trust decision never rests on a
-    // single site.
+    // enforced `min_tcb` internally (its `check_tcb_floor` gates all four TCB
+    // views), but the trust decision never rests on a single site. This
+    // re-check deliberately covers only `launch_tcb`: under Option A that is
+    // the view that decides whether the VM was launched under a safe TCB, so
+    // it is the load-bearing one to re-assert here.
     if let Err(defs) = min_tcb.satisfied_by(&response.launch_tcb) {
         bail!("guest launch TCB is below the required floor: {defs:?}");
     }
@@ -1495,13 +1503,19 @@ mod call_tests {
         // matching the format used in --policy and error messages.
         assert_eq!(v["policy"], serde_json::json!("0x30000"));
         // The effective floor and verified TCB views are evidence alongside
-        // the measurement/policy.
+        // the measurement/policy: structured objects keyed by the same
+        // component names `--min-tcb` accepts, with `fmc` null off Turin.
         assert_eq!(
             v["effective_tcb_floor"],
-            serde_json::json!("bl=4 tee=0 snp=21 ucode=84")
+            serde_json::json!({"fmc": null, "bootloader": 4, "tee": 0, "snp": 21, "microcode": 84})
         );
-        assert!(v.get("launch_tcb").is_some());
-        assert!(v.get("reported_tcb").is_some());
+        for view in ["launch_tcb", "reported_tcb"] {
+            assert!(v[view].is_object(), "{view} must be a structured object");
+            assert!(
+                v[view]["microcode"].is_number() && v[view]["bootloader"].is_number(),
+                "{view} carries numeric component fields"
+            );
+        }
         assert_eq!(v["status"], serde_json::json!(200));
         assert_eq!(v["body"]["fib"], serde_json::json!(55));
         assert_eq!(meta, None, "JSON mode carries the status in the document");

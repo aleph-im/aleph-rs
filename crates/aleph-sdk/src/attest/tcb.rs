@@ -1,7 +1,9 @@
 //! Minimum-TCB ("floor") enforcement for SEV-SNP attestation. See
-//! docs/plans/2026-08-12-snp-tcb-floor-design.md. The floor is compared
-//! componentwise against every TCB view in the report; the host is
+//! aleph-vm docs/plans/2026-08-12-snp-tcb-floor-design.md. The floor is
+//! compared componentwise against every TCB view in the report; the host is
 //! adversarial, so this client-side check is the enforcement point.
+
+use std::str::FromStr;
 
 use super::verify::AmdProduct;
 use sev::firmware::host::TcbVersion;
@@ -120,8 +122,6 @@ pub fn builtin_baseline(product: AmdProduct) -> TcbFloor {
         },
     }
 }
-
-use std::str::FromStr;
 
 /// A partial `--min-tcb` patch: only the named components. Unnamed components
 /// keep the network floor value when applied.
