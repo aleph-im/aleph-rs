@@ -1084,8 +1084,9 @@ mod tests {
 
     #[test]
     fn parse_crn_address_warns_on_http_but_still_returns() {
-        // HTTP is returned (not rejected) so the caller can degrade gracefully;
-        // the warning goes to stderr. The attested call is always HTTPS.
+        // HTTP is returned (not rejected) so the caller can degrade gracefully.
+        // The warning goes to stderr, which this test does not capture: only
+        // the return value is asserted. The attested call is always HTTPS.
         let url = parse_crn_address("http://insecure.example.com:4024", "node1");
         assert_eq!(url.unwrap().scheme(), "http");
     }
