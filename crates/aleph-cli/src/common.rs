@@ -506,6 +506,34 @@ pub fn resolve_ccn_url(ccn: Option<&str>, network: Option<&str>) -> Result<Url> 
     resolve_ccn_url_with_store(&store, ccn, network)
 }
 
+/// Parse a CRN node address (from the scheduler's `node.address` field) into a
+/// `Url`, warning on non-HTTPS schemes.
+///
+/// The trusted attested call always goes through RA-TLS (hardcoded `https://`
+/// by `resolve_attested_endpoint`), so this is a discovery-path concern: a CRN
+/// advertising `http://` would be queried over plaintext for discovery, leaking
+/// the VM hash and caller identity to a network observer. Warn loudly but do
+/// not error, preserving the best-effort discovery semantics (the caller
+/// degrades to message-only fields when this returns `None`).
+pub fn parse_crn_address(addr: &str, node_label: &str) -> Option<Url> {
+    let url = match Url::parse(addr) {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("warning: invalid CRN address `{addr}` for node {node_label}: {e}");
+            return None;
+        }
+    };
+    if url.scheme() != "https" {
+        eprintln!(
+            "warning: CRN address `{addr}` for node {node_label} uses scheme `{}`; \
+             discovery will run over a non-encrypted transport. The attested call itself \
+             is always HTTPS (RA-TLS), but the discovery path is not",
+            url.scheme()
+        );
+    }
+    Some(url)
+}
+
 /// Environment variable that overrides the upload idle-timeout policy.
 pub const UPLOAD_TIMEOUT_ENV_VAR: &str = "ALEPH_UPLOAD_TIMEOUT";
 
@@ -1041,5 +1069,25 @@ mod tests {
                 .contains("'nobody' is not a valid address or known account/alias name"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parse_crn_address_accepts_https() {
+        let url = parse_crn_address("https://node1.example.com:4024", "node1");
+        assert_eq!(url.unwrap().scheme(), "https");
+    }
+
+    #[test]
+    fn parse_crn_address_rejects_invalid_url() {
+        assert!(parse_crn_address("not a url at all", "node1").is_none());
+    }
+
+    #[test]
+    fn parse_crn_address_warns_on_http_but_still_returns() {
+        // HTTP is returned (not rejected) so the caller can degrade gracefully.
+        // The warning goes to stderr, which this test does not capture: only
+        // the return value is asserted. The attested call is always HTTPS.
+        let url = parse_crn_address("http://insecure.example.com:4024", "node1");
+        assert_eq!(url.unwrap().scheme(), "http");
     }
 }

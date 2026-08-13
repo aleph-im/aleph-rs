@@ -93,8 +93,9 @@ where
 ///
 /// Returns [`ReadyState::Pending`] when the VM is not allocated yet, when the
 /// node has no reachable address, or when the CRN does not (yet) list the VM
-/// with usable networking. Errors only on hard failures (malformed scheduler
-/// data, CRN HTTP errors).
+/// with usable networking. A malformed CRN address also counts as pending
+/// (warned, then retried until timeout). Errors only on hard failures
+/// (scheduler API errors, CRN HTTP errors).
 async fn fetch_ready_state(
     scheduler: &SchedulerClient,
     http: &reqwest::Client,
@@ -113,7 +114,10 @@ async fn fetch_ready_state(
     let Some(addr) = node.address.as_deref() else {
         return Ok(ReadyState::Pending);
     };
-    let crn_url = Url::parse(addr)?;
+    let crn_url = match crate::common::parse_crn_address(addr, &node_hash.to_string()) {
+        Some(url) => url,
+        None => return Ok(ReadyState::Pending),
+    };
 
     let list = aleph_sdk::crn::fetch_active_vms(http, &crn_url).await?;
     let Some(entry) = list.0.get(vm_id) else {

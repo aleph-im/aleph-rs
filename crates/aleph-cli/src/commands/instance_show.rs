@@ -603,41 +603,38 @@ async fn populate_verbose(
         match scheduler.get_node(node_hash).await {
             Ok(Some(node)) => {
                 if let Some(addr) = node.address.as_deref() {
-                    match Url::parse(addr) {
-                        Ok(crn_url) => {
-                            let http = reqwest::Client::new();
-                            match fetch_active_vms(&http, &crn_url).await {
-                                Ok(list) => {
-                                    if let Some(entry) = list.0.get(&show.identity.item_hash)
-                                        && let Some(net) = entry.networking.as_ref()
-                                    {
-                                        show.networking = Some(Networking {
-                                            // The VM's own IPv4 is a private
-                                            // NAT address; only the host's
-                                            // public IPv4 (paired with
-                                            // mapped_ports) is reachable.
-                                            ipv4: net.host_ipv4.clone(),
-                                            ipv6: net
-                                                .ipv6_ip
-                                                .clone()
-                                                .or_else(|| net.ipv6_network.clone()),
-                                        });
-                                        let mapped: BTreeMap<u16, u16> = net
-                                            .mapped_ports
-                                            .iter()
-                                            .map(|(k, v)| (*k, v.host))
-                                            .collect();
-                                        show.mapped_ports = Some(mapped);
-                                    }
+                    // `parse_crn_address` warns on invalid or non-HTTPS
+                    // addresses; `None` skips networking enrichment.
+                    if let Some(crn_url) = crate::common::parse_crn_address(addr, node_hash) {
+                        let http = reqwest::Client::new();
+                        match fetch_active_vms(&http, &crn_url).await {
+                            Ok(list) => {
+                                if let Some(entry) = list.0.get(&show.identity.item_hash)
+                                    && let Some(net) = entry.networking.as_ref()
+                                {
+                                    show.networking = Some(Networking {
+                                        // The VM's own IPv4 is a private
+                                        // NAT address; only the host's
+                                        // public IPv4 (paired with
+                                        // mapped_ports) is reachable.
+                                        ipv4: net.host_ipv4.clone(),
+                                        ipv6: net
+                                            .ipv6_ip
+                                            .clone()
+                                            .or_else(|| net.ipv6_network.clone()),
+                                    });
+                                    let mapped: BTreeMap<u16, u16> = net
+                                        .mapped_ports
+                                        .iter()
+                                        .map(|(k, v)| (*k, v.host))
+                                        .collect();
+                                    show.mapped_ports = Some(mapped);
                                 }
-                                Err(e) => eprintln!(
-                                    "warning: CRN {crn_url} unreachable, \
-                                     networking/mapped ports unavailable: {e}"
-                                ),
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("warning: invalid CRN address `{addr}` from scheduler: {e}")
+                            Err(e) => eprintln!(
+                                "warning: CRN {crn_url} unreachable, \
+                                 networking/mapped ports unavailable: {e}"
+                            ),
                         }
                     }
                 } else {

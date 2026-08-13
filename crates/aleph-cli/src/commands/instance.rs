@@ -324,12 +324,9 @@ async fn enrich_rows_with_ips(scheduler: &SchedulerClient, rows: &mut [InstanceR
         async move {
             let crn_url = match scheduler.get_node(&node).await {
                 Ok(Some(entry)) => match entry.address.as_deref() {
-                    Some(addr) => match Url::parse(addr) {
-                        Ok(url) => url,
-                        Err(e) => {
-                            eprintln!("warning: invalid CRN address `{addr}` for node {node}: {e}");
-                            return (indices, None);
-                        }
+                    Some(addr) => match crate::common::parse_crn_address(addr, &node.to_string()) {
+                        Some(url) => url,
+                        None => return (indices, None),
                     },
                     None => {
                         eprintln!(
