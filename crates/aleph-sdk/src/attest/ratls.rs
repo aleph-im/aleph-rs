@@ -44,6 +44,7 @@ use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use sev::firmware::guest::AttestationReport as SnpReport;
 use sev::parser::ByteParser;
 use sha2::{Digest, Sha384};
+use subtle::ConstantTimeEq;
 
 use super::verify::{AmdProduct, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
@@ -197,7 +198,7 @@ impl SnpCertVerifier {
         let mut expected_report_data = [0u8; 64];
         expected_report_data[..48].copy_from_slice(&hash);
 
-        if signed.report_data != expected_report_data {
+        if signed.report_data.ct_eq(&expected_report_data).unwrap_u8() == 0 {
             return Err(RustlsError::General(format!(
                 "key binding verification failed: report_data does not match \
                  SHA-384(domain || public_key). expected {}, got {}",
@@ -207,8 +208,15 @@ impl SnpCertVerifier {
         }
 
         // 4. Optional measurement pin, against the SIGNED measurement.
+        //    Constant-time comparison avoids leaking the first-differing-
+        //    byte offset over the TLS handshake timing side channel.
         if let Some(ref expected) = self.expected_measurement
-            && signed.measurement.as_slice() != expected.as_slice()
+            && signed
+                .measurement
+                .as_slice()
+                .ct_eq(expected.as_slice())
+                .unwrap_u8()
+                == 0
         {
             return Err(RustlsError::General(format!(
                 "measurement mismatch: expected {}, got {}",

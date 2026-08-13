@@ -394,6 +394,7 @@ dependencies = [
  "serde_with",
  "sev",
  "sha2",
+ "subtle",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
