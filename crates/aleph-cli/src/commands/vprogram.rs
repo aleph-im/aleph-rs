@@ -818,17 +818,28 @@ pub(crate) fn check_debug_policy(policy: u64, allow_debug: bool) -> Result<()> {
     Ok(())
 }
 
-/// Pure: fold an override patch onto the network floor, gating any lowering
-/// behind `accept_outdated`. I/O-free so it is directly unit-testable.
+/// Pure: fold an override patch onto every family floor of the network
+/// policy, gating any lowering behind `accept_outdated`. The lowering gate
+/// fires if the patch lowers ANY family's floor (a `--min-tcb` between the
+/// Zen4c and classic floors still weakens the classic gate, and the silicon
+/// family is only known once a report is in hand). I/O-free so it is
+/// directly unit-testable.
 pub(crate) fn resolve_effective_floor(
-    network: &aleph_sdk::attest::TcbFloor,
+    network: &aleph_sdk::attest::TcbFloorPolicy,
     override_patch: Option<&aleph_sdk::attest::TcbFloorOverride>,
     accept_outdated: bool,
-) -> Result<aleph_sdk::attest::TcbFloor> {
+) -> Result<aleph_sdk::attest::TcbFloorPolicy> {
     let Some(patch) = override_patch else {
         return Ok(*network);
     };
-    let (eff, lowered) = patch.apply_to(network);
+    let (eff_default, mut lowered) = patch.apply_to(&network.default);
+    let eff_zen4c = network.zen4c.as_ref().map(|floor| {
+        let (eff, lowered_zen4c) = patch.apply_to(floor);
+        lowered.extend(lowered_zen4c);
+        eff
+    });
+    lowered.sort();
+    lowered.dedup();
     if !lowered.is_empty() {
         if !accept_outdated {
             bail!(
@@ -841,19 +852,22 @@ pub(crate) fn resolve_effective_floor(
              runs known-outdated firmware, so the guest may be exposed"
         );
     }
-    Ok(eff)
+    Ok(aleph_sdk::attest::TcbFloorPolicy {
+        default: eff_default,
+        zen4c: eff_zen4c,
+    })
 }
 
-/// Resolve the network floor (builtin baseline raised by the settings
-/// aggregate), then apply the override. Aggregate failure falls back to the
-/// baseline with a warning.
+/// Resolve the network floor policy (per-family builtin baselines raised by
+/// the settings aggregate), then apply the override. Aggregate failure falls
+/// back to the baselines with a warning.
 async fn resolve_tcb_floor(
     aleph_client: &AlephClient,
     product: aleph_sdk::attest::AmdProduct,
     override_patch: Option<&aleph_sdk::attest::TcbFloorOverride>,
     accept_outdated: bool,
-) -> Result<aleph_sdk::attest::TcbFloor> {
-    let baseline = aleph_sdk::attest::builtin_baseline(product);
+) -> Result<aleph_sdk::attest::TcbFloorPolicy> {
+    let baseline = aleph_sdk::attest::builtin_baseline_policy(product);
     let network = match aleph_client.get_settings_aggregate().await {
         Ok(agg) => match agg.settings.snp_min_tcb.floor_for(product) {
             Some(f) => baseline.raise_to(&f),
@@ -913,12 +927,14 @@ fn tcb_floor_json(floor: &aleph_sdk::attest::TcbFloor) -> serde_json::Value {
 /// `(stdout, stderr_meta)`. In text mode stdout is the raw response body so
 /// the command pipes like curl; the `HTTP <status>` line goes to stderr. In
 /// JSON mode everything is in the stdout document and there is no meta line,
-/// and the effective TCB floor plus the verified launch/reported TCB are
-/// included as evidence alongside the measurement/policy.
+/// and the effective TCB floor (the one selected for the guest's silicon
+/// family, from the report's signed CPUID fields) plus the verified
+/// launch/reported TCB are included as evidence alongside the
+/// measurement/policy.
 /// Pure (no I/O), so it's unit-testable without a network or TLS server.
 pub(crate) fn render_call_result(
     response: &aleph_sdk::attest::AttestedResponse,
-    min_tcb: &aleph_sdk::attest::TcbFloor,
+    min_tcb: &aleph_sdk::attest::TcbFloorPolicy,
     json: bool,
 ) -> (String, Option<String>) {
     if json {
@@ -930,7 +946,12 @@ pub(crate) fn render_call_result(
         let out = serde_json::json!({
             "measurement": response.measurement,
             "policy": format!("{:#x}", response.policy),
-            "effective_tcb_floor": tcb_floor_json(min_tcb),
+            "effective_tcb_floor": tcb_floor_json(min_tcb.for_model(response.cpuid_family, response.cpuid_model)),
+            "cpuid": {
+                "family": response.cpuid_family,
+                "model": response.cpuid_model,
+                "stepping": response.cpuid_stepping,
+            },
             "launch_tcb": tcb_json(
                 response.launch_tcb.fmc,
                 response.launch_tcb.bootloader,
@@ -1103,8 +1124,10 @@ async fn handle_call(
     // views), but the trust decision never rests on a single site. This
     // re-check deliberately covers only `launch_tcb`: under Option A that is
     // the view that decides whether the VM was launched under a safe TCB, so
-    // it is the load-bearing one to re-assert here.
-    if let Err(defs) = min_tcb.satisfied_by(&response.launch_tcb) {
+    // it is the load-bearing one to re-assert here. The floor is selected
+    // from the response's (signed) CPUID family/model, like the SDK did.
+    let applied_floor = min_tcb.for_model(response.cpuid_family, response.cpuid_model);
+    if let Err(defs) = applied_floor.satisfied_by(&response.launch_tcb) {
         bail!("guest launch TCB is below the required floor: {defs:?}");
     }
 
@@ -1308,7 +1331,7 @@ mod show_tests {
 #[cfg(test)]
 mod call_tests {
     use super::*;
-    use aleph_sdk::attest::{AttestedResponse, TcbFloor, TcbFloorOverride};
+    use aleph_sdk::attest::{AttestedResponse, TcbFloor, TcbFloorOverride, TcbFloorPolicy};
 
     fn measurement(digest: &str, vcpu_type: Option<&str>) -> LaunchMeasurement {
         let json = serde_json::json!({
@@ -1438,6 +1461,9 @@ mod call_tests {
             policy: 0x30000,
             launch_tcb: Default::default(),
             reported_tcb: Default::default(),
+            cpuid_family: None,
+            cpuid_model: None,
+            cpuid_stepping: None,
             status: 200,
             headers: vec![],
             body: bytes::Bytes::copy_from_slice(body),
@@ -1491,7 +1517,8 @@ mod call_tests {
     fn render_call_result_json_parses_json_body() {
         let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
 
-        let (out, meta) = render_call_result(&response, &dummy_floor(), true);
+        let (out, meta) =
+            render_call_result(&response, &TcbFloorPolicy::uniform(dummy_floor()), true);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert!(
@@ -1525,7 +1552,8 @@ mod call_tests {
     fn render_call_result_json_falls_back_to_string_body_for_non_json() {
         let response = dummy_response(&"ab".repeat(48), b"plain text body");
 
-        let (out, _meta) = render_call_result(&response, &dummy_floor(), true);
+        let (out, _meta) =
+            render_call_result(&response, &TcbFloorPolicy::uniform(dummy_floor()), true);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["body"], serde_json::json!("plain text body"));
@@ -1535,7 +1563,8 @@ mod call_tests {
     fn render_call_result_text_puts_only_the_body_on_stdout() {
         let response = dummy_response(&"ab".repeat(48), br#"{"status":"ok"}"#);
 
-        let (out, meta) = render_call_result(&response, &dummy_floor(), false);
+        let (out, meta) =
+            render_call_result(&response, &TcbFloorPolicy::uniform(dummy_floor()), false);
 
         // The body must be machine-consumable as-is (aleph-testnets#35 run
         // 31474678768: `json.loads` on stdout choked on the status line).
@@ -1545,13 +1574,24 @@ mod call_tests {
         assert_eq!(meta.as_deref(), Some("HTTP 200"));
     }
 
-    fn net() -> TcbFloor {
-        TcbFloor {
-            fmc: None,
-            bootloader: 4,
-            tee: 0,
-            snp: 21,
-            microcode: 84,
+    fn net() -> TcbFloorPolicy {
+        TcbFloorPolicy {
+            default: TcbFloor {
+                fmc: None,
+                bootloader: 4,
+                tee: 0,
+                snp: 21,
+                microcode: 84,
+            },
+            // A Genoa-shaped policy: the Zen4c family follows its own,
+            // lower microcode line.
+            zen4c: Some(TcbFloor {
+                fmc: None,
+                bootloader: 4,
+                tee: 0,
+                snp: 21,
+                microcode: 28,
+            }),
         }
     }
 
@@ -1564,7 +1604,9 @@ mod call_tests {
     fn raising_override_needs_no_acknowledgement() {
         let o: TcbFloorOverride = "snp=30".parse().unwrap();
         let eff = resolve_effective_floor(&net(), Some(&o), false).unwrap();
-        assert_eq!(eff.snp, 30);
+        // The raise lands on every family floor.
+        assert_eq!(eff.default.snp, 30);
+        assert_eq!(eff.zen4c.unwrap().snp, 30);
     }
 
     #[test]
@@ -1577,6 +1619,39 @@ mod call_tests {
     fn lowering_override_with_ack_is_accepted() {
         let o: TcbFloorOverride = "snp=9".parse().unwrap();
         let eff = resolve_effective_floor(&net(), Some(&o), true).unwrap();
-        assert_eq!(eff.snp, 9);
+        assert_eq!(eff.default.snp, 9);
+        assert_eq!(eff.zen4c.unwrap().snp, 9);
+    }
+
+    #[test]
+    fn lowering_only_the_zen4c_floor_still_needs_the_ack() {
+        // microcode=50 sits between the zen4c floor (28, raised) and the
+        // classic floor (84, lowered): the gate fires because the silicon
+        // family is unknown until a report is in hand, so ANY family's
+        // weakened floor needs the explicit acknowledgement.
+        let o: TcbFloorOverride = "microcode=50".parse().unwrap();
+        assert!(resolve_effective_floor(&net(), Some(&o), false).is_err());
+        let eff = resolve_effective_floor(&net(), Some(&o), true).unwrap();
+        assert_eq!(eff.default.microcode, 50);
+        assert_eq!(eff.zen4c.unwrap().microcode, 50);
+    }
+
+    #[test]
+    fn render_call_result_selects_the_zen4c_floor_for_zen4c_evidence() {
+        // A response whose signed report says Bergamo/Siena (family 19h,
+        // model A0h-AFh) must show the zen4c floor as the effective one,
+        // and the CPUID fields as evidence.
+        let mut response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
+        response.cpuid_family = Some(0x19);
+        response.cpuid_model = Some(0xA1);
+        response.cpuid_stepping = Some(2);
+
+        let (out, _meta) = render_call_result(&response, &net(), true);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+
+        assert_eq!(v["effective_tcb_floor"]["microcode"], serde_json::json!(28));
+        assert_eq!(v["cpuid"]["family"], serde_json::json!(0x19));
+        assert_eq!(v["cpuid"]["model"], serde_json::json!(0xA1));
+        assert_eq!(v["cpuid"]["stepping"], serde_json::json!(2));
     }
 }

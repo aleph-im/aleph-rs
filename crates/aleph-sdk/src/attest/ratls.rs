@@ -46,7 +46,7 @@ use sev::parser::ByteParser;
 use sha2::{Digest, Sha384};
 use subtle::ConstantTimeEq;
 
-use super::tcb::TcbFloor;
+use super::tcb::TcbFloorPolicy;
 use super::verify::{AmdProduct, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
 use super::{AttestationReport, TeeType};
@@ -78,6 +78,12 @@ pub struct AttestedResponse {
     pub launch_tcb: sev::firmware::host::TcbVersion,
     /// TCB the VCEK is keyed to (from the signed report).
     pub reported_tcb: sev::firmware::host::TcbVersion,
+    /// CPUID family/model/stepping of the attesting chip, from the signed
+    /// report (version 3+; `None` on older reports). Evidence of which
+    /// silicon family the TCB floor was selected for.
+    pub cpuid_family: Option<u8>,
+    pub cpuid_model: Option<u8>,
+    pub cpuid_stepping: Option<u8>,
     /// The HTTP status code of the response.
     pub status: u16,
     /// The HTTP response headers, in wire order (a header repeated multiple
@@ -352,7 +358,7 @@ pub async fn attested_request(
     expected_measurement: Option<&[u8]>,
     expected_policy: Option<u64>,
     product: AmdProduct,
-    min_tcb: &TcbFloor,
+    min_tcb: &TcbFloorPolicy,
 ) -> Result<AttestedResponse, AttestError> {
     let url = base_url.join(path)?;
 
@@ -411,6 +417,9 @@ pub async fn attested_request(
         policy: result.policy,
         launch_tcb: result.launch_tcb,
         reported_tcb: result.reported_tcb,
+        cpuid_family: result.cpuid_family,
+        cpuid_model: result.cpuid_model,
+        cpuid_stepping: result.cpuid_stepping,
         status,
         headers: response_headers,
         body,
