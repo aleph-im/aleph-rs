@@ -97,6 +97,10 @@ impl TcbFloor {
 /// floors": the settings aggregate can only raise it. Bump each SDK release as
 /// new CVEs land. NOTE: confirm these against AMD's current published TCB
 /// before a release; the values below are the design-doc baselines.
+///
+/// This is the floor for the product's *classic* server parts. Some products
+/// cover more than one silicon family whose microcode SPL sequences are not
+/// comparable; use [`builtin_baseline_policy`] to get every family's floor.
 pub fn builtin_baseline(product: AmdProduct) -> TcbFloor {
     match product {
         AmdProduct::Milan => TcbFloor {
@@ -119,6 +123,98 @@ pub fn builtin_baseline(product: AmdProduct) -> TcbFloor {
             tee: 0,
             snp: 8,
             microcode: 12,
+        },
+    }
+}
+
+/// CPUID family (19h = Zen 3/Zen 4 server) and the model range of the Zen4c
+/// parts (Bergamo EPYC 97x4, Siena EPYC 8004: models A0h-AFh). Both attest
+/// under the *Genoa* KDS product (same ARK/ASK, same VCEK product name), but
+/// their x86 microcode is a different patch line than classic Genoa (models
+/// 10h-1Fh), so the two families' microcode SPLs are not comparable: current
+/// classic-Genoa microcode sits in the 8x range while current Zen4c microcode
+/// sits in the 2x range. A single product-keyed microcode floor therefore
+/// cannot be right for both.
+const ZEN4_FAMILY: u8 = 0x19;
+const ZEN4C_MODEL_RANGE: std::ops::RangeInclusive<u8> = 0xA0..=0xAF;
+
+/// The minimum-TCB policy for one AMD product: the floor for its classic
+/// parts plus, where the product spans a second silicon family with its own
+/// microcode line, that family's floor. The floor to enforce is selected per
+/// report via [`TcbFloorPolicy::for_model`], from the report's own CPUID
+/// family/model fields (present and signed since report version 3,
+/// SNP firmware 1.55).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TcbFloorPolicy {
+    /// Floor for the product's classic parts, and the fallback whenever the
+    /// report does not identify the silicon (pre-v3 reports). The fallback is
+    /// deliberately the strict classic floor: the SNP SVN floors already
+    /// imply firmware recent enough to emit v3 reports, so a report without
+    /// CPUID fields comes from firmware that fails the floor anyway.
+    pub default: TcbFloor,
+    /// Floor for the product's Zen4c family (Bergamo/Siena), when the
+    /// product has one. `None` means every part of this product shares
+    /// `default`.
+    pub zen4c: Option<TcbFloor>,
+}
+
+impl TcbFloorPolicy {
+    /// A policy that accepts any report. For tests and behavior-preserving
+    /// call-site updates only; never used in the attested-call path.
+    pub const UNRESTRICTED: TcbFloorPolicy = TcbFloorPolicy {
+        default: TcbFloor::UNRESTRICTED,
+        zen4c: None,
+    };
+
+    /// A policy applying one floor to every silicon family of the product.
+    pub fn uniform(floor: TcbFloor) -> TcbFloorPolicy {
+        TcbFloorPolicy {
+            default: floor,
+            zen4c: None,
+        }
+    }
+
+    /// Select the floor to enforce for a report, from the report's CPUID
+    /// family/model fields (`None` on pre-v3 reports).
+    pub fn for_model(&self, cpuid_family: Option<u8>, cpuid_model: Option<u8>) -> &TcbFloor {
+        if let (Some(zen4c), Some(ZEN4_FAMILY), Some(model)) =
+            (self.zen4c.as_ref(), cpuid_family, cpuid_model)
+            && ZEN4C_MODEL_RANGE.contains(&model)
+        {
+            return zen4c;
+        }
+        &self.default
+    }
+
+    /// Raise every family's floor by `other` (folds the network floor in).
+    pub fn raise_to(&self, other: &TcbFloor) -> TcbFloorPolicy {
+        TcbFloorPolicy {
+            default: self.default.raise_to(other),
+            zen4c: self.zen4c.map(|f| f.raise_to(other)),
+        }
+    }
+}
+
+/// [`builtin_baseline`] for every silicon family of the product. Genoa is the
+/// only product spanning two microcode lines: classic Genoa (models 10h-1Fh)
+/// and the Zen4c parts Bergamo/Siena (models A0h-AFh), which share the SP5
+/// PSP firmware line (bootloader/tee/snp floors identical) but follow their
+/// own x86 microcode sequence. NOTE: like the classic baselines, confirm the
+/// Zen4c microcode value against AMD's current published patch level before a
+/// release (current Zen4c microcode 0x0AA0021C -> SPL 0x1C = 28).
+pub fn builtin_baseline_policy(product: AmdProduct) -> TcbFloorPolicy {
+    let default = builtin_baseline(product);
+    match product {
+        AmdProduct::Genoa => TcbFloorPolicy {
+            default,
+            zen4c: Some(TcbFloor {
+                microcode: 28,
+                ..default
+            }),
+        },
+        AmdProduct::Milan | AmdProduct::Turin => TcbFloorPolicy {
+            default,
+            zen4c: None,
         },
     }
 }
@@ -331,6 +427,81 @@ mod tests {
     fn builtin_baseline_is_nonzero_per_generation() {
         assert!(builtin_baseline(AmdProduct::Genoa).snp > 0);
         assert!(builtin_baseline(AmdProduct::Turin).fmc.is_some());
+    }
+
+    #[test]
+    fn genoa_policy_selects_the_zen4c_floor_for_bergamo_siena_models() {
+        let policy = builtin_baseline_policy(AmdProduct::Genoa);
+        // Bergamo/Siena: family 19h, models A0h-AFh.
+        for model in [0xA0, 0xA7, 0xAF] {
+            let floor = policy.for_model(Some(0x19), Some(model));
+            assert_eq!(floor, policy.zen4c.as_ref().unwrap());
+        }
+        // Classic Genoa models keep the classic floor.
+        for model in [0x10, 0x11, 0x1F] {
+            assert_eq!(policy.for_model(Some(0x19), Some(model)), &policy.default);
+        }
+        // Zen4c microcode line sits far below classic Genoa's; the PSP-line
+        // components are shared.
+        let zen4c = policy.zen4c.unwrap();
+        assert!(zen4c.microcode < policy.default.microcode);
+        assert_eq!(zen4c.bootloader, policy.default.bootloader);
+        assert_eq!(zen4c.snp, policy.default.snp);
+    }
+
+    #[test]
+    fn policy_falls_back_to_the_default_floor_without_cpuid_fields() {
+        // Pre-v3 reports carry no CPUID family/model: the strict classic
+        // floor applies (conservative fallback).
+        let policy = builtin_baseline_policy(AmdProduct::Genoa);
+        assert_eq!(policy.for_model(None, None), &policy.default);
+        assert_eq!(policy.for_model(Some(0x19), None), &policy.default);
+        assert_eq!(policy.for_model(None, Some(0xA1)), &policy.default);
+        // A Zen4c-range model on a DIFFERENT family is not Zen4c.
+        assert_eq!(policy.for_model(Some(0x1A), Some(0xA1)), &policy.default);
+    }
+
+    #[test]
+    fn products_without_a_zen4c_family_always_use_the_default_floor() {
+        for product in [AmdProduct::Milan, AmdProduct::Turin] {
+            let policy = builtin_baseline_policy(product);
+            assert!(policy.zen4c.is_none());
+            assert_eq!(policy.for_model(Some(0x19), Some(0xA1)), &policy.default);
+            assert_eq!(policy.default, builtin_baseline(product));
+        }
+    }
+
+    #[test]
+    fn policy_raise_to_raises_every_family_floor() {
+        let policy = builtin_baseline_policy(AmdProduct::Genoa);
+        let network = TcbFloor {
+            fmc: None,
+            bootloader: 10,
+            tee: 1,
+            snp: 25,
+            microcode: 0,
+        };
+        let raised = policy.raise_to(&network);
+        assert_eq!(raised.default.bootloader, 10);
+        assert_eq!(raised.default.snp, 25);
+        // The classic microcode floor is untouched (network 0 < 84)...
+        assert_eq!(raised.default.microcode, policy.default.microcode);
+        // ...and the zen4c floor got the same componentwise raise.
+        let zen4c = raised.zen4c.unwrap();
+        assert_eq!(zen4c.bootloader, 10);
+        assert_eq!(zen4c.snp, 25);
+        assert_eq!(zen4c.microcode, policy.zen4c.unwrap().microcode);
+    }
+
+    #[test]
+    fn unrestricted_policy_accepts_any_report_for_any_model() {
+        let policy = TcbFloorPolicy::UNRESTRICTED;
+        assert!(
+            policy
+                .for_model(Some(0x19), Some(0xA1))
+                .satisfied_by(&tcb(0, 0, 0, 0))
+                .is_ok()
+        );
     }
 
     #[test]

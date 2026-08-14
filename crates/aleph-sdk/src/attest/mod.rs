@@ -21,7 +21,10 @@ pub mod verify;
 pub mod x509;
 
 pub use ratls::{AttestedResponse, attested_request};
-pub use tcb::{Component, Deficiency, TcbFloor, TcbFloorOverride, builtin_baseline};
+pub use tcb::{
+    Component, Deficiency, TcbFloor, TcbFloorOverride, TcbFloorPolicy, builtin_baseline,
+    builtin_baseline_policy,
+};
 pub use verify::{AmdProduct, VerificationResult, verify_sev_snp_report};
 pub use x509::{
     ATTESTATION_OID, ATTESTATION_OID_STR, AttestError, decode_attestation_extension,

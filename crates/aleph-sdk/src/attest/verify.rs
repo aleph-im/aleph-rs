@@ -23,7 +23,7 @@ use sev::parser::ByteParser;
 
 use super::AttestError;
 use super::certs;
-use super::tcb::TcbFloor;
+use super::tcb::{TcbFloor, TcbFloorPolicy};
 use super::{AttestationReport, TeeType};
 
 /// AMD ARK certificates use CN = "ARK-{product}" (e.g. "ARK-Milan").
@@ -134,6 +134,12 @@ pub struct VerificationResult {
     pub launch_tcb: TcbVersion,
     /// TCB the VCEK is keyed to (from the signed report).
     pub reported_tcb: TcbVersion,
+    /// CPUID family/model/stepping of the attesting chip, from the signed
+    /// report (version 3+, SNP firmware 1.55; `None` on older reports).
+    /// Evidence of which silicon family the TCB floor was selected for.
+    pub cpuid_family: Option<u8>,
+    pub cpuid_model: Option<u8>,
+    pub cpuid_stepping: Option<u8>,
     /// Human-readable summary of what was checked.
     pub summary: String,
 }
@@ -170,7 +176,7 @@ fn check_vmpl(vmpl: u32) -> Result<(), AttestError> {
 pub async fn verify_sev_snp_report(
     dto: &AttestationReport,
     product: AmdProduct,
-    min_tcb: &TcbFloor,
+    min_tcb: &TcbFloorPolicy,
 ) -> Result<VerificationResult, AttestError> {
     if dto.tee_type != TeeType::SevSnp {
         return Err(AttestError::UnsupportedTeeType(dto.tee_type));
@@ -202,7 +208,7 @@ fn verify_report_with_vcek(
     report: &SnpReport,
     product: AmdProduct,
     vcek_der: &[u8],
-    min_tcb: &TcbFloor,
+    min_tcb: &TcbFloorPolicy,
 ) -> Result<VerificationResult, AttestError> {
     let (ark, ask) = product.builtin_ca()?;
     let vek = Certificate::from_der(vcek_der)?;
@@ -220,13 +226,17 @@ fn verify_report_with_vcek(
     verify_ark(&chain.ca.ark, product)?;
 
     // TCB floor: the report is now chain- and signature-verified, so its TCB
-    // views are trustworthy. Gate before returning success.
+    // views AND its CPUID family/model fields are trustworthy. Select the
+    // floor for the silicon family the report attests to (Genoa-classic vs
+    // the Zen4c parts follow different microcode lines), then gate before
+    // returning success.
+    let floor = min_tcb.for_model(report.cpuid_fam_id, report.cpuid_mod_id);
     check_tcb_floor(
         &report.launch_tcb,
         &report.reported_tcb,
         &report.current_tcb,
         &report.committed_tcb,
-        min_tcb,
+        floor,
     )?;
 
     Ok(VerificationResult {
@@ -234,6 +244,9 @@ fn verify_report_with_vcek(
         policy: u64::from(report.policy),
         launch_tcb: report.launch_tcb,
         reported_tcb: report.reported_tcb,
+        cpuid_family: report.cpuid_fam_id,
+        cpuid_model: report.cpuid_mod_id,
+        cpuid_stepping: report.cpuid_step,
         summary: format!(
             "SEV-SNP verified against AMD {product} chain (VMPL {}, policy {:#x})",
             report.vmpl,
@@ -387,7 +400,7 @@ mod tests {
             data: milan_report_bytes(),
         };
 
-        let err = verify_sev_snp_report(&dto, AmdProduct::Milan, &TcbFloor::UNRESTRICTED)
+        let err = verify_sev_snp_report(&dto, AmdProduct::Milan, &TcbFloorPolicy::UNRESTRICTED)
             .await
             .expect_err("a non-SEV-SNP tee_type must be rejected before parsing");
         assert!(
@@ -513,7 +526,7 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
-            &TcbFloor::UNRESTRICTED,
+            &TcbFloorPolicy::UNRESTRICTED,
         )
         .expect("verification of a genuine, untampered Milan report must succeed");
 
@@ -552,7 +565,7 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
-            &TcbFloor::UNRESTRICTED,
+            &TcbFloorPolicy::UNRESTRICTED,
         );
         assert!(
             result.is_err(),
@@ -642,7 +655,7 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
-            &TcbFloor::UNRESTRICTED,
+            &TcbFloorPolicy::UNRESTRICTED,
         )
         .expect("UNRESTRICTED floor accepts the genuine fixture");
     }
@@ -659,7 +672,47 @@ mod tests {
             snp: report.reported_tcb.snp.saturating_add(1),
             microcode: report.reported_tcb.microcode,
         };
-        let err = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &floor)
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            &TcbFloorPolicy::uniform(floor),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AttestError::TcbBelowFloor(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn zen4c_floor_is_never_selected_for_a_non_zen4c_report() {
+        // The Milan fixture is not a Zen4c part (and pre-v3 reports carry no
+        // CPUID fields at all), so the gate must use the default floor: an
+        // impossible zen4c floor must not affect the outcome...
+        let report = SnpReport::from_bytes(&milan_report_bytes()).unwrap();
+        let policy = TcbFloorPolicy {
+            default: TcbFloor::UNRESTRICTED,
+            zen4c: Some(TcbFloor {
+                fmc: None,
+                bootloader: u8::MAX,
+                tee: u8::MAX,
+                snp: u8::MAX,
+                microcode: u8::MAX,
+            }),
+        };
+        verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &policy)
+            .expect("default floor governs a non-Zen4c report");
+
+        // ...and an impossible default floor must reject it.
+        let policy = TcbFloorPolicy {
+            default: TcbFloor {
+                fmc: None,
+                bootloader: u8::MAX,
+                tee: u8::MAX,
+                snp: u8::MAX,
+                microcode: u8::MAX,
+            },
+            zen4c: Some(TcbFloor::UNRESTRICTED),
+        };
+        let err = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &policy)
             .unwrap_err();
         assert!(matches!(err, AttestError::TcbBelowFloor(_)), "got {err:?}");
     }
