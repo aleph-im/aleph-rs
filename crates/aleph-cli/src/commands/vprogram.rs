@@ -818,12 +818,12 @@ pub(crate) fn check_debug_policy(policy: u64, allow_debug: bool) -> Result<()> {
     Ok(())
 }
 
-/// Pure: fold an override patch onto every family floor of the network
-/// policy, gating any lowering behind `accept_outdated`. The lowering gate
-/// fires if the patch lowers ANY family's floor (a `--min-tcb` between the
-/// Zen4c and classic floors still weakens the classic gate, and the silicon
-/// family is only known once a report is in hand). I/O-free so it is
-/// directly unit-testable.
+/// Pure: fold an override patch onto every silicon line's floor of the
+/// network policy, gating any lowering behind `accept_outdated`. The
+/// lowering gate fires if the patch lowers ANY line's floor (a `--min-tcb`
+/// between the Zen4c and classic floors still weakens the classic gate,
+/// and the silicon line is only known once a report is in hand). I/O-free
+/// so it is directly unit-testable.
 pub(crate) fn resolve_effective_floor(
     network: &aleph_sdk::attest::TcbFloorPolicy,
     override_patch: Option<&aleph_sdk::attest::TcbFloorOverride>,
@@ -833,6 +833,11 @@ pub(crate) fn resolve_effective_floor(
         return Ok(*network);
     };
     let (eff_default, mut lowered) = patch.apply_to(&network.default);
+    let eff_x_variant = network.x_variant.as_ref().map(|floor| {
+        let (eff, lowered_x) = patch.apply_to(floor);
+        lowered.extend(lowered_x);
+        eff
+    });
     let eff_zen4c = network.zen4c.as_ref().map(|floor| {
         let (eff, lowered_zen4c) = patch.apply_to(floor);
         lowered.extend(lowered_zen4c);
@@ -854,6 +859,7 @@ pub(crate) fn resolve_effective_floor(
     }
     Ok(aleph_sdk::attest::TcbFloorPolicy {
         default: eff_default,
+        x_variant: eff_x_variant,
         zen4c: eff_zen4c,
     })
 }
@@ -946,7 +952,7 @@ pub(crate) fn render_call_result(
         let out = serde_json::json!({
             "measurement": response.measurement,
             "policy": format!("{:#x}", response.policy),
-            "effective_tcb_floor": tcb_floor_json(min_tcb.for_model(response.cpuid_family, response.cpuid_model)),
+            "effective_tcb_floor": tcb_floor_json(min_tcb.for_silicon(response.cpuid_family, response.cpuid_model, response.cpuid_stepping)),
             "cpuid": {
                 "family": response.cpuid_family,
                 "model": response.cpuid_model,
@@ -1125,8 +1131,13 @@ async fn handle_call(
     // re-check deliberately covers only `launch_tcb`: under Option A that is
     // the view that decides whether the VM was launched under a safe TCB, so
     // it is the load-bearing one to re-assert here. The floor is selected
-    // from the response's (signed) CPUID family/model, like the SDK did.
-    let applied_floor = min_tcb.for_model(response.cpuid_family, response.cpuid_model);
+    // from the response's (signed) CPUID family/model/stepping, like the SDK
+    // did.
+    let applied_floor = min_tcb.for_silicon(
+        response.cpuid_family,
+        response.cpuid_model,
+        response.cpuid_stepping,
+    );
     if let Err(defs) = applied_floor.satisfied_by(&response.launch_tcb) {
         bail!("guest launch TCB is below the required floor: {defs:?}");
     }
@@ -1583,8 +1594,15 @@ mod call_tests {
                 snp: 21,
                 microcode: 84,
             },
-            // A Genoa-shaped policy: the Zen4c family follows its own,
-            // lower microcode line.
+            // A Genoa-shaped policy: the Genoa-X and Zen4c lines each
+            // follow their own, lower microcode sequence.
+            x_variant: Some(TcbFloor {
+                fmc: None,
+                bootloader: 4,
+                tee: 0,
+                snp: 21,
+                microcode: 79,
+            }),
             zen4c: Some(TcbFloor {
                 fmc: None,
                 bootloader: 4,
@@ -1633,6 +1651,7 @@ mod call_tests {
         assert!(resolve_effective_floor(&net(), Some(&o), false).is_err());
         let eff = resolve_effective_floor(&net(), Some(&o), true).unwrap();
         assert_eq!(eff.default.microcode, 50);
+        assert_eq!(eff.x_variant.unwrap().microcode, 50);
         assert_eq!(eff.zen4c.unwrap().microcode, 50);
     }
 
