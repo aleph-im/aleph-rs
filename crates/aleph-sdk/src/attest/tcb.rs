@@ -94,13 +94,23 @@ impl TcbFloor {
 }
 
 /// Conservative, release-time known-good floor per AMD generation. A "floor of
-/// floors": the settings aggregate can only raise it. Bump each SDK release as
-/// new CVEs land. NOTE: confirm these against AMD's current published TCB
-/// before a release; the values below are the design-doc baselines.
+/// floors": the settings aggregate can only raise it.
 ///
-/// This is the floor for the product's *classic* server parts. Some products
-/// cover more than one silicon family whose microcode SPL sequences are not
-/// comparable; use [`builtin_baseline_policy`] to get every family's floor.
+/// Calibration rule: each microcode floor is AMD's *published mitigation
+/// minimum* for the microcode signature-verification break ("EntrySign",
+/// AMD-SB-3019 / CVE-2024-56161 and AMD-SB-7033 / CVE-2024-36347). Below
+/// that level a ring-0 attacker can load forged microcode, which voids every
+/// SEV-SNP guarantee including the attestation report itself, so it is the
+/// hard minimum the client bakes in. Later, less fundamental microcode CVE
+/// waves (e.g. AMD-SB-3023's CVE-2025-48514, fixed one to three SPLs above
+/// these values) are deliberately left to the network floor in the settings
+/// aggregate, which can only raise this baseline. Do NOT set these to the
+/// latest available patch level: that rejects hosts AMD itself still
+/// considers mitigated.
+///
+/// This is the floor for the product's *classic* (stepping-1) server parts.
+/// Products span several silicon lines whose microcode SPL sequences are not
+/// comparable; use [`builtin_baseline_policy`] to get every line's floor.
 pub fn builtin_baseline(product: AmdProduct) -> TcbFloor {
     match product {
         AmdProduct::Milan => TcbFloor {
@@ -108,15 +118,22 @@ pub fn builtin_baseline(product: AmdProduct) -> TcbFloor {
             bootloader: 4,
             tee: 0,
             snp: 22,
-            microcode: 213,
+            // SB-3019 Milan minimum 0x0A0011DB -> SPL 0xDB. (The previous
+            // value, 213 = 0x0A0011D5, is the highest Milan patch WITHOUT
+            // the signing fix and accepted EntrySign-vulnerable hosts.)
+            microcode: 219,
         },
         AmdProduct::Genoa => TcbFloor {
             fmc: None,
             bootloader: 9,
             tee: 0,
             snp: 21,
+            // SB-3019 Genoa minimum 0x0A101154 -> SPL 0x54.
             microcode: 84,
         },
+        // Turin's SVN scheme differs (FMC present, small sequential SVNs that
+        // are not the patch-id low byte); its values come from the design-doc
+        // baseline and are not part of the SB-3019 recalibration.
         AmdProduct::Turin => TcbFloor {
             fmc: Some(3),
             bootloader: 4,
@@ -138,23 +155,35 @@ pub fn builtin_baseline(product: AmdProduct) -> TcbFloor {
 const ZEN4_FAMILY: u8 = 0x19;
 const ZEN4C_MODEL_RANGE: std::ops::RangeInclusive<u8> = 0xA0..=0xAF;
 
+/// The cache-stacked ("X", 3D V-Cache) variants Milan-X (EPYC 7x73X) and
+/// Genoa-X (EPYC 9x84X) are stepping 2 of the same family/model as their
+/// classic parts, and each follows its OWN microcode patch line
+/// (0x0A0012xx / 0x0A1012xx vs classic 0x0A0011xx / 0x0A1011xx), so their
+/// SPLs are not comparable with the classic floors either: SB-3019's
+/// published minimums are SPL 68 (Milan-X) and 79 (Genoa-X), both below
+/// the classic floors of 219 and 84.
+const CACHE_STACKED_STEPPING: u8 = 0x2;
+
 /// The minimum-TCB policy for one AMD product: the floor for its classic
-/// parts plus, where the product spans a second silicon family with its own
-/// microcode line, that family's floor. The floor to enforce is selected per
-/// report via [`TcbFloorPolicy::for_model`], from the report's own CPUID
-/// family/model fields (present and signed since report version 3,
-/// SNP firmware 1.55).
+/// parts plus, where the product spans further silicon lines with their own
+/// microcode patch sequences, those lines' floors. The floor to enforce is
+/// selected per report via [`TcbFloorPolicy::for_silicon`], from the
+/// report's own CPUID family/model/stepping fields (present and signed
+/// since report version 3, SNP firmware 1.55).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcbFloorPolicy {
     /// Floor for the product's classic parts, and the fallback whenever the
     /// report does not identify the silicon (pre-v3 reports). The fallback is
-    /// deliberately the strict classic floor: the SNP SVN floors already
-    /// imply firmware recent enough to emit v3 reports, so a report without
-    /// CPUID fields comes from firmware that fails the floor anyway.
+    /// deliberately the strictest floor of the product: the SNP SVN floors
+    /// already imply firmware recent enough to emit v3 reports, so a report
+    /// without CPUID fields comes from firmware that fails the floor anyway.
     pub default: TcbFloor,
+    /// Floor for the product's cache-stacked stepping-2 variant (Milan-X /
+    /// Genoa-X), when the product has one. `None` means stepping does not
+    /// select a different floor for this product.
+    pub x_variant: Option<TcbFloor>,
     /// Floor for the product's Zen4c family (Bergamo/Siena), when the
-    /// product has one. `None` means every part of this product shares
-    /// `default`.
+    /// product has one. `None` means no model of this product is Zen4c.
     pub zen4c: Option<TcbFloor>,
 }
 
@@ -163,57 +192,98 @@ impl TcbFloorPolicy {
     /// call-site updates only; never used in the attested-call path.
     pub const UNRESTRICTED: TcbFloorPolicy = TcbFloorPolicy {
         default: TcbFloor::UNRESTRICTED,
+        x_variant: None,
         zen4c: None,
     };
 
-    /// A policy applying one floor to every silicon family of the product.
+    /// A policy applying one floor to every silicon line of the product.
     pub fn uniform(floor: TcbFloor) -> TcbFloorPolicy {
         TcbFloorPolicy {
             default: floor,
+            x_variant: None,
             zen4c: None,
         }
     }
 
     /// Select the floor to enforce for a report, from the report's CPUID
-    /// family/model fields (`None` on pre-v3 reports).
-    pub fn for_model(&self, cpuid_family: Option<u8>, cpuid_model: Option<u8>) -> &TcbFloor {
+    /// family/model/stepping fields (`None` on pre-v3 reports). Zen4c is
+    /// keyed by model range (its own steppings share the 0x0AA002xx line);
+    /// the cache-stacked X variants are the SAME model range as their
+    /// classic parts and are keyed by stepping. Any absent field falls back
+    /// to `default`, the product's strictest floor.
+    pub fn for_silicon(
+        &self,
+        cpuid_family: Option<u8>,
+        cpuid_model: Option<u8>,
+        cpuid_stepping: Option<u8>,
+    ) -> &TcbFloor {
         if let (Some(zen4c), Some(ZEN4_FAMILY), Some(model)) =
             (self.zen4c.as_ref(), cpuid_family, cpuid_model)
             && ZEN4C_MODEL_RANGE.contains(&model)
         {
             return zen4c;
         }
+        if let (Some(x), Some(ZEN4_FAMILY), Some(model), Some(CACHE_STACKED_STEPPING)) = (
+            self.x_variant.as_ref(),
+            cpuid_family,
+            cpuid_model,
+            cpuid_stepping,
+        ) && !ZEN4C_MODEL_RANGE.contains(&model)
+        {
+            return x;
+        }
         &self.default
     }
 
-    /// Raise every family's floor by `other` (folds the network floor in).
+    /// Raise every silicon line's floor by `other` (folds the network floor
+    /// in).
     pub fn raise_to(&self, other: &TcbFloor) -> TcbFloorPolicy {
         TcbFloorPolicy {
             default: self.default.raise_to(other),
+            x_variant: self.x_variant.map(|f| f.raise_to(other)),
             zen4c: self.zen4c.map(|f| f.raise_to(other)),
         }
     }
 }
 
-/// [`builtin_baseline`] for every silicon family of the product. Genoa is the
-/// only product spanning two microcode lines: classic Genoa (models 10h-1Fh)
-/// and the Zen4c parts Bergamo/Siena (models A0h-AFh), which share the SP5
-/// PSP firmware line (bootloader/tee/snp floors identical) but follow their
-/// own x86 microcode sequence. NOTE: like the classic baselines, confirm the
-/// Zen4c microcode value against AMD's current published patch level before a
-/// release (current Zen4c microcode 0x0AA0021C -> SPL 0x1C = 28).
+/// [`builtin_baseline`] for every silicon line of the product. All lines of
+/// a product share its PSP firmware (bootloader/tee/snp floors identical);
+/// only the x86 microcode sequences differ:
+///
+/// - Milan: classic B1 vs cache-stacked Milan-X (B2, 0x0A0012xx line,
+///   SB-3019 minimum 0x0A001244 -> SPL 68).
+/// - Genoa: classic vs Genoa-X (stepping 2, 0x0A1012xx line, SB-3019
+///   minimum 0x0A10124F -> SPL 79) vs the Zen4c parts Bergamo/Siena
+///   (models A0h-AFh, 0x0AA002xx line, SB-3019 minimum 0x0AA00219 ->
+///   SPL 25).
+///
+/// Per the calibration rule on [`builtin_baseline`], every value is the
+/// published EntrySign (SB-3019) mitigation minimum, not the latest patch.
 pub fn builtin_baseline_policy(product: AmdProduct) -> TcbFloorPolicy {
     let default = builtin_baseline(product);
     match product {
+        AmdProduct::Milan => TcbFloorPolicy {
+            default,
+            x_variant: Some(TcbFloor {
+                microcode: 68,
+                ..default
+            }),
+            zen4c: None,
+        },
         AmdProduct::Genoa => TcbFloorPolicy {
             default,
+            x_variant: Some(TcbFloor {
+                microcode: 79,
+                ..default
+            }),
             zen4c: Some(TcbFloor {
-                microcode: 28,
+                microcode: 25,
                 ..default
             }),
         },
-        AmdProduct::Milan | AmdProduct::Turin => TcbFloorPolicy {
+        AmdProduct::Turin => TcbFloorPolicy {
             default,
+            x_variant: None,
             zen4c: None,
         },
     }
@@ -430,16 +500,40 @@ mod tests {
     }
 
     #[test]
+    fn builtin_microcode_floors_are_the_sb3019_entrysign_minimums() {
+        // AMD-SB-3019 (EntrySign, CVE-2024-56161) published mitigation
+        // minimums, SPL = patch-id low byte. Below these a ring-0 attacker
+        // can load forged microcode and void SEV-SNP entirely, so they are
+        // the hard built-in minimums; anything newer belongs to the network
+        // floor. Values per bulletin: Milan 0x0A0011DB, Milan-X 0x0A001244,
+        // Genoa 0x0A101154, Genoa-X 0x0A10124F, Bergamo/Siena 0x0AA00219.
+        let milan = builtin_baseline_policy(AmdProduct::Milan);
+        assert_eq!(milan.default.microcode, 219);
+        assert_eq!(milan.x_variant.unwrap().microcode, 68);
+        assert!(milan.zen4c.is_none());
+        let genoa = builtin_baseline_policy(AmdProduct::Genoa);
+        assert_eq!(genoa.default.microcode, 84);
+        assert_eq!(genoa.x_variant.unwrap().microcode, 79);
+        assert_eq!(genoa.zen4c.unwrap().microcode, 25);
+    }
+
+    #[test]
     fn genoa_policy_selects_the_zen4c_floor_for_bergamo_siena_models() {
         let policy = builtin_baseline_policy(AmdProduct::Genoa);
-        // Bergamo/Siena: family 19h, models A0h-AFh.
+        // Bergamo/Siena: family 19h, models A0h-AFh, any stepping (the
+        // Zen4c steppings share the 0x0AA002xx patch line).
         for model in [0xA0, 0xA7, 0xAF] {
-            let floor = policy.for_model(Some(0x19), Some(model));
-            assert_eq!(floor, policy.zen4c.as_ref().unwrap());
+            for stepping in [None, Some(1), Some(2)] {
+                let floor = policy.for_silicon(Some(0x19), Some(model), stepping);
+                assert_eq!(floor, policy.zen4c.as_ref().unwrap());
+            }
         }
         // Classic Genoa models keep the classic floor.
         for model in [0x10, 0x11, 0x1F] {
-            assert_eq!(policy.for_model(Some(0x19), Some(model)), &policy.default);
+            assert_eq!(
+                policy.for_silicon(Some(0x19), Some(model), Some(1)),
+                &policy.default
+            );
         }
         // Zen4c microcode line sits far below classic Genoa's; the PSP-line
         // components are shared.
@@ -450,29 +544,77 @@ mod tests {
     }
 
     #[test]
-    fn policy_falls_back_to_the_default_floor_without_cpuid_fields() {
-        // Pre-v3 reports carry no CPUID family/model: the strict classic
-        // floor applies (conservative fallback).
-        let policy = builtin_baseline_policy(AmdProduct::Genoa);
-        assert_eq!(policy.for_model(None, None), &policy.default);
-        assert_eq!(policy.for_model(Some(0x19), None), &policy.default);
-        assert_eq!(policy.for_model(None, Some(0xA1)), &policy.default);
-        // A Zen4c-range model on a DIFFERENT family is not Zen4c.
-        assert_eq!(policy.for_model(Some(0x1A), Some(0xA1)), &policy.default);
+    fn stepping_two_selects_the_x_variant_floor_for_classic_models() {
+        // Milan-X (family 19h, Milan models, stepping 2) follows its own
+        // 0x0A0012xx microcode line: SB-3019 minimum SPL 68, far below the
+        // classic Milan floor of 219 which would falsely reject it.
+        let milan = builtin_baseline_policy(AmdProduct::Milan);
+        let floor = milan.for_silicon(Some(0x19), Some(0x01), Some(2));
+        assert_eq!(floor, milan.x_variant.as_ref().unwrap());
+        // Genoa-X likewise (0x0A1012xx line, minimum SPL 79 vs classic 84).
+        let genoa = builtin_baseline_policy(AmdProduct::Genoa);
+        let floor = genoa.for_silicon(Some(0x19), Some(0x11), Some(2));
+        assert_eq!(floor, genoa.x_variant.as_ref().unwrap());
+        // Stepping 1 (classic silicon) and unknown stepping keep the
+        // classic floor.
+        for stepping in [None, Some(0), Some(1)] {
+            assert_eq!(
+                genoa.for_silicon(Some(0x19), Some(0x11), stepping),
+                &genoa.default
+            );
+        }
+        // The X floors share the PSP-line components with their classics.
+        let x = genoa.x_variant.unwrap();
+        assert_eq!(x.bootloader, genoa.default.bootloader);
+        assert_eq!(x.snp, genoa.default.snp);
     }
 
     #[test]
-    fn products_without_a_zen4c_family_always_use_the_default_floor() {
+    fn zen4c_models_never_take_the_x_variant_floor() {
+        // A Zen4c-range model at stepping 2 (Bergamo A2, the production
+        // stepping) is a Zen4c part, not a cache-stacked X part: the model
+        // range wins over the stepping.
+        let policy = builtin_baseline_policy(AmdProduct::Genoa);
+        assert_eq!(
+            policy.for_silicon(Some(0x19), Some(0xA0), Some(2)),
+            policy.zen4c.as_ref().unwrap()
+        );
+    }
+
+    #[test]
+    fn policy_falls_back_to_the_default_floor_without_cpuid_fields() {
+        // Pre-v3 reports carry no CPUID family/model/stepping: the strict
+        // classic floor applies (conservative fallback).
+        let policy = builtin_baseline_policy(AmdProduct::Genoa);
+        assert_eq!(policy.for_silicon(None, None, None), &policy.default);
+        assert_eq!(policy.for_silicon(Some(0x19), None, None), &policy.default);
+        assert_eq!(policy.for_silicon(None, Some(0xA1), None), &policy.default);
+        // A Zen4c-range model on a DIFFERENT family is not Zen4c, and a
+        // stepping-2 part of a different family is not an X part either.
+        assert_eq!(
+            policy.for_silicon(Some(0x1A), Some(0xA1), Some(2)),
+            &policy.default
+        );
+    }
+
+    #[test]
+    fn products_without_a_given_silicon_line_use_the_default_floor() {
+        // Milan has no Zen4c models; Turin has neither special line.
         for product in [AmdProduct::Milan, AmdProduct::Turin] {
             let policy = builtin_baseline_policy(product);
             assert!(policy.zen4c.is_none());
-            assert_eq!(policy.for_model(Some(0x19), Some(0xA1)), &policy.default);
             assert_eq!(policy.default, builtin_baseline(product));
         }
+        let turin = builtin_baseline_policy(AmdProduct::Turin);
+        assert!(turin.x_variant.is_none());
+        assert_eq!(
+            turin.for_silicon(Some(0x1A), Some(0x02), Some(2)),
+            &turin.default
+        );
     }
 
     #[test]
-    fn policy_raise_to_raises_every_family_floor() {
+    fn policy_raise_to_raises_every_silicon_line_floor() {
         let policy = builtin_baseline_policy(AmdProduct::Genoa);
         let network = TcbFloor {
             fmc: None,
@@ -486,11 +628,15 @@ mod tests {
         assert_eq!(raised.default.snp, 25);
         // The classic microcode floor is untouched (network 0 < 84)...
         assert_eq!(raised.default.microcode, policy.default.microcode);
-        // ...and the zen4c floor got the same componentwise raise.
+        // ...and the zen4c and X floors get the same componentwise raise.
         let zen4c = raised.zen4c.unwrap();
         assert_eq!(zen4c.bootloader, 10);
         assert_eq!(zen4c.snp, 25);
         assert_eq!(zen4c.microcode, policy.zen4c.unwrap().microcode);
+        let x = raised.x_variant.unwrap();
+        assert_eq!(x.bootloader, 10);
+        assert_eq!(x.snp, 25);
+        assert_eq!(x.microcode, policy.x_variant.unwrap().microcode);
     }
 
     #[test]
@@ -498,7 +644,7 @@ mod tests {
         let policy = TcbFloorPolicy::UNRESTRICTED;
         assert!(
             policy
-                .for_model(Some(0x19), Some(0xA1))
+                .for_silicon(Some(0x19), Some(0xA1), Some(2))
                 .satisfied_by(&tcb(0, 0, 0, 0))
                 .is_ok()
         );
