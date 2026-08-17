@@ -226,11 +226,11 @@ fn verify_report_with_vcek(
     verify_ark(&chain.ca.ark, product)?;
 
     // TCB floor: the report is now chain- and signature-verified, so its TCB
-    // views AND its CPUID family/model fields are trustworthy. Select the
-    // floor for the silicon family the report attests to (Genoa-classic vs
-    // the Zen4c parts follow different microcode lines), then gate before
-    // returning success.
-    let floor = min_tcb.for_model(report.cpuid_fam_id, report.cpuid_mod_id);
+    // views AND its CPUID family/model/stepping fields are trustworthy.
+    // Select the floor for the silicon line the report attests to (classic,
+    // cache-stacked X, and Zen4c parts each follow their own microcode patch
+    // sequence), then gate before returning success.
+    let floor = min_tcb.for_silicon(report.cpuid_fam_id, report.cpuid_mod_id, report.cpuid_step);
     check_tcb_floor(
         &report.launch_tcb,
         &report.reported_tcb,
@@ -690,6 +690,7 @@ mod tests {
         let report = SnpReport::from_bytes(&milan_report_bytes()).unwrap();
         let policy = TcbFloorPolicy {
             default: TcbFloor::UNRESTRICTED,
+            x_variant: None,
             zen4c: Some(TcbFloor {
                 fmc: None,
                 bootloader: u8::MAX,
@@ -710,6 +711,7 @@ mod tests {
                 snp: u8::MAX,
                 microcode: u8::MAX,
             },
+            x_variant: None,
             zen4c: Some(TcbFloor::UNRESTRICTED),
         };
         let err = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &policy)
