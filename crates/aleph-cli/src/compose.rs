@@ -11,9 +11,12 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_norway::Value;
+
+use crate::mkfs::{MkfsError, MkfsExt4};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ComposeError {
@@ -253,6 +256,74 @@ pub(crate) fn to_yaml(file: &ComposeFile) -> Result<String, ComposeError> {
     Ok(serde_norway::to_string(file)?)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ComposeBuildError {
+    #[error(transparent)]
+    Mkfs(#[from] MkfsError),
+    #[error("failed to stage compose workload image: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Content size -> image size: content plus slack (max of 20% of content or
+/// 16 MiB), rounded up to a 4096-byte block boundary. Pure for unit testing.
+pub(crate) fn image_size_bytes(content_bytes: u64) -> u64 {
+    const MIN_SLACK: u64 = 16 * 1024 * 1024;
+    const BLOCK: u64 = 4096;
+    let slack = (content_bytes / 5).max(MIN_SLACK);
+    (content_bytes + slack).div_ceil(BLOCK) * BLOCK
+}
+
+/// Sanitize an image name for use as a filename component: lowercase,
+/// keep `[a-z0-9-]`, replace everything else with `-`. Filenames are
+/// informational per the `aleph.compose/1` contract.
+fn sanitize_image_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Stage the pinned compose file and image archives into the
+/// `aleph.compose/1` layout (`docker-compose.yml` at the root, archives under
+/// `images/NNN-<sanitized-name>.tar`) and build an ext4 workload image from
+/// it via `mkfs`. Returns the tempfile; the caller keeps it alive until after
+/// upload.
+pub(crate) async fn build_workload_image(
+    mkfs: &MkfsExt4,
+    pinned_yaml: &str,
+    archives: &[(String, PathBuf)],
+) -> Result<tempfile::NamedTempFile, ComposeBuildError> {
+    let staging = tempfile::tempdir()?;
+
+    let compose_path = staging.path().join("docker-compose.yml");
+    std::fs::write(&compose_path, pinned_yaml)?;
+    let mut content_bytes = pinned_yaml.len() as u64;
+
+    let images_dir = staging.path().join("images");
+    std::fs::create_dir(&images_dir)?;
+    for (index, (name, archive_path)) in archives.iter().enumerate() {
+        let dest = images_dir.join(format!("{index:03}-{}.tar", sanitize_image_name(name)));
+        std::fs::copy(archive_path, &dest)?;
+        content_bytes += std::fs::metadata(&dest)?.len();
+    }
+
+    let out = tempfile::Builder::new()
+        .prefix("aleph-compose-")
+        .suffix(".ext4")
+        .tempfile()?;
+    out.as_file().set_len(image_size_bytes(content_bytes))?;
+
+    mkfs.build(staging.path(), out.path()).await?;
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +460,53 @@ mod tests {
         )]);
         pin_images(&mut v.file, &pins).unwrap();
         parse_and_validate(&to_yaml(&v.file).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn image_size_adds_slack_and_rounds_to_blocks() {
+        assert_eq!(image_size_bytes(0) % 4096, 0);
+        assert!(image_size_bytes(0) >= 16 * 1024 * 1024);
+        let one_gib = 1 << 30;
+        assert!(image_size_bytes(one_gib) >= one_gib + (one_gib / 5));
+        assert_eq!(image_size_bytes(one_gib) % 4096, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_workload_image_stages_compose_and_archives() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_dir = dir.path().join("snapshot");
+        let fake = dir.path().join("mkfs.ext4");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\ncp -r \"$4\" {}\nexit 0\n",
+                snapshot_dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mkfs = MkfsExt4 { path: fake };
+
+        let archive_path = dir.path().join("nginx.tar");
+        let archive_bytes = b"fake tar bytes";
+        std::fs::write(&archive_path, archive_bytes).unwrap();
+
+        let pinned_yaml = "services:\n  web:\n    image: nginx@sha256:abc\n";
+        let archives = vec![("nginx".to_string(), archive_path)];
+
+        let _out = build_workload_image(&mkfs, pinned_yaml, &archives)
+            .await
+            .unwrap();
+
+        let staged_compose =
+            std::fs::read_to_string(snapshot_dir.join("docker-compose.yml")).unwrap();
+        assert_eq!(staged_compose, pinned_yaml);
+
+        let staged_archive =
+            std::fs::read(snapshot_dir.join("images").join("000-nginx.tar")).unwrap();
+        assert_eq!(staged_archive, archive_bytes);
     }
 }

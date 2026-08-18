@@ -12,6 +12,8 @@ mod compose;
 mod config;
 #[cfg(feature = "vprogram")]
 mod container;
+#[cfg(feature = "vprogram")]
+mod mkfs;
 mod program;
 mod sevctl;
 #[cfg(feature = "vprogram")]
