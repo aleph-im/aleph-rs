@@ -9,9 +9,9 @@
 //! RA-TLS handshake (a later task) which has the expected measurement and
 //! public key to compare against.
 //!
-//! Fails closed: any parse, chain, signature, VMPL, or ARK-identity failure
-//! returns `Err`; an `Ok(VerificationResult)` always means a fully verified
-//! report.
+//! Fails closed: any parse, chain, signature, VMPL, ARK-identity, or
+//! validity-window failure returns `Err`; an `Ok(VerificationResult)` always
+//! means a fully verified report.
 
 use sha2::{Digest, Sha384};
 use x509_parser::certificate::X509Certificate;
@@ -183,7 +183,13 @@ pub async fn verify_sev_snp_report(
     }
     let report = SnpReport::from_bytes(&dto.data).map_err(AttestError::Parse)?;
     let vcek_der = certs::fetch_vcek(product, &report.chip_id, &report.reported_tcb).await?;
-    verify_report_with_vcek(&report, product, &vcek_der, min_tcb)
+    // A pre-epoch clock yields now = 0, which fails closed (every AMD cert's
+    // not_before is later than the epoch).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    verify_report_with_vcek(&report, product, &vcek_der, now, min_tcb)
 }
 
 /// Synchronous core of [`verify_sev_snp_report`]: everything after the VCEK
@@ -208,6 +214,7 @@ fn verify_report_with_vcek(
     report: &SnpReport,
     product: AmdProduct,
     vcek_der: &[u8],
+    now: i64,
     min_tcb: &TcbFloorPolicy,
 ) -> Result<VerificationResult, AttestError> {
     let (ark, ask) = product.builtin_ca()?;
@@ -224,6 +231,7 @@ fn verify_report_with_vcek(
     // Policy checks the `sev` crate does not perform:
     check_vmpl(report.vmpl)?;
     verify_ark(&chain.ca.ark, product)?;
+    check_chain_validity(now, &chain, vcek_der)?;
 
     // TCB floor: the report is now chain- and signature-verified, so its TCB
     // views AND its CPUID family/model/stepping fields are trustworthy.
@@ -253,6 +261,53 @@ fn verify_report_with_vcek(
             u64::from(report.policy),
         ),
     })
+}
+
+/// Enforce validity windows across the whole AMD chain (ARK, ASK, VCEK) at
+/// verification time `now` (seconds since the Unix epoch).
+fn check_chain_validity(now: i64, chain: &Chain, vcek_der: &[u8]) -> Result<(), AttestError> {
+    let ark_der = chain.ca.ark.to_der().map_err(AttestError::CertDecode)?;
+    let ask_der = chain.ca.ask.to_der().map_err(AttestError::CertDecode)?;
+    for (name, der) in [
+        ("ARK", ark_der.as_slice()),
+        ("ASK", ask_der.as_slice()),
+        ("VCEK", vcek_der),
+    ] {
+        let (_, cert) = x509_parser::parse_x509_certificate(der).map_err(|e| {
+            AttestError::CertParse(format!(
+                "failed to parse {name} certificate for the validity check: {e}"
+            ))
+        })?;
+        check_cert_validity(now, name, &cert)?;
+    }
+    Ok(())
+}
+
+/// Reject a certificate whose validity window does not contain `now`
+/// (seconds since the Unix epoch). `sev`'s chain verification checks
+/// signature math only; without this, an expired (retired) AMD key
+/// verifies forever.
+fn check_cert_validity(
+    now: i64,
+    name: &'static str,
+    cert: &X509Certificate<'_>,
+) -> Result<(), AttestError> {
+    let validity = cert.validity();
+    if now < validity.not_before.timestamp() {
+        return Err(AttestError::CertNotYetValid {
+            name,
+            not_before: validity.not_before.to_string(),
+            now,
+        });
+    }
+    if now > validity.not_after.timestamp() {
+        return Err(AttestError::CertExpired {
+            name,
+            not_after: validity.not_after.to_string(),
+            now,
+        });
+    }
+    Ok(())
 }
 
 /// Run both ARK checks (subject identity + SPKI pin) on a certificate,
@@ -393,6 +448,81 @@ mod tests {
         hex::decode(hex_str).expect("fixture is valid hex")
     }
 
+    /// Fixed verification time for chain tests: 2026-08-18, inside every
+    /// fixture validity window (VCEK 2023..2030, ARK/ASK through 2045+).
+    /// Injected so tests stay green regardless of the wall clock.
+    const TEST_NOW: i64 = 1787011200;
+
+    #[test]
+    fn rejects_a_chain_whose_certificates_have_expired() {
+        let report_bytes = milan_report_bytes();
+        let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
+
+        // 2200-01-01: every certificate in the fixture chain is long expired.
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            7258118400,
+            &TcbFloorPolicy::UNRESTRICTED,
+        )
+        .expect_err("an expired AMD chain must be rejected");
+        assert!(
+            matches!(err, AttestError::CertExpired { .. }),
+            "expected CertExpired, got: {err:?}"
+        );
+    }
+
+    /// A self-signed cert valid 2023-01-01 through 2030-01-01, as DER, for
+    /// probing `check_cert_validity`'s window boundaries.
+    fn cert_valid_2023_to_2030() -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let mut params =
+            rcgen::CertificateParams::new(vec![]).expect("CertificateParams should be valid");
+        params.not_before = rcgen::date_time_ymd(2023, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2030, 1, 1);
+        params
+            .self_signed(&key)
+            .expect("self-signing should succeed")
+            .der()
+            .to_vec()
+    }
+
+    fn run_cert_validity(now: i64, der: &[u8]) -> Result<(), AttestError> {
+        let (_, cert) =
+            x509_parser::parse_x509_certificate(der).expect("cert should parse as X.509");
+        check_cert_validity(now, "VCEK", &cert)
+    }
+
+    #[test]
+    fn cert_validity_accepts_a_time_inside_the_window() {
+        // 2026-08-18, inside 2023..2030.
+        run_cert_validity(1787011200, &cert_valid_2023_to_2030())
+            .expect("a time inside the validity window must be accepted");
+    }
+
+    #[test]
+    fn cert_validity_rejects_a_time_before_not_before() {
+        // 2020-01-01, before the 2023 not_before.
+        let err = run_cert_validity(1577836800, &cert_valid_2023_to_2030())
+            .expect_err("a time before not_before must be rejected");
+        assert!(
+            matches!(err, AttestError::CertNotYetValid { name: "VCEK", .. }),
+            "expected CertNotYetValid, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn cert_validity_rejects_a_time_after_not_after() {
+        // 2035-01-01, after the 2030 not_after.
+        let err = run_cert_validity(2051222400, &cert_valid_2023_to_2030())
+            .expect_err("a time after not_after must be rejected");
+        assert!(
+            matches!(err, AttestError::CertExpired { name: "VCEK", .. }),
+            "expected CertExpired, got: {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn rejects_a_dto_declaring_a_non_sev_snp_tee_type() {
         let dto = AttestationReport {
@@ -526,6 +656,7 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
+            TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
         )
         .expect("verification of a genuine, untampered Milan report must succeed");
@@ -565,6 +696,7 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
+            TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
         );
         assert!(
@@ -655,6 +787,7 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
+            TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
         )
         .expect("UNRESTRICTED floor accepts the genuine fixture");
@@ -676,6 +809,7 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
+            TEST_NOW,
             &TcbFloorPolicy::uniform(floor),
         )
         .unwrap_err();
@@ -699,8 +833,14 @@ mod tests {
                 microcode: u8::MAX,
             }),
         };
-        verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &policy)
-            .expect("default floor governs a non-Zen4c report");
+        verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            TEST_NOW,
+            &policy,
+        )
+        .expect("default floor governs a non-Zen4c report");
 
         // ...and an impossible default floor must reject it.
         let policy = TcbFloorPolicy {
@@ -714,8 +854,14 @@ mod tests {
             x_variant: None,
             zen4c: Some(TcbFloor::UNRESTRICTED),
         };
-        let err = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &policy)
-            .unwrap_err();
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            TEST_NOW,
+            &policy,
+        )
+        .unwrap_err();
         assert!(matches!(err, AttestError::TcbBelowFloor(_)), "got {err:?}");
     }
 

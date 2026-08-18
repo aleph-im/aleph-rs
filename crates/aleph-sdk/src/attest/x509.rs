@@ -65,6 +65,26 @@ pub enum AttestError {
     /// Service failed.
     #[error("failed to fetch VCEK certificate from AMD KDS: {0}")]
     Kds(String),
+    /// An AMD chain certificate's validity window starts in the future
+    /// relative to the verification time.
+    #[error(
+        "{name} certificate is not yet valid: not_before {not_before}, verification time {now}"
+    )]
+    CertNotYetValid {
+        name: &'static str,
+        not_before: String,
+        now: i64,
+    },
+    /// An AMD chain certificate's validity window ended before the
+    /// verification time. Expiry is the PKI's dead-man switch: it is what
+    /// eventually stops trusting a retired AMD key even for verifiers that
+    /// never see a revocation.
+    #[error("{name} certificate has expired: not_after {not_after}, verification time {now}")]
+    CertExpired {
+        name: &'static str,
+        not_after: String,
+        now: i64,
+    },
     /// The RA-TLS handshake's server certificate verification failed: no
     /// attestation extension, a key-binding mismatch (`report_data` doesn't
     /// hash the TLS public key), or a measurement pin mismatch.
