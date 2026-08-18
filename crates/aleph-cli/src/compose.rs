@@ -5,11 +5,6 @@
 //! specific reason, or a schema error. Loosened deliberately, never
 //! accidentally (mirrors the V-PROGRAM message format's philosophy).
 
-// This module has no non-test consumers yet: `aleph vprogram create --compose`
-// lands in a later task (Task 6), which is what will actually call
-// `parse_and_validate` and construct these types from the CLI.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

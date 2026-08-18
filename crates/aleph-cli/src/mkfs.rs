@@ -1,10 +1,6 @@
 //! Shell-out helpers for `mkfs.ext4` (part of e2fsprogs). Kept off the SDK so
 //! the SDK stays library-clean (no subprocess invocations).
 
-// No non-test consumers yet: `build_workload_image` (Task 5, compose.rs) is
-// the first caller, and the CLI wiring that drives it lands in Task 6.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 

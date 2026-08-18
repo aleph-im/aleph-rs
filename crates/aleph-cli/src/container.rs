@@ -1,11 +1,6 @@
 //! Shell-out helpers for `podman`/`docker`. Kept off the SDK so the SDK
 //! stays library-clean (no subprocess invocations).
 
-// This module has no non-test consumers yet: `aleph vprogram create --compose`
-// lands in a later task (Task 6), which is what will actually call
-// `pull`/`resolve_digest`/`save_archive` from the CLI.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 

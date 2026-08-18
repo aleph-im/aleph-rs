@@ -1,5 +1,6 @@
 //! `aleph vprogram` command tree.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use aleph_sdk::attest::attested_request;
@@ -13,7 +14,7 @@ use aleph_sdk::scheduler::SchedulerClient;
 use aleph_sdk::verify::Hasher;
 use aleph_sdk::vprogram::bundle::fetch_bundle_artifacts;
 use aleph_sdk::vprogram::cmdline::instantiate_cmdline;
-use aleph_sdk::vprogram::manifest::RuntimeManifest;
+use aleph_sdk::vprogram::manifest::{RuntimeManifest, WorkloadSpec};
 use aleph_sdk::vprogram::measure::compute_measurements;
 use aleph_sdk::vprogram::status::resolve_attested_endpoint;
 use aleph_types::channel::Channel;
@@ -30,7 +31,10 @@ use url::Url;
 use crate::account::CliAccount;
 use crate::cli::{VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramShowArgs};
 use crate::common::{render_upload_progress, resolve_account, submit_or_preview};
+use crate::compose;
 use crate::config::store::ConfigStore;
+use crate::container::ContainerTool;
+use crate::mkfs::MkfsExt4;
 use crate::veritysetup::Veritysetup;
 
 /// Fixed RA-TLS attestation transport port advertised by the runtime manifest
@@ -77,9 +81,43 @@ async fn handle_create(
     if args.volumes.len() > MAX_VERIFIED_VOLUMES {
         bail!("at most {MAX_VERIFIED_VOLUMES} --volume flags are supported");
     }
-    if !args.workload.exists() {
-        bail!("workload image not found: {}", args.workload.display());
-    }
+    let compose_input = match (&args.workload, &args.compose) {
+        (Some(path), None) => {
+            if !path.exists() {
+                bail!("workload image not found: {}", path.display());
+            }
+            None
+        }
+        (None, Some(compose_path)) => {
+            let text = std::fs::read_to_string(compose_path)
+                .with_context(|| format!("reading compose file {}", compose_path.display()))?;
+            let validated = compose::parse_and_validate(&text)?;
+            for w in &validated.warnings {
+                eprintln!("warning: {w}");
+            }
+            let archives: BTreeMap<String, PathBuf> = args
+                .image_archives
+                .iter()
+                .map(|s| parse_image_archive(s))
+                .collect::<Result<_>>()?;
+            for path in archives.values() {
+                if !path.exists() {
+                    bail!("image archive not found: {}", path.display());
+                }
+            }
+            let mkfs = MkfsExt4::find()?;
+            let needs_pull = compose::image_names(&validated.file)
+                .iter()
+                .any(|i| !archives.contains_key(i));
+            let container = if needs_pull {
+                Some(ContainerTool::find()?)
+            } else {
+                None
+            };
+            Some((validated, archives, mkfs, container))
+        }
+        _ => unreachable!("clap enforces exactly one of --workload/--compose"),
+    };
     for path in &args.volumes {
         if !path.exists() {
             bail!("volume image not found: {}", path.display());
@@ -98,6 +136,10 @@ async fn handle_create(
         .bytes()
         .await?;
     let manifest = RuntimeManifest::parse(&manifest_bytes)?;
+
+    if compose_input.is_some() {
+        check_compose_contract(manifest.workload.as_ref())?;
+    }
 
     // Cheap slot check right after the manifest is known: instantiate_cmdline
     // only needs the template, the platform roothash, and how many volumes
@@ -118,10 +160,53 @@ async fn handle_create(
     let cache_dir = ConfigStore::vprogram_bundle_cache_dir()?;
     let artifacts = fetch_bundle_artifacts(aleph_client, &manifest, &cache_dir).await?;
 
+    // Materialize the workload image: either the prebuilt path from
+    // --workload, or (for --compose) pull/resolve/save every image not
+    // covered by --image-archive, digest-pin the compose file, and build an
+    // ext4 image from it. Network access (image pulls) only happens here,
+    // after every cheap local/manifest gate above has already passed.
+    // `built_workload`'s tempfile must outlive `upload_pair` below, so it is
+    // bound in this function's scope rather than dropped at the match arm.
+    let mut built_workload: Option<tempfile::NamedTempFile> = None;
+    let workload_path: PathBuf = match compose_input {
+        None => args.workload.clone().expect("clap: workload set"),
+        Some((mut validated, archives, mkfs, container)) => {
+            let mut pins = BTreeMap::new();
+            let mut resolved: Vec<(String, PathBuf)> = Vec::new();
+            let mut save_tmp = Vec::new(); // keep pulled archives alive until staged
+            for image in compose::image_names(&validated.file) {
+                if let Some(path) = archives.get(&image) {
+                    pins.insert(image.clone(), image.clone());
+                    resolved.push((image, path.clone()));
+                } else {
+                    let tool = container.as_ref().expect("find() ran when pulls needed");
+                    if !json {
+                        eprintln!("Pulling {image}...");
+                    }
+                    tool.pull(&image).await?;
+                    let pinned = tool.resolve_digest(&image).await?;
+                    let tmp = tempfile::Builder::new().suffix(".tar").tempfile()?;
+                    tool.save_archive(&pinned, tmp.path()).await?;
+                    pins.insert(image.clone(), pinned);
+                    resolved.push((image, tmp.path().to_path_buf()));
+                    save_tmp.push(tmp);
+                }
+            }
+            compose::pin_images(&mut validated.file, &pins)?;
+            let yaml = compose::to_yaml(&validated.file)?;
+            let image = compose::build_workload_image(&mkfs, &yaml, &resolved).await?;
+            let path = image.path().to_path_buf();
+            built_workload = Some(image);
+            drop(save_tmp); // archives are copied into the image; safe to drop now
+            path
+        }
+    };
+    let _keep_alive = &built_workload; // lives until after upload_pair
+
     // 3. Verity-hash the workload and any extra volumes. Hash trees land
     //    next to the images as <name>.<ext>.verity (content-derived, so
     //    overwriting an existing one is fine).
-    let workload_verity = verity_format(&veritysetup, &args.workload, json).await?;
+    let workload_verity = verity_format(&veritysetup, &workload_path, json).await?;
     let mut volume_verities = Vec::new();
     for path in &args.volumes {
         volume_verities.push(verity_format(&veritysetup, path, json).await?);
@@ -229,6 +314,38 @@ async fn handle_create(
         }
     }
     Ok(())
+}
+
+/// Refuse --compose against a runtime that does not declare the compose
+/// workload contract, so a compose workload cannot land on e.g. a builtin
+/// runtime. Pure and I/O-free so it's directly unit-testable.
+pub(crate) fn check_compose_contract(workload: Option<&WorkloadSpec>) -> Result<()> {
+    const COMPOSE_CONTRACT: &str = "aleph.compose/1";
+    match workload {
+        Some(w) if w.contract == COMPOSE_CONTRACT => Ok(()),
+        Some(w) => bail!(
+            "--compose requires a runtime declaring workload contract \
+             {COMPOSE_CONTRACT:?}, but this runtime declares {:?}",
+            w.contract
+        ),
+        None => bail!(
+            "--compose requires a runtime declaring workload contract \
+             {COMPOSE_CONTRACT:?}, but this runtime manifest declares no \
+             workload contract"
+        ),
+    }
+}
+
+/// Parse an --image-archive spec, "IMAGE=PATH", split on the first '='
+/// (image references may contain ':' and '/' but never '=', so the first
+/// '=' unambiguously separates image from path).
+pub(crate) fn parse_image_archive(spec: &str) -> Result<(String, PathBuf)> {
+    match spec.split_once('=') {
+        Some((image, path)) if !image.is_empty() && !path.is_empty() => {
+            Ok((image.to_string(), PathBuf::from(path)))
+        }
+        _ => bail!("invalid --image-archive {spec:?}; expected IMAGE=PATH"),
+    }
 }
 
 /// One sample of the VM's attested endpoint via the scheduler + CRN.
@@ -1672,5 +1789,45 @@ mod call_tests {
         assert_eq!(v["cpuid"]["family"], serde_json::json!(0x19));
         assert_eq!(v["cpuid"]["model"], serde_json::json!(0xA1));
         assert_eq!(v["cpuid"]["stepping"], serde_json::json!(2));
+    }
+}
+
+#[cfg(test)]
+mod compose_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn compose_contract_gate_accepts_the_compose_contract() {
+        let w = WorkloadSpec {
+            contract: "aleph.compose/1".into(),
+            upstream_port: Some(8080),
+        };
+        check_compose_contract(Some(&w)).unwrap();
+    }
+
+    #[test]
+    fn compose_contract_gate_names_both_contracts_on_mismatch() {
+        let w = WorkloadSpec {
+            contract: "aleph.builtin/1".into(),
+            upstream_port: None,
+        };
+        let err = check_compose_contract(Some(&w)).unwrap_err().to_string();
+        assert!(
+            err.contains("aleph.compose/1") && err.contains("aleph.builtin/1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn compose_contract_gate_rejects_a_contractless_runtime() {
+        assert!(check_compose_contract(None).is_err());
+    }
+
+    #[test]
+    fn image_archive_specs_parse_and_reject_garbage() {
+        let (name, path) = parse_image_archive("fib-service:latest=./fib.tar").unwrap();
+        assert_eq!(name, "fib-service:latest");
+        assert_eq!(path, PathBuf::from("./fib.tar"));
+        assert!(parse_image_archive("no-equals-sign").is_err());
     }
 }
