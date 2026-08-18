@@ -47,7 +47,7 @@ use sha2::{Digest, Sha384};
 use subtle::ConstantTimeEq;
 
 use super::tcb::TcbFloorPolicy;
-use super::verify::{AmdProduct, verify_sev_snp_report};
+use super::verify::{AmdProduct, VerificationResult, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
 use super::{AttestationReport, TeeType};
 
@@ -69,12 +69,10 @@ const KEY_BINDING_DOMAIN: &[u8] = b"aleph-attest-tls-key-v1\x00";
 /// `rust/crates/aleph-tee`) byte-for-byte, trailing `0x00` separator
 /// included. The distinct domain keeps fresh reports from ever colliding
 /// with key-bound ones.
-#[allow(dead_code)]
 const FRESH_DOMAIN: &[u8] = b"aleph-attest-fresh-v1\x00";
 
 /// The canonical 64-byte fresh report_data for `(served key, nonce)`:
 /// `SHA-384(FRESH_DOMAIN || public_key_raw || nonce)` then zero padding.
-#[allow(dead_code)]
 fn fresh_bound_report_data(public_key_raw: &[u8], nonce: &[u8]) -> [u8; 64] {
     let mut hasher = Sha384::new();
     hasher.update(FRESH_DOMAIN);
@@ -88,7 +86,6 @@ fn fresh_bound_report_data(public_key_raw: &[u8], nonce: &[u8]) -> [u8; 64] {
 /// Verify that a fresh report's SIGNED report_data binds BOTH the served
 /// TLS public key and the caller's nonce. Constant-time compare, matching
 /// the key-binding check.
-#[allow(dead_code)]
 fn verify_fresh_binding(
     report_bytes: &[u8],
     served_public_key: &[u8],
@@ -134,6 +131,30 @@ pub struct AttestedResponse {
     pub headers: Vec<(String, String)>,
     /// The raw HTTP response body.
     pub body: bytes::Bytes,
+}
+
+/// The result of a verified fresh-nonce challenge.
+///
+/// Constructing this type implies every check passed (same convention as
+/// [`AttestedResponse`]: no validity flag).
+#[derive(Debug, Clone)]
+pub struct FreshAttestation {
+    /// Hex-encoded launch measurement from the verified fresh report.
+    pub measurement: String,
+    /// SEV-SNP guest policy from the verified fresh report.
+    pub policy: u64,
+    /// TCB the VM was launched under (Option A gates on this).
+    pub launch_tcb: sev::firmware::host::TcbVersion,
+    /// TCB the VCEK is keyed to (from the signed fresh report).
+    pub reported_tcb: sev::firmware::host::TcbVersion,
+    /// CPUID family/model/stepping of the attesting chip, from the signed
+    /// fresh report (version 3+; `None` on older reports).
+    pub cpuid_family: Option<u8>,
+    pub cpuid_model: Option<u8>,
+    pub cpuid_stepping: Option<u8>,
+    /// Key of the RA-TLS exchange that answered the challenge, bound into
+    /// the fresh report's report_data alongside the nonce.
+    pub served_public_key: Vec<u8>,
 }
 
 /// A `rustls` [`ServerCertVerifier`] that extracts a SEV-SNP attestation
@@ -481,6 +502,114 @@ pub async fn attested_request(
         status,
         headers: response_headers,
         body,
+    })
+}
+
+/// Re-run the measurement and policy pins against a VERIFIED fresh report.
+/// These normally run during the TLS handshake against the cert report;
+/// the fresh report arrives in a response body, so they must be re-applied
+/// to its signed fields explicitly.
+fn check_fresh_pins(
+    result: &VerificationResult,
+    expected_measurement: Option<&[u8]>,
+    expected_policy: Option<u64>,
+) -> Result<(), AttestError> {
+    if let Some(expected) = expected_measurement {
+        let expected_hex = hex::encode(expected);
+        if result.measurement != expected_hex {
+            return Err(AttestError::FreshMeasurementMismatch {
+                expected: expected_hex,
+                got: result.measurement.clone(),
+            });
+        }
+    }
+    if let Some(expected) = expected_policy
+        && result.policy != expected
+    {
+        return Err(AttestError::FreshPolicyMismatch {
+            expected,
+            got: result.policy,
+        });
+    }
+    Ok(())
+}
+
+/// Challenge the guest agent's fresh-attestation endpoint and verify the
+/// answer end to end.
+///
+/// Proves liveness: the returned report must be AMD-signed (chain + TCB
+/// floor via `verify_sev_snp_report`), satisfy the same measurement and
+/// policy pins as the certificate report, and bind BOTH the served TLS key
+/// of this exchange AND a nonce generated here, so it cannot have existed
+/// before this call. See the G4a design doc for the security argument.
+pub async fn fresh_attestation(
+    base_url: &url::Url,
+    expected_measurement: Option<&[u8]>,
+    expected_policy: Option<u64>,
+    product: AmdProduct,
+    min_tcb: &TcbFloorPolicy,
+) -> Result<FreshAttestation, AttestError> {
+    use rand::RngCore;
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    fresh_attestation_with_nonce(
+        base_url,
+        &nonce,
+        expected_measurement,
+        expected_policy,
+        product,
+        min_tcb,
+    )
+    .await
+}
+
+async fn fresh_attestation_with_nonce(
+    base_url: &url::Url,
+    nonce: &[u8],
+    expected_measurement: Option<&[u8]>,
+    expected_policy: Option<u64>,
+    product: AmdProduct,
+    min_tcb: &TcbFloorPolicy,
+) -> Result<FreshAttestation, AttestError> {
+    // The challenge request itself runs over an attested channel, with the
+    // same pins enforced on the CERT report during its handshake.
+    let path = format!("/.well-known/attestation?nonce={}", hex::encode(nonce));
+    let response = attested_request(
+        base_url,
+        reqwest::Method::GET,
+        &path,
+        &[],
+        None,
+        expected_measurement,
+        expected_policy,
+        product,
+        min_tcb,
+    )
+    .await?;
+    if response.status != 200 {
+        return Err(AttestError::FreshEndpoint(response.status));
+    }
+
+    let dto: AttestationReport = serde_json::from_slice(&response.body)?;
+    if dto.tee_type != TeeType::SevSnp {
+        return Err(AttestError::UnsupportedTeeType(dto.tee_type));
+    }
+
+    // Full verification of the FRESH report: AMD chain, signature, VMPL,
+    // TCB floor. Then the pins, then the freshness binding.
+    let result = verify_sev_snp_report(&dto, product, min_tcb).await?;
+    check_fresh_pins(&result, expected_measurement, expected_policy)?;
+    verify_fresh_binding(&dto.data, &response.served_public_key, nonce)?;
+
+    Ok(FreshAttestation {
+        measurement: result.measurement,
+        policy: result.policy,
+        launch_tcb: result.launch_tcb,
+        reported_tcb: result.reported_tcb,
+        cpuid_family: result.cpuid_family,
+        cpuid_model: result.cpuid_model,
+        cpuid_stepping: result.cpuid_stepping,
+        served_public_key: response.served_public_key,
     })
 }
 
@@ -1005,5 +1134,39 @@ mod tests {
         // No nonce can make it pass the fresh check, including an empty one.
         let err = verify_fresh_binding(&bytes, &key, &[]).unwrap_err();
         assert!(matches!(err, AttestError::FreshnessBinding));
+    }
+
+    fn dummy_verification(measurement_hex: &str, policy: u64) -> VerificationResult {
+        VerificationResult {
+            measurement: measurement_hex.to_string(),
+            policy,
+            launch_tcb: Default::default(),
+            reported_tcb: Default::default(),
+            cpuid_family: None,
+            cpuid_model: None,
+            cpuid_stepping: None,
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn fresh_pins_accept_matching_measurement_and_policy() {
+        let v = dummy_verification(&"ab".repeat(48), 0x30000);
+        check_fresh_pins(&v, Some(&[0xAB; 48]), Some(0x30000)).expect("matching pins must pass");
+        check_fresh_pins(&v, None, None).expect("absent pins must pass");
+    }
+
+    #[test]
+    fn fresh_pins_reject_a_measurement_mismatch() {
+        let v = dummy_verification(&"ab".repeat(48), 0x30000);
+        let err = check_fresh_pins(&v, Some(&[0xCD; 48]), None).unwrap_err();
+        assert!(matches!(err, AttestError::FreshMeasurementMismatch { .. }));
+    }
+
+    #[test]
+    fn fresh_pins_reject_a_policy_mismatch() {
+        let v = dummy_verification(&"ab".repeat(48), 0x30000);
+        let err = check_fresh_pins(&v, None, Some(0xa0000)).unwrap_err();
+        assert!(matches!(err, AttestError::FreshPolicyMismatch { .. }));
     }
 }
