@@ -14,6 +14,14 @@ pub enum MkfsError {
     Io(#[from] std::io::Error),
 }
 
+/// Fixed filesystem UUID stamped onto every workload image so two builds of
+/// the same staged content produce byte-identical output (mke2fs otherwise
+/// draws a random UUID per run). Arbitrary but fixed and documented here;
+/// `mke2fs` rejects the all-zeros UUID, so this is a fixed non-nil one
+/// instead. Also reused as the `hash_seed` (see below) so the whole build is
+/// pinned to a single documented constant.
+const FIXED_FS_UUID: &str = "decade00-c0de-4000-8000-000000000001";
+
 #[derive(Debug, Clone)]
 pub struct MkfsExt4 {
     pub(crate) path: PathBuf,
@@ -31,13 +39,27 @@ impl MkfsExt4 {
     /// Shell out to `mkfs.ext4 -b 4096 -d <staging> <out>`. `out` must already
     /// exist at its final size (mkfs.ext4 sizes the filesystem to the file).
     /// Returns `MkfsError::CommandFailed` with stderr on non-zero exit.
+    ///
+    /// The build is pinned to be reproducible: a fixed filesystem UUID and
+    /// directory-hash seed (both `FIXED_FS_UUID`, so a third party rebuilding
+    /// the image from the published compose file gets byte-identical output
+    /// and can verify the published measurement), a fixed `root_owner`, and
+    /// `E2FSPROGS_FAKE_TIME=0` so superblock timestamps don't leak the build
+    /// time. Staged file/dir mtimes are normalized by the caller
+    /// (`compose::build_workload_image`); reproducibility also depends on
+    /// that.
     pub async fn build(&self, staging: &Path, out: &Path) -> Result<(), MkfsError> {
         let output = tokio::process::Command::new(&self.path)
             .arg("-b")
             .arg("4096")
+            .arg("-U")
+            .arg(FIXED_FS_UUID)
+            .arg("-E")
+            .arg(format!("hash_seed={FIXED_FS_UUID},root_owner=0:0"))
             .arg("-d")
             .arg(staging)
             .arg(out)
+            .env("E2FSPROGS_FAKE_TIME", "0")
             .output()
             .await?;
         if !output.status.success() {
@@ -100,11 +122,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("mkfs.ext4");
         let argv_log = dir.path().join("argv");
+        let env_log = dir.path().join("env");
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
-                argv_log.display()
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf '%s' \"$E2FSPROGS_FAKE_TIME\" > {}\nexit 0\n",
+                argv_log.display(),
+                env_log.display()
             ),
         )
         .unwrap();
@@ -127,10 +151,19 @@ mod tests {
             vec![
                 "-b",
                 "4096",
+                "-U",
+                FIXED_FS_UUID,
+                "-E",
+                &format!("hash_seed={FIXED_FS_UUID},root_owner=0:0"),
                 "-d",
                 staging.to_str().unwrap(),
                 out.to_str().unwrap()
             ]
+        );
+        let env = std::fs::read_to_string(&env_log).unwrap();
+        assert_eq!(
+            env, "0",
+            "E2FSPROGS_FAKE_TIME must be pinned for reproducible superblock timestamps"
         );
     }
 

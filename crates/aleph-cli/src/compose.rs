@@ -287,17 +287,25 @@ fn sanitize_image_name(name: &str) -> String {
 /// Stage the pinned compose file and image archives into the
 /// `aleph.compose/1` layout (`docker-compose.yml` at the root, archives under
 /// `images/NNN-<sanitized-name>.tar`) and build an ext4 workload image from
-/// it via `mkfs`. Returns the tempfile; the caller keeps it alive until after
-/// upload.
+/// it via `mkfs`.
+///
+/// The image is written inside a dedicated [`tempfile::TempDir`] (not the
+/// staging dir, which is dropped at the end of this function, and not the
+/// bare system temp dir) so that `verity_format`'s `<file_name>.verity`
+/// sidecar - written next to the image by the caller - lands in that same
+/// directory. Returns the directory together with the image file; the caller
+/// must keep both alive (the directory removes its contents, sidecar
+/// included, on drop) until after upload.
 pub(crate) async fn build_workload_image(
     mkfs: &MkfsExt4,
     pinned_yaml: &str,
     archives: &[(String, PathBuf)],
-) -> Result<tempfile::NamedTempFile, ComposeBuildError> {
+) -> Result<(tempfile::TempDir, tempfile::NamedTempFile), ComposeBuildError> {
     let staging = tempfile::tempdir()?;
 
     let compose_path = staging.path().join("docker-compose.yml");
     std::fs::write(&compose_path, pinned_yaml)?;
+    set_fixed_mtime(&compose_path)?;
     let mut content_bytes = pinned_yaml.len() as u64;
 
     let images_dir = staging.path().join("images");
@@ -305,18 +313,38 @@ pub(crate) async fn build_workload_image(
     for (index, (name, archive_path)) in archives.iter().enumerate() {
         let dest = images_dir.join(format!("{index:03}-{}.tar", sanitize_image_name(name)));
         std::fs::copy(archive_path, &dest)?;
+        set_fixed_mtime(&dest)?;
         content_bytes += std::fs::metadata(&dest)?.len();
     }
+    set_fixed_mtime(&images_dir)?;
+    set_fixed_mtime(staging.path())?;
 
+    let output_dir = tempfile::tempdir()?;
     let out = tempfile::Builder::new()
         .prefix("aleph-compose-")
         .suffix(".ext4")
-        .tempfile()?;
+        .tempfile_in(output_dir.path())?;
     out.as_file().set_len(image_size_bytes(content_bytes))?;
 
     mkfs.build(staging.path(), out.path()).await?;
 
-    Ok(out)
+    Ok((output_dir, out))
+}
+
+/// Pin a staged file or directory's mtime (and atime) to the Unix epoch so
+/// two builds of the same content produce byte-identical staging input for
+/// `mkfs.ext4`, and in turn a byte-identical, independently reproducible
+/// image (see `MkfsExt4::build`'s doc comment for the filesystem-level half
+/// of this).
+fn set_fixed_mtime(path: &std::path::Path) -> std::io::Result<()> {
+    let epoch = std::fs::FileTimes::new()
+        .set_accessed(std::time::SystemTime::UNIX_EPOCH)
+        .set_modified(std::time::SystemTime::UNIX_EPOCH);
+    // A read-only open is enough: `set_times` checks file ownership at
+    // syscall time, not the fd's open mode, and this process owns every
+    // path passed here (it just created them under the staging tempdir).
+    // Works for both regular files and directories on Unix.
+    std::fs::File::open(path)?.set_times(epoch)
 }
 
 #[cfg(test)]
@@ -477,7 +505,7 @@ mod tests {
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\ncp -r \"$4\" {}\nexit 0\n",
+                "#!/bin/sh\ncp -r \"$8\" {}\nexit 0\n",
                 snapshot_dir.display()
             ),
         )
@@ -492,7 +520,7 @@ mod tests {
         let pinned_yaml = "services:\n  web:\n    image: nginx@sha256:abc\n";
         let archives = vec![("nginx".to_string(), archive_path)];
 
-        let _out = build_workload_image(&mkfs, pinned_yaml, &archives)
+        let (_dir, _out) = build_workload_image(&mkfs, pinned_yaml, &archives)
             .await
             .unwrap();
 
@@ -503,5 +531,44 @@ mod tests {
         let staged_archive =
             std::fs::read(snapshot_dir.join("images").join("000-nginx.tar")).unwrap();
         assert_eq!(staged_archive, archive_bytes);
+    }
+
+    /// Two builds of the same staged content must be byte-identical, so a
+    /// third party can rebuild a workload from a published compose file and
+    /// verify the published measurement. Requires a real `mkfs.ext4` (the
+    /// fixed UUID/hash-seed/timestamp flags only matter against the real
+    /// tool); skips silently when it's not on PATH rather than failing CI
+    /// images that lack e2fsprogs.
+    #[tokio::test]
+    async fn build_workload_image_is_reproducible() {
+        let Ok(mkfs) = MkfsExt4::find() else {
+            return;
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("nginx.tar");
+        std::fs::write(&archive_path, b"fake tar bytes for determinism check").unwrap();
+
+        let pinned_yaml = "services:\n  web:\n    image: nginx@sha256:abc\n";
+        let archives = vec![("nginx".to_string(), archive_path)];
+
+        let (_first_dir, first) = build_workload_image(&mkfs, pinned_yaml, &archives)
+            .await
+            .unwrap();
+        let (_second_dir, second) = build_workload_image(&mkfs, pinned_yaml, &archives)
+            .await
+            .unwrap();
+
+        let first_bytes = std::fs::read(first.path()).unwrap();
+        let second_bytes = std::fs::read(second.path()).unwrap();
+
+        use sha2::{Digest, Sha256};
+        let first_hash = Sha256::digest(&first_bytes);
+        let second_hash = Sha256::digest(&second_bytes);
+        assert_eq!(
+            first_hash, second_hash,
+            "two builds of identical staged content produced different images; \
+             the build is not reproducible"
+        );
     }
 }

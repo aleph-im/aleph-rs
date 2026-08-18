@@ -165,11 +165,25 @@ async fn handle_create(
     // covered by --image-archive, digest-pin the compose file, and build an
     // ext4 image from it. Network access (image pulls) only happens here,
     // after every cheap local/manifest gate above has already passed.
-    // `built_workload`'s tempfile must outlive `upload_pair` below, so it is
-    // bound in this function's scope rather than dropped at the match arm.
-    let mut built_workload: Option<tempfile::NamedTempFile> = None;
-    let workload_path: PathBuf = match compose_input {
-        None => args.workload.clone().expect("clap: workload set"),
+    //
+    // `_built_workload` (the compose-built ext4 image) and
+    // `_built_workload_dir` (its containing tempdir, which the `.verity`
+    // sidecar `verity_format` writes below also lands in) are `None` for
+    // --workload, where the file is caller-owned. Both are bound by this
+    // `let`, in this function's scope, which is what keeps them alive - and
+    // their backing files un-deleted - until after `upload_pair` runs; a
+    // narrower scope (e.g. dropping them at the end of the match arm) would
+    // delete the image/sidecar before they could be uploaded.
+    let (workload_path, _built_workload, _built_workload_dir): (
+        PathBuf,
+        Option<tempfile::NamedTempFile>,
+        Option<tempfile::TempDir>,
+    ) = match compose_input {
+        None => (
+            args.workload.clone().expect("clap: workload set"),
+            None,
+            None,
+        ),
         Some((mut validated, archives, mkfs, container)) => {
             let mut pins = BTreeMap::new();
             let mut resolved: Vec<(String, PathBuf)> = Vec::new();
@@ -194,14 +208,12 @@ async fn handle_create(
             }
             compose::pin_images(&mut validated.file, &pins)?;
             let yaml = compose::to_yaml(&validated.file)?;
-            let image = compose::build_workload_image(&mkfs, &yaml, &resolved).await?;
+            let (dir, image) = compose::build_workload_image(&mkfs, &yaml, &resolved).await?;
             let path = image.path().to_path_buf();
-            built_workload = Some(image);
             drop(save_tmp); // archives are copied into the image; safe to drop now
-            path
+            (path, Some(image), Some(dir))
         }
     };
-    let _keep_alive = &built_workload; // lives until after upload_pair
 
     // 3. Verity-hash the workload and any extra volumes. Hash trees land
     //    next to the images as <name>.<ext>.verity (content-derived, so
