@@ -1110,9 +1110,10 @@ async fn handle_call(
     )
     .await?;
 
-    // Fresh-nonce liveness challenge (G4a): before sending the workload
-    // request, demand a report that cannot predate this call. Runs with the
-    // same pins and floor as the workload exchange.
+    // Fresh-nonce liveness challenge (G4a): runs first and fails closed. No
+    // response is trusted or surfaced unless this challenge and the served-key
+    // consistency check both pass. A live-key-copy MITM can still receive the
+    // request body; only the response is gated (a stated limit in the design doc).
     let fresh = if args.allow_stale_attestation {
         None
     } else {
