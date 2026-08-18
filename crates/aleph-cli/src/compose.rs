@@ -1,0 +1,330 @@
+//! Docker Compose subset validation and workload staging for
+//! `vprogram create --compose`.
+//!
+//! The subset is closed: every key is either accepted, rejected with a
+//! specific reason, or a schema error. Loosened deliberately, never
+//! accidentally (mirrors the V-PROGRAM message format's philosophy).
+
+// This module has no non-test consumers yet: `aleph vprogram create --compose`
+// lands in a later task (Task 6), which is what will actually call
+// `parse_and_validate` and construct these types from the CLI.
+#![allow(dead_code)]
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_norway::Value;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ComposeError {
+    #[error("compose file is not valid YAML or uses an unsupported key: {0}")]
+    Yaml(#[from] serde_norway::Error),
+    #[error("compose file defines no services")]
+    NoServices,
+    #[error("service {0:?} has no image; every service must reference a prebuilt image")]
+    MissingImage(String),
+    #[error("service {service:?}: `{key}` is not supported: {reason}")]
+    RejectedKey {
+        service: String,
+        key: &'static str,
+        reason: &'static str,
+    },
+    #[error("top-level `{key}` is not supported: {reason}")]
+    RejectedTopLevel {
+        key: &'static str,
+        reason: &'static str,
+    },
+    #[error(
+        "service {service:?} must set `network_mode: host` (found {found:?}); \
+         v1 stacks share the guest network namespace and talk over localhost"
+    )]
+    BadNetworkMode { service: String, found: String },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposeFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub services: BTreeMap<String, ComposeService>,
+    // Known-rejected top-level keys, captured so validation can explain
+    // instead of serde reporting "unknown field".
+    #[serde(default, skip_serializing)]
+    volumes: Option<Value>,
+    #[serde(default, skip_serializing)]
+    networks: Option<Value>,
+    #[serde(default, skip_serializing)]
+    secrets: Option<Value>,
+    #[serde(default, skip_serializing)]
+    configs: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposeService {
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmpfs: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<String>,
+    // Known-rejected service keys.
+    #[serde(default, skip_serializing)]
+    build: Option<Value>,
+    #[serde(default, skip_serializing)]
+    volumes: Option<Value>,
+    #[serde(default, skip_serializing)]
+    ports: Option<Value>,
+    #[serde(default, skip_serializing)]
+    secrets: Option<Value>,
+    #[serde(default, skip_serializing)]
+    env_file: Option<Value>,
+    #[serde(default, skip_serializing)]
+    privileged: Option<Value>,
+    #[serde(default, skip_serializing)]
+    devices: Option<Value>,
+    #[serde(default, skip_serializing)]
+    cap_add: Option<Value>,
+}
+
+#[derive(Debug)]
+pub struct ValidatedCompose {
+    pub file: ComposeFile,
+    pub warnings: Vec<String>,
+}
+
+/// Parse and validate a compose file against the aleph.compose/1 subset.
+/// Pure and I/O-free so it's directly unit-testable.
+pub(crate) fn parse_and_validate(text: &str) -> Result<ValidatedCompose, ComposeError> {
+    let file: ComposeFile = serde_norway::from_str(text)?;
+
+    for (key, present, reason) in [
+        (
+            "volumes",
+            file.volumes.is_some(),
+            "persistent volumes are not supported in v1; use service-level `tmpfs:` for scratch space",
+        ),
+        (
+            "networks",
+            file.networks.is_some(),
+            "v1 stacks run with `network_mode: host`; custom networks are not available",
+        ),
+        (
+            "secrets",
+            file.secrets.is_some(),
+            "there is no unmeasured input channel; secrets would be public and measured",
+        ),
+        (
+            "configs",
+            file.configs.is_some(),
+            "bake configuration into the image or the environment (both are measured)",
+        ),
+    ] {
+        if present {
+            return Err(ComposeError::RejectedTopLevel { key, reason });
+        }
+    }
+
+    if file.services.is_empty() {
+        return Err(ComposeError::NoServices);
+    }
+
+    let mut warnings = Vec::new();
+    for (name, service) in &file.services {
+        service_checks(name, service)?;
+        if service.restart.is_some() {
+            warnings.push(format!(
+                "service {name:?}: `restart` is accepted but ignored in v1 \
+                 (a stack that exits powers the VM off)"
+            ));
+        }
+    }
+
+    Ok(ValidatedCompose { file, warnings })
+}
+
+fn service_checks(name: &str, s: &ComposeService) -> Result<(), ComposeError> {
+    let rejected: [(&'static str, bool, &'static str); 8] = [
+        (
+            "build",
+            s.build.is_some(),
+            "nothing can be built in-guest; reference a prebuilt image",
+        ),
+        (
+            "volumes",
+            s.volumes.is_some(),
+            "persistent volumes are not supported in v1; `tmpfs:` mounts are",
+        ),
+        (
+            "ports",
+            s.ports.is_some(),
+            "a V-Program exposes exactly one attested endpoint: the guest agent \
+          serves RA-TLS on 8443 and proxies to the service listening on \
+          127.0.0.1:8080; direct port publishing is not available",
+        ),
+        (
+            "secrets",
+            s.secrets.is_some(),
+            "there is no unmeasured input channel; secrets would be public and measured",
+        ),
+        (
+            "env_file",
+            s.env_file.is_some(),
+            "environment must be inline (it is public and measured); env_file hides that",
+        ),
+        (
+            "privileged",
+            s.privileged.is_some(),
+            "privileged containers are not available",
+        ),
+        (
+            "devices",
+            s.devices.is_some(),
+            "host device passthrough is not available",
+        ),
+        (
+            "cap_add",
+            s.cap_add.is_some(),
+            "extra capabilities are not available",
+        ),
+    ];
+    for (key, present, reason) in rejected {
+        if present {
+            return Err(ComposeError::RejectedKey {
+                service: name.to_string(),
+                key,
+                reason,
+            });
+        }
+    }
+    if s.image.as_deref().unwrap_or("").is_empty() {
+        return Err(ComposeError::MissingImage(name.to_string()));
+    }
+    match s.network_mode.as_deref() {
+        Some("host") => Ok(()),
+        other => Err(ComposeError::BadNetworkMode {
+            service: name.to_string(),
+            found: other.unwrap_or("<unset>").to_string(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL: &str = "services:\n  web:\n    image: nginx:1.27\n    network_mode: host\n";
+
+    fn svc(extra: &str) -> String {
+        format!("services:\n  web:\n    image: nginx:1.27\n    network_mode: host\n{extra}")
+    }
+
+    #[test]
+    fn accepts_the_full_supported_subset() {
+        let text = "services:\n  web:\n    image: nginx:1.27\n    network_mode: host\n    \
+                    command: [\"nginx\", \"-g\", \"daemon off;\"]\n    entrypoint: /entry.sh\n    \
+                    environment:\n      A: b\n    depends_on: [db]\n    tmpfs:\n      - /scratch\n  \
+                    db:\n    image: postgres:16\n    network_mode: host\n";
+        let v = parse_and_validate(text).unwrap();
+        assert_eq!(v.file.services.len(), 2);
+        assert!(v.warnings.is_empty());
+    }
+
+    #[test]
+    fn restart_is_accepted_with_a_warning() {
+        let v = parse_and_validate(&svc("    restart: always\n")).unwrap();
+        assert_eq!(v.warnings.len(), 1);
+        assert!(v.warnings[0].contains("restart"));
+    }
+
+    #[test]
+    fn rejects_build() {
+        let err = parse_and_validate(&svc("    build: .\n")).unwrap_err();
+        assert!(err.to_string().contains("build"), "{err}");
+    }
+
+    #[test]
+    fn rejects_volumes() {
+        let err = parse_and_validate(&svc("    volumes:\n      - data:/var/lib\n")).unwrap_err();
+        assert!(err.to_string().contains("volumes"), "{err}");
+    }
+
+    #[test]
+    fn rejects_ports_and_explains_the_entrypoint_contract() {
+        let err = parse_and_validate(&svc("    ports:\n      - \"80:80\"\n")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ports") && msg.contains("8080"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_secrets() {
+        assert!(parse_and_validate(&svc("    secrets: [s]\n")).is_err());
+    }
+    #[test]
+    fn rejects_env_file() {
+        assert!(parse_and_validate(&svc("    env_file: .env\n")).is_err());
+    }
+    #[test]
+    fn rejects_privileged() {
+        assert!(parse_and_validate(&svc("    privileged: true\n")).is_err());
+    }
+    #[test]
+    fn rejects_devices() {
+        assert!(parse_and_validate(&svc("    devices: [\"/dev/kvm\"]\n")).is_err());
+    }
+    #[test]
+    fn rejects_cap_add() {
+        assert!(parse_and_validate(&svc("    cap_add: [NET_ADMIN]\n")).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_service_keys() {
+        let err = parse_and_validate(&svc("    gpus: all\n")).unwrap_err();
+        assert!(err.to_string().contains("gpus"), "{err}");
+    }
+
+    #[test]
+    fn rejects_top_level_volumes() {
+        let text = format!("{MINIMAL}volumes:\n  data: {{}}\n");
+        assert!(parse_and_validate(&text).is_err());
+    }
+
+    #[test]
+    fn rejects_a_service_without_an_image() {
+        let text = "services:\n  web:\n    network_mode: host\n";
+        let err = parse_and_validate(text).unwrap_err();
+        assert!(err.to_string().contains("image"), "{err}");
+    }
+
+    #[test]
+    fn requires_host_network_mode_on_every_service() {
+        let text = "services:\n  web:\n    image: nginx:1.27\n";
+        let err = parse_and_validate(text).unwrap_err();
+        assert!(err.to_string().contains("network_mode"), "{err}");
+        let text = "services:\n  web:\n    image: nginx:1.27\n    network_mode: bridge\n";
+        assert!(parse_and_validate(text).is_err());
+    }
+
+    #[test]
+    fn rejects_an_empty_services_map() {
+        assert!(parse_and_validate("services: {}\n").is_err());
+    }
+
+    #[test]
+    fn version_and_name_are_tolerated() {
+        let text = format!("version: \"3.9\"\nname: demo\n{MINIMAL}");
+        parse_and_validate(&text).unwrap();
+    }
+}

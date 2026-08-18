@@ -7,6 +7,8 @@ mod account;
 mod cli;
 mod commands;
 mod common;
+#[cfg(feature = "vprogram")]
+mod compose;
 mod config;
 mod program;
 mod sevctl;
