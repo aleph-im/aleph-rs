@@ -929,6 +929,53 @@ fn tcb_floor_json(floor: &aleph_sdk::attest::TcbFloor) -> serde_json::Value {
     )
 }
 
+/// Whether this call's attestation evidence includes a verified
+/// fresh-nonce liveness challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Freshness {
+    Verified,
+    Skipped,
+}
+
+/// Transfer the liveness proof from the challenge exchange to the workload
+/// exchange: both must have been answered by the same TLS identity
+/// presenting the same measured stack. Guards against a load balancer (or
+/// an attacker) splitting the two requests across different guests.
+///
+/// This is also what pins the measurement/policy of the fresh report in the
+/// `MeasurementExpectation::MemberOf` fleet case: there the handshake pin is
+/// `None` (the fleet's exact model is not known ahead of the call), so the
+/// fresh report carries no pin of its own. Closing the loop against
+/// `response.measurement`/`response.policy`, which the caller's
+/// post-handshake checks already validated, is what pins it instead.
+fn check_fresh_consistency(
+    fresh: &aleph_sdk::attest::FreshAttestation,
+    response: &aleph_sdk::attest::AttestedResponse,
+) -> Result<()> {
+    if fresh.served_public_key != response.served_public_key {
+        bail!(
+            "the fresh attestation challenge was answered by a different TLS identity \
+             than the one that served the response; refusing to transfer liveness"
+        );
+    }
+    if fresh.measurement != response.measurement {
+        bail!(
+            "fresh report measurement {} does not match the response's verified \
+             measurement {}",
+            fresh.measurement,
+            response.measurement
+        );
+    }
+    if fresh.policy != response.policy {
+        bail!(
+            "fresh report policy {:#x} does not match the response's verified policy {:#x}",
+            fresh.policy,
+            response.policy
+        );
+    }
+    Ok(())
+}
+
 /// Render an [`aleph_sdk::attest::AttestedResponse`] for `call`'s output as
 /// `(stdout, stderr_meta)`. In text mode stdout is the raw response body so
 /// the command pipes like curl; the `HTTP <status>` line goes to stderr. In
@@ -941,6 +988,7 @@ fn tcb_floor_json(floor: &aleph_sdk::attest::TcbFloor) -> serde_json::Value {
 pub(crate) fn render_call_result(
     response: &aleph_sdk::attest::AttestedResponse,
     min_tcb: &aleph_sdk::attest::TcbFloorPolicy,
+    freshness: Freshness,
     json: bool,
 ) -> (String, Option<String>) {
     if json {
@@ -974,6 +1022,10 @@ pub(crate) fn render_call_result(
             ),
             "status": response.status,
             "body": body,
+            "freshness": match freshness {
+                Freshness::Verified => "verified",
+                Freshness::Skipped => "skipped",
+            },
         });
         (
             serde_json::to_string_pretty(&out).expect("call result always serializes"),
@@ -982,7 +1034,14 @@ pub(crate) fn render_call_result(
     } else {
         (
             String::from_utf8_lossy(&response.body).into_owned(),
-            Some(format!("HTTP {}", response.status)),
+            Some(format!(
+                "HTTP {}\nFreshness: {}",
+                response.status,
+                match freshness {
+                    Freshness::Verified => "verified (nonce challenge)",
+                    Freshness::Skipped => "skipped (--allow-stale-attestation)",
+                }
+            )),
         )
     }
 }
@@ -1050,6 +1109,25 @@ async fn handle_call(
         args.accept_outdated_tcb,
     )
     .await?;
+
+    // Fresh-nonce liveness challenge (G4a): before sending the workload
+    // request, demand a report that cannot predate this call. Runs with the
+    // same pins and floor as the workload exchange.
+    let fresh = if args.allow_stale_attestation {
+        None
+    } else {
+        Some(
+            aleph_sdk::attest::fresh_attestation(
+                &base_url,
+                handshake_pin,
+                Some(content.verification.policy),
+                args.amd_product,
+                &min_tcb,
+            )
+            .await
+            .map_err(|e| anyhow!("fresh attestation challenge failed: {e}"))?,
+        )
+    };
 
     let response = attested_request(
         &base_url,
@@ -1142,7 +1220,15 @@ async fn handle_call(
         bail!("guest launch TCB is below the required floor: {defs:?}");
     }
 
-    let (out, meta) = render_call_result(&response, &min_tcb, json);
+    let freshness = match &fresh {
+        Some(fresh) => {
+            check_fresh_consistency(fresh, &response)?;
+            Freshness::Verified
+        }
+        None => Freshness::Skipped,
+    };
+
+    let (out, meta) = render_call_result(&response, &min_tcb, freshness, json);
     if let Some(meta) = meta {
         eprintln!("{meta}");
     }
@@ -1342,7 +1428,9 @@ mod show_tests {
 #[cfg(test)]
 mod call_tests {
     use super::*;
-    use aleph_sdk::attest::{AttestedResponse, TcbFloor, TcbFloorOverride, TcbFloorPolicy};
+    use aleph_sdk::attest::{
+        AttestedResponse, FreshAttestation, TcbFloor, TcbFloorOverride, TcbFloorPolicy,
+    };
 
     fn measurement(digest: &str, vcpu_type: Option<&str>) -> LaunchMeasurement {
         let json = serde_json::json!({
@@ -1529,8 +1617,12 @@ mod call_tests {
     fn render_call_result_json_parses_json_body() {
         let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
 
-        let (out, meta) =
-            render_call_result(&response, &TcbFloorPolicy::uniform(dummy_floor()), true);
+        let (out, meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            true,
+        );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert!(
@@ -1564,8 +1656,12 @@ mod call_tests {
     fn render_call_result_json_falls_back_to_string_body_for_non_json() {
         let response = dummy_response(&"ab".repeat(48), b"plain text body");
 
-        let (out, _meta) =
-            render_call_result(&response, &TcbFloorPolicy::uniform(dummy_floor()), true);
+        let (out, _meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            true,
+        );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["body"], serde_json::json!("plain text body"));
@@ -1575,15 +1671,22 @@ mod call_tests {
     fn render_call_result_text_puts_only_the_body_on_stdout() {
         let response = dummy_response(&"ab".repeat(48), br#"{"status":"ok"}"#);
 
-        let (out, meta) =
-            render_call_result(&response, &TcbFloorPolicy::uniform(dummy_floor()), false);
+        let (out, meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            false,
+        );
 
         // The body must be machine-consumable as-is (aleph-testnets#35 run
         // 31474678768: `json.loads` on stdout choked on the status line).
         serde_json::from_str::<serde_json::Value>(&out)
             .expect("stdout is exactly the response body");
         assert_eq!(out, r#"{"status":"ok"}"#);
-        assert_eq!(meta.as_deref(), Some("HTTP 200"));
+        assert_eq!(
+            meta.as_deref(),
+            Some("HTTP 200\nFreshness: verified (nonce challenge)")
+        );
     }
 
     fn net() -> TcbFloorPolicy {
@@ -1666,12 +1769,87 @@ mod call_tests {
         response.cpuid_model = Some(0xA1);
         response.cpuid_stepping = Some(2);
 
-        let (out, _meta) = render_call_result(&response, &net(), true);
+        let (out, _meta) = render_call_result(&response, &net(), Freshness::Verified, true);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["effective_tcb_floor"]["microcode"], serde_json::json!(28));
         assert_eq!(v["cpuid"]["family"], serde_json::json!(0x19));
         assert_eq!(v["cpuid"]["model"], serde_json::json!(0xA1));
         assert_eq!(v["cpuid"]["stepping"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn render_call_result_reports_freshness_in_json() {
+        let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
+        let (out, _) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(v["freshness"], serde_json::json!("verified"));
+
+        let (out, _) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Skipped,
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(v["freshness"], serde_json::json!("skipped"));
+    }
+
+    #[test]
+    fn render_call_result_reports_freshness_in_text_meta() {
+        let response = dummy_response(&"ab".repeat(48), b"55");
+        let (_, meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            false,
+        );
+        assert!(
+            meta.unwrap()
+                .contains("Freshness: verified (nonce challenge)")
+        );
+        let (_, meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Skipped,
+            false,
+        );
+        assert!(
+            meta.unwrap()
+                .contains("Freshness: skipped (--allow-stale-attestation)")
+        );
+    }
+
+    #[test]
+    fn fresh_consistency_rejects_key_measurement_and_policy_drift() {
+        let response = dummy_response(&"ab".repeat(48), b"ok");
+        let fresh = FreshAttestation {
+            measurement: response.measurement.clone(),
+            policy: response.policy,
+            launch_tcb: response.launch_tcb,
+            reported_tcb: response.reported_tcb,
+            cpuid_family: None,
+            cpuid_model: None,
+            cpuid_stepping: None,
+            served_public_key: response.served_public_key.clone(),
+        };
+        check_fresh_consistency(&fresh, &response).expect("matching evidence must pass");
+
+        let mut wrong_key = fresh.clone();
+        wrong_key.served_public_key = b"someone else".to_vec();
+        assert!(check_fresh_consistency(&wrong_key, &response).is_err());
+
+        let mut wrong_measurement = fresh.clone();
+        wrong_measurement.measurement = "cd".repeat(48);
+        assert!(check_fresh_consistency(&wrong_measurement, &response).is_err());
+
+        let mut wrong_policy = fresh;
+        wrong_policy.policy ^= 1;
+        assert!(check_fresh_consistency(&wrong_policy, &response).is_err());
     }
 }

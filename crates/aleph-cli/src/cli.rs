@@ -3248,6 +3248,12 @@ pub struct VProgramCallArgs {
     /// and the guest may be exposed.
     #[arg(long)]
     pub accept_outdated_tcb: bool,
+
+    /// Skip the fresh-nonce liveness challenge and accept the (timeless)
+    /// certificate attestation alone. The certificate checks still apply,
+    /// but a key stolen from a past instance would not be detected.
+    #[arg(long)]
+    pub allow_stale_attestation: bool,
 }
 
 /// Clap adapter for `reqwest::Method::from_str` (`-X`/`--request`).
@@ -4539,5 +4545,38 @@ mod vprogram_call_args_tests {
             args.expected_measurement.as_deref(),
             Some("ab".repeat(48)).as_deref()
         );
+    }
+
+    #[test]
+    fn vprogram_call_freshness_defaults_on_with_an_opt_out() {
+        let hash = "a".repeat(64);
+        let cli = Cli::try_parse_from(["aleph", "vprogram", "call", &hash, "/fib/10"]).unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert!(
+            !args.allow_stale_attestation,
+            "the challenge must default on"
+        );
+
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "call",
+            &hash,
+            "/fib/10",
+            "--allow-stale-attestation",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert!(args.allow_stale_attestation);
     }
 }
