@@ -39,6 +39,8 @@ pub enum ComposeError {
          v1 stacks share the guest network namespace and talk over localhost"
     )]
     BadNetworkMode { service: String, found: String },
+    #[error("no digest or archive resolved for image {0:?}")]
+    UnpinnedImage(String),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -221,6 +223,36 @@ fn service_checks(name: &str, s: &ComposeService) -> Result<(), ComposeError> {
     }
 }
 
+/// Unique image references in service-name order.
+pub(crate) fn image_names(file: &ComposeFile) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    file.services
+        .values()
+        .filter_map(|s| s.image.clone())
+        .filter(|i| seen.insert(i.clone()))
+        .collect()
+}
+
+/// Rewrite every service's image to its digest-pinned form so the measured
+/// compose file names exact image identities, not floating tags.
+pub(crate) fn pin_images(
+    file: &mut ComposeFile,
+    pins: &BTreeMap<String, String>,
+) -> Result<(), ComposeError> {
+    for service in file.services.values_mut() {
+        let image = service.image.as_mut().expect("validated: image present");
+        match pins.get(image) {
+            Some(pinned) => *image = pinned.clone(),
+            None => return Err(ComposeError::UnpinnedImage(image.clone())),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn to_yaml(file: &ComposeFile) -> Result<String, ComposeError> {
+    Ok(serde_norway::to_string(file)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +358,36 @@ mod tests {
     fn version_and_name_are_tolerated() {
         let text = format!("version: \"3.9\"\nname: demo\n{MINIMAL}");
         parse_and_validate(&text).unwrap();
+    }
+
+    #[test]
+    fn pin_images_rewrites_every_reference() {
+        let mut v = parse_and_validate(MINIMAL).unwrap();
+        let pins = BTreeMap::from([(
+            "nginx:1.27".to_string(),
+            "docker.io/library/nginx@sha256:abc123".to_string(),
+        )]);
+        pin_images(&mut v.file, &pins).unwrap();
+        let yaml = to_yaml(&v.file).unwrap();
+        assert!(yaml.contains("docker.io/library/nginx@sha256:abc123"));
+        assert!(!yaml.contains("nginx:1.27"));
+    }
+
+    #[test]
+    fn pin_images_fails_on_a_missing_pin() {
+        let mut v = parse_and_validate(MINIMAL).unwrap();
+        let err = pin_images(&mut v.file, &BTreeMap::new()).unwrap_err();
+        assert!(err.to_string().contains("nginx:1.27"), "{err}");
+    }
+
+    #[test]
+    fn rewritten_yaml_round_trips_through_the_validator() {
+        let mut v = parse_and_validate(MINIMAL).unwrap();
+        let pins = BTreeMap::from([(
+            "nginx:1.27".to_string(),
+            "docker.io/library/nginx@sha256:abc123".to_string(),
+        )]);
+        pin_images(&mut v.file, &pins).unwrap();
+        parse_and_validate(&to_yaml(&v.file).unwrap()).unwrap();
     }
 }
