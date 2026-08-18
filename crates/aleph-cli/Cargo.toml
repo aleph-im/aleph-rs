@@ -12,7 +12,7 @@ default = ["vprogram"]
 # Verifiable programs (attestable SEV-SNP VMs): `aleph vprogram create`.
 # Gated so the CLI's own vprogram command tree can be excluded from stripped-down
 # builds, forwarding to aleph-sdk's `vprogram` feature (which pulls in `sev`).
-vprogram = ["aleph-sdk/vprogram"]
+vprogram = ["aleph-sdk/vprogram", "dep:serde_norway"]
 
 [dependencies]
 aleph-sdk = { workspace = true, features = ["account-evm", "account-sol", "credits", "swap"] }
@@ -29,7 +29,7 @@ clap_complete = "4.5"
 memsizes = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
-serde_norway = { workspace = true }
+serde_norway = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["process"] }
 tokio-util = { workspace = true }
 url = { workspace = true }
