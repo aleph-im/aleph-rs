@@ -234,4 +234,18 @@ mod test {
         let m = RuntimeManifest::parse(stripped.as_bytes()).unwrap();
         assert!(m.workload.is_none());
     }
+
+    #[test]
+    fn the_published_compose_runtime_manifest_parses() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/vprogram/compose-runtime-manifest.json"
+        ));
+        let m = RuntimeManifest::parse(bytes).unwrap();
+        assert_eq!(m.workload.unwrap().contract, "aleph.compose/1");
+        assert_eq!(
+            m.boot.cmdline_template,
+            "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash} workload_roothash={workload_roothash}"
+        );
+    }
 }
