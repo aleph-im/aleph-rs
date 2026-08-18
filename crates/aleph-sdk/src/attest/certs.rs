@@ -111,9 +111,113 @@ pub async fn fetch_vcek(
     Ok(data)
 }
 
+/// Whether `der` parses as a CRL whose own validity window contains `now`.
+///
+/// Used only as the cache-freshness predicate: a cached CRL past its
+/// next_update (or unparseable) is refetched. The authoritative window and
+/// signature checks happen again in `verify.rs` on whatever bytes are used.
+fn crl_is_fresh(der: &[u8], now: i64) -> bool {
+    match x509_parser::parse_x509_crl(der) {
+        Ok((_, crl)) => {
+            let tbs = &crl.tbs_cert_list;
+            tbs.this_update.timestamp() <= now
+                && tbs
+                    .next_update
+                    .as_ref()
+                    .is_some_and(|next| now <= next.timestamp())
+        }
+        Err(_) => false,
+    }
+}
+
+/// Fetch the product CRL from AMD KDS, honoring the on-disk cache until the
+/// CRL's own next_update.
+///
+/// Unlike VCEKs (immutable per (chip, TCB) pair, cached forever), CRLs
+/// expire: a cached copy past its next_update is refetched, and if the
+/// refetch fails this returns `Err`, so verification fails closed upstream
+/// rather than trusting stale revocation data.
+pub async fn fetch_crl(product: AmdProduct) -> Result<Vec<u8>, AttestError> {
+    let product_name = product.kds_name();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let cache_path = cache_dir().map(|dir| dir.join(product_name).join("crl.der"));
+    if let Some(path) = cache_path.as_deref()
+        && let Some(data) = read_cached(path)
+        && crl_is_fresh(&data, now)
+    {
+        return Ok(data);
+    }
+
+    let url = format!("{KDS_BASE_URL}/{product_name}/crl");
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| AttestError::Kds(format!("failed to fetch CRL from {url}: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AttestError::Kds(format!(
+            "AMD KDS returned HTTP {status} for CRL request: {url}"
+        )));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| AttestError::Kds(format!("failed to read CRL response body: {e}")))?;
+
+    let data = bytes.to_vec();
+    if let Some(path) = cache_path.as_deref() {
+        write_cache(path, &data);
+    }
+    Ok(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real Milan CRL fixture (window 2026-07-28..2026-09-10); see
+    /// `verify.rs` tests for provenance.
+    const TEST_MILAN_CRL_DER: &[u8] = include_bytes!("testdata/crl_milan.der");
+
+    #[test]
+    fn crl_is_fresh_inside_its_window() {
+        // 2026-08-18.
+        assert!(crl_is_fresh(TEST_MILAN_CRL_DER, 1787011200));
+    }
+
+    #[test]
+    fn crl_is_stale_past_next_update() {
+        // 2026-12-01, past the 2026-09-10 next_update.
+        assert!(!crl_is_fresh(TEST_MILAN_CRL_DER, 1764547200));
+    }
+
+    #[test]
+    fn crl_freshness_rejects_garbage_bytes() {
+        assert!(!crl_is_fresh(b"not a crl", 1787011200));
+    }
+
+    /// Live network tier: fetches the real AMD KDS CRL. Run explicitly with
+    /// `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "network: fetches the live AMD KDS CRL"]
+    async fn fetch_crl_live_from_kds() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs() as i64;
+        let data = fetch_crl(AmdProduct::Milan)
+            .await
+            .expect("the live KDS CRL fetch should succeed");
+        assert!(
+            crl_is_fresh(&data, now),
+            "AMD should never serve a stale CRL"
+        );
+    }
 
     #[test]
     fn cache_dir_prefers_xdg_cache_home() {

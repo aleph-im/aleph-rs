@@ -57,6 +57,8 @@ sev = { version = "8", default-features = false, features = ["snp", "crypto_noss
 der = { version = "0.7", optional = true }
 x509-parser = { version = "0.16", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
+# CRL signature verification (AMD signs its KDS CRLs with RSASSA-PSS/SHA-384).
+ring = { version = "0.17", optional = true }
 
 [dev-dependencies]
 rcgen = "0.14"
@@ -90,7 +92,7 @@ swap = [
 ]
 # Verifiable programs (attestable SEV-SNP VMs): launch measurement, runtime
 # bundle handling, and the VProgramBuilder message builder.
-vprogram = ["dep:sev", "dep:der", "dep:x509-parser", "dep:rustls"]
+vprogram = ["dep:sev", "dep:der", "dep:x509-parser", "dep:rustls", "dep:ring"]
 # Gates network-tier integration tests (kept out of plain `cargo test`).
 test-helpers = []
 

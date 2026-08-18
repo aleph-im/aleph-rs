@@ -85,6 +85,21 @@ pub enum AttestError {
         not_after: String,
         now: i64,
     },
+    /// The AMD CRL's signature does not verify under the pinned ARK public
+    /// key. A tampered or substituted CRL fails closed exactly like a
+    /// missing one: block-and-substitute must not be easier than blocking.
+    #[error("AMD CRL signature verification failed: {0}")]
+    CrlSignature(String),
+    /// The AMD CRL's own validity window does not contain the verification
+    /// time. A CRL past its next_update is not evidence of anything:
+    /// revocations issued since are unknown, so verification fails closed
+    /// rather than treating "no known revocation" as "not revoked".
+    #[error("AMD CRL is stale or not yet valid: {0}")]
+    CrlStale(String),
+    /// An AMD chain certificate's serial number appears in the product CRL:
+    /// AMD has revoked it, so nothing it signed can be trusted.
+    #[error("{name} certificate (serial {serial}) is revoked by the AMD CRL")]
+    CertRevoked { name: &'static str, serial: String },
     /// The RA-TLS handshake's server certificate verification failed: no
     /// attestation extension, a key-binding mismatch (`report_data` doesn't
     /// hash the TLS public key), or a measurement pin mismatch.
