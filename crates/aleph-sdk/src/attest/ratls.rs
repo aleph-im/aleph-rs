@@ -62,6 +62,46 @@ use super::{AttestationReport, TeeType};
 /// rejected every real guest (aleph-testnets#35 run 31433603211).
 const KEY_BINDING_DOMAIN: &[u8] = b"aleph-attest-tls-key-v1\x00";
 
+/// Domain tag the guest agent mixes into the fresh/nonce-binding hash:
+/// `report_data = SHA-384(FRESH_DOMAIN || served_public_key || nonce) || zeros`.
+///
+/// Mirrors `aleph_tee::report_data::DOMAIN_FRESH` (aleph-vm
+/// `rust/crates/aleph-tee`) byte-for-byte, trailing `0x00` separator
+/// included. The distinct domain keeps fresh reports from ever colliding
+/// with key-bound ones.
+#[allow(dead_code)]
+const FRESH_DOMAIN: &[u8] = b"aleph-attest-fresh-v1\x00";
+
+/// The canonical 64-byte fresh report_data for `(served key, nonce)`:
+/// `SHA-384(FRESH_DOMAIN || public_key_raw || nonce)` then zero padding.
+#[allow(dead_code)]
+fn fresh_bound_report_data(public_key_raw: &[u8], nonce: &[u8]) -> [u8; 64] {
+    let mut hasher = Sha384::new();
+    hasher.update(FRESH_DOMAIN);
+    hasher.update(public_key_raw);
+    hasher.update(nonce);
+    let mut report_data = [0u8; 64];
+    report_data[..48].copy_from_slice(&hasher.finalize());
+    report_data
+}
+
+/// Verify that a fresh report's SIGNED report_data binds BOTH the served
+/// TLS public key and the caller's nonce. Constant-time compare, matching
+/// the key-binding check.
+#[allow(dead_code)]
+fn verify_fresh_binding(
+    report_bytes: &[u8],
+    served_public_key: &[u8],
+    nonce: &[u8],
+) -> Result<(), AttestError> {
+    let signed = SnpReport::from_bytes(report_bytes).map_err(AttestError::Parse)?;
+    let expected = fresh_bound_report_data(served_public_key, nonce);
+    if signed.report_data.ct_eq(&expected).unwrap_u8() == 0 {
+        return Err(AttestError::FreshnessBinding);
+    }
+    Ok(())
+}
+
 /// The result of an attested HTTP request: the HTTP response plus the
 /// verified launch measurement the connection was gated on.
 ///
@@ -919,5 +959,51 @@ mod tests {
                 .data
                 .to_vec(),
         );
+    }
+
+    /// The canonical fresh report_data for `(key, nonce)`, computed the same
+    /// way the emitter does, used to synthesize valid fresh reports.
+    #[test]
+    fn accepts_a_correctly_bound_fresh_report() {
+        let key = b"served-public-key".to_vec();
+        let nonce = [0x42u8; 32];
+        let rd = fresh_bound_report_data(&key, &nonce);
+        let bytes = signed_report_bytes(rd, [0xAB; 48]);
+        verify_fresh_binding(&bytes, &key, &nonce).expect("correct binding must verify");
+    }
+
+    #[test]
+    fn rejects_a_fresh_report_with_the_wrong_nonce() {
+        let key = b"served-public-key".to_vec();
+        let rd = fresh_bound_report_data(&key, &[0x42u8; 32]);
+        let bytes = signed_report_bytes(rd, [0xAB; 48]);
+        let err = verify_fresh_binding(&bytes, &key, &[0x43u8; 32]).unwrap_err();
+        assert!(matches!(err, AttestError::FreshnessBinding));
+    }
+
+    #[test]
+    fn rejects_a_fresh_report_bound_to_a_different_key() {
+        let nonce = [0x42u8; 32];
+        let rd = fresh_bound_report_data(b"key-A", &nonce);
+        let bytes = signed_report_bytes(rd, [0xAB; 48]);
+        let err = verify_fresh_binding(&bytes, b"key-B", &nonce).unwrap_err();
+        assert!(matches!(err, AttestError::FreshnessBinding));
+    }
+
+    /// Domain separation regression: a KEY-BOUND report must never satisfy a
+    /// fresh challenge, even when the attacker picks the nonce so the hashed
+    /// payloads would otherwise collide (the aleph-cvm confusion attack).
+    #[test]
+    fn rejects_a_key_bound_report_presented_as_fresh() {
+        let key = b"served-public-key".to_vec();
+        // A genuine key-bound report for this key (KEY_BINDING_DOMAIN scheme).
+        let mut hasher = Sha384::new();
+        hasher.update(KEY_BINDING_DOMAIN);
+        hasher.update(&key);
+        let bytes =
+            signed_report_bytes(key_bound_report_data(hasher.finalize().into()), [0xAB; 48]);
+        // No nonce can make it pass the fresh check, including an empty one.
+        let err = verify_fresh_binding(&bytes, &key, &[]).unwrap_err();
+        assert!(matches!(err, AttestError::FreshnessBinding));
     }
 }
