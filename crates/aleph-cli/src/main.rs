@@ -10,6 +10,8 @@ mod common;
 #[cfg(feature = "vprogram")]
 mod compose;
 mod config;
+#[cfg(feature = "vprogram")]
+mod container;
 mod program;
 mod sevctl;
 #[cfg(feature = "vprogram")]
