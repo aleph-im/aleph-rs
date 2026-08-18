@@ -318,6 +318,18 @@ fn verify_crl_signature(
     crl: &CertificateRevocationList<'_>,
     ark: &X509Certificate<'_>,
 ) -> Result<(), AttestError> {
+    // Name an algorithm rotation explicitly instead of letting it surface
+    // as a generic signature failure: a wrong-scheme CRL fails closed
+    // either way, but a clear error saves debugging time if AMD ever
+    // changes the CRL signing scheme.
+    const RSASSA_PSS_OID: &str = "1.2.840.113549.1.1.10";
+    let algorithm = crl.signature_algorithm.algorithm.to_id_string();
+    if algorithm != RSASSA_PSS_OID {
+        return Err(AttestError::CrlSignature(format!(
+            "unexpected CRL signature algorithm {algorithm} (expected RSASSA-PSS {RSASSA_PSS_OID})"
+        )));
+    }
+
     // For an RSA key, the SPKI bit-string content is the PKCS#1
     // RSAPublicKey DER, which is what ring expects.
     let ark_public_key = &ark.tbs_certificate.subject_pki.subject_public_key.data;
@@ -639,6 +651,30 @@ mod tests {
 
         verify_crl_signature(&crl, &ark)
             .expect("the genuine AMD Milan CRL must verify under the builtin ARK");
+    }
+
+    #[test]
+    fn crl_signature_names_an_unexpected_algorithm() {
+        // The rcgen test CRL is ECDSA-signed; AMD KDS CRLs are RSASSA-PSS.
+        // The rejection must name the algorithm mismatch, not report a
+        // generic signature failure (that distinction is what saves
+        // debugging time if AMD ever rotates the CRL signing scheme).
+        let (_, crl_der) = test_ca_leaf_and_crl(&[0x01], &[]);
+        let (_, crl) = x509_parser::parse_x509_crl(&crl_der).expect("CRL should parse");
+        let ark_der = parsed_milan_ark_der();
+        let (_, ark) = x509_parser::parse_x509_certificate(&ark_der).expect("ARK should parse");
+
+        let err = verify_crl_signature(&crl, &ark)
+            .expect_err("a CRL signed under a different algorithm must be rejected");
+        match err {
+            AttestError::CrlSignature(msg) => {
+                assert!(
+                    msg.contains("algorithm"),
+                    "message should name the algorithm mismatch, got: {msg}"
+                )
+            }
+            other => panic!("expected CrlSignature, got: {other:?}"),
+        }
     }
 
     #[test]
