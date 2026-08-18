@@ -1475,6 +1475,7 @@ mod call_tests {
             cpuid_family: None,
             cpuid_model: None,
             cpuid_stepping: None,
+            served_public_key: b"dummy-served-key".to_vec(),
             status: 200,
             headers: vec![],
             body: bytes::Bytes::copy_from_slice(body),

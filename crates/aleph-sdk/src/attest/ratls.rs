@@ -84,6 +84,9 @@ pub struct AttestedResponse {
     pub cpuid_family: Option<u8>,
     pub cpuid_model: Option<u8>,
     pub cpuid_stepping: Option<u8>,
+    /// Raw subjectPublicKey bytes of the attested TLS certificate the
+    /// handshake verified (the same bytes the agent binds reports to).
+    pub served_public_key: Vec<u8>,
     /// The HTTP status code of the response.
     pub status: u16,
     /// The HTTP response headers, in wire order (a header repeated multiple
@@ -111,6 +114,10 @@ struct SnpCertVerifier {
     /// attestation failure (a measurement mismatch looks identical to a
     /// connection refusal otherwise).
     last_rejection: Mutex<Option<String>>,
+    /// Raw subjectPublicKey bytes of the last cert this verifier accepted.
+    /// The fresh-attestation flow needs them to reconstruct the channel-bound
+    /// fresh report_data.
+    served_public_key: Mutex<Option<Vec<u8>>>,
     expected_measurement: Option<Vec<u8>>,
     expected_policy: Option<u64>,
     provider: Arc<CryptoProvider>,
@@ -131,6 +138,7 @@ impl SnpCertVerifier {
         Arc::new(Self {
             extracted_report: Mutex::new(None),
             last_rejection: Mutex::new(None),
+            served_public_key: Mutex::new(None),
             expected_measurement,
             expected_policy,
             provider: Arc::new(rustls::crypto::ring::default_provider()),
@@ -145,6 +153,11 @@ impl SnpCertVerifier {
     /// Why the last handshake was rejected, if this verifier rejected one.
     fn get_rejection(&self) -> Option<String> {
         self.last_rejection.lock().unwrap().clone()
+    }
+
+    /// The served public key stashed by a completed, successful handshake.
+    fn get_served_public_key(&self) -> Option<Vec<u8>> {
+        self.served_public_key.lock().unwrap().clone()
     }
 
     /// The attestation checks behind [`ServerCertVerifier::verify_server_cert`],
@@ -204,7 +217,7 @@ impl SnpCertVerifier {
 
         let mut hasher = Sha384::new();
         hasher.update(KEY_BINDING_DOMAIN);
-        hasher.update(public_key_bytes);
+        hasher.update(&public_key_bytes[..]);
         let hash = hasher.finalize();
         let mut expected_report_data = [0u8; 64];
         expected_report_data[..48].copy_from_slice(&hash);
@@ -251,6 +264,7 @@ impl SnpCertVerifier {
         }
 
         *self.extracted_report.lock().unwrap() = Some(report);
+        *self.served_public_key.lock().unwrap() = Some(public_key_bytes.to_vec());
         Ok(ServerCertVerified::assertion())
     }
 }
@@ -394,6 +408,9 @@ pub async fn attested_request(
     // stashes a report (it errors the handshake otherwise), but check again
     // rather than trust that invariant silently.
     let report = verifier.get_report().ok_or(AttestError::MissingReport)?;
+    let served_public_key = verifier
+        .get_served_public_key()
+        .ok_or(AttestError::MissingReport)?;
 
     // Propagate on failure rather than degrading to a partial response: an
     // unverifiable report must never look like a successful response.
@@ -420,6 +437,7 @@ pub async fn attested_request(
         cpuid_family: result.cpuid_family,
         cpuid_model: result.cpuid_model,
         cpuid_stepping: result.cpuid_stepping,
+        served_public_key,
         status,
         headers: response_headers,
         body,
@@ -865,5 +883,41 @@ mod tests {
             .get_rejection()
             .expect("rejection must be recorded");
         assert!(rejection.contains("attestation extension"), "{rejection}");
+    }
+
+    #[test]
+    fn a_successful_handshake_stashes_the_served_public_key() {
+        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let probe_der = self_signed_der(&key_pair, None);
+        let hash = subject_pubkey_sha384(&probe_der);
+        let report = AttestationReport {
+            tee_type: TeeType::SevSnp,
+            data: signed_report_bytes(key_bound_report_data(hash), [0xAB; 48]),
+        };
+        let ext = encode_attestation_extension(&report).unwrap();
+        let der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext)));
+
+        let verifier = SnpCertVerifier::new(None, None);
+        verifier
+            .verify_server_cert(
+                &CertificateDer::from(der.clone()),
+                &[],
+                &dummy_server_name(),
+                &[],
+                UnixTime::now(),
+            )
+            .expect("the valid cert must be accepted");
+
+        let (_, cert) = x509_parser::parse_x509_certificate(&der).unwrap();
+        assert_eq!(
+            verifier
+                .get_served_public_key()
+                .expect("key must be stashed"),
+            cert.tbs_certificate
+                .subject_pki
+                .subject_public_key
+                .data
+                .to_vec(),
+        );
     }
 }
