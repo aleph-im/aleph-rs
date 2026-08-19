@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aleph_sdk::attest::attested_request;
+use aleph_sdk::attest::{MeasurementPin, PolicyPin, attested_request};
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
     hash_file,
@@ -1098,9 +1098,13 @@ async fn handle_call(
     let body = args.data.clone().map(bytes::Bytes::from);
 
     let handshake_pin = match &expected {
-        MeasurementExpectation::Pin(bytes) => Some(bytes.as_slice()),
-        MeasurementExpectation::MemberOf(_) => None,
+        MeasurementExpectation::Pin(bytes) => MeasurementPin::Exact(bytes.as_slice()),
+        // Fleet flow: the exact model is only known from the response, so
+        // the handshake pin is explicitly deferred; the MemberOf allow-list
+        // check below is what discharges the CallerVerified obligation.
+        MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
     };
+    let policy_pin = PolicyPin::Exact(content.verification.policy);
 
     let min_tcb = resolve_tcb_floor(
         aleph_client,
@@ -1121,7 +1125,7 @@ async fn handle_call(
             aleph_sdk::attest::fresh_attestation(
                 &base_url,
                 handshake_pin,
-                Some(content.verification.policy),
+                policy_pin,
                 args.amd_product,
                 &min_tcb,
             )
@@ -1137,7 +1141,7 @@ async fn handle_call(
         &headers,
         body,
         handshake_pin,
-        Some(content.verification.policy),
+        policy_pin,
         args.amd_product,
         &min_tcb,
     )
