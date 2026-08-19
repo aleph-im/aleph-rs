@@ -91,6 +91,20 @@ pub enum AttestError {
     /// silently returns an unattested response instead of erroring.
     #[error("no attestation report was extracted during the TLS handshake")]
     MissingReport,
+    /// The fresh report's signed report_data does not match
+    /// SHA-384(FRESH_DOMAIN || served_public_key || nonce): the report was
+    /// not generated for this challenge and this TLS identity.
+    #[error(
+        "fresh attestation binding failed: report_data does not match the challenged key and nonce"
+    )]
+    FreshnessBinding,
+    /// The agent's fresh-attestation endpoint returned a non-success status.
+    #[error("fresh attestation endpoint returned HTTP {0}")]
+    FreshEndpoint(u16),
+    #[error("fresh attestation measurement mismatch: expected {expected}, got {got}")]
+    FreshMeasurementMismatch { expected: String, got: String },
+    #[error("fresh attestation policy mismatch: expected {expected:#x}, got {got:#x}")]
+    FreshPolicyMismatch { expected: u64, got: u64 },
 }
 
 /// Encode an AttestationReport as a DER-encoded OctetString.
