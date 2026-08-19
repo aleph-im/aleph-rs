@@ -24,6 +24,7 @@ use sev::parser::ByteParser;
 
 use super::AttestError;
 use super::certs;
+use super::platform::{PlatformPolicy, PlatformPosture};
 use super::tcb::{TcbFloor, TcbFloorPolicy};
 use super::{AttestationReport, TeeType};
 
@@ -141,6 +142,9 @@ pub struct VerificationResult {
     pub cpuid_family: Option<u8>,
     pub cpuid_model: Option<u8>,
     pub cpuid_stepping: Option<u8>,
+    /// Decoded PLATFORM_INFO posture of the attesting host (always
+    /// surfaced; gated only by the caller's opt-in platform policy).
+    pub platform: PlatformPosture,
     /// Human-readable summary of what was checked.
     pub summary: String,
 }
@@ -178,6 +182,7 @@ pub async fn verify_sev_snp_report(
     dto: &AttestationReport,
     product: AmdProduct,
     min_tcb: &TcbFloorPolicy,
+    platform: &PlatformPolicy,
 ) -> Result<VerificationResult, AttestError> {
     if dto.tee_type != TeeType::SevSnp {
         return Err(AttestError::UnsupportedTeeType(dto.tee_type));
@@ -191,7 +196,9 @@ pub async fn verify_sev_snp_report(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    verify_report_with_vcek(&report, product, &vcek_der, &crl_der, now, min_tcb)
+    verify_report_with_vcek(
+        &report, product, &vcek_der, &crl_der, now, min_tcb, platform,
+    )
 }
 
 /// Synchronous core of [`verify_sev_snp_report`]: everything after the VCEK
@@ -219,6 +226,7 @@ fn verify_report_with_vcek(
     crl_der: &[u8],
     now: i64,
     min_tcb: &TcbFloorPolicy,
+    platform: &PlatformPolicy,
 ) -> Result<VerificationResult, AttestError> {
     let (ark, ask) = product.builtin_ca()?;
     let vek = Certificate::from_der(vcek_der)?;
@@ -250,6 +258,11 @@ fn verify_report_with_vcek(
         floor,
     )?;
 
+    // PLATFORM_INFO posture: decoded from the now-verified report, always
+    // surfaced on the result, gated only by the caller's opt-in policy.
+    let posture = PlatformPosture::from(report.plat_info);
+    platform.check(&posture)?;
+
     Ok(VerificationResult {
         measurement: hex::encode(report.measurement),
         policy: u64::from(report.policy),
@@ -258,6 +271,7 @@ fn verify_report_with_vcek(
         cpuid_family: report.cpuid_fam_id,
         cpuid_model: report.cpuid_mod_id,
         cpuid_stepping: report.cpuid_step,
+        platform: posture,
         summary: format!(
             "SEV-SNP verified against AMD {product} chain (VMPL {}, policy {:#x})",
             report.vmpl,
@@ -576,6 +590,7 @@ mod tests {
             TEST_MILAN_CRL_DER,
             7258118400,
             &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
         )
         .expect_err("an expired AMD chain must be rejected");
         assert!(
@@ -612,6 +627,7 @@ mod tests {
             TEST_MILAN_CRL_DER,
             1796083200,
             &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
         )
         .expect_err("a stale CRL must fail verification closed");
         assert!(
@@ -639,6 +655,7 @@ mod tests {
             &crl_der,
             TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
         )
         .expect_err("a tampered CRL must fail verification closed");
         assert!(
@@ -659,12 +676,63 @@ mod tests {
             b"not a crl",
             TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
         )
         .expect_err("an unparseable CRL must fail verification closed");
         assert!(
             matches!(err, AttestError::CrlParse(_)),
             "expected CrlParse, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn rejects_a_bad_platform_posture_end_to_end() {
+        let report_bytes = milan_report_bytes();
+        let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
+
+        // The genuine fixture host reports PLATFORM_INFO 0x1 (SMT on,
+        // nothing hardened), so requiring RAPL-off must fail closed.
+        let policy = PlatformPolicy {
+            require_rapl_disabled: true,
+            ..PlatformPolicy::NONE
+        };
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            TEST_NOW,
+            &TcbFloorPolicy::UNRESTRICTED,
+            &policy,
+        )
+        .expect_err("the fixture host does not disable RAPL");
+        match err {
+            AttestError::PlatformPosture { unmet, plat_info } => {
+                assert_eq!(unmet, vec!["rapl-off"]);
+                assert_eq!(plat_info, 0x1);
+            }
+            other => panic!("expected PlatformPosture, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_result_carries_the_platform_posture() {
+        let report_bytes = milan_report_bytes();
+        let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
+
+        let result = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            TEST_NOW,
+            &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
+        )
+        .expect("the genuine report must verify under the default policy");
+        assert!(result.platform.smt_enabled);
+        assert!(!result.platform.rapl_disabled);
+        assert_eq!(result.platform.raw, 0x1);
     }
 
     #[test]
@@ -894,9 +962,14 @@ mod tests {
             data: milan_report_bytes(),
         };
 
-        let err = verify_sev_snp_report(&dto, AmdProduct::Milan, &TcbFloorPolicy::UNRESTRICTED)
-            .await
-            .expect_err("a non-SEV-SNP tee_type must be rejected before parsing");
+        let err = verify_sev_snp_report(
+            &dto,
+            AmdProduct::Milan,
+            &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
+        )
+        .await
+        .expect_err("a non-SEV-SNP tee_type must be rejected before parsing");
         assert!(
             matches!(err, AttestError::UnsupportedTeeType(TeeType::Tdx)),
             "expected UnsupportedTeeType, got: {err:?}"
@@ -1023,6 +1096,7 @@ mod tests {
             TEST_MILAN_CRL_DER,
             TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
         )
         .expect("verification of a genuine, untampered Milan report must succeed");
 
@@ -1064,6 +1138,7 @@ mod tests {
             TEST_MILAN_CRL_DER,
             TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
         );
         assert!(
             result.is_err(),
@@ -1156,6 +1231,7 @@ mod tests {
             TEST_MILAN_CRL_DER,
             TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
+            &PlatformPolicy::NONE,
         )
         .expect("UNRESTRICTED floor accepts the genuine fixture");
     }
@@ -1179,6 +1255,7 @@ mod tests {
             TEST_MILAN_CRL_DER,
             TEST_NOW,
             &TcbFloorPolicy::uniform(floor),
+            &PlatformPolicy::NONE,
         )
         .unwrap_err();
         assert!(matches!(err, AttestError::TcbBelowFloor(_)), "got {err:?}");
@@ -1208,6 +1285,7 @@ mod tests {
             TEST_MILAN_CRL_DER,
             TEST_NOW,
             &policy,
+            &PlatformPolicy::NONE,
         )
         .expect("default floor governs a non-Zen4c report");
 
@@ -1230,6 +1308,7 @@ mod tests {
             TEST_MILAN_CRL_DER,
             TEST_NOW,
             &policy,
+            &PlatformPolicy::NONE,
         )
         .unwrap_err();
         assert!(matches!(err, AttestError::TcbBelowFloor(_)), "got {err:?}");
