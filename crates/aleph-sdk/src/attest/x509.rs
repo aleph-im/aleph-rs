@@ -104,6 +104,14 @@ pub enum AttestError {
     /// AMD has revoked it, so nothing it signed can be trusted.
     #[error("{name} certificate (serial {serial}) is revoked by the AMD CRL")]
     CertRevoked { name: &'static str, serial: String },
+    /// The host's PLATFORM_INFO posture fails the caller's opt-in
+    /// [`PlatformPolicy`](super::platform::PlatformPolicy): every unmet
+    /// requirement is listed (by its CLI spelling), with the raw field value.
+    #[error("host platform posture fails required {unmet:?} (PLATFORM_INFO={plat_info:#x})")]
+    PlatformPosture {
+        unmet: Vec<&'static str>,
+        plat_info: u64,
+    },
     /// The RA-TLS handshake's server certificate verification failed: no
     /// attestation extension, a key-binding mismatch (`report_data` doesn't
     /// hash the TLS public key), or a measurement pin mismatch.
