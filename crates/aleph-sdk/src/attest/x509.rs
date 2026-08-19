@@ -90,6 +90,10 @@ pub enum AttestError {
     /// missing one: block-and-substitute must not be easier than blocking.
     #[error("AMD CRL signature verification failed: {0}")]
     CrlSignature(String),
+    /// The AMD CRL bytes do not parse as a CRL at all. An unparseable CRL
+    /// is as unverifiable as a missing one, so verification fails closed.
+    #[error("AMD CRL failed to parse: {0}")]
+    CrlParse(String),
     /// The AMD CRL's own validity window does not contain the verification
     /// time. A CRL past its next_update is not evidence of anything:
     /// revocations issued since are unknown, so verification fails closed

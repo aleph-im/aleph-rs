@@ -298,8 +298,8 @@ fn check_chain_validity_and_revocation(
     check_cert_validity(now, "VCEK", &vcek)?;
 
     // An unparseable CRL is treated like an unverifiable one: fail closed.
-    let (_, crl) = x509_parser::parse_x509_crl(crl_der)
-        .map_err(|e| AttestError::CrlSignature(format!("failed to parse AMD CRL: {e}")))?;
+    let (_, crl) =
+        x509_parser::parse_x509_crl(crl_der).map_err(|e| AttestError::CrlParse(e.to_string()))?;
     verify_crl_signature(&crl, &ark)?;
     check_crl_window(now, &crl)?;
     // The ARK is deliberately not checked against the CRL: the ARK signs the
@@ -644,6 +644,26 @@ mod tests {
         assert!(
             matches!(err, AttestError::CrlSignature(_)),
             "expected CrlSignature, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unparseable_crl_end_to_end() {
+        let report_bytes = milan_report_bytes();
+        let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
+
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            b"not a crl",
+            TEST_NOW,
+            &TcbFloorPolicy::UNRESTRICTED,
+        )
+        .expect_err("an unparseable CRL must fail verification closed");
+        assert!(
+            matches!(err, AttestError::CrlParse(_)),
+            "expected CrlParse, got: {err:?}"
         );
     }
 
