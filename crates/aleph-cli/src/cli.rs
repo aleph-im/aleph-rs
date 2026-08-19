@@ -3254,6 +3254,35 @@ pub struct VProgramCallArgs {
     /// but a key stolen from a past instance would not be detected.
     #[arg(long)]
     pub allow_stale_attestation: bool,
+
+    /// Require host platform posture bits from the report's AMD-signed
+    /// PLATFORM_INFO field (repeatable or comma-separated). Nothing is
+    /// required by default; posture is always shown in the output.
+    #[arg(long = "require-platform", value_delimiter = ',')]
+    pub require_platform: Vec<PlatformRequirement>,
+}
+
+/// A PLATFORM_INFO requirement `vprogram call` can gate on. Each value is a
+/// host-configuration bit of the AMD-signed report; a zero bit means
+/// "feature off or firmware too old to report it", and both fail the
+/// requirement (fail closed).
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PlatformRequirement {
+    /// Require SMT disabled on the host (cross-thread side channels).
+    /// Normally governed by the pinned guest policy's SMT_ALLOWED bit; this
+    /// adds an independent report-level gate.
+    SmtOff,
+    /// Require transparent SME (all-DRAM encryption, physical hardening).
+    Tsme,
+    /// Require RAPL energy telemetry disabled (power side channels).
+    RaplOff,
+    /// Require guest ciphertext unreadable from the host (CipherLeaks
+    /// hardening; needs Genoa or later silicon).
+    CiphertextHiding,
+    /// Require the firmware memory-alias scan completed since last reset
+    /// with no aliases found (BadRAM hardening).
+    AliasCheck,
 }
 
 /// Clap adapter for `reqwest::Method::from_str` (`-X`/`--request`).

@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use aleph_sdk::attest::{MeasurementPin, PolicyPin, attested_request};
+use aleph_sdk::attest::{
+    MeasurementPin, PlatformPolicy, PlatformPosture, PolicyPin, attested_request,
+};
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
     hash_file,
@@ -28,7 +30,9 @@ use memsizes::MiB;
 use url::Url;
 
 use crate::account::CliAccount;
-use crate::cli::{VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramShowArgs};
+use crate::cli::{
+    PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramShowArgs,
+};
 use crate::common::{render_upload_progress, resolve_account, submit_or_preview};
 use crate::config::store::ConfigStore;
 use crate::veritysetup::Veritysetup;
@@ -976,6 +980,43 @@ fn check_fresh_consistency(
     Ok(())
 }
 
+/// Build the SDK's [`PlatformPolicy`] from the `--require-platform` values.
+/// An empty list is [`PlatformPolicy::NONE`]: posture is surfaced, never
+/// gated (the current fleet fails every bit, so requiring is opt-in).
+fn platform_policy_from(requirements: &[PlatformRequirement]) -> PlatformPolicy {
+    let mut policy = PlatformPolicy::NONE;
+    for requirement in requirements {
+        match requirement {
+            PlatformRequirement::SmtOff => policy.require_smt_disabled = true,
+            PlatformRequirement::Tsme => policy.require_tsme = true,
+            PlatformRequirement::RaplOff => policy.require_rapl_disabled = true,
+            PlatformRequirement::CiphertextHiding => policy.require_ciphertext_hiding = true,
+            PlatformRequirement::AliasCheck => policy.require_alias_check = true,
+        }
+    }
+    policy
+}
+
+/// Render a [`PlatformPosture`] as the one-line text form used in the meta
+/// block, e.g. `SMT=on TSME=off ECC=off RAPL=on ciphertext-hiding=off
+/// alias-check=no (0x1)`. RAPL renders enablement (`on` = telemetry active),
+/// matching how an operator reads the risk.
+fn platform_posture_line(p: &PlatformPosture) -> String {
+    fn on(b: bool) -> &'static str {
+        if b { "on" } else { "off" }
+    }
+    format!(
+        "SMT={} TSME={} ECC={} RAPL={} ciphertext-hiding={} alias-check={} ({:#x})",
+        on(p.smt_enabled),
+        on(p.tsme_enabled),
+        on(p.ecc_enabled),
+        on(!p.rapl_disabled),
+        on(p.ciphertext_hiding_enabled),
+        if p.alias_check_complete { "yes" } else { "no" },
+        p.raw,
+    )
+}
+
 /// Render an [`aleph_sdk::attest::AttestedResponse`] for `call`'s output as
 /// `(stdout, stderr_meta)`. In text mode stdout is the raw response body so
 /// the command pipes like curl; the `HTTP <status>` line goes to stderr. In
@@ -1020,6 +1061,15 @@ pub(crate) fn render_call_result(
                 response.reported_tcb.snp,
                 response.reported_tcb.microcode,
             ),
+            "platform_info": {
+                "raw": format!("{:#x}", response.platform.raw),
+                "smt_enabled": response.platform.smt_enabled,
+                "tsme_enabled": response.platform.tsme_enabled,
+                "ecc_enabled": response.platform.ecc_enabled,
+                "rapl_disabled": response.platform.rapl_disabled,
+                "ciphertext_hiding_enabled": response.platform.ciphertext_hiding_enabled,
+                "alias_check_complete": response.platform.alias_check_complete,
+            },
             "status": response.status,
             "body": body,
             "freshness": match freshness {
@@ -1035,12 +1085,13 @@ pub(crate) fn render_call_result(
         (
             String::from_utf8_lossy(&response.body).into_owned(),
             Some(format!(
-                "HTTP {}\nFreshness: {}",
+                "HTTP {}\nFreshness: {}\nplatform: {}",
                 response.status,
                 match freshness {
                     Freshness::Verified => "verified (nonce challenge)",
                     Freshness::Skipped => "skipped (--allow-stale-attestation)",
-                }
+                },
+                platform_posture_line(&response.platform),
             )),
         )
     }
@@ -1105,6 +1156,7 @@ async fn handle_call(
         MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
     };
     let policy_pin = PolicyPin::Exact(content.verification.policy);
+    let platform_policy = platform_policy_from(&args.require_platform);
 
     let min_tcb = resolve_tcb_floor(
         aleph_client,
@@ -1128,6 +1180,7 @@ async fn handle_call(
                 policy_pin,
                 args.amd_product,
                 &min_tcb,
+                &platform_policy,
             )
             .await
             .map_err(|e| anyhow!("fresh attestation challenge failed: {e}"))?,
@@ -1144,6 +1197,7 @@ async fn handle_call(
         policy_pin,
         args.amd_product,
         &min_tcb,
+        &platform_policy,
     )
     .await
     .map_err(|e| anyhow!("attestation failed: {e}"))?;
@@ -1568,11 +1622,90 @@ mod call_tests {
             cpuid_family: None,
             cpuid_model: None,
             cpuid_stepping: None,
+            platform: PlatformPosture {
+                smt_enabled: true,
+                tsme_enabled: false,
+                ecc_enabled: false,
+                rapl_disabled: false,
+                ciphertext_hiding_enabled: false,
+                alias_check_complete: false,
+                raw: 0x1,
+            },
             served_public_key: b"dummy-served-key".to_vec(),
             status: 200,
             headers: vec![],
             body: bytes::Bytes::copy_from_slice(body),
         }
+    }
+
+    #[test]
+    fn platform_requirement_parses_every_cli_spelling() {
+        use clap::ValueEnum;
+        for (spelling, expected) in [
+            ("smt-off", PlatformRequirement::SmtOff),
+            ("tsme", PlatformRequirement::Tsme),
+            ("rapl-off", PlatformRequirement::RaplOff),
+            ("ciphertext-hiding", PlatformRequirement::CiphertextHiding),
+            ("alias-check", PlatformRequirement::AliasCheck),
+        ] {
+            assert_eq!(
+                PlatformRequirement::from_str(spelling, false).expect(spelling),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn platform_requirements_build_the_policy() {
+        let policy = platform_policy_from(&[
+            PlatformRequirement::RaplOff,
+            PlatformRequirement::AliasCheck,
+        ]);
+        assert!(policy.require_rapl_disabled);
+        assert!(policy.require_alias_check);
+        assert!(!policy.require_smt_disabled);
+        assert!(!policy.require_tsme);
+        assert!(!policy.require_ciphertext_hiding);
+    }
+
+    #[test]
+    fn render_call_result_reports_platform_posture_in_json() {
+        let response = dummy_response(&"ab".repeat(48), b"x");
+        let (out, _) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(v["platform_info"]["raw"], serde_json::json!("0x1"));
+        assert_eq!(v["platform_info"]["smt_enabled"], serde_json::json!(true));
+        assert_eq!(
+            v["platform_info"]["rapl_disabled"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            v["platform_info"]["alias_check_complete"],
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn render_call_result_reports_platform_posture_in_text_meta() {
+        let response = dummy_response(&"ab".repeat(48), b"x");
+        let (_, meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            false,
+        );
+        let meta = meta.expect("text mode always has a meta block");
+        assert!(
+            meta.contains(
+                "platform: SMT=on TSME=off ECC=off RAPL=on ciphertext-hiding=off alias-check=no (0x1)"
+            ),
+            "meta should carry the posture line, got: {meta}"
+        );
     }
 
     #[test]
@@ -1690,7 +1823,11 @@ mod call_tests {
         assert_eq!(out, r#"{"status":"ok"}"#);
         assert_eq!(
             meta.as_deref(),
-            Some("HTTP 200\nFreshness: verified (nonce challenge)")
+            Some(
+                "HTTP 200\nFreshness: verified (nonce challenge)\n\
+                 platform: SMT=on TSME=off ECC=off RAPL=on \
+                 ciphertext-hiding=off alias-check=no (0x1)"
+            )
         );
     }
 
@@ -1841,6 +1978,7 @@ mod call_tests {
             cpuid_family: None,
             cpuid_model: None,
             cpuid_stepping: None,
+            platform: response.platform,
             served_public_key: response.served_public_key.clone(),
         };
         check_fresh_consistency(&fresh, &response).expect("matching evidence must pass");
