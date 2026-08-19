@@ -51,6 +51,7 @@ use sev::parser::ByteParser;
 use sha2::{Digest, Sha384};
 use subtle::ConstantTimeEq;
 
+use super::platform::PlatformPolicy;
 use super::tcb::TcbFloorPolicy;
 use super::verify::{AmdProduct, VerificationResult, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
@@ -490,6 +491,7 @@ pub async fn attested_request(
     policy: PolicyPin,
     product: AmdProduct,
     min_tcb: &TcbFloorPolicy,
+    platform: &PlatformPolicy,
 ) -> Result<AttestedResponse, AttestError> {
     let url = base_url.join(path)?;
 
@@ -534,7 +536,7 @@ pub async fn attested_request(
 
     // Propagate on failure rather than degrading to a partial response: an
     // unverifiable report must never look like a successful response.
-    let result = verify_sev_snp_report(&report, product, min_tcb).await?;
+    let result = verify_sev_snp_report(&report, product, min_tcb, platform).await?;
 
     let status = response.status().as_u16();
     let response_headers = response
@@ -607,11 +609,21 @@ pub async fn fresh_attestation(
     policy: PolicyPin,
     product: AmdProduct,
     min_tcb: &TcbFloorPolicy,
+    platform: &PlatformPolicy,
 ) -> Result<FreshAttestation, AttestError> {
     use rand::RngCore;
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
-    fresh_attestation_with_nonce(base_url, &nonce, measurement, policy, product, min_tcb).await
+    fresh_attestation_with_nonce(
+        base_url,
+        &nonce,
+        measurement,
+        policy,
+        product,
+        min_tcb,
+        platform,
+    )
+    .await
 }
 
 async fn fresh_attestation_with_nonce(
@@ -621,6 +633,7 @@ async fn fresh_attestation_with_nonce(
     policy: PolicyPin,
     product: AmdProduct,
     min_tcb: &TcbFloorPolicy,
+    platform: &PlatformPolicy,
 ) -> Result<FreshAttestation, AttestError> {
     // The challenge request itself runs over an attested channel, with the
     // same pins enforced on the CERT report during its handshake.
@@ -635,6 +648,7 @@ async fn fresh_attestation_with_nonce(
         policy,
         product,
         min_tcb,
+        platform,
     )
     .await?;
     if response.status != 200 {
@@ -648,7 +662,7 @@ async fn fresh_attestation_with_nonce(
 
     // Full verification of the FRESH report: AMD chain, signature, VMPL,
     // TCB floor. Then the pins, then the freshness binding.
-    let result = verify_sev_snp_report(&dto, product, min_tcb).await?;
+    let result = verify_sev_snp_report(&dto, product, min_tcb, platform).await?;
     check_fresh_pins(&result, measurement.as_option(), policy.as_option())?;
     verify_fresh_binding(&dto.data, &response.served_public_key, nonce)?;
 
@@ -1208,6 +1222,9 @@ mod tests {
             policy,
             launch_tcb: Default::default(),
             reported_tcb: Default::default(),
+            platform: crate::attest::PlatformPosture::from(
+                sev::firmware::guest::PlatformInfo::from(0u64),
+            ),
             cpuid_family: None,
             cpuid_model: None,
             cpuid_stepping: None,
