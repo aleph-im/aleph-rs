@@ -94,3 +94,11 @@ assets = [
 [[bin]]
 name = "aleph"
 path = "src/main.rs"
+
+# The compose CLI tests drive the binary's `vprogram create --compose`
+# subcommand, which only exists with the vprogram feature; skip them under
+# `cargo test --no-default-features` instead of failing on the missing
+# subcommand.
+[[test]]
+name = "vprogram_compose_cli"
+required-features = ["vprogram"]
