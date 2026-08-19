@@ -178,6 +178,9 @@ pub struct AttestedResponse {
     pub cpuid_family: Option<u8>,
     pub cpuid_model: Option<u8>,
     pub cpuid_stepping: Option<u8>,
+    /// Decoded PLATFORM_INFO posture of the attesting host (always
+    /// surfaced; gated only by the caller's opt-in platform policy).
+    pub platform: super::platform::PlatformPosture,
     /// Raw subjectPublicKey bytes of the attested TLS certificate the
     /// handshake verified (the same bytes the agent binds reports to).
     pub served_public_key: Vec<u8>,
@@ -209,6 +212,8 @@ pub struct FreshAttestation {
     pub cpuid_family: Option<u8>,
     pub cpuid_model: Option<u8>,
     pub cpuid_stepping: Option<u8>,
+    /// Decoded PLATFORM_INFO posture from the verified fresh report.
+    pub platform: super::platform::PlatformPosture,
     /// Key of the RA-TLS exchange that answered the challenge, bound into
     /// the fresh report's report_data alongside the nonce.
     pub served_public_key: Vec<u8>,
@@ -559,6 +564,7 @@ pub async fn attested_request(
         cpuid_family: result.cpuid_family,
         cpuid_model: result.cpuid_model,
         cpuid_stepping: result.cpuid_stepping,
+        platform: result.platform,
         served_public_key,
         status,
         headers: response_headers,
@@ -674,6 +680,7 @@ async fn fresh_attestation_with_nonce(
         cpuid_family: result.cpuid_family,
         cpuid_model: result.cpuid_model,
         cpuid_stepping: result.cpuid_stepping,
+        platform: result.platform,
         served_public_key: response.served_public_key,
     })
 }
