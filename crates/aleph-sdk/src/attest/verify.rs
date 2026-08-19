@@ -9,12 +9,13 @@
 //! RA-TLS handshake (a later task) which has the expected measurement and
 //! public key to compare against.
 //!
-//! Fails closed: any parse, chain, signature, VMPL, or ARK-identity failure
-//! returns `Err`; an `Ok(VerificationResult)` always means a fully verified
-//! report.
+//! Fails closed: any parse, chain, signature, VMPL, ARK-identity,
+//! validity-window, or CRL/revocation failure returns `Err`; an
+//! `Ok(VerificationResult)` always means a fully verified report.
 
 use sha2::{Digest, Sha384};
 use x509_parser::certificate::X509Certificate;
+use x509_parser::revocation_list::CertificateRevocationList;
 
 use sev::certs::snp::{Certificate, Chain, Verifiable, builtin, ca};
 use sev::firmware::guest::AttestationReport as SnpReport;
@@ -183,7 +184,14 @@ pub async fn verify_sev_snp_report(
     }
     let report = SnpReport::from_bytes(&dto.data).map_err(AttestError::Parse)?;
     let vcek_der = certs::fetch_vcek(product, &report.chip_id, &report.reported_tcb).await?;
-    verify_report_with_vcek(&report, product, &vcek_der, min_tcb)
+    let crl_der = certs::fetch_crl(product).await?;
+    // A pre-epoch clock yields now = 0, which fails closed (every AMD cert's
+    // not_before is later than the epoch).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    verify_report_with_vcek(&report, product, &vcek_der, &crl_der, now, min_tcb)
 }
 
 /// Synchronous core of [`verify_sev_snp_report`]: everything after the VCEK
@@ -208,6 +216,8 @@ fn verify_report_with_vcek(
     report: &SnpReport,
     product: AmdProduct,
     vcek_der: &[u8],
+    crl_der: &[u8],
+    now: i64,
     min_tcb: &TcbFloorPolicy,
 ) -> Result<VerificationResult, AttestError> {
     let (ark, ask) = product.builtin_ca()?;
@@ -224,6 +234,7 @@ fn verify_report_with_vcek(
     // Policy checks the `sev` crate does not perform:
     check_vmpl(report.vmpl)?;
     verify_ark(&chain.ca.ark, product)?;
+    check_chain_validity_and_revocation(now, &chain, vcek_der, crl_der)?;
 
     // TCB floor: the report is now chain- and signature-verified, so its TCB
     // views AND its CPUID family/model/stepping fields are trustworthy.
@@ -253,6 +264,160 @@ fn verify_report_with_vcek(
             u64::from(report.policy),
         ),
     })
+}
+
+/// Enforce validity windows across the whole AMD chain (ARK, ASK, VCEK) at
+/// verification time `now`, then the product CRL's verdict on it: the CRL
+/// must carry a valid ARK signature and a validity window containing `now`,
+/// and must not list the ASK or VCEK serial.
+fn check_chain_validity_and_revocation(
+    now: i64,
+    chain: &Chain,
+    vcek_der: &[u8],
+    crl_der: &[u8],
+) -> Result<(), AttestError> {
+    // A closure cannot name the borrow between its input and output, so
+    // this small parser is a fn.
+    fn parse<'a>(name: &'static str, der: &'a [u8]) -> Result<X509Certificate<'a>, AttestError> {
+        x509_parser::parse_x509_certificate(der)
+            .map(|(_, cert)| cert)
+            .map_err(|e| {
+                AttestError::CertParse(format!(
+                    "failed to parse {name} certificate for the validity check: {e}"
+                ))
+            })
+    }
+    let ark_der = chain.ca.ark.to_der().map_err(AttestError::CertDecode)?;
+    let ask_der = chain.ca.ask.to_der().map_err(AttestError::CertDecode)?;
+    let ark = parse("ARK", &ark_der)?;
+    let ask = parse("ASK", &ask_der)?;
+    let vcek = parse("VCEK", vcek_der)?;
+
+    check_cert_validity(now, "ARK", &ark)?;
+    check_cert_validity(now, "ASK", &ask)?;
+    check_cert_validity(now, "VCEK", &vcek)?;
+
+    // An unparseable CRL is treated like an unverifiable one: fail closed.
+    let (_, crl) =
+        x509_parser::parse_x509_crl(crl_der).map_err(|e| AttestError::CrlParse(e.to_string()))?;
+    verify_crl_signature(&crl, &ark)?;
+    check_crl_window(now, &crl)?;
+    // The ARK is deliberately not checked against the CRL: the ARK signs the
+    // CRL, so self-revocation could never fire against a real adversary (a
+    // compromised ARK just omits itself). Distrusting an ARK is the pinned
+    // SPKI hashes' job.
+    check_not_revoked(&crl, "ASK", &ask)?;
+    check_not_revoked(&crl, "VCEK", &vcek)?;
+    Ok(())
+}
+
+/// Verify the CRL's signature against the ARK public key.
+///
+/// AMD's KDS CRLs are issued and signed by the product ARK with
+/// RSASSA-PSS/SHA-384 (MGF1-SHA384, salt length 48), which is exactly
+/// ring's `RSA_PSS_2048_8192_SHA384` profile. The ARK handed in here has
+/// already passed the identity check and SPKI pin, so this anchors the CRL
+/// to the same pinned key as the chain itself.
+fn verify_crl_signature(
+    crl: &CertificateRevocationList<'_>,
+    ark: &X509Certificate<'_>,
+) -> Result<(), AttestError> {
+    // Name an algorithm rotation explicitly instead of letting it surface
+    // as a generic signature failure: a wrong-scheme CRL fails closed
+    // either way, but a clear error saves debugging time if AMD ever
+    // changes the CRL signing scheme.
+    const RSASSA_PSS_OID: &str = "1.2.840.113549.1.1.10";
+    let algorithm = crl.signature_algorithm.algorithm.to_id_string();
+    if algorithm != RSASSA_PSS_OID {
+        return Err(AttestError::CrlSignature(format!(
+            "unexpected CRL signature algorithm {algorithm} (expected RSASSA-PSS {RSASSA_PSS_OID})"
+        )));
+    }
+
+    // For an RSA key, the SPKI bit-string content is the PKCS#1
+    // RSAPublicKey DER, which is what ring expects.
+    let ark_public_key = &ark.tbs_certificate.subject_pki.subject_public_key.data;
+    ring::signature::UnparsedPublicKey::new(
+        &ring::signature::RSA_PSS_2048_8192_SHA384,
+        ark_public_key.as_ref(),
+    )
+    .verify(crl.tbs_cert_list.as_ref(), &crl.signature_value.data)
+    .map_err(|_| {
+        AttestError::CrlSignature(
+            "CRL signature does not verify under the pinned ARK public key".to_string(),
+        )
+    })
+}
+
+/// Reject a CRL whose own validity window does not contain `now`. A CRL past
+/// its next_update carries no information about revocations issued since, so
+/// it must not be treated as proof of non-revocation.
+fn check_crl_window(now: i64, crl: &CertificateRevocationList<'_>) -> Result<(), AttestError> {
+    let this_update = &crl.tbs_cert_list.this_update;
+    if now < this_update.timestamp() {
+        return Err(AttestError::CrlStale(format!(
+            "this_update {this_update} is after verification time {now}"
+        )));
+    }
+    match &crl.tbs_cert_list.next_update {
+        Some(next_update) if now <= next_update.timestamp() => Ok(()),
+        Some(next_update) => Err(AttestError::CrlStale(format!(
+            "next_update {next_update} is before verification time {now}"
+        ))),
+        None => Err(AttestError::CrlStale(
+            "CRL carries no next_update".to_string(),
+        )),
+    }
+}
+
+/// Reject a certificate whose serial number appears in the CRL.
+///
+/// Note on AMD's cert profile: KDS-issued VCEKs carry serial 0, so AMD
+/// cannot single out one VCEK here (per-chip remediation rides TCB bumps and
+/// the TCB floor instead); the practical bite of this check is ASK-level
+/// revocation, where serials are real. Checking the VCEK serial anyway is
+/// free and strictly fail-closed.
+fn check_not_revoked(
+    crl: &CertificateRevocationList<'_>,
+    name: &'static str,
+    cert: &X509Certificate<'_>,
+) -> Result<(), AttestError> {
+    for revoked in crl.iter_revoked_certificates() {
+        if revoked.raw_serial() == cert.raw_serial() {
+            return Err(AttestError::CertRevoked {
+                name,
+                serial: hex::encode(cert.raw_serial()),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Reject a certificate whose validity window does not contain `now`
+/// (seconds since the Unix epoch). `sev`'s chain verification checks
+/// signature math only; without this, an expired (retired) AMD key
+/// verifies forever.
+fn check_cert_validity(
+    now: i64,
+    name: &'static str,
+    cert: &X509Certificate<'_>,
+) -> Result<(), AttestError> {
+    let validity = cert.validity();
+    if now < validity.not_before.timestamp() {
+        return Err(AttestError::CertNotYetValid {
+            name,
+            not_before: validity.not_before.to_string(),
+            now,
+        });
+    }
+    if now > validity.not_after.timestamp() {
+        return Err(AttestError::CertExpired {
+            name,
+            not_after: validity.not_after.to_string(),
+            now,
+        });
+    }
+    Ok(())
 }
 
 /// Run both ARK checks (subject identity + SPKI pin) on a certificate,
@@ -393,6 +558,335 @@ mod tests {
         hex::decode(hex_str).expect("fixture is valid hex")
     }
 
+    /// Fixed verification time for chain tests: 2026-08-18, inside every
+    /// fixture validity window (VCEK 2023..2030, ARK/ASK through 2045+).
+    /// Injected so tests stay green regardless of the wall clock.
+    const TEST_NOW: i64 = 1787011200;
+
+    #[test]
+    fn rejects_a_chain_whose_certificates_have_expired() {
+        let report_bytes = milan_report_bytes();
+        let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
+
+        // 2200-01-01: every certificate in the fixture chain is long expired.
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            7258118400,
+            &TcbFloorPolicy::UNRESTRICTED,
+        )
+        .expect_err("an expired AMD chain must be rejected");
+        assert!(
+            matches!(err, AttestError::CertExpired { .. }),
+            "expected CertExpired, got: {err:?}"
+        );
+    }
+
+    /// The real Milan CRL captured from AMD KDS
+    /// (`https://kdsintf.amd.com/vcek/v1/Milan/crl`, fetched 2026-08-18:
+    /// CRL number 10, window 2026-07-28..2026-09-10, no revoked entries,
+    /// RSASSA-PSS/SHA-384 signed by ARK-Milan).
+    const TEST_MILAN_CRL_DER: &[u8] = include_bytes!("testdata/crl_milan.der");
+
+    fn parsed_milan_ark_der() -> Vec<u8> {
+        let (ark, _) = AmdProduct::Milan
+            .builtin_ca()
+            .expect("builtin CA should load");
+        ark.to_der().expect("ARK should encode to DER")
+    }
+
+    #[test]
+    fn rejects_a_stale_crl_end_to_end() {
+        let report_bytes = milan_report_bytes();
+        let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
+
+        // 2026-12-01: every chain cert is still valid, but the fixture CRL's
+        // next_update (2026-09-10) has passed, so its revocation verdict is
+        // no longer evidence.
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            1796083200,
+            &TcbFloorPolicy::UNRESTRICTED,
+        )
+        .expect_err("a stale CRL must fail verification closed");
+        assert!(
+            matches!(err, AttestError::CrlStale(_)),
+            "expected CrlStale, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_tampered_crl_end_to_end() {
+        let report_bytes = milan_report_bytes();
+        let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
+
+        let mut crl_der = TEST_MILAN_CRL_DER.to_vec();
+        let pos = crl_der
+            .windows(5)
+            .position(|w| w == b"Milan")
+            .expect("issuer string should be present in the fixture");
+        crl_der[pos] ^= 0x01;
+
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            &crl_der,
+            TEST_NOW,
+            &TcbFloorPolicy::UNRESTRICTED,
+        )
+        .expect_err("a tampered CRL must fail verification closed");
+        assert!(
+            matches!(err, AttestError::CrlSignature(_)),
+            "expected CrlSignature, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unparseable_crl_end_to_end() {
+        let report_bytes = milan_report_bytes();
+        let report = SnpReport::from_bytes(&report_bytes).expect("fixture report should parse");
+
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            b"not a crl",
+            TEST_NOW,
+            &TcbFloorPolicy::UNRESTRICTED,
+        )
+        .expect_err("an unparseable CRL must fail verification closed");
+        assert!(
+            matches!(err, AttestError::CrlParse(_)),
+            "expected CrlParse, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn crl_signature_verifies_against_the_builtin_milan_ark() {
+        let ark_der = parsed_milan_ark_der();
+        let (_, ark) = x509_parser::parse_x509_certificate(&ark_der).expect("ARK should parse");
+        let (_, crl) = x509_parser::parse_x509_crl(TEST_MILAN_CRL_DER).expect("CRL should parse");
+
+        verify_crl_signature(&crl, &ark)
+            .expect("the genuine AMD Milan CRL must verify under the builtin ARK");
+    }
+
+    #[test]
+    fn crl_signature_names_an_unexpected_algorithm() {
+        // The rcgen test CRL is ECDSA-signed; AMD KDS CRLs are RSASSA-PSS.
+        // The rejection must name the algorithm mismatch, not report a
+        // generic signature failure (that distinction is what saves
+        // debugging time if AMD ever rotates the CRL signing scheme).
+        let (_, crl_der) = test_ca_leaf_and_crl(&[0x01], &[]);
+        let (_, crl) = x509_parser::parse_x509_crl(&crl_der).expect("CRL should parse");
+        let ark_der = parsed_milan_ark_der();
+        let (_, ark) = x509_parser::parse_x509_certificate(&ark_der).expect("ARK should parse");
+
+        let err = verify_crl_signature(&crl, &ark)
+            .expect_err("a CRL signed under a different algorithm must be rejected");
+        match err {
+            AttestError::CrlSignature(msg) => {
+                assert!(
+                    msg.contains("algorithm"),
+                    "message should name the algorithm mismatch, got: {msg}"
+                )
+            }
+            other => panic!("expected CrlSignature, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crl_signature_rejects_tampered_tbs_bytes() {
+        // Flip one bit inside the issuer CN ("ARK-Milan"), which lives in the
+        // signed TBS portion: the CRL still parses (same DER structure, one
+        // changed string byte) but the ARK signature no longer covers it.
+        let mut der = TEST_MILAN_CRL_DER.to_vec();
+        let pos = der
+            .windows(5)
+            .position(|w| w == b"Milan")
+            .expect("issuer string should be present in the fixture");
+        der[pos] ^= 0x01;
+
+        let ark_der = parsed_milan_ark_der();
+        let (_, ark) = x509_parser::parse_x509_certificate(&ark_der).expect("ARK should parse");
+        let (_, crl) = x509_parser::parse_x509_crl(&der).expect("tampered CRL should still parse");
+
+        let err = verify_crl_signature(&crl, &ark).expect_err(
+            "a tampered CRL must be rejected: block-and-substitute must not beat block",
+        );
+        assert!(
+            matches!(err, AttestError::CrlSignature(_)),
+            "expected CrlSignature, got: {err:?}"
+        );
+    }
+
+    /// Build a test CA (with CRL-signing usage), a leaf cert carrying
+    /// `serial`, and a CRL from that CA revoking `revoked_serials`, valid
+    /// 2026-01-01 through 2026-12-31. Returns `(leaf_der, crl_der)`. Used to
+    /// probe the serial-matching and window logic; the CRL *signature* path
+    /// is probed separately against the real AMD fixture (this CA signs with
+    /// ECDSA, not AMD's RSASSA-PSS).
+    fn test_ca_leaf_and_crl(serial: &[u8], revoked_serials: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
+        use rcgen::{
+            BasicConstraints, CertificateRevocationListParams, IsCa, KeyIdMethod, KeyUsagePurpose,
+            RevokedCertParams, SerialNumber,
+        };
+
+        let ca_key = rcgen::KeyPair::generate().expect("CA key generation should succeed");
+        let mut ca_params =
+            rcgen::CertificateParams::new(vec![]).expect("CA params should be valid");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca = rcgen::Issuer::new(ca_params, ca_key);
+
+        let leaf_key = rcgen::KeyPair::generate().expect("leaf key generation should succeed");
+        let mut leaf_params =
+            rcgen::CertificateParams::new(vec![]).expect("leaf params should be valid");
+        leaf_params.serial_number = Some(SerialNumber::from(serial.to_vec()));
+        let leaf_der = leaf_params
+            .signed_by(&leaf_key, &ca)
+            .expect("leaf signing should succeed")
+            .der()
+            .to_vec();
+
+        let crl_params = CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2026, 1, 1),
+            next_update: rcgen::date_time_ymd(2026, 12, 31),
+            crl_number: SerialNumber::from(vec![1u8]),
+            issuing_distribution_point: None,
+            revoked_certs: revoked_serials
+                .iter()
+                .map(|s| RevokedCertParams {
+                    serial_number: SerialNumber::from(s.to_vec()),
+                    revocation_time: rcgen::date_time_ymd(2026, 1, 1),
+                    reason_code: None,
+                    invalidity_date: None,
+                })
+                .collect(),
+            key_identifier_method: KeyIdMethod::Sha256,
+        };
+        let crl_der = crl_params
+            .signed_by(&ca)
+            .expect("CRL signing should succeed")
+            .der()
+            .to_vec();
+        (leaf_der, crl_der)
+    }
+
+    #[test]
+    fn crl_rejects_a_revoked_serial() {
+        let (leaf_der, crl_der) = test_ca_leaf_and_crl(&[0xAB, 0xCD], &[&[0xAB, 0xCD]]);
+        let (_, leaf) = x509_parser::parse_x509_certificate(&leaf_der).expect("leaf should parse");
+        let (_, crl) = x509_parser::parse_x509_crl(&crl_der).expect("CRL should parse");
+
+        let err = check_not_revoked(&crl, "VCEK", &leaf)
+            .expect_err("a serial listed in the CRL must be rejected");
+        assert!(
+            matches!(err, AttestError::CertRevoked { name: "VCEK", .. }),
+            "expected CertRevoked, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn crl_accepts_an_unlisted_serial() {
+        let (leaf_der, crl_der) = test_ca_leaf_and_crl(&[0xAB, 0xCD], &[&[0x01, 0x02]]);
+        let (_, leaf) = x509_parser::parse_x509_certificate(&leaf_der).expect("leaf should parse");
+        let (_, crl) = x509_parser::parse_x509_crl(&crl_der).expect("CRL should parse");
+
+        check_not_revoked(&crl, "VCEK", &leaf)
+            .expect("a serial not listed in the CRL must be accepted");
+    }
+
+    #[test]
+    fn crl_window_accepts_a_time_inside() {
+        let (_, crl_der) = test_ca_leaf_and_crl(&[0x01], &[]);
+        let (_, crl) = x509_parser::parse_x509_crl(&crl_der).expect("CRL should parse");
+        // 2026-08-18, inside 2026-01-01..2026-12-31.
+        check_crl_window(1787011200, &crl).expect("a time inside the CRL window must be accepted");
+    }
+
+    #[test]
+    fn crl_window_rejects_a_time_past_next_update() {
+        let (_, crl_der) = test_ca_leaf_and_crl(&[0x01], &[]);
+        let (_, crl) = x509_parser::parse_x509_crl(&crl_der).expect("CRL should parse");
+        // 2035-01-01, past the 2026-12-31 next_update.
+        let err = check_crl_window(2051222400, &crl)
+            .expect_err("a stale CRL must be rejected: revocations after next_update are unknown");
+        assert!(
+            matches!(err, AttestError::CrlStale(_)),
+            "expected CrlStale, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn crl_window_rejects_a_time_before_this_update() {
+        let (_, crl_der) = test_ca_leaf_and_crl(&[0x01], &[]);
+        let (_, crl) = x509_parser::parse_x509_crl(&crl_der).expect("CRL should parse");
+        // 2025-12-01, before the 2026-01-01 this_update.
+        let err = check_crl_window(1764547200, &crl)
+            .expect_err("a CRL from the future must be rejected: the clock or CRL is wrong");
+        assert!(
+            matches!(err, AttestError::CrlStale(_)),
+            "expected CrlStale, got: {err:?}"
+        );
+    }
+
+    /// A self-signed cert valid 2023-01-01 through 2030-01-01, as DER, for
+    /// probing `check_cert_validity`'s window boundaries.
+    fn cert_valid_2023_to_2030() -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let mut params =
+            rcgen::CertificateParams::new(vec![]).expect("CertificateParams should be valid");
+        params.not_before = rcgen::date_time_ymd(2023, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2030, 1, 1);
+        params
+            .self_signed(&key)
+            .expect("self-signing should succeed")
+            .der()
+            .to_vec()
+    }
+
+    fn run_cert_validity(now: i64, der: &[u8]) -> Result<(), AttestError> {
+        let (_, cert) =
+            x509_parser::parse_x509_certificate(der).expect("cert should parse as X.509");
+        check_cert_validity(now, "VCEK", &cert)
+    }
+
+    #[test]
+    fn cert_validity_accepts_a_time_inside_the_window() {
+        // 2026-08-18, inside 2023..2030.
+        run_cert_validity(1787011200, &cert_valid_2023_to_2030())
+            .expect("a time inside the validity window must be accepted");
+    }
+
+    #[test]
+    fn cert_validity_rejects_a_time_before_not_before() {
+        // 2020-01-01, before the 2023 not_before.
+        let err = run_cert_validity(1577836800, &cert_valid_2023_to_2030())
+            .expect_err("a time before not_before must be rejected");
+        assert!(
+            matches!(err, AttestError::CertNotYetValid { name: "VCEK", .. }),
+            "expected CertNotYetValid, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn cert_validity_rejects_a_time_after_not_after() {
+        // 2035-01-01, after the 2030 not_after.
+        let err = run_cert_validity(2051222400, &cert_valid_2023_to_2030())
+            .expect_err("a time after not_after must be rejected");
+        assert!(
+            matches!(err, AttestError::CertExpired { name: "VCEK", .. }),
+            "expected CertExpired, got: {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn rejects_a_dto_declaring_a_non_sev_snp_tee_type() {
         let dto = AttestationReport {
@@ -526,6 +1020,8 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
         )
         .expect("verification of a genuine, untampered Milan report must succeed");
@@ -565,6 +1061,8 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
         );
         assert!(
@@ -655,6 +1153,8 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            TEST_NOW,
             &TcbFloorPolicy::UNRESTRICTED,
         )
         .expect("UNRESTRICTED floor accepts the genuine fixture");
@@ -676,6 +1176,8 @@ mod tests {
             &report,
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            TEST_NOW,
             &TcbFloorPolicy::uniform(floor),
         )
         .unwrap_err();
@@ -699,8 +1201,15 @@ mod tests {
                 microcode: u8::MAX,
             }),
         };
-        verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &policy)
-            .expect("default floor governs a non-Zen4c report");
+        verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            TEST_NOW,
+            &policy,
+        )
+        .expect("default floor governs a non-Zen4c report");
 
         // ...and an impossible default floor must reject it.
         let policy = TcbFloorPolicy {
@@ -714,8 +1223,15 @@ mod tests {
             x_variant: None,
             zen4c: Some(TcbFloor::UNRESTRICTED),
         };
-        let err = verify_report_with_vcek(&report, AmdProduct::Milan, TEST_MILAN_VCEK_DER, &policy)
-            .unwrap_err();
+        let err = verify_report_with_vcek(
+            &report,
+            AmdProduct::Milan,
+            TEST_MILAN_VCEK_DER,
+            TEST_MILAN_CRL_DER,
+            TEST_NOW,
+            &policy,
+        )
+        .unwrap_err();
         assert!(matches!(err, AttestError::TcbBelowFloor(_)), "got {err:?}");
     }
 

@@ -388,6 +388,7 @@ dependencies = [
  "reqwest",
  "reqwest-middleware",
  "reqwest-retry",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
