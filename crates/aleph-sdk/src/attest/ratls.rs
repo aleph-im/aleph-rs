@@ -19,8 +19,13 @@
 //! - the raw report bytes (`data`) don't parse as a SEV-SNP report,
 //! - the key-binding check fails
 //!   (`report_data != SHA-384(DOMAIN_KEY || pubkey) || zeros`),
-//! - an `expected_measurement` was given and doesn't match,
-//! - an `expected_policy` was given and the signed guest policy doesn't match.
+//! - a [`MeasurementPin::Exact`] was given and doesn't match,
+//! - a [`PolicyPin::Exact`] was given and the signed guest policy doesn't
+//!   match.
+//!
+//! There is no implicit "don't check": callers that cannot pin ahead of the
+//! handshake must pass the explicit `CallerVerified` variants and then check
+//! the returned values themselves.
 //!
 //! Crucially, the key-binding and measurement checks are made against the
 //! fields parsed out of the AMD-signed report bytes (`data`). The DTO carries
@@ -97,6 +102,57 @@ fn verify_fresh_binding(
         return Err(AttestError::FreshnessBinding);
     }
     Ok(())
+}
+
+/// Handshake-time launch-measurement expectation for an attested request.
+///
+/// There is deliberately no silent "don't check" (the G3 audit residue: a
+/// plain `Option` let callers skip the pin by accident). A caller that
+/// cannot know the exact measurement before the handshake (fleet flows
+/// where the guest's model is only learned from the response) must opt out
+/// explicitly with [`MeasurementPin::CallerVerified`], and then MUST check
+/// the returned [`AttestedResponse::measurement`] against its own
+/// allow-list: with this variant nothing else will.
+#[derive(Debug, Clone, Copy)]
+pub enum MeasurementPin<'a> {
+    /// Reject the handshake unless the report's launch measurement equals
+    /// exactly these bytes (48 for SEV-SNP).
+    Exact(&'a [u8]),
+    /// Skip the handshake-time measurement check; the caller takes over the
+    /// obligation to validate the measurement returned by the call.
+    CallerVerified,
+}
+
+impl<'a> MeasurementPin<'a> {
+    fn as_option(self) -> Option<&'a [u8]> {
+        match self {
+            MeasurementPin::Exact(bytes) => Some(bytes),
+            MeasurementPin::CallerVerified => None,
+        }
+    }
+}
+
+/// Handshake-time guest-policy expectation for an attested request. Same
+/// contract as [`MeasurementPin`]: opting out is explicit, and
+/// [`PolicyPin::CallerVerified`] transfers the check to the caller against
+/// [`AttestedResponse::policy`].
+#[derive(Debug, Clone, Copy)]
+pub enum PolicyPin {
+    /// Reject the handshake unless the report's SEV-SNP guest policy equals
+    /// exactly this value.
+    Exact(u64),
+    /// Skip the handshake-time policy check; the caller takes over the
+    /// obligation to validate the policy returned by the call.
+    CallerVerified,
+}
+
+impl PolicyPin {
+    fn as_option(self) -> Option<u64> {
+        match self {
+            PolicyPin::Exact(policy) => Some(policy),
+            PolicyPin::CallerVerified => None,
+        }
+    }
 }
 
 /// The result of an attested HTTP request: the HTTP response plus the
@@ -412,9 +468,9 @@ fn build_attested_client(verifier: Arc<SnpCertVerifier>) -> Result<reqwest::Clie
 
 /// Make an HTTP request over a TLS channel whose server certificate is
 /// verified, during the handshake, to carry a SEV-SNP attestation report
-/// bound to that certificate's key (and, optionally, pinned to
-/// `expected_measurement`). After the handshake, the report is further
-/// checked against AMD's certificate chain via [`verify_sev_snp_report`].
+/// bound to that certificate's key and gated on the `measurement` and
+/// `policy` pins. After the handshake, the report is further checked
+/// against AMD's certificate chain via [`verify_sev_snp_report`].
 ///
 /// The URL requested is `base_url` joined with `path` (so `path` may be
 /// absolute, e.g. `"/status"`, replacing `base_url`'s path component per
@@ -430,14 +486,17 @@ pub async fn attested_request(
     path: &str,
     headers: &[(String, String)],
     body: Option<bytes::Bytes>,
-    expected_measurement: Option<&[u8]>,
-    expected_policy: Option<u64>,
+    measurement: MeasurementPin<'_>,
+    policy: PolicyPin,
     product: AmdProduct,
     min_tcb: &TcbFloorPolicy,
 ) -> Result<AttestedResponse, AttestError> {
     let url = base_url.join(path)?;
 
-    let verifier = SnpCertVerifier::new(expected_measurement.map(<[u8]>::to_vec), expected_policy);
+    let verifier = SnpCertVerifier::new(
+        measurement.as_option().map(<[u8]>::to_vec),
+        policy.as_option(),
+    );
     let client = build_attested_client(verifier.clone())?;
 
     let mut request = client.request(method, url);
@@ -544,30 +603,22 @@ fn check_fresh_pins(
 /// before this call. See the G4a design doc for the security argument.
 pub async fn fresh_attestation(
     base_url: &url::Url,
-    expected_measurement: Option<&[u8]>,
-    expected_policy: Option<u64>,
+    measurement: MeasurementPin<'_>,
+    policy: PolicyPin,
     product: AmdProduct,
     min_tcb: &TcbFloorPolicy,
 ) -> Result<FreshAttestation, AttestError> {
     use rand::RngCore;
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
-    fresh_attestation_with_nonce(
-        base_url,
-        &nonce,
-        expected_measurement,
-        expected_policy,
-        product,
-        min_tcb,
-    )
-    .await
+    fresh_attestation_with_nonce(base_url, &nonce, measurement, policy, product, min_tcb).await
 }
 
 async fn fresh_attestation_with_nonce(
     base_url: &url::Url,
     nonce: &[u8],
-    expected_measurement: Option<&[u8]>,
-    expected_policy: Option<u64>,
+    measurement: MeasurementPin<'_>,
+    policy: PolicyPin,
     product: AmdProduct,
     min_tcb: &TcbFloorPolicy,
 ) -> Result<FreshAttestation, AttestError> {
@@ -580,8 +631,8 @@ async fn fresh_attestation_with_nonce(
         &path,
         &[],
         None,
-        expected_measurement,
-        expected_policy,
+        measurement,
+        policy,
         product,
         min_tcb,
     )
@@ -598,7 +649,7 @@ async fn fresh_attestation_with_nonce(
     // Full verification of the FRESH report: AMD chain, signature, VMPL,
     // TCB floor. Then the pins, then the freshness binding.
     let result = verify_sev_snp_report(&dto, product, min_tcb).await?;
-    check_fresh_pins(&result, expected_measurement, expected_policy)?;
+    check_fresh_pins(&result, measurement.as_option(), policy.as_option())?;
     verify_fresh_binding(&dto.data, &response.served_public_key, nonce)?;
 
     Ok(FreshAttestation {
@@ -618,6 +669,21 @@ mod tests {
     use super::*;
     use crate::attest::TeeType;
     use crate::attest::x509::{ATTESTATION_OID, encode_attestation_extension};
+
+    #[test]
+    fn measurement_pin_exact_carries_the_bytes() {
+        assert_eq!(
+            MeasurementPin::Exact(&[0xAA, 0xBB]).as_option(),
+            Some([0xAA, 0xBB].as_slice())
+        );
+        assert_eq!(MeasurementPin::CallerVerified.as_option(), None);
+    }
+
+    #[test]
+    fn policy_pin_exact_carries_the_value() {
+        assert_eq!(PolicyPin::Exact(0x3_0000).as_option(), Some(0x3_0000));
+        assert_eq!(PolicyPin::CallerVerified.as_option(), None);
+    }
 
     /// A genuine Milan report fixture (the same one `verify.rs` uses), whose
     /// framing/version/chip_id are all well-formed so that `to_bytes()` /
