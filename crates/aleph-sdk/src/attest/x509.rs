@@ -65,6 +65,45 @@ pub enum AttestError {
     /// Service failed.
     #[error("failed to fetch VCEK certificate from AMD KDS: {0}")]
     Kds(String),
+    /// An AMD chain certificate's validity window starts in the future
+    /// relative to the verification time.
+    #[error(
+        "{name} certificate is not yet valid: not_before {not_before}, verification time {now}"
+    )]
+    CertNotYetValid {
+        name: &'static str,
+        not_before: String,
+        now: i64,
+    },
+    /// An AMD chain certificate's validity window ended before the
+    /// verification time. Expiry is the PKI's dead-man switch: it is what
+    /// eventually stops trusting a retired AMD key even for verifiers that
+    /// never see a revocation.
+    #[error("{name} certificate has expired: not_after {not_after}, verification time {now}")]
+    CertExpired {
+        name: &'static str,
+        not_after: String,
+        now: i64,
+    },
+    /// The AMD CRL's signature does not verify under the pinned ARK public
+    /// key. A tampered or substituted CRL fails closed exactly like a
+    /// missing one: block-and-substitute must not be easier than blocking.
+    #[error("AMD CRL signature verification failed: {0}")]
+    CrlSignature(String),
+    /// The AMD CRL bytes do not parse as a CRL at all. An unparseable CRL
+    /// is as unverifiable as a missing one, so verification fails closed.
+    #[error("AMD CRL failed to parse: {0}")]
+    CrlParse(String),
+    /// The AMD CRL's own validity window does not contain the verification
+    /// time. A CRL past its next_update is not evidence of anything:
+    /// revocations issued since are unknown, so verification fails closed
+    /// rather than treating "no known revocation" as "not revoked".
+    #[error("AMD CRL is stale or not yet valid: {0}")]
+    CrlStale(String),
+    /// An AMD chain certificate's serial number appears in the product CRL:
+    /// AMD has revoked it, so nothing it signed can be trusted.
+    #[error("{name} certificate (serial {serial}) is revoked by the AMD CRL")]
+    CertRevoked { name: &'static str, serial: String },
     /// The RA-TLS handshake's server certificate verification failed: no
     /// attestation extension, a key-binding mismatch (`report_data` doesn't
     /// hash the TLS public key), or a measurement pin mismatch.
