@@ -302,6 +302,10 @@ fn check_chain_validity_and_revocation(
         .map_err(|e| AttestError::CrlSignature(format!("failed to parse AMD CRL: {e}")))?;
     verify_crl_signature(&crl, &ark)?;
     check_crl_window(now, &crl)?;
+    // The ARK is deliberately not checked against the CRL: the ARK signs the
+    // CRL, so self-revocation could never fire against a real adversary (a
+    // compromised ARK just omits itself). Distrusting an ARK is the pinned
+    // SPKI hashes' job.
     check_not_revoked(&crl, "ASK", &ask)?;
     check_not_revoked(&crl, "VCEK", &vcek)?;
     Ok(())
@@ -370,7 +374,7 @@ fn check_crl_window(now: i64, crl: &CertificateRevocationList<'_>) -> Result<(),
 ///
 /// Note on AMD's cert profile: KDS-issued VCEKs carry serial 0, so AMD
 /// cannot single out one VCEK here (per-chip remediation rides TCB bumps and
-/// the TCB floor instead); the practical bite of this check is ASK/ARK-level
+/// the TCB floor instead); the practical bite of this check is ASK-level
 /// revocation, where serials are real. Checking the VCEK serial anyway is
 /// free and strictly fail-closed.
 fn check_not_revoked(
@@ -606,7 +610,7 @@ mod tests {
             AmdProduct::Milan,
             TEST_MILAN_VCEK_DER,
             TEST_MILAN_CRL_DER,
-            1764547200,
+            1796083200,
             &TcbFloorPolicy::UNRESTRICTED,
         )
         .expect_err("a stale CRL must fail verification closed");
@@ -794,6 +798,19 @@ mod tests {
         // 2035-01-01, past the 2026-12-31 next_update.
         let err = check_crl_window(2051222400, &crl)
             .expect_err("a stale CRL must be rejected: revocations after next_update are unknown");
+        assert!(
+            matches!(err, AttestError::CrlStale(_)),
+            "expected CrlStale, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn crl_window_rejects_a_time_before_this_update() {
+        let (_, crl_der) = test_ca_leaf_and_crl(&[0x01], &[]);
+        let (_, crl) = x509_parser::parse_x509_crl(&crl_der).expect("CRL should parse");
+        // 2025-12-01, before the 2026-01-01 this_update.
+        let err = check_crl_window(1764547200, &crl)
+            .expect_err("a CRL from the future must be rejected: the clock or CRL is wrong");
         assert!(
             matches!(err, AttestError::CrlStale(_)),
             "expected CrlStale, got: {err:?}"

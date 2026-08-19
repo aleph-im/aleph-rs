@@ -193,6 +193,12 @@ mod tests {
     #[test]
     fn crl_is_stale_past_next_update() {
         // 2026-12-01, past the 2026-09-10 next_update.
+        assert!(!crl_is_fresh(TEST_MILAN_CRL_DER, 1796083200));
+    }
+
+    #[test]
+    fn crl_is_not_fresh_before_this_update() {
+        // 2025-12-01, before the 2026-07-28 this_update.
         assert!(!crl_is_fresh(TEST_MILAN_CRL_DER, 1764547200));
     }
 
