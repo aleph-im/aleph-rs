@@ -47,7 +47,7 @@ use sha2::{Digest, Sha384};
 use subtle::ConstantTimeEq;
 
 use super::tcb::TcbFloorPolicy;
-use super::verify::{AmdProduct, verify_sev_snp_report};
+use super::verify::{AmdProduct, VerificationResult, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
 use super::{AttestationReport, TeeType};
 
@@ -61,6 +61,43 @@ use super::{AttestationReport, TeeType};
 /// `report_data` collides with a key-bound one; verifying without the domain
 /// rejected every real guest (aleph-testnets#35 run 31433603211).
 const KEY_BINDING_DOMAIN: &[u8] = b"aleph-attest-tls-key-v1\x00";
+
+/// Domain tag the guest agent mixes into the fresh/nonce-binding hash:
+/// `report_data = SHA-384(FRESH_DOMAIN || served_public_key || nonce) || zeros`.
+///
+/// Mirrors `aleph_tee::report_data::DOMAIN_FRESH` (aleph-vm
+/// `rust/crates/aleph-tee`) byte-for-byte, trailing `0x00` separator
+/// included. The distinct domain keeps fresh reports from ever colliding
+/// with key-bound ones.
+const FRESH_DOMAIN: &[u8] = b"aleph-attest-fresh-v1\x00";
+
+/// The canonical 64-byte fresh report_data for `(served key, nonce)`:
+/// `SHA-384(FRESH_DOMAIN || public_key_raw || nonce)` then zero padding.
+fn fresh_bound_report_data(public_key_raw: &[u8], nonce: &[u8]) -> [u8; 64] {
+    let mut hasher = Sha384::new();
+    hasher.update(FRESH_DOMAIN);
+    hasher.update(public_key_raw);
+    hasher.update(nonce);
+    let mut report_data = [0u8; 64];
+    report_data[..48].copy_from_slice(&hasher.finalize());
+    report_data
+}
+
+/// Verify that a fresh report's SIGNED report_data binds BOTH the served
+/// TLS public key and the caller's nonce. Constant-time compare, matching
+/// the key-binding check.
+fn verify_fresh_binding(
+    report_bytes: &[u8],
+    served_public_key: &[u8],
+    nonce: &[u8],
+) -> Result<(), AttestError> {
+    let signed = SnpReport::from_bytes(report_bytes).map_err(AttestError::Parse)?;
+    let expected = fresh_bound_report_data(served_public_key, nonce);
+    if signed.report_data.ct_eq(&expected).unwrap_u8() == 0 {
+        return Err(AttestError::FreshnessBinding);
+    }
+    Ok(())
+}
 
 /// The result of an attested HTTP request: the HTTP response plus the
 /// verified launch measurement the connection was gated on.
@@ -84,6 +121,9 @@ pub struct AttestedResponse {
     pub cpuid_family: Option<u8>,
     pub cpuid_model: Option<u8>,
     pub cpuid_stepping: Option<u8>,
+    /// Raw subjectPublicKey bytes of the attested TLS certificate the
+    /// handshake verified (the same bytes the agent binds reports to).
+    pub served_public_key: Vec<u8>,
     /// The HTTP status code of the response.
     pub status: u16,
     /// The HTTP response headers, in wire order (a header repeated multiple
@@ -91,6 +131,30 @@ pub struct AttestedResponse {
     pub headers: Vec<(String, String)>,
     /// The raw HTTP response body.
     pub body: bytes::Bytes,
+}
+
+/// The result of a verified fresh-nonce challenge.
+///
+/// Constructing this type implies every check passed (same convention as
+/// [`AttestedResponse`]: no validity flag).
+#[derive(Debug, Clone)]
+pub struct FreshAttestation {
+    /// Hex-encoded launch measurement from the verified fresh report.
+    pub measurement: String,
+    /// SEV-SNP guest policy from the verified fresh report.
+    pub policy: u64,
+    /// TCB the VM was launched under (Option A gates on this).
+    pub launch_tcb: sev::firmware::host::TcbVersion,
+    /// TCB the VCEK is keyed to (from the signed fresh report).
+    pub reported_tcb: sev::firmware::host::TcbVersion,
+    /// CPUID family/model/stepping of the attesting chip, from the signed
+    /// fresh report (version 3+; `None` on older reports).
+    pub cpuid_family: Option<u8>,
+    pub cpuid_model: Option<u8>,
+    pub cpuid_stepping: Option<u8>,
+    /// Key of the RA-TLS exchange that answered the challenge, bound into
+    /// the fresh report's report_data alongside the nonce.
+    pub served_public_key: Vec<u8>,
 }
 
 /// A `rustls` [`ServerCertVerifier`] that extracts a SEV-SNP attestation
@@ -111,6 +175,10 @@ struct SnpCertVerifier {
     /// attestation failure (a measurement mismatch looks identical to a
     /// connection refusal otherwise).
     last_rejection: Mutex<Option<String>>,
+    /// Raw subjectPublicKey bytes of the last cert this verifier accepted.
+    /// The fresh-attestation flow needs them to reconstruct the channel-bound
+    /// fresh report_data.
+    served_public_key: Mutex<Option<Vec<u8>>>,
     expected_measurement: Option<Vec<u8>>,
     expected_policy: Option<u64>,
     provider: Arc<CryptoProvider>,
@@ -131,6 +199,7 @@ impl SnpCertVerifier {
         Arc::new(Self {
             extracted_report: Mutex::new(None),
             last_rejection: Mutex::new(None),
+            served_public_key: Mutex::new(None),
             expected_measurement,
             expected_policy,
             provider: Arc::new(rustls::crypto::ring::default_provider()),
@@ -145,6 +214,11 @@ impl SnpCertVerifier {
     /// Why the last handshake was rejected, if this verifier rejected one.
     fn get_rejection(&self) -> Option<String> {
         self.last_rejection.lock().unwrap().clone()
+    }
+
+    /// The served public key stashed by a completed, successful handshake.
+    fn get_served_public_key(&self) -> Option<Vec<u8>> {
+        self.served_public_key.lock().unwrap().clone()
     }
 
     /// The attestation checks behind [`ServerCertVerifier::verify_server_cert`],
@@ -204,7 +278,7 @@ impl SnpCertVerifier {
 
         let mut hasher = Sha384::new();
         hasher.update(KEY_BINDING_DOMAIN);
-        hasher.update(public_key_bytes);
+        hasher.update(&public_key_bytes[..]);
         let hash = hasher.finalize();
         let mut expected_report_data = [0u8; 64];
         expected_report_data[..48].copy_from_slice(&hash);
@@ -251,6 +325,7 @@ impl SnpCertVerifier {
         }
 
         *self.extracted_report.lock().unwrap() = Some(report);
+        *self.served_public_key.lock().unwrap() = Some(public_key_bytes.to_vec());
         Ok(ServerCertVerified::assertion())
     }
 }
@@ -394,6 +469,9 @@ pub async fn attested_request(
     // stashes a report (it errors the handshake otherwise), but check again
     // rather than trust that invariant silently.
     let report = verifier.get_report().ok_or(AttestError::MissingReport)?;
+    let served_public_key = verifier
+        .get_served_public_key()
+        .ok_or(AttestError::MissingReport)?;
 
     // Propagate on failure rather than degrading to a partial response: an
     // unverifiable report must never look like a successful response.
@@ -420,9 +498,118 @@ pub async fn attested_request(
         cpuid_family: result.cpuid_family,
         cpuid_model: result.cpuid_model,
         cpuid_stepping: result.cpuid_stepping,
+        served_public_key,
         status,
         headers: response_headers,
         body,
+    })
+}
+
+/// Re-run the measurement and policy pins against a VERIFIED fresh report.
+/// These normally run during the TLS handshake against the cert report;
+/// the fresh report arrives in a response body, so they must be re-applied
+/// to its signed fields explicitly.
+fn check_fresh_pins(
+    result: &VerificationResult,
+    expected_measurement: Option<&[u8]>,
+    expected_policy: Option<u64>,
+) -> Result<(), AttestError> {
+    if let Some(expected) = expected_measurement {
+        let expected_hex = hex::encode(expected);
+        if result.measurement != expected_hex {
+            return Err(AttestError::FreshMeasurementMismatch {
+                expected: expected_hex,
+                got: result.measurement.clone(),
+            });
+        }
+    }
+    if let Some(expected) = expected_policy
+        && result.policy != expected
+    {
+        return Err(AttestError::FreshPolicyMismatch {
+            expected,
+            got: result.policy,
+        });
+    }
+    Ok(())
+}
+
+/// Challenge the guest agent's fresh-attestation endpoint and verify the
+/// answer end to end.
+///
+/// Proves liveness: the returned report must be AMD-signed (chain + TCB
+/// floor via `verify_sev_snp_report`), satisfy the same measurement and
+/// policy pins as the certificate report, and bind BOTH the served TLS key
+/// of this exchange AND a nonce generated here, so it cannot have existed
+/// before this call. See the G4a design doc for the security argument.
+pub async fn fresh_attestation(
+    base_url: &url::Url,
+    expected_measurement: Option<&[u8]>,
+    expected_policy: Option<u64>,
+    product: AmdProduct,
+    min_tcb: &TcbFloorPolicy,
+) -> Result<FreshAttestation, AttestError> {
+    use rand::RngCore;
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    fresh_attestation_with_nonce(
+        base_url,
+        &nonce,
+        expected_measurement,
+        expected_policy,
+        product,
+        min_tcb,
+    )
+    .await
+}
+
+async fn fresh_attestation_with_nonce(
+    base_url: &url::Url,
+    nonce: &[u8],
+    expected_measurement: Option<&[u8]>,
+    expected_policy: Option<u64>,
+    product: AmdProduct,
+    min_tcb: &TcbFloorPolicy,
+) -> Result<FreshAttestation, AttestError> {
+    // The challenge request itself runs over an attested channel, with the
+    // same pins enforced on the CERT report during its handshake.
+    let path = format!("/.well-known/attestation?nonce={}", hex::encode(nonce));
+    let response = attested_request(
+        base_url,
+        reqwest::Method::GET,
+        &path,
+        &[],
+        None,
+        expected_measurement,
+        expected_policy,
+        product,
+        min_tcb,
+    )
+    .await?;
+    if response.status != 200 {
+        return Err(AttestError::FreshEndpoint(response.status));
+    }
+
+    let dto: AttestationReport = serde_json::from_slice(&response.body)?;
+    if dto.tee_type != TeeType::SevSnp {
+        return Err(AttestError::UnsupportedTeeType(dto.tee_type));
+    }
+
+    // Full verification of the FRESH report: AMD chain, signature, VMPL,
+    // TCB floor. Then the pins, then the freshness binding.
+    let result = verify_sev_snp_report(&dto, product, min_tcb).await?;
+    check_fresh_pins(&result, expected_measurement, expected_policy)?;
+    verify_fresh_binding(&dto.data, &response.served_public_key, nonce)?;
+
+    Ok(FreshAttestation {
+        measurement: result.measurement,
+        policy: result.policy,
+        launch_tcb: result.launch_tcb,
+        reported_tcb: result.reported_tcb,
+        cpuid_family: result.cpuid_family,
+        cpuid_model: result.cpuid_model,
+        cpuid_stepping: result.cpuid_stepping,
+        served_public_key: response.served_public_key,
     })
 }
 
@@ -865,5 +1052,121 @@ mod tests {
             .get_rejection()
             .expect("rejection must be recorded");
         assert!(rejection.contains("attestation extension"), "{rejection}");
+    }
+
+    #[test]
+    fn a_successful_handshake_stashes_the_served_public_key() {
+        let key_pair = rcgen::KeyPair::generate().expect("key generation should succeed");
+        let probe_der = self_signed_der(&key_pair, None);
+        let hash = subject_pubkey_sha384(&probe_der);
+        let report = AttestationReport {
+            tee_type: TeeType::SevSnp,
+            data: signed_report_bytes(key_bound_report_data(hash), [0xAB; 48]),
+        };
+        let ext = encode_attestation_extension(&report).unwrap();
+        let der = self_signed_der(&key_pair, Some((ATTESTATION_OID, ext)));
+
+        let verifier = SnpCertVerifier::new(None, None);
+        verifier
+            .verify_server_cert(
+                &CertificateDer::from(der.clone()),
+                &[],
+                &dummy_server_name(),
+                &[],
+                UnixTime::now(),
+            )
+            .expect("the valid cert must be accepted");
+
+        let (_, cert) = x509_parser::parse_x509_certificate(&der).unwrap();
+        assert_eq!(
+            verifier
+                .get_served_public_key()
+                .expect("key must be stashed"),
+            cert.tbs_certificate
+                .subject_pki
+                .subject_public_key
+                .data
+                .to_vec(),
+        );
+    }
+
+    /// The canonical fresh report_data for `(key, nonce)`, computed the same
+    /// way the emitter does, used to synthesize valid fresh reports.
+    #[test]
+    fn accepts_a_correctly_bound_fresh_report() {
+        let key = b"served-public-key".to_vec();
+        let nonce = [0x42u8; 32];
+        let rd = fresh_bound_report_data(&key, &nonce);
+        let bytes = signed_report_bytes(rd, [0xAB; 48]);
+        verify_fresh_binding(&bytes, &key, &nonce).expect("correct binding must verify");
+    }
+
+    #[test]
+    fn rejects_a_fresh_report_with_the_wrong_nonce() {
+        let key = b"served-public-key".to_vec();
+        let rd = fresh_bound_report_data(&key, &[0x42u8; 32]);
+        let bytes = signed_report_bytes(rd, [0xAB; 48]);
+        let err = verify_fresh_binding(&bytes, &key, &[0x43u8; 32]).unwrap_err();
+        assert!(matches!(err, AttestError::FreshnessBinding));
+    }
+
+    #[test]
+    fn rejects_a_fresh_report_bound_to_a_different_key() {
+        let nonce = [0x42u8; 32];
+        let rd = fresh_bound_report_data(b"key-A", &nonce);
+        let bytes = signed_report_bytes(rd, [0xAB; 48]);
+        let err = verify_fresh_binding(&bytes, b"key-B", &nonce).unwrap_err();
+        assert!(matches!(err, AttestError::FreshnessBinding));
+    }
+
+    /// Domain separation regression: a KEY-BOUND report must never satisfy a
+    /// fresh challenge, even when the attacker picks the nonce so the hashed
+    /// payloads would otherwise collide (the aleph-cvm confusion attack).
+    #[test]
+    fn rejects_a_key_bound_report_presented_as_fresh() {
+        let key = b"served-public-key".to_vec();
+        // A genuine key-bound report for this key (KEY_BINDING_DOMAIN scheme).
+        let mut hasher = Sha384::new();
+        hasher.update(KEY_BINDING_DOMAIN);
+        hasher.update(&key);
+        let bytes =
+            signed_report_bytes(key_bound_report_data(hasher.finalize().into()), [0xAB; 48]);
+        // No nonce can make it pass the fresh check, including an empty one.
+        let err = verify_fresh_binding(&bytes, &key, &[]).unwrap_err();
+        assert!(matches!(err, AttestError::FreshnessBinding));
+    }
+
+    fn dummy_verification(measurement_hex: &str, policy: u64) -> VerificationResult {
+        VerificationResult {
+            measurement: measurement_hex.to_string(),
+            policy,
+            launch_tcb: Default::default(),
+            reported_tcb: Default::default(),
+            cpuid_family: None,
+            cpuid_model: None,
+            cpuid_stepping: None,
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn fresh_pins_accept_matching_measurement_and_policy() {
+        let v = dummy_verification(&"ab".repeat(48), 0x30000);
+        check_fresh_pins(&v, Some(&[0xAB; 48]), Some(0x30000)).expect("matching pins must pass");
+        check_fresh_pins(&v, None, None).expect("absent pins must pass");
+    }
+
+    #[test]
+    fn fresh_pins_reject_a_measurement_mismatch() {
+        let v = dummy_verification(&"ab".repeat(48), 0x30000);
+        let err = check_fresh_pins(&v, Some(&[0xCD; 48]), None).unwrap_err();
+        assert!(matches!(err, AttestError::FreshMeasurementMismatch { .. }));
+    }
+
+    #[test]
+    fn fresh_pins_reject_a_policy_mismatch() {
+        let v = dummy_verification(&"ab".repeat(48), 0x30000);
+        let err = check_fresh_pins(&v, None, Some(0xa0000)).unwrap_err();
+        assert!(matches!(err, AttestError::FreshPolicyMismatch { .. }));
     }
 }
