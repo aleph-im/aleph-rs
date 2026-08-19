@@ -20,7 +20,10 @@ pub mod tcb;
 pub mod verify;
 pub mod x509;
 
-pub use ratls::{AttestedResponse, FreshAttestation, attested_request, fresh_attestation};
+pub use ratls::{
+    AttestedResponse, FreshAttestation, MeasurementPin, PolicyPin, attested_request,
+    fresh_attestation,
+};
 pub use tcb::{
     Component, Deficiency, TcbFloor, TcbFloorOverride, TcbFloorPolicy, builtin_baseline,
     builtin_baseline_policy,
