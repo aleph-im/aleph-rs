@@ -3110,6 +3110,15 @@ pub enum VProgramCommand {
     /// dm-verity hashes, uploads the artifacts, computes the SEV-SNP launch
     /// measurements from the runtime bundle, and publishes the V-PROGRAM
     /// message. Payment is always credit; the network scheduler starts the VM.
+    ///
+    /// Instead of a prebuilt image, --compose builds the workload from a
+    /// Docker Compose file (the aleph.compose/1 subset: image, command,
+    /// entrypoint, environment, depends_on, tmpfs; every service must set
+    /// network_mode: host). Images are pulled and digest-pinned by default;
+    /// pass --image-archive IMAGE=PATH (repeatable) to supply a prebuilt
+    /// archive instead of pulling. The guest exposes a single attested
+    /// endpoint that proxies to 127.0.0.1:8080, so the runtime manifest must
+    /// declare workload.contract: "aleph.compose/1".
     Create(Box<VProgramCreateArgs>),
     /// Show a published V-PROGRAM message plus its CRN's live status.
     ///
@@ -3139,9 +3148,26 @@ pub enum VProgramCommand {
 #[cfg(feature = "vprogram")]
 #[derive(Debug, Args)]
 pub struct VProgramCreateArgs {
-    /// Path to the prebuilt workload ext4 image.
-    #[arg(long)]
-    pub workload: PathBuf,
+    /// Path to the prebuilt workload ext4 image. Exactly one of --workload
+    /// and --compose is required.
+    #[arg(long, required_unless_present = "compose", conflicts_with = "compose")]
+    pub workload: Option<PathBuf>,
+
+    /// Build the workload from a Docker Compose file (aleph.compose/1 subset:
+    /// image/command/entrypoint/environment/depends_on/tmpfs, every service
+    /// with network_mode host; environment values are public and measured).
+    /// Images are pulled and digest-pinned unless supplied via --image-archive.
+    #[arg(long, value_name = "COMPOSE_FILE")]
+    pub compose: Option<PathBuf>,
+
+    /// Use a local image archive instead of pulling: IMAGE=PATH, where IMAGE
+    /// matches the compose file's `image:` value exactly. Repeatable.
+    #[arg(
+        long = "image-archive",
+        value_name = "IMAGE=PATH",
+        requires = "compose"
+    )]
+    pub image_archives: Vec<String>,
 
     /// Item hash of the runtime manifest store message.
     #[arg(long)]
@@ -4486,6 +4512,64 @@ mod vprogram_create_args_tests {
             panic!("wrong variant");
         };
         assert_eq!(args.item_hash.to_string(), hash);
+    }
+
+    #[test]
+    fn compose_and_workload_are_mutually_exclusive() {
+        match Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--workload",
+            "/tmp/w.ext4",
+            "--compose",
+            "/tmp/compose.yml",
+            "--runtime",
+            &"cafe".repeat(16),
+        ]) {
+            Ok(_) => panic!("expected conflict error"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict),
+        }
+    }
+
+    #[test]
+    fn one_of_compose_or_workload_is_required() {
+        match Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--runtime",
+            &"cafe".repeat(16),
+        ]) {
+            Ok(_) => panic!("expected missing-required-argument error"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument),
+        }
+    }
+
+    #[test]
+    fn compose_accepts_repeated_image_archives() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "--compose",
+            "f.yml",
+            "--image-archive",
+            "svc=./a.tar",
+            "--image-archive",
+            "db=./b.tar",
+            "--runtime",
+            &"cafe".repeat(16),
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.compose, Some(PathBuf::from("f.yml")));
+        assert_eq!(args.image_archives.len(), 2);
     }
 }
 

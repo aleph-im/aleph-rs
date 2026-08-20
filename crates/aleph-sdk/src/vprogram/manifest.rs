@@ -23,6 +23,15 @@ pub enum ManifestError {
     BadPlatformRoothash,
 }
 
+/// Contract the runtime imposes on the workload volume's contents, e.g.
+/// "aleph.compose/1". Absent means: opaque ext4, runtime-defined.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkloadSpec {
+    pub contract: String,
+    #[serde(default)]
+    pub upstream_port: Option<u16>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuntimeManifest {
     pub format: String,
@@ -33,6 +42,8 @@ pub struct RuntimeManifest {
     pub bundle: BundleRef,
     pub boot: BootSpec,
     pub attestation: Vec<AttestationDescriptor>,
+    #[serde(default)]
+    pub workload: Option<WorkloadSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,5 +214,38 @@ mod test {
             let err = RuntimeManifest::parse(json.as_bytes()).unwrap_err();
             assert!(err.to_string().contains(needle), "{patch}: got {err}");
         }
+    }
+
+    #[test]
+    fn parses_the_workload_contract() {
+        let m = RuntimeManifest::parse(VALID_MANIFEST.as_bytes()).unwrap();
+        let w = m.workload.expect("fixture declares a workload contract");
+        assert_eq!(w.contract, "aleph.builtin/1");
+        assert_eq!(w.upstream_port, Some(8080));
+    }
+
+    #[test]
+    fn workload_is_optional() {
+        let stripped = VALID_MANIFEST.replace(
+            r#""workload": { "contract": "aleph.builtin/1", "upstream_port": 8080 },"#,
+            "",
+        );
+        assert_ne!(stripped, VALID_MANIFEST);
+        let m = RuntimeManifest::parse(stripped.as_bytes()).unwrap();
+        assert!(m.workload.is_none());
+    }
+
+    #[test]
+    fn the_published_compose_runtime_manifest_parses() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/vprogram/compose-runtime-manifest.json"
+        ));
+        let m = RuntimeManifest::parse(bytes).unwrap();
+        assert_eq!(m.workload.unwrap().contract, "aleph.compose/1");
+        assert_eq!(
+            m.boot.cmdline_template,
+            "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash} workload_roothash={workload_roothash}"
+        );
     }
 }
