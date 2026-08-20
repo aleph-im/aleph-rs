@@ -215,14 +215,59 @@ impl TeePlatform {
             TeePlatform::SevSnp => "sev_snp",
         }
     }
+}
 
-    /// Expected hex length of a launch digest for this platform.
-    /// sev_snp: 48-byte SHA-384 launch digest.
-    fn digest_hex_len(self) -> usize {
-        match self {
-            TeePlatform::SevSnp => 96,
-        }
+/// Every pinned register is a 48-byte SHA-384 value.
+pub const REGISTER_HEX_LEN: usize = 96;
+
+/// Deserialize a measurement register: exactly [`REGISTER_HEX_LEN`] lowercase
+/// hex characters. Lowercase only, so two encodings of the same value can
+/// never both validate.
+///
+/// A field-level hook rather than a newtype: the value is a plain `String`
+/// everywhere it is used, and messages only ever arrive by deserialization, so
+/// a wrapper type would buy nothing that this does not.
+fn deserialize_register<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let value = String::deserialize(deserializer)?;
+    if value.len() != REGISTER_HEX_LEN {
+        return Err(D::Error::custom(TeeError::BadDigestLength {
+            platform: "sev_snp",
+            expected: REGISTER_HEX_LEN,
+            got: value.len(),
+        }));
     }
+    if !value
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(D::Error::custom(TeeError::DigestNotLowercaseHex));
+    }
+    Ok(value)
+}
+
+/// The measurement registers SEV-SNP pins: one launch digest.
+///
+/// A TEE's launch identity is not always a single value. SEV-SNP has one
+/// launch digest, while platforms such as Intel TDX spread it over several
+/// hardware registers (MRTD plus RTMRs), which is why the wire shape is an
+/// object rather than a scalar. Only SEV-SNP is defined today, so this is a
+/// concrete struct rather than a generic map: `deny_unknown_fields` plus a
+/// required field give the closed key set natively, with no validator to keep
+/// in step, and no unbounded map to parse before rejecting.
+///
+/// Adding a platform turns [`LaunchMeasurement::registers`] into an enum
+/// discriminated on `platform`. That is a schema release either way, since an
+/// unknown platform is already schema-invalid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SevSnpRegisters {
+    #[serde(deserialize_with = "deserialize_register")]
+    pub launch: String,
 }
 
 /// Supervisor-opaque verification annotation, validated by the CCN.
@@ -230,50 +275,22 @@ impl TeePlatform {
 /// Declares the launch digest a verifier should expect. Multiple entries
 /// (one per vcpu_type) keep a message verifiable across a mixed CPU fleet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "RawLaunchMeasurement")]
+#[serde(deny_unknown_fields)]
 pub struct LaunchMeasurement {
-    /// TEE platform this digest applies to.
+    /// TEE platform these registers apply to.
     pub platform: TeePlatform,
-    /// Expected launch digest, lowercase hex; length is platform-defined.
-    pub digest: String,
-    /// QEMU CPU model this digest was computed for (e.g. "EPYC-v4").
+    /// Expected measurement registers; sev_snp declares `{"launch"}`.
+    pub registers: SevSnpRegisters,
+    /// QEMU CPU model these registers were computed for (e.g. "EPYC-v4").
     /// Required by direct-boot measurement recipes, absent for igvm bundles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcpu_type: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct RawLaunchMeasurement {
-    platform: TeePlatform,
-    digest: String,
-    #[serde(default)]
-    vcpu_type: Option<String>,
-}
-
-impl TryFrom<RawLaunchMeasurement> for LaunchMeasurement {
-    type Error = TeeError;
-
-    fn try_from(raw: RawLaunchMeasurement) -> Result<Self, Self::Error> {
-        let expected = raw.platform.digest_hex_len();
-        if raw.digest.len() != expected {
-            return Err(TeeError::BadDigestLength {
-                platform: raw.platform.as_str(),
-                expected,
-                got: raw.digest.len(),
-            });
-        }
-        if !raw
-            .digest
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        {
-            return Err(TeeError::DigestNotLowercaseHex);
-        }
-        Ok(Self {
-            platform: raw.platform,
-            digest: raw.digest,
-            vcpu_type: raw.vcpu_type,
-        })
+impl LaunchMeasurement {
+    /// The SEV-SNP launch digest, i.e. the `launch` register.
+    pub fn snp_launch_digest(&self) -> &str {
+        &self.registers.launch
     }
 }
 
@@ -454,7 +471,7 @@ mod test {
     fn snp_tee_json(policy: &str) -> String {
         format!(
             r#"{{"mode": "sev_snp", "policy": {policy}, "runtime": "{ITEM_HASH_HEX}",
-                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]}}"#
         )
     }
 
@@ -505,7 +522,7 @@ mod test {
         // missing runtime
         let json = format!(
             r#"{{"mode": "sev_snp", "policy": 196608,
-                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]}}"#
         );
         assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
         // missing measurements
@@ -516,7 +533,7 @@ mod test {
         let json = format!(
             r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}",
                  "firmware": "{ITEM_HASH_HEX}",
-                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]}}"#
         );
         assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
     }
@@ -525,7 +542,9 @@ mod test {
     fn test_trusted_execution_sev_forbids_snp_fields() {
         for extra in [
             format!(r#""runtime": "{ITEM_HASH_HEX}""#),
-            format!(r#""measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]"#),
+            format!(
+                r#""measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]"#
+            ),
             r#""attestation_port": 8443"#.to_string(),
         ] {
             let json = format!(r#"{{"policy": 1, {extra}}}"#);
@@ -560,7 +579,7 @@ mod test {
     fn test_trusted_execution_attestation_port_bounds() {
         let json = format!(
             r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}",
-                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}],
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}],
                  "attestation_port": 8443}}"#
         );
         // a valid port is accepted and round-trips
@@ -580,41 +599,71 @@ mod test {
     #[test]
     fn test_launch_measurement_valid() {
         let m: LaunchMeasurement = serde_json::from_str(&format!(
-            r#"{{"platform": "sev_snp", "digest": "{SNP_DIGEST}", "vcpu_type": "EPYC-v4"}}"#
+            r#"{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}, "vcpu_type": "EPYC-v4"}}"#
         ))
         .unwrap();
         assert_eq!(m.platform, TeePlatform::SevSnp);
+        assert_eq!(m.snp_launch_digest(), SNP_DIGEST);
         assert_eq!(m.vcpu_type.as_deref(), Some("EPYC-v4"));
         // vcpu_type is optional: absent for igvm-recipe bundles
         let m: LaunchMeasurement = serde_json::from_str(&format!(
-            r#"{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}"#
+            r#"{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}"#
         ))
         .unwrap();
         assert_eq!(m.vcpu_type, None);
     }
 
     #[test]
-    fn test_launch_measurement_rejects_bad_digests() {
+    fn test_launch_measurement_rejects_bad_register_values() {
         // wrong length (sha256-sized), non-hex, uppercase hex
         for digest in ["cd".repeat(32), "zz".repeat(48), "AB".repeat(48)] {
-            let json = format!(r#"{{"platform": "sev_snp", "digest": "{digest}"}}"#);
+            let json =
+                format!(r#"{{"platform": "sev_snp", "registers": {{"launch": "{digest}"}}}}"#);
             assert!(
                 serde_json::from_str::<LaunchMeasurement>(&json).is_err(),
-                "digest {digest} should be rejected"
+                "register value {digest} should be rejected"
+            );
+        }
+    }
+
+    /// The register set is exactly `{"launch"}`: nothing more, nothing less.
+    /// An unknown register is as schema-invalid as an unknown platform.
+    #[test]
+    fn test_launch_measurement_register_key_set_is_closed() {
+        for registers in [
+            // missing the required key
+            "{}".to_string(),
+            // an unknown key alongside the required one
+            format!(r#"{{"launch": "{SNP_DIGEST}", "mrtd": "{SNP_DIGEST}"}}"#),
+            // a register from another platform instead of the required one
+            format!(r#"{{"mrtd": "{SNP_DIGEST}"}}"#),
+        ] {
+            let json = format!(r#"{{"platform": "sev_snp", "registers": {registers}}}"#);
+            assert!(
+                serde_json::from_str::<LaunchMeasurement>(&json).is_err(),
+                "register set {registers} should be rejected"
             );
         }
     }
 
     #[test]
     fn test_launch_measurement_rejects_unknown_platform() {
-        let json = format!(r#"{{"platform": "tdx", "digest": "{SNP_DIGEST}"}}"#);
+        let json = format!(r#"{{"platform": "tdx", "registers": {{"mrtd": "{SNP_DIGEST}"}}}}"#);
+        assert!(serde_json::from_str::<LaunchMeasurement>(&json).is_err());
+    }
+
+    /// The pre-register scalar shape must not silently deserialize into a
+    /// measurement with an empty register map.
+    #[test]
+    fn test_launch_measurement_rejects_legacy_digest_shape() {
+        let json = format!(r#"{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}"#);
         assert!(serde_json::from_str::<LaunchMeasurement>(&json).is_err());
     }
 
     #[test]
     fn test_launch_measurement_roundtrip_omits_null_vcpu_type() {
         let m: LaunchMeasurement = serde_json::from_str(&format!(
-            r#"{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}"#
+            r#"{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}"#
         ))
         .unwrap();
         let value = serde_json::to_value(&m).unwrap();
@@ -626,7 +675,7 @@ mod test {
             .collect();
         keys.sort();
         // no vcpu_type key when None (serde_json orders keys alphabetically)
-        assert_eq!(keys, vec!["digest", "platform"]);
+        assert_eq!(keys, vec!["platform", "registers"]);
     }
 
     #[test]

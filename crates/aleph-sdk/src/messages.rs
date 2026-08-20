@@ -1663,7 +1663,7 @@ mod tests {
         .unwrap();
         let verification = serde_json::from_value::<TeeVerification>(serde_json::json!({
             "backend": "sev_snp",
-            "measurements": [{"platform": "sev_snp", "digest": "ab".repeat(48)}],
+            "measurements": [{"platform": "sev_snp", "registers": {"launch": "ab".repeat(48)}}],
         }))
         .unwrap();
         let pending = VProgramBuilder::new(

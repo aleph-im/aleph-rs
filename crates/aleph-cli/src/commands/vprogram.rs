@@ -601,7 +601,7 @@ const MISSING: &str = "-";
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct MeasurementSummary {
     pub platform: String,
-    pub digest: String,
+    pub registers: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vcpu_type: Option<String>,
 }
@@ -646,7 +646,9 @@ pub(crate) fn build_show(
         .iter()
         .map(|m| MeasurementSummary {
             platform: m.platform.as_str().to_string(),
-            digest: m.digest.clone(),
+            // rendered as a map so a future multi-register platform needs no
+            // change here; sev_snp contributes its single launch register.
+            registers: BTreeMap::from([("launch".to_string(), m.snp_launch_digest().to_string())]),
             vcpu_type: m.vcpu_type.clone(),
         })
         .collect();
@@ -676,11 +678,17 @@ fn render_text(s: &VProgramShow) -> String {
     writeln!(out).unwrap();
     writeln!(out, "MEASUREMENTS ({})", s.measurements.len()).unwrap();
     for m in &s.measurements {
+        let registers = m
+            .registers
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         writeln!(
             out,
-            "  {} digest={} vcpu_type={}",
+            "  {} {} vcpu_type={}",
             m.platform,
-            m.digest,
+            registers,
             m.vcpu_type.as_deref().unwrap_or(MISSING)
         )
         .unwrap();
@@ -931,29 +939,29 @@ pub(crate) fn resolve_expected_measurement(
             "V-Program message pins no launch measurements; cannot verify attestation without \
              --expected-measurement"
         ),
-        1 => {
-            let bytes = hex::decode(&measurements[0].digest).with_context(|| {
-                format!(
-                    "message measurement digest is not valid hex: {:?}",
-                    measurements[0].digest
-                )
-            })?;
-            Ok(MeasurementExpectation::Pin(bytes))
-        }
+        1 => Ok(MeasurementExpectation::Pin(snp_launch_bytes(
+            &measurements[0],
+        )?)),
         _ => {
             let mut digests = Vec::with_capacity(measurements.len());
             for m in measurements {
-                let bytes = hex::decode(&m.digest).with_context(|| {
-                    format!(
-                        "message measurement digest is not valid hex: {:?}",
-                        m.digest
-                    )
-                })?;
-                digests.push(bytes);
+                digests.push(snp_launch_bytes(m)?);
             }
             Ok(MeasurementExpectation::MemberOf(digests))
         }
     }
+}
+
+/// The SEV-SNP launch digest of one measurement, as raw bytes.
+///
+/// Infallible on the platform axis while sev_snp is the only one defined. When
+/// a second platform lands, `registers` becomes an enum and this must fail
+/// closed on an entry the client cannot check rather than skipping it, since
+/// skipping would narrow the accepted set without the user knowing.
+fn snp_launch_bytes(m: &LaunchMeasurement) -> Result<Vec<u8>> {
+    let digest = m.snp_launch_digest();
+    hex::decode(digest)
+        .with_context(|| format!("message launch register is not valid hex: {digest:?}"))
 }
 
 /// True if `policy` has the SEV-SNP DEBUG bit (19) set: the host may then
@@ -1626,7 +1634,7 @@ mod show_tests {
         assert_eq!(v["host_ipv4"], serde_json::json!("203.0.113.5"));
         assert_eq!(v["mapped_ports"]["8443"], serde_json::json!(24101));
         assert_eq!(
-            v["measurements"][0]["digest"],
+            v["measurements"][0]["registers"]["launch"],
             serde_json::json!("ab".repeat(48))
         );
         assert_eq!(v["runtime_ref"], serde_json::json!("cafe".repeat(16)));
@@ -1662,7 +1670,7 @@ mod call_tests {
     fn measurement(digest: &str, vcpu_type: Option<&str>) -> LaunchMeasurement {
         let json = serde_json::json!({
             "platform": "sev_snp",
-            "digest": digest,
+            "registers": {"launch": digest},
             "vcpu_type": vcpu_type,
         });
         serde_json::from_value(json).expect("valid measurement fixture")
