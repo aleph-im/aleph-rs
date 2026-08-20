@@ -601,7 +601,7 @@ const MISSING: &str = "-";
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct MeasurementSummary {
     pub platform: String,
-    pub registers: std::collections::BTreeMap<String, String>,
+    pub registers: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vcpu_type: Option<String>,
 }
@@ -646,7 +646,9 @@ pub(crate) fn build_show(
         .iter()
         .map(|m| MeasurementSummary {
             platform: m.platform.as_str().to_string(),
-            registers: m.registers.clone(),
+            // rendered as a map so a future multi-register platform needs no
+            // change here; sev_snp contributes its single launch register.
+            registers: BTreeMap::from([("launch".to_string(), m.snp_launch_digest().to_string())]),
             vcpu_type: m.vcpu_type.clone(),
         })
         .collect();
@@ -952,18 +954,12 @@ pub(crate) fn resolve_expected_measurement(
 
 /// The SEV-SNP launch digest of one measurement, as raw bytes.
 ///
-/// Fails closed on a measurement this client cannot check: a non-SNP platform
-/// entry (a mixed-platform message read by an SNP-only verifier) must never be
-/// silently skipped, because skipping it would narrow the accepted set without
-/// the user knowing.
+/// Infallible on the platform axis while sev_snp is the only one defined. When
+/// a second platform lands, `registers` becomes an enum and this must fail
+/// closed on an entry the client cannot check rather than skipping it, since
+/// skipping would narrow the accepted set without the user knowing.
 fn snp_launch_bytes(m: &LaunchMeasurement) -> Result<Vec<u8>> {
-    let digest = m.snp_launch_digest().ok_or_else(|| {
-        anyhow::anyhow!(
-            "message pins a {} measurement, which this client cannot verify; \
-             pass --expected-measurement to override",
-            m.platform.as_str()
-        )
-    })?;
+    let digest = m.snp_launch_digest();
     hex::decode(digest)
         .with_context(|| format!("message launch register is not valid hex: {digest:?}"))
 }

@@ -2,7 +2,6 @@ use crate::chain::Address;
 use crate::item_hash::ItemHash;
 use memsizes::MiB;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,23 +171,6 @@ pub enum TeeError {
     },
     #[error("digest must be lowercase hex")]
     DigestNotLowercaseHex,
-    #[error("{platform} requires exactly the registers {required:?}, got {got:?}")]
-    RegisterSetMismatch {
-        platform: &'static str,
-        required: &'static [&'static str],
-        got: Vec<String>,
-    },
-    #[error(
-        "{platform} register {register:?} must be {expected} lowercase hex characters, got {got}"
-    )]
-    BadRegisterLength {
-        platform: &'static str,
-        register: String,
-        expected: usize,
-        got: usize,
-    },
-    #[error("register {register:?} must be lowercase hex")]
-    RegisterNotLowercaseHex { register: String },
     #[error(
         "firmware belongs to the SEV flow and must not be set in sev_snp mode; use runtime instead"
     )]
@@ -233,40 +215,75 @@ impl TeePlatform {
             TeePlatform::SevSnp => "sev_snp",
         }
     }
+}
 
-    /// The measurement registers this platform pins, and nothing else.
-    ///
-    /// A TEE's launch identity is not always a single scalar: SEV-SNP has one
-    /// launch digest, while platforms such as Intel TDX spread it over several
-    /// hardware registers (MRTD plus RTMRs). The set is CLOSED, so a message
-    /// declaring a key outside it, or omitting one inside it, is
-    /// schema-invalid: the same fail-closed stance this enum already takes for
-    /// unknown platforms, applied one level down.
-    pub fn required_registers(self) -> &'static [&'static str] {
-        match self {
-            TeePlatform::SevSnp => &["launch"],
-        }
+/// Every pinned register is a 48-byte SHA-384 value.
+const REGISTER_HEX_LEN: usize = 96;
+
+/// A measurement register value: exactly [`REGISTER_HEX_LEN`] lowercase hex
+/// characters. Lowercase only, so two encodings of the same value can never
+/// both validate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct RegisterValue(String);
+
+impl RegisterValue {
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-/// Every pinned register on every platform is a 48-byte SHA-384 value.
-const REGISTER_HEX_LEN: usize = 96;
+impl TryFrom<String> for RegisterValue {
+    type Error = TeeError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() != REGISTER_HEX_LEN {
+            return Err(TeeError::BadDigestLength {
+                platform: "sev_snp",
+                expected: REGISTER_HEX_LEN,
+                got: value.len(),
+            });
+        }
+        if !value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(TeeError::DigestNotLowercaseHex);
+        }
+        Ok(Self(value))
+    }
+}
+
+/// The measurement registers SEV-SNP pins: one launch digest.
+///
+/// A TEE's launch identity is not always a single value. SEV-SNP has one
+/// launch digest, while platforms such as Intel TDX spread it over several
+/// hardware registers (MRTD plus RTMRs), which is why the wire shape is an
+/// object rather than a scalar. Only SEV-SNP is defined today, so this is a
+/// concrete struct rather than a generic map: `deny_unknown_fields` plus a
+/// required field give the closed key set natively, with no validator to keep
+/// in step, and no unbounded map to parse before rejecting.
+///
+/// Adding a platform turns [`LaunchMeasurement::registers`] into an enum
+/// discriminated on `platform`. That is a schema release either way, since an
+/// unknown platform is already schema-invalid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SevSnpRegisters {
+    pub launch: RegisterValue,
+}
 
 /// Supervisor-opaque verification annotation, validated by the CCN.
 ///
 /// Declares the launch digest a verifier should expect. Multiple entries
 /// (one per vcpu_type) keep a message verifiable across a mixed CPU fleet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "RawLaunchMeasurement")]
+#[serde(deny_unknown_fields)]
 pub struct LaunchMeasurement {
     /// TEE platform these registers apply to.
     pub platform: TeePlatform,
-    /// Expected measurement registers, lowercase hex. The key set is
-    /// platform-defined and closed; sev_snp declares `{"launch"}`.
-    ///
-    /// A `BTreeMap` rather than a `HashMap` so serialization is deterministic:
-    /// a message this crate emits must hash the same way every time.
-    pub registers: BTreeMap<String, String>,
+    /// Expected measurement registers; sev_snp declares `{"launch"}`.
+    pub registers: SevSnpRegisters,
     /// QEMU CPU model these registers were computed for (e.g. "EPYC-v4").
     /// Required by direct-boot measurement recipes, absent for igvm bundles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,67 +292,8 @@ pub struct LaunchMeasurement {
 
 impl LaunchMeasurement {
     /// The SEV-SNP launch digest, i.e. the `launch` register.
-    ///
-    /// Present as a named accessor because SNP is single-register and every
-    /// caller wants exactly this value; multi-register platforms read
-    /// `registers` directly.
-    pub fn snp_launch_digest(&self) -> Option<&str> {
-        (self.platform == TeePlatform::SevSnp)
-            .then(|| self.registers.get("launch").map(String::as_str))
-            .flatten()
-    }
-}
-
-#[derive(Deserialize)]
-struct RawLaunchMeasurement {
-    platform: TeePlatform,
-    registers: BTreeMap<String, String>,
-    #[serde(default)]
-    vcpu_type: Option<String>,
-}
-
-impl TryFrom<RawLaunchMeasurement> for LaunchMeasurement {
-    type Error = TeeError;
-
-    fn try_from(raw: RawLaunchMeasurement) -> Result<Self, Self::Error> {
-        let required = raw.platform.required_registers();
-        // The key set must match exactly: a missing register leaves part of
-        // the launch identity unpinned, and an unknown one is a claim no
-        // verifier on this protocol version knows how to check.
-        let matches_exactly = raw.registers.len() == required.len()
-            && required
-                .iter()
-                .all(|name| raw.registers.contains_key(*name));
-        if !matches_exactly {
-            return Err(TeeError::RegisterSetMismatch {
-                platform: raw.platform.as_str(),
-                required,
-                got: raw.registers.keys().cloned().collect(),
-            });
-        }
-        for (name, value) in &raw.registers {
-            if value.len() != REGISTER_HEX_LEN {
-                return Err(TeeError::BadRegisterLength {
-                    platform: raw.platform.as_str(),
-                    register: name.clone(),
-                    expected: REGISTER_HEX_LEN,
-                    got: value.len(),
-                });
-            }
-            if !value
-                .bytes()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-            {
-                return Err(TeeError::RegisterNotLowercaseHex {
-                    register: name.clone(),
-                });
-            }
-        }
-        Ok(Self {
-            platform: raw.platform,
-            registers: raw.registers,
-            vcpu_type: raw.vcpu_type,
-        })
+    pub fn snp_launch_digest(&self) -> &str {
+        self.registers.launch.as_str()
     }
 }
 
@@ -648,7 +606,7 @@ mod test {
         ))
         .unwrap();
         assert_eq!(m.platform, TeePlatform::SevSnp);
-        assert_eq!(m.snp_launch_digest(), Some(SNP_DIGEST));
+        assert_eq!(m.snp_launch_digest(), SNP_DIGEST);
         assert_eq!(m.vcpu_type.as_deref(), Some("EPYC-v4"));
         // vcpu_type is optional: absent for igvm-recipe bundles
         let m: LaunchMeasurement = serde_json::from_str(&format!(
@@ -671,8 +629,8 @@ mod test {
         }
     }
 
-    /// The key set must equal the platform's required set exactly. An unknown
-    /// register is as schema-invalid as an unknown platform.
+    /// The register set is exactly `{"launch"}`: nothing more, nothing less.
+    /// An unknown register is as schema-invalid as an unknown platform.
     #[test]
     fn test_launch_measurement_register_key_set_is_closed() {
         for registers in [

@@ -20,8 +20,5 @@ fn main() {
         &["EPYC-v4".into()],
     )
     .expect("measurement");
-    println!(
-        "{}",
-        m[0].snp_launch_digest().expect("sev_snp launch register")
-    );
+    println!("{}", m[0].snp_launch_digest());
 }

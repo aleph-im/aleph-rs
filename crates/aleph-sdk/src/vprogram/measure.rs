@@ -8,7 +8,9 @@
 //! features, one VMSA page per vcpu).
 
 use crate::vprogram::bundle::BundleArtifacts;
-use aleph_types::message::execution::environment::{LaunchMeasurement, TeePlatform};
+use aleph_types::message::execution::environment::{
+    LaunchMeasurement, SevSnpRegisters, TeePlatform,
+};
 use sev::measurement::snp::{SnpMeasurementArgs, snp_calc_launch_digest};
 use sev::measurement::vcpu_types::CpuType;
 use sev::measurement::vmsa::{GuestFeatures, VMMType};
@@ -59,9 +61,11 @@ pub fn compute_measurements(
             Ok(LaunchMeasurement {
                 platform: TeePlatform::SevSnp,
                 // SEV-SNP pins exactly one register: the launch digest.
-                registers: [("launch".to_string(), hex::encode(bytes))]
-                    .into_iter()
-                    .collect(),
+                registers: SevSnpRegisters {
+                    launch: hex::encode(bytes)
+                        .try_into()
+                        .map_err(|e| MeasureError::Measurement(format!("{e}")))?,
+                },
                 vcpu_type: Some(model.clone()),
             })
         })
@@ -125,6 +129,6 @@ mod test {
         };
         let cmdline = "console=ttyS0 root=/dev/mapper/verity-root ro roothash=cb121a317be7dc7969dd633ca9b6c3718ffe9ea6715b64e0e35a871d484b56b8";
         let m = compute_measurements(&artifacts, cmdline, 1, &["EPYC-v4".into()]).unwrap();
-        assert_eq!(m[0].snp_launch_digest(), Some(EXPECTED));
+        assert_eq!(m[0].snp_launch_digest(), EXPECTED);
     }
 }
