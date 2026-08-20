@@ -218,7 +218,7 @@ impl TeePlatform {
 }
 
 /// Every pinned register is a 48-byte SHA-384 value.
-const REGISTER_HEX_LEN: usize = 96;
+pub const REGISTER_HEX_LEN: usize = 96;
 
 /// A measurement register value: exactly [`REGISTER_HEX_LEN`] lowercase hex
 /// characters. Lowercase only, so two encodings of the same value can never
