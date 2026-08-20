@@ -1,0 +1,47 @@
+{
+  "format": "aleph-vprogram-runtime",
+  "format_version": 1,
+  "name": "aleph-compose-runtime",
+  "version": "2026.08.18",
+  "platform": "sev_snp",
+  "bundle": {
+    "ref": "FILL-AFTER-UPLOAD",
+    "sha256": "d75c2e60e83e35fd9b87ac08e376176d457b0030b720887dcf9e350165ecfc95",
+    "size": 264008948,
+    "members": {
+      "ovmf": "image/OVMF.fd",
+      "kernel": "image/bzImage",
+      "initrd": "image/initrd",
+      "platform_rootfs": "image/rootfs.ext4",
+      "platform_hash_tree": "image/rootfs.ext4.verity",
+      "platform_roothash_file": "image/rootfs.ext4.roothash"
+    }
+  },
+  "boot": {
+    "method": "qemu-direct-kernel",
+    "kernel_hashes": true,
+    "cpu_models": [
+      "EPYC-v4"
+    ],
+    "platform_roothash": "f9a5032b6cccb2f9b1fd16012c0baf5d94ca6b4a07c33b2e04706bd4c21ecbb4",
+    "cmdline_template": "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash} workload_roothash={workload_roothash}"
+  },
+  "attestation": [
+    {
+      "protocol": "aleph.ra-tls",
+      "version": "1",
+      "transport": {
+        "type": "tcp",
+        "port": 8443
+      }
+    }
+  ],
+  "workload": {
+    "contract": "aleph.compose/1",
+    "upstream_port": 8080
+  },
+  "source": {
+    "repo": "https://github.com/aleph-im/aleph-cvm",
+    "build": "nix build ./nix#vprogram-compose-bundle"
+  }
+}
