@@ -20,5 +20,5 @@ fn main() {
         &["EPYC-v4".into()],
     )
     .expect("measurement");
-    println!("{}", m[0].digest);
+    println!("{}", m[0].snp_launch_digest());
 }

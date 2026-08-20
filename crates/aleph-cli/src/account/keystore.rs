@@ -47,8 +47,8 @@ fn salsa20_8_inplace(block: &mut [u8; 64]) {
     }
 
     let mut x = [0u32; 16];
-    for (word, chunk) in x.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_le_bytes(chunk.try_into().unwrap());
+    for (word, chunk) in x.iter_mut().zip(block.as_chunks::<4>().0.iter()) {
+        *word = u32::from_le_bytes(*chunk);
     }
     let mut z = x;
 
@@ -69,8 +69,8 @@ fn salsa20_8_inplace(block: &mut [u8; 64]) {
         *word = word.wrapping_add(x[i]);
     }
 
-    for (chunk, word) in block.chunks_exact_mut(4).zip(z.iter()) {
-        chunk.copy_from_slice(&word.to_le_bytes());
+    for (chunk, word) in block.as_chunks_mut::<4>().0.iter_mut().zip(z.iter()) {
+        *chunk = word.to_le_bytes();
     }
 }
 
@@ -85,7 +85,7 @@ fn scrypt_block_mix(input: &[u8], output: &mut [u8]) {
     // matching the scrypt crate's own behavior.
     let mut t = [0u8; 64];
 
-    for (i, chunk) in input.chunks_exact(64).enumerate() {
+    for (i, chunk) in input.as_chunks::<64>().0.iter().enumerate() {
         // t = x XOR chunk
         for j in 0..64 {
             t[j] = x[j] ^ chunk[j];
