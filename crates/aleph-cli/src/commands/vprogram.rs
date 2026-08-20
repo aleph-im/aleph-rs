@@ -1,5 +1,6 @@
 //! `aleph vprogram` command tree.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use aleph_sdk::attest::{
@@ -15,7 +16,7 @@ use aleph_sdk::scheduler::SchedulerClient;
 use aleph_sdk::verify::Hasher;
 use aleph_sdk::vprogram::bundle::fetch_bundle_artifacts;
 use aleph_sdk::vprogram::cmdline::instantiate_cmdline;
-use aleph_sdk::vprogram::manifest::RuntimeManifest;
+use aleph_sdk::vprogram::manifest::{RuntimeManifest, WorkloadSpec};
 use aleph_sdk::vprogram::measure::compute_measurements;
 use aleph_sdk::vprogram::status::resolve_attested_endpoint;
 use aleph_types::channel::Channel;
@@ -34,7 +35,10 @@ use crate::cli::{
     PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramShowArgs,
 };
 use crate::common::{render_upload_progress, resolve_account, submit_or_preview};
+use crate::compose;
 use crate::config::store::ConfigStore;
+use crate::container::ContainerTool;
+use crate::mkfs::MkfsExt4;
 use crate::veritysetup::Veritysetup;
 
 /// Fixed RA-TLS attestation transport port advertised by the runtime manifest
@@ -81,9 +85,39 @@ async fn handle_create(
     if args.volumes.len() > MAX_VERIFIED_VOLUMES {
         bail!("at most {MAX_VERIFIED_VOLUMES} --volume flags are supported");
     }
-    if !args.workload.exists() {
-        bail!("workload image not found: {}", args.workload.display());
-    }
+    let compose_input = match (&args.workload, &args.compose) {
+        (Some(path), None) => {
+            if !path.exists() {
+                bail!("workload image not found: {}", path.display());
+            }
+            None
+        }
+        (None, Some(compose_path)) => {
+            let text = std::fs::read_to_string(compose_path)
+                .with_context(|| format!("reading compose file {}", compose_path.display()))?;
+            let validated = compose::parse_and_validate(&text)?;
+            for w in &validated.warnings {
+                eprintln!("warning: {w}");
+            }
+            let archives = parse_image_archives(&args.image_archives)?;
+            for path in archives.values() {
+                if !path.exists() {
+                    bail!("image archive not found: {}", path.display());
+                }
+            }
+            let images = compose::image_names(&validated.file);
+            check_archive_keys_are_known_images(&archives, &images)?;
+            let mkfs = MkfsExt4::find()?;
+            let needs_pull = images.iter().any(|i| !archives.contains_key(i));
+            let container = if needs_pull {
+                Some(ContainerTool::find()?)
+            } else {
+                None
+            };
+            Some((validated, archives, mkfs, container))
+        }
+        _ => unreachable!("clap enforces exactly one of --workload/--compose"),
+    };
     for path in &args.volumes {
         if !path.exists() {
             bail!("volume image not found: {}", path.display());
@@ -102,6 +136,10 @@ async fn handle_create(
         .bytes()
         .await?;
     let manifest = RuntimeManifest::parse(&manifest_bytes)?;
+
+    if compose_input.is_some() {
+        check_compose_contract(manifest.workload.as_ref())?;
+    }
 
     // Cheap slot check right after the manifest is known: instantiate_cmdline
     // only needs the template, the platform roothash, and how many volumes
@@ -122,10 +160,65 @@ async fn handle_create(
     let cache_dir = ConfigStore::vprogram_bundle_cache_dir()?;
     let artifacts = fetch_bundle_artifacts(aleph_client, &manifest, &cache_dir).await?;
 
+    // Materialize the workload image: either the prebuilt path from
+    // --workload, or (for --compose) pull/resolve/save every image not
+    // covered by --image-archive, digest-pin the compose file, and build an
+    // ext4 image from it. Network access (image pulls) only happens here,
+    // after every cheap local/manifest gate above has already passed.
+    //
+    // `_built_workload` (the compose-built ext4 image) and
+    // `_built_workload_dir` (its containing tempdir, which the `.verity`
+    // sidecar `verity_format` writes below also lands in) are `None` for
+    // --workload, where the file is caller-owned. Both are bound by this
+    // `let`, in this function's scope, which is what keeps them alive - and
+    // their backing files un-deleted - until after `upload_pair` runs; a
+    // narrower scope (e.g. dropping them at the end of the match arm) would
+    // delete the image/sidecar before they could be uploaded.
+    let (workload_path, _built_workload, _built_workload_dir): (
+        PathBuf,
+        Option<tempfile::NamedTempFile>,
+        Option<tempfile::TempDir>,
+    ) = match compose_input {
+        None => (
+            args.workload.clone().expect("clap: workload set"),
+            None,
+            None,
+        ),
+        Some((mut validated, archives, mkfs, container)) => {
+            let mut pins = BTreeMap::new();
+            let mut resolved: Vec<(String, PathBuf)> = Vec::new();
+            let mut save_tmp = Vec::new(); // keep pulled archives alive until staged
+            for image in compose::image_names(&validated.file) {
+                if let Some(path) = archives.get(&image) {
+                    pins.insert(image.clone(), image.clone());
+                    resolved.push((image, path.clone()));
+                } else {
+                    let tool = container.as_ref().expect("find() ran when pulls needed");
+                    if !json {
+                        eprintln!("Pulling {image}...");
+                    }
+                    tool.pull(&image).await?;
+                    let pinned = tool.resolve_digest(&image).await?;
+                    let tmp = tempfile::Builder::new().suffix(".tar").tempfile()?;
+                    tool.save_archive(&pinned, tmp.path()).await?;
+                    pins.insert(image.clone(), pinned);
+                    resolved.push((image, tmp.path().to_path_buf()));
+                    save_tmp.push(tmp);
+                }
+            }
+            compose::pin_images(&mut validated.file, &pins)?;
+            let yaml = compose::to_yaml(&validated.file)?;
+            let (dir, image) = compose::build_workload_image(&mkfs, &yaml, &resolved).await?;
+            let path = image.path().to_path_buf();
+            drop(save_tmp); // archives are copied into the image; safe to drop now
+            (path, Some(image), Some(dir))
+        }
+    };
+
     // 3. Verity-hash the workload and any extra volumes. Hash trees land
     //    next to the images as <name>.<ext>.verity (content-derived, so
     //    overwriting an existing one is fine).
-    let workload_verity = verity_format(&veritysetup, &args.workload, json).await?;
+    let workload_verity = verity_format(&veritysetup, &workload_path, json).await?;
     let mut volume_verities = Vec::new();
     for path in &args.volumes {
         volume_verities.push(verity_format(&veritysetup, path, json).await?);
@@ -233,6 +326,81 @@ async fn handle_create(
         }
     }
     Ok(())
+}
+
+/// Refuse --compose against a runtime that does not declare the compose
+/// workload contract, so a compose workload cannot land on e.g. a builtin
+/// runtime. Pure and I/O-free so it's directly unit-testable.
+pub(crate) fn check_compose_contract(workload: Option<&WorkloadSpec>) -> Result<()> {
+    const COMPOSE_CONTRACT: &str = "aleph.compose/1";
+    match workload {
+        Some(w) if w.contract == COMPOSE_CONTRACT => Ok(()),
+        Some(w) => bail!(
+            "--compose requires a runtime declaring workload contract \
+             {COMPOSE_CONTRACT:?}, but this runtime declares {:?}",
+            w.contract
+        ),
+        None => bail!(
+            "--compose requires a runtime declaring workload contract \
+             {COMPOSE_CONTRACT:?}, but this runtime manifest declares no \
+             workload contract"
+        ),
+    }
+}
+
+/// Parse an --image-archive spec, "IMAGE=PATH", split on the first '='
+/// (image references may contain ':' and '/' but never '=', so the first
+/// '=' unambiguously separates image from path).
+pub(crate) fn parse_image_archive(spec: &str) -> Result<(String, PathBuf)> {
+    match spec.split_once('=') {
+        Some((image, path)) if !image.is_empty() && !path.is_empty() => {
+            Ok((image.to_string(), PathBuf::from(path)))
+        }
+        _ => bail!("invalid --image-archive {spec:?}; expected IMAGE=PATH"),
+    }
+}
+
+/// Parse every repeated --image-archive spec into a map, rejecting a
+/// duplicate IMAGE key instead of letting the last one silently win (a plain
+/// `.collect::<BTreeMap<_, _>>()` would do that). Pure and I/O-free so it's
+/// directly unit-testable.
+pub(crate) fn parse_image_archives(specs: &[String]) -> Result<BTreeMap<String, PathBuf>> {
+    let mut archives = BTreeMap::new();
+    for spec in specs {
+        let (image, path) = parse_image_archive(spec)?;
+        if let Some(previous) = archives.insert(image.clone(), path) {
+            bail!(
+                "duplicate --image-archive for {image:?} (already mapped to {}); \
+                 each IMAGE may be supplied once",
+                previous.display()
+            );
+        }
+    }
+    Ok(archives)
+}
+
+/// Error out if any --image-archive key does not match a compose `image:`
+/// value: an unmatched key currently falls back to a registry pull for that
+/// image with no indication the archive was ignored (invisible under
+/// --json). Pure and I/O-free so it's directly unit-testable.
+pub(crate) fn check_archive_keys_are_known_images(
+    archives: &BTreeMap<String, PathBuf>,
+    images: &[String],
+) -> Result<()> {
+    let known: std::collections::BTreeSet<&str> = images.iter().map(String::as_str).collect();
+    let unknown: Vec<&str> = archives
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !known.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "--image-archive key(s) {unknown:?} do not match any compose `image:` value \
+             ({images:?}); IMAGE must match the compose file's image string exactly"
+        );
+    }
 }
 
 /// One sample of the VM's attested endpoint via the scheduler + CRN.
@@ -1994,5 +2162,76 @@ mod call_tests {
         let mut wrong_policy = fresh;
         wrong_policy.policy ^= 1;
         assert!(check_fresh_consistency(&wrong_policy, &response).is_err());
+    }
+}
+
+#[cfg(test)]
+mod compose_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn compose_contract_gate_accepts_the_compose_contract() {
+        let w = WorkloadSpec {
+            contract: "aleph.compose/1".into(),
+            upstream_port: Some(8080),
+        };
+        check_compose_contract(Some(&w)).unwrap();
+    }
+
+    #[test]
+    fn compose_contract_gate_names_both_contracts_on_mismatch() {
+        let w = WorkloadSpec {
+            contract: "aleph.builtin/1".into(),
+            upstream_port: None,
+        };
+        let err = check_compose_contract(Some(&w)).unwrap_err().to_string();
+        assert!(
+            err.contains("aleph.compose/1") && err.contains("aleph.builtin/1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn compose_contract_gate_rejects_a_contractless_runtime() {
+        assert!(check_compose_contract(None).is_err());
+    }
+
+    #[test]
+    fn image_archive_specs_parse_and_reject_garbage() {
+        let (name, path) = parse_image_archive("fib-service:latest=./fib.tar").unwrap();
+        assert_eq!(name, "fib-service:latest");
+        assert_eq!(path, PathBuf::from("./fib.tar"));
+        assert!(parse_image_archive("no-equals-sign").is_err());
+    }
+
+    #[test]
+    fn parse_image_archives_rejects_a_duplicate_image_key() {
+        let specs = vec!["web=./a.tar".to_string(), "web=./b.tar".to_string()];
+        let err = parse_image_archives(&specs).unwrap_err().to_string();
+        assert!(err.contains("web") && err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn parse_image_archives_accepts_distinct_images() {
+        let specs = vec!["web=./a.tar".to_string(), "db=./b.tar".to_string()];
+        let archives = parse_image_archives(&specs).unwrap();
+        assert_eq!(archives.len(), 2);
+    }
+
+    #[test]
+    fn check_archive_keys_rejects_a_key_with_no_matching_image() {
+        let archives = BTreeMap::from([("typo-nginx".to_string(), PathBuf::from("./a.tar"))]);
+        let images = vec!["nginx:1.27".to_string()];
+        let err = check_archive_keys_are_known_images(&archives, &images)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("typo-nginx"), "{err}");
+    }
+
+    #[test]
+    fn check_archive_keys_accepts_an_exact_match() {
+        let archives = BTreeMap::from([("nginx:1.27".to_string(), PathBuf::from("./a.tar"))]);
+        let images = vec!["nginx:1.27".to_string()];
+        check_archive_keys_are_known_images(&archives, &images).unwrap();
     }
 }

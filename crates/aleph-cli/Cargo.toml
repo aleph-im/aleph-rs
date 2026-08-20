@@ -12,7 +12,7 @@ default = ["vprogram"]
 # Verifiable programs (attestable SEV-SNP VMs): `aleph vprogram create`.
 # Gated so the CLI's own vprogram command tree can be excluded from stripped-down
 # builds, forwarding to aleph-sdk's `vprogram` feature (which pulls in `sev`).
-vprogram = ["aleph-sdk/vprogram"]
+vprogram = ["aleph-sdk/vprogram", "dep:serde_norway"]
 
 [dependencies]
 aleph-sdk = { workspace = true, features = ["account-evm", "account-sol", "credits", "swap"] }
@@ -29,6 +29,7 @@ clap_complete = "4.5"
 memsizes = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
+serde_norway = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["process"] }
 tokio-util = { workspace = true }
 url = { workspace = true }
@@ -109,3 +110,11 @@ assets = [
 [[bin]]
 name = "aleph"
 path = "src/main.rs"
+
+# The compose CLI tests drive the binary's `vprogram create --compose`
+# subcommand, which only exists with the vprogram feature; skip them under
+# `cargo test --no-default-features` instead of failing on the missing
+# subcommand.
+[[test]]
+name = "vprogram_compose_cli"
+required-features = ["vprogram"]
