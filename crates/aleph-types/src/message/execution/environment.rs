@@ -220,38 +220,34 @@ impl TeePlatform {
 /// Every pinned register is a 48-byte SHA-384 value.
 pub const REGISTER_HEX_LEN: usize = 96;
 
-/// A measurement register value: exactly [`REGISTER_HEX_LEN`] lowercase hex
-/// characters. Lowercase only, so two encodings of the same value can never
-/// both validate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct RegisterValue(String);
+/// Deserialize a measurement register: exactly [`REGISTER_HEX_LEN`] lowercase
+/// hex characters. Lowercase only, so two encodings of the same value can
+/// never both validate.
+///
+/// A field-level hook rather than a newtype: the value is a plain `String`
+/// everywhere it is used, and messages only ever arrive by deserialization, so
+/// a wrapper type would buy nothing that this does not.
+fn deserialize_register<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
 
-impl RegisterValue {
-    pub fn as_str(&self) -> &str {
-        &self.0
+    let value = String::deserialize(deserializer)?;
+    if value.len() != REGISTER_HEX_LEN {
+        return Err(D::Error::custom(TeeError::BadDigestLength {
+            platform: "sev_snp",
+            expected: REGISTER_HEX_LEN,
+            got: value.len(),
+        }));
     }
-}
-
-impl TryFrom<String> for RegisterValue {
-    type Error = TeeError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() != REGISTER_HEX_LEN {
-            return Err(TeeError::BadDigestLength {
-                platform: "sev_snp",
-                expected: REGISTER_HEX_LEN,
-                got: value.len(),
-            });
-        }
-        if !value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        {
-            return Err(TeeError::DigestNotLowercaseHex);
-        }
-        Ok(Self(value))
+    if !value
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(D::Error::custom(TeeError::DigestNotLowercaseHex));
     }
+    Ok(value)
 }
 
 /// The measurement registers SEV-SNP pins: one launch digest.
@@ -270,7 +266,8 @@ impl TryFrom<String> for RegisterValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SevSnpRegisters {
-    pub launch: RegisterValue,
+    #[serde(deserialize_with = "deserialize_register")]
+    pub launch: String,
 }
 
 /// Supervisor-opaque verification annotation, validated by the CCN.
@@ -293,7 +290,7 @@ pub struct LaunchMeasurement {
 impl LaunchMeasurement {
     /// The SEV-SNP launch digest, i.e. the `launch` register.
     pub fn snp_launch_digest(&self) -> &str {
-        self.registers.launch.as_str()
+        &self.registers.launch
     }
 }
 

@@ -62,9 +62,7 @@ pub fn compute_measurements(
                 platform: TeePlatform::SevSnp,
                 // SEV-SNP pins exactly one register: the launch digest.
                 registers: SevSnpRegisters {
-                    launch: hex::encode(bytes)
-                        .try_into()
-                        .map_err(|e| MeasureError::Measurement(format!("{e}")))?,
+                    launch: hex::encode(bytes),
                 },
                 vcpu_type: Some(model.clone()),
             })
