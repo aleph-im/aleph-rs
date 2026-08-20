@@ -380,7 +380,7 @@ mod test {
     fn test_tee_verification_policy_and_measurements() {
         let json = format!(
             r#"{{"backend": "sev_snp",
-                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]}}"#
         );
         let v: TeeVerification = serde_json::from_str(&json).unwrap();
         assert_eq!(v.policy, 0x30000); // default when omitted
@@ -396,7 +396,7 @@ mod test {
     fn test_tee_verification_backend_wire_roundtrip() {
         let json = format!(
             r#"{{"backend": "sev_snp",
-                 "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]}}"#
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]}}"#
         );
         let v: TeeVerification = serde_json::from_str(&json).unwrap();
         assert_eq!(v.backend, TeePlatform::SevSnp);
@@ -480,7 +480,7 @@ mod test {
                     "backend": "sev_snp",
                     "policy": 196608,
                     "measurements": [
-                        {{"platform": "sev_snp", "digest": "{SNP_DIGEST}", "vcpu_type": "EPYC-v4"}}
+                        {{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}, "vcpu_type": "EPYC-v4"}}
                     ]
                 }},
                 "volumes": {volumes}
