@@ -241,7 +241,7 @@ mod test {
                         "mode": "sev_snp",
                         "policy": 196608,
                         "runtime": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
-                        "measurements": [{{"platform": "sev_snp", "digest": "{SNP_DIGEST}"}}]
+                        "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]
                     }}
                 }},
                 "resources": {{"vcpus": 2, "memory": 2048, "seconds": 30}},

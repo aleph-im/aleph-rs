@@ -1,13 +1,16 @@
 //! SEV-SNP launch measurement computation for V-Programs.
 //!
 //! Wraps the `sev` crate's `snp_calc_launch_digest` to produce one
-//! [`LaunchMeasurement`] per manifest-declared CPU model, matching the
+//! [`LaunchMeasurement`] per manifest-declared CPU model, each carrying the
+//! single `launch` register SEV-SNP pins, matching the
 //! recipe `sev-snp-measure` uses for QEMU direct-boot launches (kernel
 //! hashes embedded via the OVMF SEV metadata table, default guest
 //! features, one VMSA page per vcpu).
 
 use crate::vprogram::bundle::BundleArtifacts;
-use aleph_types::message::execution::environment::{LaunchMeasurement, TeePlatform};
+use aleph_types::message::execution::environment::{
+    LaunchMeasurement, SevSnpRegisters, TeePlatform,
+};
 use sev::measurement::snp::{SnpMeasurementArgs, snp_calc_launch_digest};
 use sev::measurement::vcpu_types::CpuType;
 use sev::measurement::vmsa::{GuestFeatures, VMMType};
@@ -57,7 +60,10 @@ pub fn compute_measurements(
                 .map_err(|e| MeasureError::Measurement(format!("{e:?}")))?;
             Ok(LaunchMeasurement {
                 platform: TeePlatform::SevSnp,
-                digest: hex::encode(bytes),
+                // SEV-SNP pins exactly one register: the launch digest.
+                registers: SevSnpRegisters {
+                    launch: hex::encode(bytes),
+                },
                 vcpu_type: Some(model.clone()),
             })
         })
@@ -121,6 +127,6 @@ mod test {
         };
         let cmdline = "console=ttyS0 root=/dev/mapper/verity-root ro roothash=cb121a317be7dc7969dd633ca9b6c3718ffe9ea6715b64e0e35a871d484b56b8";
         let m = compute_measurements(&artifacts, cmdline, 1, &["EPYC-v4".into()]).unwrap();
-        assert_eq!(m[0].digest, EXPECTED);
+        assert_eq!(m[0].snp_launch_digest(), EXPECTED);
     }
 }
