@@ -21,7 +21,6 @@ pub mod ssh;
 pub mod swap;
 pub mod upload_timeout;
 pub mod verify;
-#[cfg(feature = "vprogram")]
 pub mod vprogram;
 pub mod ws;
 
