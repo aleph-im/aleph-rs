@@ -10,7 +10,23 @@ path = "src/main.rs"
 [dependencies]
 aleph-types = { path = "../aleph-types", features = ["account-evm", "signature-sol"] }
 aleph-sdk = { path = "../aleph-sdk" }
-actix-web = "4"
+# actix-web's default feature set minus `http2`. Dropping it removes the
+# optional `h2 0.3` dependency of actix-http from the lockfile entirely, which
+# clears RUSTSEC-2026-0258 for a line of h2 that will never be patched (0.3
+# ended at 0.3.27; the advisory is only fixed in >= 0.4.16). Nothing here
+# enables a TLS feature, so the server only ever spoke cleartext HTTP/1.1 to
+# real clients anyway: `http2` bought us prior-knowledge h2c, which no browser
+# or ordinary client negotiates.
+actix-web = { version = "4", default-features = false, features = [
+    "macros",
+    "compress-brotli",
+    "compress-gzip",
+    "compress-zstd",
+    "cookies",
+    "unicode",
+    "compat",
+    "ws",
+] }
 actix-cors = "0.7"
 actix-multipart = "0.7"
 rusqlite = { version = "0.34", features = ["bundled"] }
