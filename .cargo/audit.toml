@@ -26,4 +26,29 @@ ignore = [
     # removing our dependency on rust_decimal in heph — both out of scope for
     # the v0.16.0 fix release.
     "RUSTSEC-2026-0235",
+
+    # RUSTSEC-2023-0071 / rsa 0.9.10: the Marvin attack, a timing sidechannel
+    # that can leak an RSA *private* key to an attacker who can submit
+    # ciphertexts and measure decryption time. No fixed version exists; the
+    # rsa crate has no constant-time decryption implementation to upgrade to.
+    #
+    # rsa reaches our lockfile through aleph-sdk -> sev v8, enabled by the
+    # `vprogram` feature (on by default in aleph-cli). We depend on sev with
+    # `crypto_nossl`, which swaps the OpenSSL backend for pure-Rust crypto so
+    # the CLI does not need a system libssl. On that path the rsa crate is
+    # reachable from exactly one file, sev-8.0.0/src/certs/snp/cert_nossl.rs,
+    # and it is used only to build an `rsa::RsaPublicKey` and verify an
+    # RSASSA-PSS/SHA-384 signature via `rsa::pss::VerifyingKey`: the AMD
+    # certificate chain and the KDS CRLs. There is no private key and no
+    # decryption anywhere in that path, so the vulnerable operation is never
+    # performed.
+    #
+    # The alternative is to drop `crypto_nossl` and use sev's OpenSSL backend,
+    # which removes the rsa crate but adds a system OpenSSL build dependency
+    # to a CLI we ship as a self-contained binary. Not worth it for a
+    # sidechannel in an operation we do not run.
+    #
+    # Revisit if sev's nossl path ever grows an RSA decrypt or private-key
+    # operation, or if rsa ships a constant-time release.
+    "RUSTSEC-2023-0071",
 ]
