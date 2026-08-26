@@ -3127,6 +3127,11 @@ pub enum VProgramCommand {
     /// ports, host IPv4) and the attested (RA-TLS) endpoint. When the VM
     /// hasn't been placed yet or the CRN is unreachable, only the
     /// message-side fields are shown.
+    ///
+    /// The STORAGE section lists the workload image and verified volumes
+    /// with the size recorded on their STORE messages. A V-PROGRAM has no
+    /// disk allocation: it boots only from these read-only dm-verity images,
+    /// and writable scratch is guest tmpfs carved out of its memory.
     Show(VProgramShowArgs),
     /// Make an attested HTTP call to a running V-PROGRAM guest.
     ///
