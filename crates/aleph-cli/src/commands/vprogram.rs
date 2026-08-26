@@ -13,7 +13,7 @@ use aleph_sdk::client::{
 };
 use aleph_sdk::crn::{ActiveVmNetworking, fetch_active_vms};
 use aleph_sdk::messages::{StoreBuilder, VProgramBuilder};
-use aleph_sdk::scheduler::SchedulerClient;
+use aleph_sdk::scheduler::{SchedulerClient, VmEntry};
 use aleph_sdk::verify::Hasher;
 use aleph_sdk::vprogram::bundle::fetch_bundle_artifacts;
 use aleph_sdk::vprogram::cmdline::instantiate_cmdline;
@@ -996,6 +996,13 @@ async fn resolve_vprogram_id(scheduler: &SchedulerClient, input: &str) -> Result
         .find_vms_by_hash_prefix(input)
         .await
         .with_context(|| format!("looking up VMs matching prefix `{input}` in the scheduler"))?;
+    pick_unique_vprogram(input, matches)
+}
+
+/// The 0/1/N dispatch behind [`resolve_vprogram_id`], split out so it can
+/// be unit-tested without a scheduler. Mirrors
+/// `instance_target::pick_unique_match` with V-Program wording.
+fn pick_unique_vprogram(input: &str, matches: Vec<VmEntry>) -> Result<ItemHash> {
     match matches.len() {
         0 => bail!(
             "no V-Program matches `{input}`. Run `aleph vprogram list` to see available \
@@ -1691,8 +1698,15 @@ async fn handle_call(
     json: bool,
     args: VProgramCallArgs,
 ) -> Result<()> {
-    let scheduler = SchedulerClient::new(crate::common::resolve_scheduler_url(network_override)?);
-    let item_hash = resolve_vprogram_id(&scheduler, &args.vm_id).await?;
+    // The scheduler is only consulted when something actually needs it (a
+    // hash prefix, or endpoint discovery without --url), so a full hash plus
+    // --url keeps working even when no scheduler is configured.
+    let scheduler =
+        || crate::common::resolve_scheduler_url(network_override).map(SchedulerClient::new);
+    let item_hash = match ItemHash::try_from(args.vm_id.as_str()) {
+        Ok(hash) => hash,
+        Err(_) => resolve_vprogram_id(&scheduler()?, &args.vm_id).await?,
+    };
     let message = fetch_vprogram_message(aleph_client, &item_hash).await?;
     let MessageContentEnum::VProgram(content) = message.content() else {
         bail!(
@@ -1709,7 +1723,7 @@ async fn handle_call(
     let base_url = match &args.url {
         Some(url) => url.clone(),
         None => {
-            let net = fetch_live_networking(&scheduler, &item_hash)
+            let net = fetch_live_networking(&scheduler()?, &item_hash)
                 .await
                 .ok_or_else(|| {
                     anyhow!(
@@ -1883,6 +1897,51 @@ async fn handle_call(
     }
     println!("{out}");
     Ok(())
+}
+
+#[cfg(test)]
+mod resolve_id_tests {
+    use super::*;
+
+    fn vm_entry(hash_hex: &str) -> VmEntry {
+        VmEntry {
+            vm_hash: hash_hex.parse().unwrap(),
+            vm_type: "vprogram".to_string(),
+            allocated_node: None,
+            status: "dispatched".to_string(),
+            scheduling_status: "scheduled".to_string(),
+            migration_target: None,
+            owner: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn unique_prefix_returns_the_match() {
+        let hash = "cafe".repeat(16);
+        let got = pick_unique_vprogram("cafecafecafe", vec![vm_entry(&hash)]).unwrap();
+        assert_eq!(got.to_string(), hash);
+    }
+
+    #[test]
+    fn unknown_prefix_points_at_vprogram_list() {
+        let err = pick_unique_vprogram("zzzz", vec![])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no V-Program matches `zzzz`"), "{err}");
+        assert!(err.contains("aleph vprogram list"), "{err}");
+    }
+
+    #[test]
+    fn ambiguous_prefix_lists_candidates_sorted() {
+        let a = "cafe".repeat(16);
+        let b = "cafd".repeat(16);
+        let err = pick_unique_vprogram("caf", vec![vm_entry(&a), vm_entry(&b)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ambiguous, matches 2 VMs"), "{err}");
+        assert!(err.find(&b).unwrap() < err.find(&a).unwrap(), "{err}");
+    }
 }
 
 #[cfg(test)]

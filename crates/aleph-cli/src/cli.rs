@@ -4621,6 +4621,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--compose",
             "f.yml",
             "--image-archive",
