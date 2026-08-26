@@ -3128,6 +3128,12 @@ pub enum VProgramCommand {
     /// hasn't been placed yet or the CRN is unreachable, only the
     /// message-side fields are shown.
     Show(VProgramShowArgs),
+    /// List V-PROGRAMs for an address, with scheduler status and endpoint.
+    ///
+    /// Lists the V-PROGRAM messages sent by or owned by the address, merged
+    /// with the scheduler's placement status and, for placed VMs, the
+    /// attested (RA-TLS) endpoint discovered from the allocated CRN.
+    List(VProgramListArgs),
     /// Make an attested HTTP call to a running V-PROGRAM guest.
     ///
     /// Resolves the guest's attested (RA-TLS) endpoint (from `--url`, or via
@@ -3229,6 +3235,15 @@ pub struct VProgramCreateArgs {
 pub struct VProgramShowArgs {
     /// Item hash of the V-PROGRAM message to inspect.
     pub item_hash: ItemHash,
+}
+
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Args)]
+pub struct VProgramListArgs {
+    /// Address to query, as a hex address (`0x…`) or a local account/alias name.
+    /// Defaults to the address of the current default account.
+    #[arg(long)]
+    pub address: Option<String>,
 }
 
 #[cfg(feature = "vprogram")]

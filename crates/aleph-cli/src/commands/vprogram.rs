@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::instance::{InstanceRow, format_item_hash_short, format_node_short};
 use aleph_sdk::attest::{
     MeasurementPin, PlatformPolicy, PlatformPosture, PolicyPin, attested_request,
 };
@@ -33,9 +34,13 @@ use url::Url;
 
 use crate::account::CliAccount;
 use crate::cli::{
-    PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramShowArgs,
+    PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramListArgs,
+    VProgramShowArgs,
 };
-use crate::common::{render_upload_progress, resolve_account, resolve_address, submit_or_preview};
+use crate::common::{
+    render_upload_progress, resolve_account, resolve_address, resolve_address_or_active,
+    submit_or_preview,
+};
 use crate::compose;
 use crate::config::store::ConfigStore;
 use crate::container::ContainerTool;
@@ -64,6 +69,10 @@ pub async fn dispatch(
         VProgramCommand::Show(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             handle_show(aleph_client, scheduler_url, json, args).await
+        }
+        VProgramCommand::List(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            handle_list(aleph_client, scheduler_url, json, args).await
         }
         VProgramCommand::Call(args) => {
             handle_call(aleph_client, network_override, json, *args).await
@@ -905,6 +914,147 @@ async fn handle_show(
 }
 
 // ---------------------------------------------------------------------
+// `aleph vprogram list`
+// ---------------------------------------------------------------------
+
+/// Same pipeline as `aleph instance list` (CCN sender+owner queries, bulk
+/// scheduler enrichment, best-effort CRN networking), filtered on V-PROGRAM
+/// messages. The text table swaps the IPv6 column for the attested (RA-TLS)
+/// endpoint, which is what a V-PROGRAM is reached through.
+async fn handle_list(
+    aleph_client: &AlephClient,
+    scheduler_url: Url,
+    json: bool,
+    args: VProgramListArgs,
+) -> Result<()> {
+    use super::instance::{
+        enrich_by_sender, enrich_rows_with_ips, fetch_scheduler_map, fetch_vm_rows,
+        merge_scheduler_into_rows,
+    };
+
+    // Read-only: resolve the address from the manifest without loading the
+    // account (loading an encrypted account would prompt for its password).
+    let address = resolve_address_or_active(args.address.as_deref())?;
+
+    let mut rows = fetch_vm_rows(aleph_client, &address, MessageType::VProgram).await?;
+
+    let scheduler = SchedulerClient::new(scheduler_url);
+    let mut scheduler_map = fetch_scheduler_map(&scheduler, &address).await;
+    enrich_by_sender(&scheduler, &address, &rows, &mut scheduler_map).await;
+    merge_scheduler_into_rows(&mut rows, &scheduler_map);
+    enrich_rows_with_ips(&scheduler, &mut rows).await;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&format_list_json(&rows))?
+        );
+    } else {
+        print!("{}", format_list_text(&rows));
+    }
+    Ok(())
+}
+
+const MISSING_VALUE: &str = "-";
+
+/// Attested endpoint for a row, when the CRN reported networking that maps
+/// the attestation port.
+fn row_attested_endpoint(row: &InstanceRow) -> Option<Url> {
+    row.networking
+        .as_ref()
+        .and_then(|net| resolve_attested_endpoint(net, ATTEST_PORT))
+}
+
+fn format_list_json(rows: &[InstanceRow]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "item_hash": r.item_hash.to_string(),
+                "name": r.name,
+                "owner": r.owner.to_string(),
+                "node_hash": r.node_hash,
+                "attested_endpoint": row_attested_endpoint(r).map(|u| u.to_string()),
+                "ipv4": r.ipv4,
+                "created_at": r.created_at
+                    .to_datetime()
+                    .ok()
+                    .map(|dt| dt.to_rfc3339()),
+                "scheduler": r.scheduler_raw,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items)
+}
+
+fn format_list_text(rows: &[InstanceRow]) -> String {
+    use std::fmt::Write;
+
+    const HASH_HEADER: &str = "ITEM_HASH";
+    const NAME_HEADER: &str = "NAME";
+    const OWNER_HEADER: &str = "OWNER";
+    const STATUS_HEADER: &str = "STATUS";
+    const ALLOC_HEADER: &str = "ALLOCATED";
+    const ENDPOINT_HEADER: &str = "ENDPOINT";
+
+    fn width<'a>(header: &str, values: impl Iterator<Item = &'a str>) -> usize {
+        values.map(str::len).fold(header.len(), usize::max)
+    }
+
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|r| r.name.as_deref().unwrap_or(MISSING_VALUE))
+        .collect();
+    let owners: Vec<String> = rows.iter().map(|r| r.owner.to_string()).collect();
+    let statuses: Vec<&str> = rows
+        .iter()
+        .map(|r| r.status.as_deref().unwrap_or(MISSING_VALUE))
+        .collect();
+    let allocated: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.allocated_node
+                .as_deref()
+                .map(format_node_short)
+                .unwrap_or_else(|| MISSING_VALUE.to_string())
+        })
+        .collect();
+    let endpoints: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            row_attested_endpoint(r)
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| MISSING_VALUE.to_string())
+        })
+        .collect();
+
+    let hash_w = HASH_HEADER.len().max(12);
+    let name_w = width(NAME_HEADER, names.iter().copied());
+    let owner_w = width(OWNER_HEADER, owners.iter().map(String::as_str));
+    let status_w = width(STATUS_HEADER, statuses.iter().copied());
+    let alloc_w = width(ALLOC_HEADER, allocated.iter().map(String::as_str));
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{HASH_HEADER:<hash_w$}  {NAME_HEADER:<name_w$}  {OWNER_HEADER:<owner_w$}  \
+         {STATUS_HEADER:<status_w$}  {ALLOC_HEADER:<alloc_w$}  {ENDPOINT_HEADER}"
+    )
+    .expect("writing to String cannot fail");
+
+    for (i, row) in rows.iter().enumerate() {
+        let hash = format_item_hash_short(&row.item_hash);
+        writeln!(
+            out,
+            "{hash:<hash_w$}  {:<name_w$}  {:<owner_w$}  {:<status_w$}  {:<alloc_w$}  {}",
+            names[i], owners[i], statuses[i], allocated[i], endpoints[i],
+        )
+        .expect("writing to String cannot fail");
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
 // `aleph vprogram call <hash> <path>`
 // ---------------------------------------------------------------------
 
@@ -1587,13 +1737,88 @@ mod wait_report_tests {
 }
 
 #[cfg(test)]
+mod list_tests {
+    use super::*;
+    use aleph_types::message::Message;
+
+    fn fixture_message() -> Message {
+        serde_json::from_str(show_tests::VPROGRAM_FIXTURE).expect("fixture parses")
+    }
+
+    #[test]
+    fn extract_vm_row_accepts_a_vprogram_message() {
+        let message = fixture_message();
+        let row = super::super::instance::extract_vm_row(&message).expect("row extracted");
+        assert_eq!(row.item_hash, message.item_hash);
+        assert_eq!(&row.owner, message.owner());
+        assert!(row.status.is_none());
+        assert!(row.networking.is_none());
+    }
+
+    fn placed_row() -> InstanceRow {
+        let message = fixture_message();
+        let mut row = super::super::instance::extract_vm_row(&message).expect("row extracted");
+        row.status = Some("dispatched".to_string());
+        row.allocated_node = Some("node-0123456789abcdef".to_string());
+        row.networking = Some(show_tests::active_networking());
+        row
+    }
+
+    #[test]
+    fn format_list_text_shows_endpoint_and_placeholders() {
+        let placed = placed_row();
+        let mut unplaced = placed.clone();
+        unplaced.status = None;
+        unplaced.allocated_node = None;
+        unplaced.networking = None;
+
+        let out = format_list_text(&[placed.clone(), unplaced]);
+        let mut lines = out.lines();
+        let header = lines.next().expect("header");
+        assert!(header.starts_with("ITEM_HASH"));
+        assert!(header.ends_with("ENDPOINT"));
+        assert!(!header.contains("IPV6"));
+
+        let first = lines.next().expect("placed row");
+        assert!(first.starts_with(&format_item_hash_short(&placed.item_hash)));
+        assert!(first.contains("dispatched"));
+        assert!(
+            first.contains("6789abcdef"),
+            "allocated node is shortened to its last 10 chars"
+        );
+        assert!(first.ends_with("https://203.0.113.5:24101/"));
+
+        let second = lines.next().expect("unplaced row");
+        let cells: Vec<&str> = second.split_whitespace().collect();
+        assert_eq!(
+            &cells[cells.len() - 3..],
+            ["-", "-", "-"],
+            "got: {second:?}"
+        );
+    }
+
+    #[test]
+    fn format_list_json_shape() {
+        let placed = placed_row();
+        let v = format_list_json(std::slice::from_ref(&placed));
+        let item = &v.as_array().expect("array")[0];
+        assert_eq!(item["item_hash"], placed.item_hash.to_string());
+        assert_eq!(item["owner"], placed.owner.to_string());
+        assert_eq!(item["attested_endpoint"], "https://203.0.113.5:24101/");
+        assert_eq!(item["ipv4"], serde_json::Value::Null);
+        assert!(item["created_at"].is_string());
+        assert!(item.get("scheduler").is_some());
+    }
+}
+
+#[cfg(test)]
 mod show_tests {
     use super::*;
     use aleph_sdk::crn::MappedPort;
     use aleph_types::message::Message;
     use std::collections::BTreeMap;
 
-    const VPROGRAM_FIXTURE: &str = include_str!(concat!(
+    pub(super) const VPROGRAM_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/messages/vprogram/vprogram-credit.json"
     ));
@@ -1606,7 +1831,7 @@ mod show_tests {
         (message.item_hash.clone(), content)
     }
 
-    fn active_networking() -> ActiveVmNetworking {
+    pub(super) fn active_networking() -> ActiveVmNetworking {
         let mut mapped_ports = BTreeMap::new();
         mapped_ports.insert(
             ATTEST_PORT,
