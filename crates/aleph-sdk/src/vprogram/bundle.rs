@@ -1,9 +1,9 @@
 //! V-Program runtime bundle download, verification, and extraction.
 //!
 //! A runtime bundle is a `.tar.gz` referenced by a [`RuntimeManifest`]'s
-//! `bundle` field. This module fetches it from aleph storage (with a local
-//! disk cache keyed by the manifest's declared sha256), verifies its hash and
-//! size, and extracts the OVMF firmware, kernel, and initrd members that the
+//! `bundle` field. This module fetches it by `bundle.ref`, the STORE message
+//! pinning the tarball (native storage or IPFS), with a local disk cache keyed
+//! by the manifest's declared sha256, verifies its hash and size, and extracts the OVMF firmware, kernel, and initrd members that the
 //! V-Program launch pipeline needs.
 
 use std::fs;
@@ -28,6 +28,8 @@ pub enum BundleError {
     MissingMember(&'static str),
     #[error("bundle.sha256 is not a valid storage hash: {0}")]
     BadBundleHash(String),
+    #[error("bundle.ref is not a valid message hash: {0}")]
+    BadBundleRef(String),
     #[error("reading/writing bundle cache: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -62,20 +64,26 @@ pub async fn fetch_bundle_artifacts(
         return Ok(artifacts);
     }
 
-    let hash =
+    // Download by `bundle.ref`, the STORE message pinning the tarball, not
+    // by `bundle.sha256`: the sha256 is only a valid storage path for
+    // native-storage uploads, and a bundle above the network's native size
+    // limit lives on IPFS under a CID (the mainnet aleph.compose/1 runtime,
+    // 297 MB). Resolving the message gives whichever file hash the node
+    // serves it under, the same way the CRN fetches it.
+    let bundle_ref =
         manifest
             .bundle
-            .sha256
+            .reference
             .parse()
             .map_err(|e: aleph_types::item_hash::ItemHashError| {
-                BundleError::BadBundleHash(e.to_string())
+                BundleError::BadBundleRef(e.to_string())
             })?;
 
     // Deliberately no `.with_verification()`: `verify_bundle_bytes` below
     // checks both size and sha256 against the manifest, which is strictly
     // stronger than the download-layer hash-only check and avoids hashing
     // the payload twice.
-    let download = client.download_file_by_hash(&hash).await?;
+    let download = client.download_file_by_message_hash(&bundle_ref).await?;
     let bytes = download.bytes().await?;
 
     verify_bundle_bytes(&bytes, &manifest.bundle.sha256, manifest.bundle.size)?;

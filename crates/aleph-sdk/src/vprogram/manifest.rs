@@ -48,11 +48,11 @@ pub struct RuntimeManifest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BundleRef {
-    /// Kept for schema completeness but not used as the download key:
-    /// `fetch_bundle_artifacts` downloads by `sha256` (for native storage
-    /// the content hash is the storage path) and verifies size + sha256
-    /// against this manifest. `ref` may diverge from `sha256` in future
-    /// manifests (e.g. an IPFS CID), so the two are not cross-validated.
+    /// STORE message hash pinning the bundle tarball; the download key used
+    /// by `fetch_bundle_artifacts`, which then verifies size + sha256 against
+    /// this manifest. The file behind the message may sit on native storage
+    /// (addressed by its sha256) or on IPFS (addressed by a CID), so `ref`
+    /// and `sha256` are not cross-validated.
     #[serde(rename = "ref")]
     pub reference: String,
     pub sha256: String,
