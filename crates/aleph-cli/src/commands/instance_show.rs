@@ -22,7 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::collections::BTreeMap;
 use url::Url;
 
-use crate::commands::instance_target::pick_unique_match;
+use crate::commands::instance_target::{VmKind, pick_unique_match};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct InstanceShow {
@@ -765,7 +765,7 @@ pub(crate) async fn build_instance_show(
                     args.vm_id
                 )
             })?;
-        pick_unique_match(&args.vm_id, matches)?
+        pick_unique_match(&args.vm_id, matches, VmKind::Instance)?
     };
 
     // 2. Fetch the CCN INSTANCE message.
