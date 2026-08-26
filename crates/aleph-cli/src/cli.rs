@@ -3209,6 +3209,10 @@ pub struct VProgramCreateArgs {
     #[arg(long)]
     pub channel: Option<String>,
 
+    /// Sign on behalf of another address (requires an authorization from that address).
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
     /// After submitting, poll until the V-Program is reachable (networking
     /// populated on its allocated CRN) and print its attested endpoint.
     /// Optionally takes a timeout in seconds (default 300): `--wait` or
