@@ -81,14 +81,14 @@ pub enum CreditError {
     CheckBalance {
         token: &'static str,
         #[source]
-        source: alloy_contract::Error,
+        source: Box<alloy_contract::Error>,
     },
     /// RPC error reading the native ETH balance.
     #[error("failed to check ETH balance")]
     CheckEthBalance(#[source] alloy_provider::transport::TransportError),
     /// Failed to broadcast the ERC20 credit-buy transaction.
     #[error("failed to send transaction")]
-    SendTransaction(#[source] alloy_contract::Error),
+    SendTransaction(#[source] Box<alloy_contract::Error>),
     /// Failed to broadcast the native-ETH credit-buy transaction.
     #[error("failed to send transaction")]
     SendEthTransaction(#[source] alloy_provider::transport::TransportError),
@@ -454,7 +454,7 @@ pub async fn check_balance(
             .await
             .map_err(|source| CreditError::CheckBalance {
                 token: token.symbol(),
-                source,
+                source: Box::new(source),
             })?;
     Ok(result)
 }
@@ -496,7 +496,10 @@ pub async fn buy_credits(
 ) -> Result<alloy_rpc_types_eth::TransactionReceipt, CreditError> {
     let contract = IERC20::new(token_address, provider);
     let tx = contract.transfer(credit_contract, amount_raw);
-    let pending = tx.send().await.map_err(CreditError::SendTransaction)?;
+    let pending = tx
+        .send()
+        .await
+        .map_err(|e| CreditError::SendTransaction(Box::new(e)))?;
 
     let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
         .await
