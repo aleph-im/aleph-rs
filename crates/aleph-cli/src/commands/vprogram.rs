@@ -19,6 +19,7 @@ use aleph_sdk::vprogram::cmdline::instantiate_cmdline;
 use aleph_sdk::vprogram::manifest::{RuntimeManifest, WorkloadSpec};
 use aleph_sdk::vprogram::measure::compute_measurements;
 use aleph_sdk::vprogram::status::resolve_attested_endpoint;
+use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::environment::{LaunchMeasurement, validate_snp_policy};
@@ -34,7 +35,7 @@ use crate::account::CliAccount;
 use crate::cli::{
     PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramShowArgs,
 };
-use crate::common::{render_upload_progress, resolve_account, submit_or_preview};
+use crate::common::{render_upload_progress, resolve_account, resolve_address, submit_or_preview};
 use crate::compose;
 use crate::config::store::ConfigStore;
 use crate::container::ContainerTool;
@@ -228,11 +229,24 @@ async fn handle_create(
     //    --dry-run, uploads are skipped entirely: the file hash stands in
     //    for the STORE message hash so the pending message can still be
     //    previewed without ever touching the network for the upload.
-    let workload_refs =
-        upload_pair(aleph_client, &account, json, dry_run, &workload_verity).await?;
+    let owner = args
+        .on_behalf_of
+        .as_deref()
+        .map(resolve_address)
+        .transpose()?;
+    let workload_refs = upload_pair(
+        aleph_client,
+        &account,
+        owner.as_ref(),
+        json,
+        dry_run,
+        &workload_verity,
+    )
+    .await?;
     let mut volume_refs = Vec::new();
     for v in &volume_verities {
-        volume_refs.push(upload_pair(aleph_client, &account, json, dry_run, v).await?);
+        volume_refs
+            .push(upload_pair(aleph_client, &account, owner.as_ref(), json, dry_run, v).await?);
     }
 
     // 5. Cmdline + measurements.
@@ -288,6 +302,9 @@ async fn handle_create(
     }
     if let Some(channel) = args.channel {
         builder = builder.channel(Channel::from(channel));
+    }
+    if let Some(owner) = owner {
+        builder = builder.on_behalf_of(owner);
     }
     let pending = builder.build()?;
     let vm_id = pending.item_hash.clone();
@@ -534,13 +551,14 @@ struct UploadedPair {
 async fn upload_pair(
     client: &AlephClient,
     account: &CliAccount,
+    owner: Option<&Address>,
     json: bool,
     dry_run: bool,
     v: &VerityArtifact,
 ) -> Result<UploadedPair> {
     Ok(UploadedPair {
-        data_message: upload_file(client, account, &v.data, json, dry_run).await?,
-        tree_message: upload_file(client, account, &v.hash_tree, json, dry_run).await?,
+        data_message: upload_file(client, account, owner, &v.data, json, dry_run).await?,
+        tree_message: upload_file(client, account, owner, &v.hash_tree, json, dry_run).await?,
     })
 }
 
@@ -554,6 +572,7 @@ async fn upload_pair(
 async fn upload_file(
     client: &AlephClient,
     account: &CliAccount,
+    owner: Option<&Address>,
     path: &Path,
     json: bool,
     dry_run: bool,
@@ -570,7 +589,11 @@ async fn upload_file(
         return Ok(file_hash);
     }
 
-    let pending = StoreBuilder::new(account, file_hash, StorageEngine::Storage).build()?;
+    let mut builder = StoreBuilder::new(account, file_hash, StorageEngine::Storage);
+    if let Some(owner) = owner {
+        builder = builder.on_behalf_of(owner.clone());
+    }
+    let pending = builder.build()?;
 
     if !json {
         eprintln!("Uploading {}...", path.display());
