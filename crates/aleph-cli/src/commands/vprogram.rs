@@ -646,6 +646,9 @@ pub(crate) struct VProgramShow {
     pub item_hash: String,
     pub runtime_ref: String,
     pub workload_ref: String,
+    pub resources: ShowResources,
+    pub internet: bool,
+    pub storage: ShowStorage,
     pub measurements: Vec<MeasurementSummary>,
     /// Whether the CRN currently reports this VM as active. `false` when the
     /// scheduler/CRN has no record of it (not yet placed, or unreachable) -
@@ -663,15 +666,74 @@ pub(crate) struct VProgramShow {
     pub attested_endpoint: Option<String>,
 }
 
+/// Compute resources pinned on the message. A V-PROGRAM has no disk
+/// allocation: every disk it boots from is a read-only dm-verity image
+/// (see [`ShowStorage`]), and writable scratch is guest tmpfs out of memory.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct ShowResources {
+    pub vcpus: u32,
+    pub memory_mib: u64,
+}
+
+/// One read-only artifact the VM boots from, with its size from the CCN's
+/// storage metadata when it is known.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct ShowArtifact {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+}
+
+/// Disk footprint of the workload image and verified volumes (data images
+/// only; hash trees are a few percent on top). This is the figure the
+/// scheduler checks against a node's free disk before placing the VM.
+/// `total_bytes` is only present when every artifact's size is known.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct ShowStorage {
+    pub workload: ShowArtifact,
+    pub volumes: Vec<ShowArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+}
+
+/// Artifact sizes keyed by STORE message hash, as resolved by
+/// [`fetch_artifact_sizes`]. Missing entries render as unknown.
+pub(crate) type ArtifactSizes = std::collections::HashMap<ItemHash, u64>;
+
 /// Pure builder: assembles the render model from a V-PROGRAM message's
-/// content plus optional live CRN state. No I/O, so it is unit-testable
-/// without a network.
+/// content plus optional live CRN state and artifact sizes. No I/O, so it
+/// is unit-testable without a network.
 pub(crate) fn build_show(
     item_hash: &ItemHash,
     content: &VerifiableProgramContent,
     net: Option<&ActiveVmNetworking>,
     attested_endpoint: Option<&Url>,
+    sizes: &ArtifactSizes,
 ) -> VProgramShow {
+    let artifact = |reference: &ItemHash, comment: Option<&str>| ShowArtifact {
+        reference: reference.to_string(),
+        comment: comment.filter(|c| !c.is_empty()).map(str::to_string),
+        size_bytes: sizes.get(reference).copied(),
+    };
+    let workload = artifact(&content.workload.reference, None);
+    let volumes: Vec<ShowArtifact> = content
+        .volumes
+        .iter()
+        .map(|v| artifact(&v.reference, Some(&v.comment)))
+        .collect();
+    let total_bytes = std::iter::once(&workload)
+        .chain(volumes.iter())
+        .map(|a| a.size_bytes)
+        .try_fold(0u64, |acc, size| size.map(|s| acc.saturating_add(s)));
+    let storage = ShowStorage {
+        workload,
+        volumes,
+        total_bytes,
+    };
+
     let measurements = content
         .verification
         .measurements
@@ -689,6 +751,12 @@ pub(crate) fn build_show(
         item_hash: item_hash.to_string(),
         runtime_ref: content.runtime.reference.to_string(),
         workload_ref: content.workload.reference.to_string(),
+        resources: ShowResources {
+            vcpus: content.base.resources.vcpus,
+            memory_mib: u64::from(content.base.resources.memory),
+        },
+        internet: content.environment.internet,
+        storage,
         measurements,
         running: net.is_some(),
         host_ipv4: net.and_then(|n| n.host_ipv4.clone()),
@@ -706,6 +774,49 @@ fn render_text(s: &VProgramShow) -> String {
     writeln!(out, "VPROGRAM {}", s.item_hash).unwrap();
     writeln!(out, "  Runtime        {}", s.runtime_ref).unwrap();
     writeln!(out, "  Workload       {}", s.workload_ref).unwrap();
+    writeln!(
+        out,
+        "  Resources      {} vCPUs, {} MiB",
+        s.resources.vcpus, s.resources.memory_mib
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  Internet       {}",
+        if s.internet { "yes" } else { "no" }
+    )
+    .unwrap();
+
+    writeln!(out).unwrap();
+    writeln!(out, "STORAGE").unwrap();
+    let size_or_missing =
+        |size: Option<u64>| size.map(format_size).unwrap_or_else(|| MISSING.to_string());
+    writeln!(
+        out,
+        "  Workload       {}  {}",
+        s.storage.workload.reference,
+        size_or_missing(s.storage.workload.size_bytes)
+    )
+    .unwrap();
+    for volume in &s.storage.volumes {
+        write!(
+            out,
+            "  Volume         {}  {}",
+            volume.reference,
+            size_or_missing(volume.size_bytes)
+        )
+        .unwrap();
+        if let Some(comment) = &volume.comment {
+            write!(out, "  {comment}").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+    writeln!(
+        out,
+        "  Total          {}",
+        size_or_missing(s.storage.total_bytes)
+    )
+    .unwrap();
 
     writeln!(out).unwrap();
     writeln!(out, "MEASUREMENTS ({})", s.measurements.len()).unwrap();
@@ -774,17 +885,34 @@ fn render_text(s: &VProgramShow) -> String {
     out
 }
 
-/// Render the fetched message content (+ optional live CRN state) as either
-/// a text table or pretty JSON. Pure (no I/O): [`handle_show`] does the
-/// fetching and calls this.
+/// Human-readable binary size with one decimal (`512.0 MiB`, `1.2 GiB`);
+/// plain bytes below 1 KiB.
+pub(crate) fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// Render the fetched message content (+ optional live CRN state and
+/// artifact sizes) as either a text table or pretty JSON. Pure (no I/O):
+/// [`handle_show`] does the fetching and calls this.
 pub(crate) fn render_show(
     item_hash: &ItemHash,
     content: &VerifiableProgramContent,
     net: Option<&ActiveVmNetworking>,
     attested_endpoint: Option<&Url>,
+    sizes: &ArtifactSizes,
     json: bool,
 ) -> String {
-    let show = build_show(item_hash, content, net, attested_endpoint);
+    let show = build_show(item_hash, content, net, attested_endpoint, sizes);
     if json {
         serde_json::to_string_pretty(&show).expect("VProgramShow always serializes")
     } else {
@@ -823,6 +951,33 @@ async fn fetch_vprogram_message(
         );
     }
     Ok(message)
+}
+
+/// Best-effort artifact size lookup via the CCN's storage metadata
+/// endpoint (`/api/v0/storage/by-message-hash/<ref>`), which always
+/// carries the file size; the STORE message's own `size` field is often
+/// absent. Refs whose metadata cannot be fetched are skipped with a stderr
+/// warning and the caller renders them as unknown. Lookups run concurrently.
+async fn fetch_artifact_sizes(aleph_client: &AlephClient, refs: &[ItemHash]) -> ArtifactSizes {
+    let lookups = refs.iter().map(|reference| async move {
+        match aleph_client
+            .get_file_metadata_by_message_hash(reference)
+            .await
+        {
+            Ok(meta) => Some((reference.clone(), u64::from(meta.size))),
+            Err(e) => {
+                eprintln!(
+                    "warning: could not fetch metadata for artifact {reference}: {e}; size unknown"
+                );
+                None
+            }
+        }
+    });
+    futures_util::future::join_all(lookups)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Best-effort live-CRN lookup: resolves the scheduler placement for
@@ -893,7 +1048,14 @@ async fn handle_show(
     };
 
     let scheduler = SchedulerClient::new(scheduler_url);
-    let net = fetch_live_networking(&scheduler, &args.item_hash).await;
+    let artifact_refs: Vec<ItemHash> = std::iter::once(&content.workload.reference)
+        .chain(content.volumes.iter().map(|v| &v.reference))
+        .cloned()
+        .collect();
+    let (net, sizes) = tokio::join!(
+        fetch_live_networking(&scheduler, &args.item_hash),
+        fetch_artifact_sizes(aleph_client, &artifact_refs),
+    );
     let attested_endpoint = net
         .as_ref()
         .and_then(|n| resolve_attested_endpoint(n, ATTEST_PORT));
@@ -903,6 +1065,7 @@ async fn handle_show(
         content,
         net.as_ref(),
         attested_endpoint.as_ref(),
+        &sizes,
         json,
     );
     if json {
@@ -1902,7 +2065,14 @@ mod show_tests {
         let net = active_networking();
         let endpoint = resolve_attested_endpoint(&net, ATTEST_PORT).expect("resolves");
 
-        let out = render_show(&item_hash, &content, Some(&net), Some(&endpoint), false);
+        let out = render_show(
+            &item_hash,
+            &content,
+            Some(&net),
+            Some(&endpoint),
+            &ArtifactSizes::new(),
+            false,
+        );
 
         assert!(out.contains("Running        yes"));
         assert!(out.contains("https://203.0.113.5:24101/"));
@@ -1917,7 +2087,14 @@ mod show_tests {
         let net = active_networking();
         let endpoint = resolve_attested_endpoint(&net, ATTEST_PORT).expect("resolves");
 
-        let out = render_show(&item_hash, &content, Some(&net), Some(&endpoint), true);
+        let out = render_show(
+            &item_hash,
+            &content,
+            Some(&net),
+            Some(&endpoint),
+            &ArtifactSizes::new(),
+            true,
+        );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["running"], serde_json::json!(true));
@@ -1938,19 +2115,110 @@ mod show_tests {
     fn render_show_without_net_does_not_panic_and_shows_message_side_fields() {
         let (item_hash, content) = fixture_content();
 
-        let out = render_show(&item_hash, &content, None, None, false);
+        let out = render_show(
+            &item_hash,
+            &content,
+            None,
+            None,
+            &ArtifactSizes::new(),
+            false,
+        );
 
         assert!(out.contains("Running        no"));
         assert!(out.contains(&"ab".repeat(48)));
         // No live fields to show, so the mapped-ports section is absent.
         assert!(!out.contains("MAPPED PORTS"));
 
-        let out_json = render_show(&item_hash, &content, None, None, true);
+        let out_json = render_show(
+            &item_hash,
+            &content,
+            None,
+            None,
+            &ArtifactSizes::new(),
+            true,
+        );
         let v: serde_json::Value = serde_json::from_str(&out_json).expect("valid json");
         assert_eq!(v["running"], serde_json::json!(false));
         assert!(v.get("host_ipv4").is_none());
         assert!(v.get("mapped_ports").is_none());
         assert!(v.get("attested_endpoint").is_none());
+    }
+
+    #[test]
+    fn render_show_text_includes_resources_internet_and_storage() {
+        let (item_hash, content) = fixture_content();
+        let sizes = ArtifactSizes::from([
+            (content.workload.reference.clone(), 512 * 1024 * 1024),
+            (content.volumes[0].reference.clone(), 1_288_490_189), // 1.2 GiB
+        ]);
+
+        let out = render_show(&item_hash, &content, None, None, &sizes, false);
+
+        assert!(out.contains("Resources      2 vCPUs, 2048 MiB"), "{out}");
+        assert!(out.contains("Internet       yes"), "{out}");
+        assert!(out.contains("STORAGE"), "{out}");
+        assert!(
+            out.contains(&format!("Workload       {}  512.0 MiB", "beef".repeat(16))),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "Volume         {}  1.2 GiB  model weights",
+                "dada".repeat(16)
+            )),
+            "{out}"
+        );
+        assert!(out.contains("Total          1.7 GiB"), "{out}");
+    }
+
+    #[test]
+    fn render_show_storage_degrades_when_sizes_are_unknown() {
+        let (item_hash, content) = fixture_content();
+        // Only the workload size is known: the volume and the total render
+        // as unknown rather than under-reporting.
+        let sizes = ArtifactSizes::from([(content.workload.reference.clone(), 1024)]);
+
+        let out = render_show(&item_hash, &content, None, None, &sizes, false);
+        assert!(
+            out.contains("Workload       ") && out.contains("  1.0 KiB"),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "Volume         {}  -  model weights",
+                "dada".repeat(16)
+            )),
+            "{out}"
+        );
+        assert!(out.contains("Total          -"), "{out}");
+
+        let out_json = render_show(&item_hash, &content, None, None, &sizes, true);
+        let v: serde_json::Value = serde_json::from_str(&out_json).expect("valid json");
+        assert_eq!(
+            v["resources"],
+            serde_json::json!({"vcpus": 2, "memory_mib": 2048})
+        );
+        assert_eq!(v["internet"], serde_json::json!(true));
+        assert_eq!(
+            v["storage"]["workload"]["size_bytes"],
+            serde_json::json!(1024)
+        );
+        assert_eq!(
+            v["storage"]["volumes"][0]["ref"],
+            serde_json::json!("dada".repeat(16))
+        );
+        assert!(v["storage"]["volumes"][0].get("size_bytes").is_none());
+        assert!(v["storage"].get("total_bytes").is_none());
+    }
+
+    #[test]
+    fn format_size_picks_binary_units() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(512 * 1024 * 1024), "512.0 MiB");
+        assert_eq!(format_size(1_288_490_189), "1.2 GiB");
+        assert_eq!(format_size(4 << 40), "4.0 TiB");
     }
 }
 
