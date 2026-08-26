@@ -3183,6 +3183,10 @@ Examples:
 #[cfg(feature = "vprogram")]
 #[derive(Debug, Args)]
 pub struct VProgramCreateArgs {
+    /// V-Program name (stored as metadata.name, shown by `aleph vprogram list`).
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
     /// Path to the prebuilt workload ext4 image. Exactly one of --workload
     /// and --compose is required.
     #[arg(long, required_unless_present = "compose", conflicts_with = "compose")]
@@ -3262,8 +3266,9 @@ pub struct VProgramCreateArgs {
 #[cfg(feature = "vprogram")]
 #[derive(Debug, Args)]
 pub struct VProgramShowArgs {
-    /// Item hash of the V-PROGRAM message to inspect.
-    pub item_hash: ItemHash,
+    /// V-PROGRAM item hash. Accepts a unique prefix (e.g. the 12-char hash
+    /// shown by `aleph vprogram list`); the scheduler matches it server-side.
+    pub vm_id: String,
 }
 
 #[cfg(feature = "vprogram")]
@@ -3278,8 +3283,9 @@ pub struct VProgramListArgs {
 #[cfg(feature = "vprogram")]
 #[derive(Debug, Args)]
 pub struct VProgramCallArgs {
-    /// Item hash of the V-PROGRAM message to call.
-    pub item_hash: ItemHash,
+    /// V-PROGRAM item hash. Accepts a unique prefix (e.g. the 12-char hash
+    /// shown by `aleph vprogram list`); the scheduler matches it server-side.
+    pub vm_id: String,
 
     /// HTTP path to request on the guest, e.g. `/fib/10`.
     pub path: String,
@@ -4388,6 +4394,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
             "--runtime",
@@ -4413,6 +4420,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
             "--runtime",
@@ -4450,6 +4458,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
             "--runtime",
@@ -4475,6 +4484,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
             "--runtime",
@@ -4496,6 +4506,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
             "--runtime",
@@ -4517,6 +4528,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
             "--runtime",
@@ -4539,6 +4551,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
             "--runtime",
@@ -4566,7 +4579,7 @@ mod vprogram_create_args_tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(args.item_hash.to_string(), hash);
+        assert_eq!(args.vm_id, hash);
     }
 
     #[test]
@@ -4575,6 +4588,7 @@ mod vprogram_create_args_tests {
             "aleph",
             "vprogram",
             "create",
+            "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
             "--compose",
@@ -4643,7 +4657,7 @@ mod vprogram_call_args_tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(args.item_hash.to_string(), hash);
+        assert_eq!(args.vm_id, hash);
         assert_eq!(args.path, "/fib/10");
         assert_eq!(args.method, reqwest::Method::GET);
         assert!(args.data.is_none());

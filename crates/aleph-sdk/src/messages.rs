@@ -831,6 +831,7 @@ pub struct VProgramBuilder<'a, A: Account> {
     // Placement
     node_hash: Option<String>,
     channel: Option<Channel>,
+    metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[cfg(feature = "vprogram")]
@@ -853,7 +854,14 @@ impl<'a, A: Account> VProgramBuilder<'a, A> {
             memory: MiB::from(2048),
             node_hash: None,
             channel: None,
+            metadata: None,
         }
+    }
+
+    /// Set metadata key-value pairs (e.g. the human-readable `name`).
+    pub fn metadata(mut self, metadata: HashMap<String, serde_json::Value>) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 
     pub fn vcpus(mut self, vcpus: u32) -> Self {
@@ -905,7 +913,7 @@ impl<'a, A: Account> VProgramBuilder<'a, A> {
         let content = VerifiableProgramContent {
             base: ExecutableContent {
                 allow_amend: false,
-                metadata: None,
+                metadata: self.metadata,
                 variables: None,
                 resources: MachineResources {
                     vcpus: self.vcpus,
@@ -1673,10 +1681,15 @@ mod tests {
             verification,
         )
         .vcpus(2)
+        .metadata(HashMap::from([(
+            "name".to_string(),
+            serde_json::json!("my-vprogram"),
+        )]))
         .build()
         .unwrap();
         assert_eq!(pending.message_type, MessageType::VProgram);
         let content: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        assert_eq!(content["metadata"]["name"], "my-vprogram");
         assert_eq!(content["payment"]["type"], "credit");
         assert_eq!(content["environment"]["internet"], true); // CLI default: on
         assert_eq!(content["resources"]["vcpus"], 2);

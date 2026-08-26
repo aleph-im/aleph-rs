@@ -305,7 +305,11 @@ async fn handle_create(
         .vcpus(args.vcpus)
         .memory(MiB::from(u64::from(args.memory)))
         .internet(!args.no_internet)
-        .volumes(volumes);
+        .volumes(volumes)
+        .metadata(std::collections::HashMap::from([(
+            "name".to_string(),
+            serde_json::json!(args.name),
+        )]));
     if let Some(crn_hash) = args.crn_hash {
         builder = builder.node_hash(crn_hash.to_string());
     }
@@ -980,6 +984,35 @@ async fn fetch_artifact_sizes(aleph_client: &AlephClient, refs: &[ItemHash]) -> 
         .collect()
 }
 
+/// Resolve a user-supplied V-Program id (full item hash or a prefix such as
+/// the 12-char form printed by `aleph vprogram list`) to its item hash. A
+/// full hash is returned as-is without any network call; a prefix is
+/// expanded server-side by the scheduler and must match exactly one VM.
+async fn resolve_vprogram_id(scheduler: &SchedulerClient, input: &str) -> Result<ItemHash> {
+    if let Ok(hash) = ItemHash::try_from(input) {
+        return Ok(hash);
+    }
+    let matches = scheduler
+        .find_vms_by_hash_prefix(input)
+        .await
+        .with_context(|| format!("looking up VMs matching prefix `{input}` in the scheduler"))?;
+    match matches.len() {
+        0 => bail!(
+            "no V-Program matches `{input}`. Run `aleph vprogram list` to see available \
+             hashes, or pass a full hash."
+        ),
+        1 => Ok(matches.into_iter().next().expect("len() == 1").vm_hash),
+        n => {
+            let mut hashes: Vec<String> = matches.iter().map(|v| v.vm_hash.to_string()).collect();
+            hashes.sort();
+            bail!(
+                "prefix `{input}` is ambiguous, matches {n} VMs:\n  {}",
+                hashes.join("\n  ")
+            )
+        }
+    }
+}
+
 /// Best-effort live-CRN lookup: resolves the scheduler placement for
 /// `item_hash`, then the CRN's active-VM networking for it. Returns `None`
 /// (never an error) whenever the VM isn't placed yet or any hop along the
@@ -1038,22 +1071,22 @@ async fn handle_show(
     json: bool,
     args: VProgramShowArgs,
 ) -> Result<()> {
-    let message = fetch_vprogram_message(aleph_client, &args.item_hash).await?;
+    let scheduler = SchedulerClient::new(scheduler_url);
+    let item_hash = resolve_vprogram_id(&scheduler, &args.vm_id).await?;
+    let message = fetch_vprogram_message(aleph_client, &item_hash).await?;
     let MessageContentEnum::VProgram(content) = message.content() else {
         bail!(
-            "item {} is not a V-PROGRAM message (got {:?})",
-            args.item_hash,
+            "item {item_hash} is not a V-PROGRAM message (got {:?})",
             message.message_type
         );
     };
 
-    let scheduler = SchedulerClient::new(scheduler_url);
     let artifact_refs: Vec<ItemHash> = std::iter::once(&content.workload.reference)
         .chain(content.volumes.iter().map(|v| &v.reference))
         .cloned()
         .collect();
     let (net, sizes) = tokio::join!(
-        fetch_live_networking(&scheduler, &args.item_hash),
+        fetch_live_networking(&scheduler, &item_hash),
         fetch_artifact_sizes(aleph_client, &artifact_refs),
     );
     let attested_endpoint = net
@@ -1061,7 +1094,7 @@ async fn handle_show(
         .and_then(|n| resolve_attested_endpoint(n, ATTEST_PORT));
 
     let out = render_show(
-        &args.item_hash,
+        &item_hash,
         content,
         net.as_ref(),
         attested_endpoint.as_ref(),
@@ -1658,11 +1691,12 @@ async fn handle_call(
     json: bool,
     args: VProgramCallArgs,
 ) -> Result<()> {
-    let message = fetch_vprogram_message(aleph_client, &args.item_hash).await?;
+    let scheduler = SchedulerClient::new(crate::common::resolve_scheduler_url(network_override)?);
+    let item_hash = resolve_vprogram_id(&scheduler, &args.vm_id).await?;
+    let message = fetch_vprogram_message(aleph_client, &item_hash).await?;
     let MessageContentEnum::VProgram(content) = message.content() else {
         bail!(
-            "item {} is not a V-PROGRAM message (got {:?})",
-            args.item_hash,
+            "item {item_hash} is not a V-PROGRAM message (got {:?})",
             message.message_type
         );
     };
@@ -1675,22 +1709,20 @@ async fn handle_call(
     let base_url = match &args.url {
         Some(url) => url.clone(),
         None => {
-            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
-            let scheduler = SchedulerClient::new(scheduler_url);
-            let net = fetch_live_networking(&scheduler, &args.item_hash)
+            let net = fetch_live_networking(&scheduler, &item_hash)
                 .await
                 .ok_or_else(|| {
                     anyhow!(
                         "V-Program {} is not running (not yet placed on a CRN, or the \
                          scheduler/CRN is unreachable); pass --url to bypass discovery",
-                        args.item_hash
+                        item_hash
                     )
                 })?;
             resolve_attested_endpoint(&net, ATTEST_PORT).ok_or_else(|| {
                 anyhow!(
                     "V-Program {} is running but its attestation port ({ATTEST_PORT}) is not \
                      yet mapped by the CRN; try again shortly",
-                    args.item_hash
+                    item_hash
                 )
             })?
         }

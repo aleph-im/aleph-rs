@@ -95,6 +95,7 @@ fn rejects_a_compose_file_with_ports_before_any_network() {
         .args([
             "vprogram",
             "create",
+            "test-vprogram",
             "--compose",
             compose_path.to_str().unwrap(),
             "--runtime",
@@ -145,6 +146,7 @@ fn rejects_missing_image_archive_path() {
         .args([
             "vprogram",
             "create",
+            "test-vprogram",
             "--compose",
             compose_path.to_str().unwrap(),
             "--image-archive",
@@ -188,6 +190,7 @@ fn requires_exactly_one_of_workload_and_compose() {
         .args([
             "vprogram",
             "create",
+            "test-vprogram",
             "--runtime",
             &runtime_hash(),
             "--private-key",
