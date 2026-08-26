@@ -73,6 +73,9 @@ pub(crate) struct InstanceRow {
     pub ipv6: Option<String>,
     /// CRN host's public (shared, NAT) IPv4, fetched best-effort from the CRN.
     pub ipv4: Option<String>,
+    /// Full live networking block from the CRN, kept so callers can derive
+    /// other views of it (e.g. the attested endpoint for `vprogram list`).
+    pub networking: Option<aleph_sdk::crn::ActiveVmNetworking>,
     /// Full scheduler entry, used for `--json` passthrough.
     pub scheduler_raw: Option<VmEntry>,
     pub source_flags: SourceFlags,
@@ -100,7 +103,7 @@ pub(crate) fn format_item_hash_short(hash: &ItemHash) -> String {
 }
 
 /// Last 10 chars of a node hash. Returns `s` unchanged if shorter than 10.
-fn format_node_short(node: &str) -> String {
+pub(crate) fn format_node_short(node: &str) -> String {
     if node.len() <= 10 {
         return node.to_string();
     }
@@ -123,34 +126,39 @@ pub(crate) fn merge_scheduler_into_rows(
     }
 }
 
-/// Convert an INSTANCE message into a row. Returns `None` for non-instance
-/// messages (defensive — callers already filter by `MessageType::Instance`,
-/// but the CCN can occasionally return a mis-typed payload).
-pub(crate) fn extract_instance_row(message: &Message) -> Option<InstanceRow> {
-    let MessageContentEnum::Instance(instance) = message.content() else {
-        return None;
+/// Convert an INSTANCE or V-PROGRAM message into a row. Returns `None` for
+/// other content (defensive — callers already filter by message type, but
+/// the CCN can occasionally return a mis-typed payload).
+pub(crate) fn extract_vm_row(message: &Message) -> Option<InstanceRow> {
+    let base = match message.content() {
+        MessageContentEnum::Instance(instance) => &instance.base,
+        MessageContentEnum::VProgram(vprogram) => &vprogram.base,
+        _ => return None,
     };
     Some(InstanceRow {
         item_hash: message.item_hash.clone(),
-        name: name_from_metadata(instance.base.metadata.as_ref()),
+        name: name_from_metadata(base.metadata.as_ref()),
         owner: message.owner().clone(),
-        node_hash: node_from_requirements(instance.base.requirements.as_ref()),
+        node_hash: node_from_requirements(base.requirements.as_ref()),
         created_at: message.content.time.clone(),
         status: None,
         allocated_node: None,
         ipv6: None,
         ipv4: None,
+        networking: None,
         scheduler_raw: None,
         source_flags: SourceFlags::default(),
     })
 }
 
-/// Fetch all INSTANCE rows for `address`, deduped by item_hash.
-/// Runs the sender filter and the owner filter in sequence and merges them
-/// (the CCN ANDs `addresses` and `owners`; we want OR).
-async fn fetch_instance_rows(
+/// Fetch all VM rows of `message_type` (INSTANCE or V-PROGRAM) for
+/// `address`, deduped by item_hash. Runs the sender filter and the owner
+/// filter in sequence and merges them (the CCN ANDs `addresses` and
+/// `owners`; we want OR).
+pub(crate) async fn fetch_vm_rows(
     aleph_client: &AlephClient,
     address: &Address,
+    message_type: MessageType,
 ) -> Result<Vec<InstanceRow>> {
     use std::collections::HashMap;
 
@@ -159,7 +167,7 @@ async fn fetch_instance_rows(
     let filters = [
         (
             MessageFilter {
-                message_type: Some(MessageType::Instance),
+                message_type: Some(message_type),
                 addresses: Some(vec![address.clone()]),
                 ..Default::default()
             },
@@ -170,7 +178,7 @@ async fn fetch_instance_rows(
         ),
         (
             MessageFilter {
-                message_type: Some(MessageType::Instance),
+                message_type: Some(message_type),
                 owners: Some(vec![address.clone()]),
                 ..Default::default()
             },
@@ -185,7 +193,7 @@ async fn fetch_instance_rows(
         let mut stream = Box::pin(aleph_client.get_messages_iterator(filter, None));
         while let Some(message) = stream.next().await {
             let message = message?;
-            if let Some(mut row) = extract_instance_row(&message) {
+            if let Some(mut row) = extract_vm_row(&message) {
                 row.source_flags = flags;
                 by_hash
                     .entry(row.item_hash.clone())
@@ -193,8 +201,8 @@ async fn fetch_instance_rows(
                     .or_insert(row);
             } else {
                 eprintln!(
-                    "warning: skipping message {} with non-instance content",
-                    message.item_hash
+                    "warning: skipping message {} with non-{} content",
+                    message.item_hash, message_type
                 );
             }
         }
@@ -214,7 +222,7 @@ async fn fetch_instance_rows(
 /// Bulk-fetch every VM the scheduler knows about for `address`, indexed by
 /// `item_hash`. On HTTP / network error, prints a warning to stderr and
 /// returns an empty map so the caller can degrade gracefully.
-async fn fetch_scheduler_map(
+pub(crate) async fn fetch_scheduler_map(
     scheduler: &SchedulerClient,
     address: &Address,
 ) -> std::collections::HashMap<ItemHash, VmEntry> {
@@ -254,7 +262,7 @@ fn needs_sender_enrichment(
 /// Only fires when at least one row actually needs it. Entries already in the
 /// map are left as-is (same data). Degrades gracefully on error: a stderr
 /// warning is printed and rows simply stay unenriched.
-async fn enrich_by_sender(
+pub(crate) async fn enrich_by_sender(
     scheduler: &SchedulerClient,
     address: &Address,
     rows: &[InstanceRow],
@@ -306,7 +314,7 @@ fn select_ips(net: &aleph_sdk::crn::ActiveVmNetworking) -> (Option<String>, Opti
 /// Best-effort IP enrichment: one CRN call per unique allocated node, run in
 /// parallel. A failed node lookup or CRN fetch logs a warning and leaves the
 /// affected rows' IPs as `None`; it never fails the list command.
-async fn enrich_rows_with_ips(scheduler: &SchedulerClient, rows: &mut [InstanceRow]) {
+pub(crate) async fn enrich_rows_with_ips(scheduler: &SchedulerClient, rows: &mut [InstanceRow]) {
     use aleph_sdk::crn::fetch_active_vms;
 
     let by_node = group_row_indices_by_node(rows);
@@ -364,6 +372,7 @@ async fn enrich_rows_with_ips(scheduler: &SchedulerClient, rows: &mut [InstanceR
                 let (ipv6, ipv4) = select_ips(net);
                 rows[idx].ipv6 = ipv6;
                 rows[idx].ipv4 = ipv4;
+                rows[idx].networking = Some(net.clone());
             }
         }
     }
@@ -379,7 +388,7 @@ async fn handle_instance_list(
     // account (loading an encrypted account would prompt for its password).
     let address = resolve_address_or_active(args.address.as_deref())?;
 
-    let mut rows = fetch_instance_rows(aleph_client, &address).await?;
+    let mut rows = fetch_vm_rows(aleph_client, &address, MessageType::Instance).await?;
 
     let scheduler = SchedulerClient::new(scheduler_url);
     let mut scheduler_map = fetch_scheduler_map(&scheduler, &address).await;
@@ -2120,7 +2129,7 @@ mod tests {
             "/../../fixtures/messages/instance/instance-gpu-payg.json"
         ));
         let message: Message = serde_json::from_str(FIXTURE).expect("fixture parses");
-        let row = extract_instance_row(&message).expect("instance row extracted");
+        let row = extract_vm_row(&message).expect("instance row extracted");
         assert_eq!(
             row.item_hash.to_string(),
             "a41fb91c3e68370759b72338dd1947f18e2ed883837aec5dc731d5f427f90564"
@@ -2209,6 +2218,7 @@ mod tests {
             allocated_node: None,
             ipv6: None,
             ipv4: None,
+            networking: None,
             scheduler_raw: None,
             source_flags: Default::default(),
         }
