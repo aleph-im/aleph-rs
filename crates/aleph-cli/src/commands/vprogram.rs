@@ -666,8 +666,8 @@ pub(crate) struct ShowResources {
     pub memory_mib: u64,
 }
 
-/// One read-only artifact the VM boots from, with the size the CCN
-/// stamped on its STORE message when it is known.
+/// One read-only artifact the VM boots from, with its size from the CCN's
+/// storage metadata when it is known.
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub(crate) struct ShowArtifact {
     #[serde(rename = "ref")]
@@ -944,33 +944,25 @@ async fn fetch_vprogram_message(
     Ok(message)
 }
 
-/// Best-effort artifact size lookup: fetches each ref's STORE message and
-/// reads the `size` the CCN stamped on it. Refs that cannot be fetched, are
-/// not STORE messages, or carry no size are skipped with a stderr warning;
-/// the caller renders them as unknown. Lookups run concurrently.
+/// Best-effort artifact size lookup via the CCN's storage metadata
+/// endpoint (`/api/v0/storage/by-message-hash/<ref>`), which always
+/// carries the file size; the STORE message's own `size` field is often
+/// absent. Refs whose metadata cannot be fetched are skipped with a stderr
+/// warning and the caller renders them as unknown. Lookups run concurrently.
 async fn fetch_artifact_sizes(aleph_client: &AlephClient, refs: &[ItemHash]) -> ArtifactSizes {
     let lookups = refs.iter().map(|reference| async move {
-        let size = match aleph_client.get_message(reference).await {
-            Ok(MessageWithStatus::Processed { message })
-            | Ok(MessageWithStatus::Removing { message, .. }) => match message.content() {
-                MessageContentEnum::Store(store) => store.size.map(u64::from),
-                _ => {
-                    eprintln!("warning: artifact {reference} is not a STORE message; size unknown");
-                    None
-                }
-            },
-            Ok(_) => {
+        match aleph_client
+            .get_file_metadata_by_message_hash(reference)
+            .await
+        {
+            Ok(meta) => Some((reference.clone(), u64::from(meta.size))),
+            Err(e) => {
                 eprintln!(
-                    "warning: artifact {reference} is not available on the CCN; size unknown"
+                    "warning: could not fetch metadata for artifact {reference}: {e}; size unknown"
                 );
                 None
             }
-            Err(e) => {
-                eprintln!("warning: could not fetch artifact {reference}: {e}; size unknown");
-                None
-            }
-        };
-        size.map(|s| (reference.clone(), s))
+        }
     });
     futures_util::future::join_all(lookups)
         .await
