@@ -1366,10 +1366,40 @@ fn platform_posture_line(p: &PlatformPosture) -> String {
     )
 }
 
+/// The one-line attestation verdict for text mode. Every listed check is
+/// enforced fail-closed upstream (`attested_request` plus the CLI re-checks
+/// in `handle_call`), so the line only ever describes a verified response:
+/// the point is to tell the reader WHAT "verified" covers, not whether.
+fn attestation_verdict_line(freshness: Freshness) -> String {
+    let checks = "AMD SEV-SNP; certificate chain and report signature, TLS key binding, \
+                  launch measurement pinned, guest policy pinned, TCB floor";
+    match freshness {
+        Freshness::Verified => format!("verified ({checks}, fresh nonce)"),
+        Freshness::Skipped => {
+            format!("verified ({checks}; fresh nonce SKIPPED by --allow-stale-attestation)")
+        }
+    }
+}
+
+/// `component=value` rendering of a TCB for the verbose text meta.
+fn tcb_line(fmc: Option<u8>, bootloader: u8, tee: u8, snp: u8, microcode: u8) -> String {
+    let mut parts = Vec::new();
+    if let Some(fmc) = fmc {
+        parts.push(format!("fmc={fmc}"));
+    }
+    parts.push(format!("bootloader={bootloader}"));
+    parts.push(format!("tee={tee}"));
+    parts.push(format!("snp={snp}"));
+    parts.push(format!("microcode={microcode}"));
+    parts.join(" ")
+}
+
 /// Render an [`aleph_sdk::attest::AttestedResponse`] for `call`'s output as
 /// `(stdout, stderr_meta)`. In text mode stdout is the raw response body so
-/// the command pipes like curl; the `HTTP <status>` line goes to stderr. In
-/// JSON mode everything is in the stdout document and there is no meta line,
+/// the command pipes like curl; stderr gets a one-line attestation verdict
+/// naming every check that passed, the `HTTP <status>` line, and (with
+/// `verbose`) the evidence: measurement, policy, launch TCB, platform
+/// posture. In JSON mode everything is in the stdout document and there is no meta line,
 /// and the effective TCB floor (the one selected for the guest's silicon
 /// family, from the report's signed CPUID fields) plus the verified
 /// launch/reported TCB are included as evidence alongside the
@@ -1380,6 +1410,7 @@ pub(crate) fn render_call_result(
     min_tcb: &aleph_sdk::attest::TcbFloorPolicy,
     freshness: Freshness,
     json: bool,
+    verbose: bool,
 ) -> (String, Option<String>) {
     if json {
         let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
@@ -1431,17 +1462,29 @@ pub(crate) fn render_call_result(
             None,
         )
     } else {
+        let mut meta = format!(
+            "Attestation: {}\nHTTP {}",
+            attestation_verdict_line(freshness),
+            response.status
+        );
+        if verbose {
+            meta.push_str(&format!(
+                "\nmeasurement: {}\npolicy: {:#x}\nlaunch TCB: {}\nplatform: {}",
+                response.measurement,
+                response.policy,
+                tcb_line(
+                    response.launch_tcb.fmc,
+                    response.launch_tcb.bootloader,
+                    response.launch_tcb.tee,
+                    response.launch_tcb.snp,
+                    response.launch_tcb.microcode,
+                ),
+                platform_posture_line(&response.platform),
+            ));
+        }
         (
             String::from_utf8_lossy(&response.body).into_owned(),
-            Some(format!(
-                "HTTP {}\nFreshness: {}\nplatform: {}",
-                response.status,
-                match freshness {
-                    Freshness::Verified => "verified (nonce challenge)",
-                    Freshness::Skipped => "skipped (--allow-stale-attestation)",
-                },
-                platform_posture_line(&response.platform),
-            )),
+            Some(meta),
         )
     }
 }
@@ -1636,7 +1679,10 @@ async fn handle_call(
         None => Freshness::Skipped,
     };
 
-    let (out, meta) = render_call_result(&response, &min_tcb, freshness, json);
+    // Posture is what --require-platform gates on, so it is worth showing
+    // whenever the user asked for a requirement, verbose or not.
+    let verbose = args.verbose || !args.require_platform.is_empty();
+    let (out, meta) = render_call_result(&response, &min_tcb, freshness, json, verbose);
     if let Some(meta) = meta {
         eprintln!("{meta}");
     }
@@ -2100,6 +2146,7 @@ mod call_tests {
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
             true,
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
         assert_eq!(v["platform_info"]["raw"], serde_json::json!("0x1"));
@@ -2115,13 +2162,14 @@ mod call_tests {
     }
 
     #[test]
-    fn render_call_result_reports_platform_posture_in_text_meta() {
+    fn render_call_result_reports_platform_posture_in_verbose_text_meta() {
         let response = dummy_response(&"ab".repeat(48), b"x");
         let (_, meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
             false,
+            true,
         );
         let meta = meta.expect("text mode always has a meta block");
         assert!(
@@ -2184,6 +2232,7 @@ mod call_tests {
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
             true,
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
@@ -2223,6 +2272,7 @@ mod call_tests {
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
             true,
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
@@ -2238,6 +2288,7 @@ mod call_tests {
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
             false,
+            false,
         );
 
         // The body must be machine-consumable as-is (aleph-testnets#35 run
@@ -2245,13 +2296,37 @@ mod call_tests {
         serde_json::from_str::<serde_json::Value>(&out)
             .expect("stdout is exactly the response body");
         assert_eq!(out, r#"{"status":"ok"}"#);
-        assert_eq!(
-            meta.as_deref(),
-            Some(
-                "HTTP 200\nFreshness: verified (nonce challenge)\n\
-                 platform: SMT=on TSME=off ECC=off RAPL=on \
+        let meta = meta.expect("text mode has a stderr meta");
+        assert!(meta.starts_with("Attestation: verified ("), "{meta}");
+        assert!(meta.ends_with("\nHTTP 200"), "{meta}");
+        // Not verbose: no evidence lines.
+        assert!(!meta.contains("platform:"), "{meta}");
+        assert!(!meta.contains("measurement:"), "{meta}");
+    }
+
+    #[test]
+    fn render_call_result_text_verbose_adds_evidence_lines() {
+        let response = dummy_response(&"ab".repeat(48), b"55");
+        let (_, meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            false,
+            true,
+        );
+        let meta = meta.unwrap();
+        assert!(
+            meta.contains(&format!("\nmeasurement: {}", "ab".repeat(48))),
+            "{meta}"
+        );
+        assert!(meta.contains("\npolicy: 0x"), "{meta}");
+        assert!(meta.contains("\nlaunch TCB: bootloader="), "{meta}");
+        assert!(
+            meta.contains(
+                "\nplatform: SMT=on TSME=off ECC=off RAPL=on \
                  ciphertext-hiding=off alias-check=no (0x1)"
-            )
+            ),
+            "{meta}"
         );
     }
 
@@ -2335,7 +2410,7 @@ mod call_tests {
         response.cpuid_model = Some(0xA1);
         response.cpuid_stepping = Some(2);
 
-        let (out, _meta) = render_call_result(&response, &net(), Freshness::Verified, true);
+        let (out, _meta) = render_call_result(&response, &net(), Freshness::Verified, true, false);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["effective_tcb_floor"]["microcode"], serde_json::json!(28));
@@ -2352,6 +2427,7 @@ mod call_tests {
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
             true,
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
         assert_eq!(v["freshness"], serde_json::json!("verified"));
@@ -2361,6 +2437,7 @@ mod call_tests {
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Skipped,
             true,
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
         assert_eq!(v["freshness"], serde_json::json!("skipped"));
@@ -2374,20 +2451,23 @@ mod call_tests {
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
             false,
+            false,
         );
-        assert!(
-            meta.unwrap()
-                .contains("Freshness: verified (nonce challenge)")
-        );
+        let meta = meta.unwrap();
+        assert!(meta.contains("fresh nonce)"), "{meta}");
+        assert!(!meta.contains("SKIPPED"), "{meta}");
         let (_, meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Skipped,
             false,
+            false,
         );
+        let meta = meta.unwrap();
+        assert!(meta.starts_with("Attestation: verified ("), "{meta}");
         assert!(
-            meta.unwrap()
-                .contains("Freshness: skipped (--allow-stale-attestation)")
+            meta.contains("fresh nonce SKIPPED by --allow-stale-attestation"),
+            "{meta}"
         );
     }
 
