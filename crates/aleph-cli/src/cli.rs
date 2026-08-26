@@ -3135,19 +3135,43 @@ pub enum VProgramCommand {
     /// attested (RA-TLS) endpoint discovered from the allocated CRN.
     List(VProgramListArgs),
     /// Make an attested HTTP call to a running V-PROGRAM guest.
-    ///
-    /// Resolves the guest's attested (RA-TLS) endpoint (from `--url`, or via
-    /// the scheduler + CRN discovery used by `show`) and the expected
-    /// SEV-SNP launch measurement (from `--expected-measurement`, or from
-    /// the message's pinned `verification.measurements`). The request is
-    /// only made - and the response only trusted - if the full attestation
-    /// report chain verifies and the measurement matches; any attestation
-    /// failure or mismatch aborts before the response body is ever printed.
-    ///
-    /// On success the response body is written verbatim to stdout (pipe it
-    /// like curl); the `HTTP <status>` line goes to stderr. With `--json`,
-    /// stdout is a single JSON document with the status, verified
-    /// measurement and body.
+    #[command(long_about = "\
+Make an attested HTTP call to a running V-PROGRAM guest.
+
+Resolves the guest's attested (RA-TLS) endpoint (from --url, or via the
+scheduler + CRN discovery used by `show`) and the expected SEV-SNP launch
+measurement (from --expected-measurement, or from the message's pinned
+verification.measurements), then makes the request over a TLS session whose
+server certificate carries the guest's AMD-signed attestation report.
+
+A response is printed only if ALL of these checks pass; any failure aborts
+before the body is read:
+  - certificate chain: AMD ARK -> ASK -> VCEK (fetched for the reporting
+    chip), validity and revocation, and the report's ECDSA signature
+  - TLS key binding: the signed report_data commits to the certificate's
+    public key, so the report cannot be replayed under another key
+  - launch measurement: matches the message's pinned measurement(s) or
+    --expected-measurement
+  - guest policy: matches the message's pinned policy (no silent downgrade
+    to e.g. a debug-enabled launch; a debug-enabled policy prints a warning)
+  - TCB floor: the launch TCB meets the network floor for the chip
+    (raise with --min-tcb, lower only with --accept-outdated-tcb)
+  - fresh nonce: a second report bound to a nonce generated for this call
+    proves the guest is live now, not a replay of an old key
+    (skip with --allow-stale-attestation)
+  - platform posture, only if --require-platform is given
+
+Output: the response body is written verbatim to stdout (pipe it like curl).
+stderr gets an `Attestation: verified (...)` line listing the checks, the
+`HTTP <status>` line, and with --verbose the evidence (measurement, policy,
+launch TCB, platform posture). With --json, stdout is a single document with
+status, body, and the full verified evidence; nothing goes to stderr.
+
+Examples:
+  aleph vprogram call <hash> /fib/10
+  aleph vprogram call <hash> /fib/10 --verbose
+  aleph vprogram call <hash> /echo -X POST -d '{\"a\":1}' -H 'Content-Type: application/json'
+  aleph vprogram call <hash> /fib/10 --json | jq .body")]
     Call(Box<VProgramCallArgs>),
 }
 
@@ -3302,9 +3326,16 @@ pub struct VProgramCallArgs {
 
     /// Require host platform posture bits from the report's AMD-signed
     /// PLATFORM_INFO field (repeatable or comma-separated). Nothing is
-    /// required by default; posture is always shown in the output.
+    /// required by default. Posture is shown on stderr when this or
+    /// --verbose is given, and always in --json output.
     #[arg(long = "require-platform", value_delimiter = ',')]
     pub require_platform: Vec<PlatformRequirement>,
+
+    /// Also print the verified evidence on stderr: launch measurement,
+    /// guest policy, launch TCB and host platform posture. (--json output
+    /// always includes it.)
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
 /// A PLATFORM_INFO requirement `vprogram call` can gate on. Each value is a
