@@ -582,10 +582,15 @@ fn check_fresh_pins(
     expected_policy: Option<u64>,
 ) -> Result<(), AttestError> {
     if let Some(expected) = expected_measurement {
-        let expected_hex = hex::encode(expected);
-        if result.measurement != expected_hex {
+        // Same constant-time comparison as the handshake-time pin in
+        // `verify_snp_cert`, for consistency across the attest module. A
+        // non-hex `measurement` cannot match any pin, so it is a mismatch.
+        let matches = hex::decode(&result.measurement)
+            .map(|got| got.ct_eq(expected).unwrap_u8() == 1)
+            .unwrap_or(false);
+        if !matches {
             return Err(AttestError::FreshMeasurementMismatch {
-                expected: expected_hex,
+                expected: hex::encode(expected),
                 got: result.measurement.clone(),
             });
         }
@@ -1251,6 +1256,21 @@ mod tests {
         let v = dummy_verification(&"ab".repeat(48), 0x30000);
         let err = check_fresh_pins(&v, Some(&[0xCD; 48]), None).unwrap_err();
         assert!(matches!(err, AttestError::FreshMeasurementMismatch { .. }));
+    }
+
+    #[test]
+    fn fresh_pins_reject_a_non_hex_or_short_measurement() {
+        // Uppercase hex decodes to the same bytes and must still match.
+        let v = dummy_verification(&"AB".repeat(48), 0x30000);
+        check_fresh_pins(&v, Some(&[0xAB; 48]), None).expect("case-insensitive hex must pass");
+        for bad in ["zz", &"ab".repeat(47), ""] {
+            let v = dummy_verification(bad, 0x30000);
+            let err = check_fresh_pins(&v, Some(&[0xAB; 48]), None).unwrap_err();
+            assert!(
+                matches!(err, AttestError::FreshMeasurementMismatch { .. }),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
