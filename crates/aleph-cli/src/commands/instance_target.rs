@@ -12,7 +12,9 @@
 //! shorthand IDs printed by `aleph instance list`, which are hash suffixes),
 //! or a raw CRN URL (anything containing `://`).
 
-use aleph_sdk::scheduler::{NodeEntry, SchedulerClient, VmEntry};
+use aleph_sdk::scheduler::{
+    NodeEntry, SchedulerClient, VM_TYPE_INSTANCE, VM_TYPE_VPROGRAM, VmEntry,
+};
 use aleph_types::item_hash::ItemHash;
 use anyhow::{Context, Result, anyhow, bail};
 use url::Url;
@@ -33,14 +35,16 @@ pub async fn resolve_vm(scheduler_url: &Url, input: &str) -> Result<(ItemHash, V
     }
 
     let matches = scheduler
-        .find_vms_by_hash_prefix(input)
+        .find_vms_by_hash_prefix_and_type(input, VmKind::Instance.scheduler_vm_type())
         .await
         .with_context(|| format!("looking up VMs matching prefix `{input}` in the scheduler"))?;
     pick_unique_match(input, matches, VmKind::Instance)
 }
 
-/// Which command family a VM lookup is done for; only affects the wording
-/// of the "no match" / "ambiguous" errors.
+/// Which command family a VM lookup is done for. Selects the scheduler
+/// `vm_type` filter for prefix lookups (so instances and V-Programs sharing
+/// a prefix never collide) and the wording of the "no match" / "ambiguous"
+/// errors.
 #[derive(Debug, Clone, Copy)]
 pub enum VmKind {
     Instance,
@@ -48,6 +52,14 @@ pub enum VmKind {
 }
 
 impl VmKind {
+    /// The scheduler's `vm_type` value for this kind of VM.
+    pub fn scheduler_vm_type(self) -> &'static str {
+        match self {
+            Self::Instance => VM_TYPE_INSTANCE,
+            Self::VProgram => VM_TYPE_VPROGRAM,
+        }
+    }
+
     fn noun(self) -> &'static str {
         match self {
             Self::Instance => "instance",

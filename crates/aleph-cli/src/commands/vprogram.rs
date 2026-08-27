@@ -988,13 +988,15 @@ async fn fetch_artifact_sizes(aleph_client: &AlephClient, refs: &[ItemHash]) -> 
 /// Resolve a user-supplied V-Program id (full item hash or a prefix such as
 /// the 12-char form printed by `aleph vprogram list`) to its item hash. A
 /// full hash is returned as-is without any network call; a prefix is
-/// expanded server-side by the scheduler and must match exactly one VM.
+/// expanded server-side by the scheduler (restricted to V-Programs, so an
+/// instance sharing the prefix is not a collision) and must match exactly
+/// one VM.
 async fn resolve_vprogram_id(scheduler: &SchedulerClient, input: &str) -> Result<ItemHash> {
     if let Ok(hash) = ItemHash::try_from(input) {
         return Ok(hash);
     }
     let matches = scheduler
-        .find_vms_by_hash_prefix(input)
+        .find_vms_by_hash_prefix_and_type(input, VmKind::VProgram.scheduler_vm_type())
         .await
         .with_context(|| format!("looking up VMs matching prefix `{input}` in the scheduler"))?;
     pick_unique_match(input, matches, VmKind::VProgram).map(|(hash, _)| hash)
