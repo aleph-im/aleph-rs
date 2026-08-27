@@ -16,6 +16,11 @@ use url::Url;
 /// flow through `extra` so `--json` output can pass them on without losing
 /// information when the scheduler schema evolves.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// `vm_type` value the scheduler reports (and filters on) for INSTANCE VMs.
+pub const VM_TYPE_INSTANCE: &str = "instance";
+/// `vm_type` value the scheduler reports (and filters on) for V-PROGRAM VMs.
+pub const VM_TYPE_VPROGRAM: &str = "v_program";
+
 pub struct VmEntry {
     pub vm_hash: ItemHash,
     pub vm_type: String,
@@ -160,6 +165,21 @@ impl SchedulerClient {
         prefix: &str,
     ) -> Result<Vec<VmEntry>, SchedulerError> {
         self.fetch_all_pages("/api/v1/vms", &[("vm_hash", prefix)])
+            .await
+    }
+
+    /// Like [`find_vms_by_hash_prefix`](Self::find_vms_by_hash_prefix) but
+    /// restricted to one VM type via the scheduler's exact-match `vm_type`
+    /// filter, so an instance and a V-Program sharing a hash prefix never
+    /// collide when a command only cares about one of them. `vm_type` is one
+    /// of the scheduler's snake_case names ([`VM_TYPE_INSTANCE`],
+    /// [`VM_TYPE_VPROGRAM`], ...); the scheduler rejects unknown values.
+    pub async fn find_vms_by_hash_prefix_and_type(
+        &self,
+        prefix: &str,
+        vm_type: &str,
+    ) -> Result<Vec<VmEntry>, SchedulerError> {
+        self.fetch_all_pages("/api/v1/vms", &[("vm_hash", prefix), ("vm_type", vm_type)])
             .await
     }
 
@@ -495,6 +515,25 @@ mod tests {
         let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
         let vms = client.find_vms_by_hash_prefix("deadbeef").await.unwrap();
         assert!(vms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_vms_by_hash_prefix_and_type_sends_vm_type_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param("vm_hash", "4e7d"))
+            .and(query_param("vm_type", "v_program"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_page(1, 1, 200, 1)))
+            .mount(&server)
+            .await;
+
+        let client = SchedulerClient::new(Url::parse(&server.uri()).unwrap());
+        let vms = client
+            .find_vms_by_hash_prefix_and_type("4e7d", VM_TYPE_VPROGRAM)
+            .await
+            .unwrap();
+        assert_eq!(vms.len(), 1);
     }
 
     fn sample_node_page(hashes: &[&str], total: u32) -> serde_json::Value {
