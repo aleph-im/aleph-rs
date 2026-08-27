@@ -205,9 +205,7 @@ impl VmImagesData {
                 available: join_active_names(self.active_runtimes().iter().map(|(n, _)| *n)),
             })
     }
-}
 
-impl VmImagesData {
     /// Non-deprecated V-Program runtimes implementing a contract of `model`,
     /// as `(name, entry)`.
     pub fn active_vprogram_runtimes(&self, model: &str) -> Vec<(&str, &VProgramRuntimeEntry)> {

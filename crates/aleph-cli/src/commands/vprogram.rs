@@ -3270,7 +3270,7 @@ mod compose_wiring_tests {
                 .unwrap_err()
                 .to_string();
             assert!(
-                err.contains("unknown V-Program workload model \"exec\""),
+                err.contains("no default contract for V-Program workload model \"exec\""),
                 "{err}"
             );
         }
