@@ -193,6 +193,13 @@ fn verify_bundle_bytes(
     Ok(())
 }
 
+/// Per-member cap on extracted size. `bundle.size` bounds the *compressed*
+/// tarball (see `read_capped`), but gzip inflates a crafted archive by
+/// orders of magnitude; this bounds what any one member can write to disk.
+/// Generous against real artifacts (OVMF is a few MiB, kernel tens of MiB,
+/// initrd at most a few hundred MiB).
+const MAX_MEMBER_SIZE: u64 = 1024 * 1024 * 1024;
+
 /// Extract the `ovmf`, `kernel`, and `initrd` members declared in `members`
 /// from the gzipped tar archive `bytes` into `dir`, named after their roles.
 ///
@@ -202,13 +209,14 @@ fn verify_bundle_bytes(
 /// of the members we care about. Each matched entry is written to
 /// `<role>.part` and atomically renamed into place. A role whose member
 /// path never shows up in the archive is reported as `MissingMember`.
-/// Per-member cap on extracted size. `bundle.size` bounds the *compressed*
-/// tarball (see `read_capped`), but gzip inflates a crafted archive by
-/// orders of magnitude; this bounds what any one member can write to disk.
-/// Generous against real artifacts (OVMF is a few MiB, kernel tens of MiB,
-/// initrd at most a few hundred MiB).
-const MAX_MEMBER_SIZE: u64 = 1024 * 1024 * 1024;
-
+///
+/// Reading stops as soon as the last member has been extracted, so entries
+/// after that point are never inspected: the traversal check is a guard on
+/// the work this function does, not an audit of the whole archive. That is
+/// deliberate. Nothing is ever written to a path taken from the archive
+/// (targets are the fixed `dir/<role>` names), so an unread entry cannot
+/// affect the filesystem, and bounding the untrusted bytes we inflate is
+/// worth more than symmetric rejection of junk we would never touch.
 fn extract_members(bytes: &[u8], members: &BundleMembers, dir: &Path) -> Result<(), BundleError> {
     extract_members_with_limit(bytes, members, dir, MAX_MEMBER_SIZE)
 }
