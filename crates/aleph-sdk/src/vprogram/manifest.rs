@@ -44,6 +44,21 @@ pub struct RuntimeManifest {
     pub attestation: Vec<AttestationDescriptor>,
     #[serde(default)]
     pub workload: Option<WorkloadSpec>,
+    /// Informational provenance of the bundle (not verified by anything;
+    /// the STORE hash and the bundle sha256 are what pin the runtime).
+    #[serde(default)]
+    pub source: Option<SourceInfo>,
+}
+
+/// Where and how a runtime bundle was built, as recorded by the publisher.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceInfo {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub rev: Option<String>,
+    #[serde(default)]
+    pub build: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -246,6 +261,29 @@ mod test {
         assert_eq!(
             m.boot.cmdline_template,
             "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash} workload_roothash={workload_roothash}"
+        );
+    }
+
+    #[test]
+    fn source_block_is_parsed_and_optional() {
+        let m = RuntimeManifest::parse(VALID_MANIFEST.as_bytes()).unwrap();
+        let source = m.source.expect("fixture carries a source block");
+        assert_eq!(
+            source.repo.as_deref(),
+            Some("https://github.com/aleph-im/aleph-vm")
+        );
+        assert_eq!(source.rev.as_deref(), Some("4d90abaf"));
+
+        let without = VALID_MANIFEST.replace(
+            r#""source": { "repo": "https://github.com/aleph-im/aleph-vm", "rev": "4d90abaf", "build": "nix build" }"#,
+            r#""note": "no source block""#,
+        );
+        assert_ne!(without, VALID_MANIFEST);
+        assert!(
+            RuntimeManifest::parse(without.as_bytes())
+                .unwrap()
+                .source
+                .is_none()
         );
     }
 }

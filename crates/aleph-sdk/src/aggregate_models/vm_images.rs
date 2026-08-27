@@ -21,8 +21,63 @@ pub struct VmImagesData {
     pub runtimes: BTreeMap<String, ImageEntry>,
     #[serde(default)]
     pub firmwares: BTreeMap<String, ImageEntry>,
+    /// V-Program runtime bundles keyed by name (`exec-1.0`, ...); each
+    /// names the workload contract it implements.
+    #[serde(default)]
+    pub vprogram_runtimes: BTreeMap<String, VProgramRuntimeEntry>,
+    /// Default runtime per workload contract: `{"aleph.exec/1": "exec-1.0"}`.
+    /// Expected to point at the latest / most secure bundle.
+    #[serde(default)]
+    pub vprogram_contracts: BTreeMap<String, String>,
     #[serde(default)]
     pub defaults: VmImageDefaults,
+}
+
+/// Workload model served by the plain `aleph vprogram create` flow.
+pub const VPROGRAM_MODEL_EXEC: &str = "exec";
+/// Workload model served by `aleph vprogram create --compose`.
+pub const VPROGRAM_MODEL_COMPOSE: &str = "compose";
+/// Workload contract served by `aleph vprogram create --compose`.
+pub const VPROGRAM_CONTRACT_COMPOSE: &str = "aleph.compose/1";
+
+/// One published V-Program runtime bundle.
+///
+/// The catalogue is three levels deep, each with a default: a workload
+/// **model** (`exec`: a prebuilt binary image; `compose`: a Docker Compose
+/// stack) is how the user hands over a workload and, via
+/// `defaults.vprogram_models`, names its current **contract**
+/// (`aleph.exec/1`, ...: the convention a runtime imposes on the workload
+/// volume); `vprogram_contracts` names each contract's default **runtime**;
+/// and every runtime here declares the contract it implements. A contract's
+/// model is read off its name, `aleph.<model>/<version>`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VProgramRuntimeEntry {
+    /// STORE message hash of the runtime manifest.
+    pub hash: ItemHash,
+    /// Workload contract the bundle implements, e.g. `aleph.exec/1`.
+    pub contract: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub deprecated: bool,
+}
+
+/// The workload model a contract name encodes: `aleph.exec/1` -> `exec`.
+/// `None` when the name does not follow `aleph.<model>/<version>`.
+pub fn vprogram_contract_model(contract: &str) -> Option<&str> {
+    let rest = contract.strip_prefix("aleph.")?;
+    let (model, version) = rest.split_once('/')?;
+    (!model.is_empty() && !version.is_empty()).then_some(model)
+}
+
+/// A fully resolved V-Program runtime choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedVProgramRuntime {
+    pub contract: String,
+    pub runtime: String,
+    pub hash: ItemHash,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +112,9 @@ pub struct VmImageDefaults {
     pub firmware: Option<String>,
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Current workload contract per model: `{"exec": "aleph.exec/1"}`.
+    #[serde(default)]
+    pub vprogram_models: BTreeMap<String, String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +127,28 @@ pub enum VmImagesError {
     },
     #[error("vm-images aggregate has no default {kind} configured")]
     NoDefault { kind: &'static str },
+    #[error("vm-images aggregate has no default contract for V-Program workload model {model:?}")]
+    NoDefaultContract { model: String },
+    #[error(
+        "vm-images aggregate has no default runtime for V-Program workload contract {contract:?}"
+    )]
+    NoDefaultRuntime { contract: String },
+    #[error("unknown V-Program runtime {name:?} (available for this model: {available})")]
+    UnknownVProgramRuntime { name: String, available: String },
+    #[error(
+        "V-Program workload contract {contract:?} does not follow `aleph.<model>/<version>`, \
+         so its model cannot be determined"
+    )]
+    MalformedContract { contract: String },
+    #[error(
+        "{what} belongs to workload model {found:?}, but this invocation uses model {wanted:?}{hint}"
+    )]
+    ModelMismatch {
+        what: String,
+        found: String,
+        wanted: String,
+        hint: &'static str,
+    },
 }
 
 impl VmImagesData {
@@ -125,6 +205,90 @@ impl VmImagesData {
                 available: join_active_names(self.active_runtimes().iter().map(|(n, _)| *n)),
             })
     }
+
+    /// Non-deprecated V-Program runtimes implementing a contract of `model`,
+    /// as `(name, entry)`.
+    pub fn active_vprogram_runtimes(&self, model: &str) -> Vec<(&str, &VProgramRuntimeEntry)> {
+        self.vprogram_runtimes
+            .iter()
+            .filter(|(_, e)| !e.deprecated && vprogram_contract_model(&e.contract) == Some(model))
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+
+    /// Resolve a V-Program runtime for `model`. `selector` is `None` (the
+    /// model's default contract, then that contract's default runtime), a
+    /// contract name such as `aleph.exec/1` (its default runtime), or a
+    /// runtime name such as `exec-1.0`. A contract or runtime belonging to
+    /// another model is rejected with `hint(found_model)` appended to the
+    /// error (e.g. " (did you mean --compose?)").
+    pub fn resolve_vprogram_runtime(
+        &self,
+        model: &str,
+        selector: Option<&str>,
+        hint: impl Fn(&str) -> &'static str,
+    ) -> Result<ResolvedVProgramRuntime, VmImagesError> {
+        let (contract, runtime) = match selector {
+            None => {
+                let contract = self.defaults.vprogram_models.get(model).ok_or_else(|| {
+                    VmImagesError::NoDefaultContract {
+                        model: model.to_string(),
+                    }
+                })?;
+                (contract.clone(), None)
+            }
+            Some(sel) if sel.contains('/') => (sel.to_string(), None),
+            Some(sel) => {
+                let entry = self.vprogram_runtimes.get(sel).ok_or_else(|| {
+                    VmImagesError::UnknownVProgramRuntime {
+                        name: sel.to_string(),
+                        available: join_active_names(
+                            self.active_vprogram_runtimes(model).iter().map(|(n, _)| *n),
+                        ),
+                    }
+                })?;
+                (entry.contract.clone(), Some(sel.to_string()))
+            }
+        };
+        let found =
+            vprogram_contract_model(&contract).ok_or_else(|| VmImagesError::MalformedContract {
+                contract: contract.clone(),
+            })?;
+        if found != model {
+            return Err(VmImagesError::ModelMismatch {
+                what: match &runtime {
+                    Some(name) => format!("runtime {name:?}"),
+                    None => format!("workload contract {contract:?}"),
+                },
+                found: found.to_string(),
+                wanted: model.to_string(),
+                hint: hint(found),
+            });
+        }
+        let runtime = match runtime {
+            Some(name) => name,
+            None => self
+                .vprogram_contracts
+                .get(&contract)
+                .cloned()
+                .ok_or_else(|| VmImagesError::NoDefaultRuntime {
+                    contract: contract.clone(),
+                })?,
+        };
+        let entry = self.vprogram_runtimes.get(&runtime).ok_or_else(|| {
+            VmImagesError::UnknownVProgramRuntime {
+                name: runtime.clone(),
+                available: join_active_names(
+                    self.active_vprogram_runtimes(model).iter().map(|(n, _)| *n),
+                ),
+            }
+        })?;
+        Ok(ResolvedVProgramRuntime {
+            hash: entry.hash.clone(),
+            contract,
+            runtime,
+        })
+    }
 }
 
 fn join_active_names<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
@@ -168,9 +332,38 @@ mod tests {
                 "display_name": "OVMF (default)"
               }
             },
+            "vprogram_runtimes": {
+              "exec-1.0": {
+                "hash": "3333333333333333333333333333333333333333333333333333333333333333",
+                "contract": "aleph.exec/1",
+                "display_name": "V-Program exec runtime 1.0"
+              },
+              "exec-0.9": {
+                "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+                "contract": "aleph.exec/1",
+                "deprecated": true
+              },
+              "compose-1.0": {
+                "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+                "contract": "aleph.compose/1"
+              },
+              "exec-2.0-rc1": {
+                "hash": "6666666666666666666666666666666666666666666666666666666666666666",
+                "contract": "aleph.exec/2"
+              },
+              "weird": {
+                "hash": "7777777777777777777777777777777777777777777777777777777777777777",
+                "contract": "legacy"
+              }
+            },
+            "vprogram_contracts": {
+              "aleph.exec/1": "exec-1.0",
+              "aleph.compose/1": "compose-1.0"
+            },
             "defaults": {
               "rootfs": "ubuntu24",
-              "firmware": "ovmf-default"
+              "firmware": "ovmf-default",
+              "vprogram_models": {"exec": "aleph.exec/1", "compose": "aleph.compose/1"}
             },
             "unknown_section": {"ignored": true}
           }
@@ -304,6 +497,131 @@ mod tests {
                 .display_name
                 .as_deref(),
             Some("Python 3.11")
+        );
+    }
+
+    #[test]
+    fn vprogram_contract_model_parses_the_name() {
+        assert_eq!(vprogram_contract_model("aleph.exec/1"), Some("exec"));
+        assert_eq!(vprogram_contract_model("aleph.compose/12"), Some("compose"));
+        for bad in ["exec/1", "aleph.exec", "aleph./1", "aleph.exec/", "legacy"] {
+            assert_eq!(vprogram_contract_model(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn vprogram_runtime_resolution_walks_model_contract_runtime() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let data = &agg.vm_images;
+        let no_hint = |_: &str| "";
+
+        // Defaults all the way down.
+        let exec = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, None, no_hint)
+            .unwrap();
+        assert_eq!(exec.contract, "aleph.exec/1");
+        assert_eq!(exec.runtime, "exec-1.0");
+        assert_eq!(exec.hash.to_string(), "3".repeat(64));
+        let compose = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_COMPOSE, None, no_hint)
+            .unwrap();
+        assert_eq!(compose.hash.to_string(), "4".repeat(64));
+
+        // Explicit contract: its default runtime.
+        let exec = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("aleph.exec/1"), no_hint)
+            .unwrap();
+        assert_eq!(exec.runtime, "exec-1.0");
+
+        // Explicit runtime, including a deprecated one and a non-default contract.
+        let old = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("exec-0.9"), no_hint)
+            .unwrap();
+        assert_eq!(old.hash.to_string(), "5".repeat(64));
+        let rc = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("exec-2.0-rc1"), no_hint)
+            .unwrap();
+        assert_eq!(rc.contract, "aleph.exec/2");
+
+        // A contract without a default runtime cannot be picked implicitly.
+        let err = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("aleph.exec/2"), no_hint)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no default runtime"), "{err}");
+
+        // Listings hide deprecated runtimes and other models.
+        let active: Vec<&str> = data
+            .active_vprogram_runtimes(VPROGRAM_MODEL_EXEC)
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(active, vec!["exec-1.0", "exec-2.0-rc1"]);
+    }
+
+    #[test]
+    fn vprogram_runtime_resolution_errors() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let data = &agg.vm_images;
+        let hint = |model: &str| {
+            if model == "compose" {
+                " (did you mean --compose?)"
+            } else {
+                ""
+            }
+        };
+
+        let err = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("compose-1.0"), hint)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("belongs to workload model \"compose\""),
+            "{err}"
+        );
+        assert!(err.ends_with("(did you mean --compose?)"), "{err}");
+
+        let err = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_COMPOSE, Some("aleph.exec/1"), hint)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("workload contract \"aleph.exec/1\""), "{err}");
+        assert!(!err.contains("did you mean"), "{err}");
+
+        let err = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("nope"), hint)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown V-Program runtime \"nope\""), "{err}");
+        assert!(err.contains("exec-1.0, exec-2.0-rc1"), "{err}");
+        assert!(
+            !err.contains("exec-0.9") && !err.contains("compose-1.0"),
+            "{err}"
+        );
+
+        let err = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("weird"), hint)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not follow"), "{err}");
+
+        let err = data
+            .resolve_vprogram_runtime("bogus", None, hint)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no default contract"), "{err}");
+    }
+
+    #[test]
+    fn vprogram_runtimes_absent_in_old_aggregates() {
+        let json = r#"{"vm-images": {"defaults": {"rootfs": "ubuntu24"}}}"#;
+        let agg: VmImagesAggregate = serde_json::from_str(json).unwrap();
+        let data = &agg.vm_images;
+        assert!(data.vprogram_runtimes.is_empty() && data.vprogram_contracts.is_empty());
+        assert!(data.defaults.vprogram_models.is_empty());
+        assert!(
+            data.resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, None, |_| "")
+                .is_err()
         );
     }
 }

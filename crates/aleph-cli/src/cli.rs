@@ -3241,9 +3241,15 @@ pub struct VProgramCreateArgs {
     )]
     pub image_archives: Vec<String>,
 
-    /// Item hash of the runtime manifest store message.
-    #[arg(long)]
-    pub runtime: ItemHash,
+    /// Runtime bundle. The vm-images aggregate catalogues V-Program
+    /// runtimes by workload model -> contract -> runtime; --workload uses
+    /// the `exec` model and --compose the `compose` model, and when omitted
+    /// the model's current contract and that contract's default runtime are
+    /// used. Pass a contract (`aleph.exec/1`, its default runtime), a
+    /// runtime name (`exec-1.0`), or the item hash of a runtime manifest
+    /// STORE message to override.
+    #[arg(long, value_parser = parse_image_ref)]
+    pub runtime: Option<ImageRef>,
 
     /// Extra read-only data volume image (repeatable, max 8); each is
     /// verity-bound into the attested TCB in flag order.
