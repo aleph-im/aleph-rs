@@ -17,6 +17,10 @@ pub enum CmdlineError {
         "cmdline template contains a placeholder not defined by aleph-vprogram-runtime/1: {{{0}}}"
     )]
     UnknownPlaceholder(String),
+    #[error(
+        "runtime cmdline template puts {{workload_roothash}} and {{verified_volumes}} in the same token: the workload roothash would be dropped when no volumes are declared"
+    )]
+    SharedRoothashToken,
 }
 
 /// Instantiate an aleph-vprogram-runtime/1 cmdline template.
@@ -43,6 +47,11 @@ pub fn instantiate_cmdline(
         .filter(|token| !(volume_roothashes.is_empty() && token.contains("{verified_volumes}")))
         .map(str::to_owned)
         .collect();
+    // Dropping the {verified_volumes} token must never take the workload
+    // roothash with it (the two slots sharing a space-delimited token).
+    if !tokens.iter().any(|t| t.contains("{workload_roothash}")) {
+        return Err(CmdlineError::SharedRoothashToken);
+    }
     let mut out = tokens.join(" ");
     out = out.replace("{platform_roothash}", platform_roothash);
     out = out.replace("{workload_roothash}", workload_roothash);
@@ -68,6 +77,17 @@ mod tests {
     use super::*;
 
     const T: &str = "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash} workload_roothash={workload_roothash} verified_volumes={verified_volumes}";
+
+    #[test]
+    fn rejects_roothash_and_volumes_sharing_a_token_when_volumes_are_empty() {
+        let t =
+            "console=ttyS0 roothash={platform_roothash} w={workload_roothash}{verified_volumes}";
+        let err = instantiate_cmdline(t, "aa", "bb", &[]).unwrap_err();
+        assert!(matches!(err, CmdlineError::SharedRoothashToken), "{err}");
+        // With volumes declared the token is kept and both slots are filled.
+        let out = instantiate_cmdline(t, "aa", "bb", &["h1".into()]).unwrap();
+        assert_eq!(out, "console=ttyS0 roothash=aa w=bbh1");
+    }
 
     #[test]
     fn fills_all_slots() {
