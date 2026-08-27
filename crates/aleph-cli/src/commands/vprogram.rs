@@ -13,7 +13,7 @@ use aleph_sdk::client::{
     hash_file,
 };
 use aleph_sdk::crn::{ActiveVmNetworking, fetch_active_vms};
-use aleph_sdk::messages::{StoreBuilder, VProgramBuilder};
+use aleph_sdk::messages::{ForgetBuilder, StoreBuilder, VProgramBuilder};
 use aleph_sdk::scheduler::SchedulerClient;
 use aleph_sdk::verify::Hasher;
 use aleph_sdk::vprogram::bundle::fetch_bundle_artifacts;
@@ -21,6 +21,7 @@ use aleph_sdk::vprogram::cmdline::instantiate_cmdline;
 use aleph_sdk::vprogram::manifest::{RuntimeManifest, WorkloadSpec};
 use aleph_sdk::vprogram::measure::compute_measurements;
 use aleph_sdk::vprogram::status::resolve_attested_endpoint;
+use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
@@ -35,12 +36,12 @@ use url::Url;
 
 use crate::account::CliAccount;
 use crate::cli::{
-    PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramListArgs,
-    VProgramShowArgs,
+    PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramDeleteArgs,
+    VProgramListArgs, VProgramShowArgs,
 };
 use crate::common::{
-    render_upload_progress, resolve_account, resolve_address, resolve_address_or_active,
-    submit_or_preview,
+    confirm_action, render_upload_progress, resolve_account, resolve_address,
+    resolve_address_or_active, submit_or_preview,
 };
 use crate::compose;
 use crate::config::store::ConfigStore;
@@ -78,7 +79,61 @@ pub async fn dispatch(
         VProgramCommand::Call(args) => {
             handle_call(aleph_client, network_override, json, *args).await
         }
+        VProgramCommand::Delete(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            handle_delete(aleph_client, ccn_url, scheduler_url, json, args).await
+        }
     }
+}
+
+/// Build the FORGET for a V-PROGRAM message. Only the V-PROGRAM hash is
+/// forgotten: the runtime bundle and workload STORE messages may be shared
+/// with other deployments and stay untouched.
+fn build_forget_for_vprogram<A: Account>(
+    account: &A,
+    vprogram: &Message,
+    reason: &str,
+) -> Result<aleph_types::message::pending::PendingMessage> {
+    if vprogram.message_type != MessageType::VProgram {
+        bail!(
+            "expected V-PROGRAM message, got {:?}",
+            vprogram.message_type
+        );
+    }
+    Ok(
+        ForgetBuilder::new(account, vec![vprogram.item_hash.clone()])
+            .reason(reason)
+            .build()?,
+    )
+}
+
+async fn handle_delete(
+    aleph_client: &AlephClient,
+    ccn_url: &Url,
+    scheduler_url: Url,
+    json: bool,
+    args: VProgramDeleteArgs,
+) -> Result<()> {
+    let dry_run = args.signing.dry_run;
+    let account = resolve_account(&args.signing.identity)?;
+
+    let scheduler = SchedulerClient::new(scheduler_url);
+    let item_hash = resolve_vprogram_id(&scheduler, &args.vm_id).await?;
+    let message = fetch_vprogram_message(aleph_client, &item_hash).await?;
+    if &message.sender != account.address() {
+        bail!(
+            "you are not the owner of V-Program {item_hash} (sender: {})",
+            message.sender
+        );
+    }
+
+    let prompt = format!("Forget V-Program {item_hash}? This is irreversible.");
+    if !dry_run && !confirm_action(&prompt, args.yes)? {
+        bail!("aborted");
+    }
+
+    let pending = build_forget_for_vprogram(&account, &message, &args.reason)?;
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await
 }
 
 async fn handle_create(
@@ -1980,6 +2035,42 @@ mod list_tests {
 
     fn fixture_message() -> Message {
         serde_json::from_str(show_tests::VPROGRAM_FIXTURE).expect("fixture parses")
+    }
+
+    use aleph_types::account::SignError;
+    use aleph_types::chain::{Chain, Signature};
+
+    /// Minimal test account that produces a dummy signature. Mirrors the
+    /// `TestAccount` in `commands/instance.rs` tests.
+    struct TestAccount {
+        address: Address,
+    }
+
+    impl Account for TestAccount {
+        fn chain(&self) -> Chain {
+            Chain::Ethereum
+        }
+        fn address(&self) -> &Address {
+            &self.address
+        }
+        fn sign_raw(&self, _buffer: &[u8]) -> Result<Signature, SignError> {
+            Ok(Signature::from("0xDUMMY".to_string()))
+        }
+    }
+
+    #[test]
+    fn build_forget_for_vprogram_targets_only_the_vprogram_hash() {
+        let message = fixture_message();
+        let account = TestAccount {
+            address: Address::from("0xB68B9D4f3771c246233823ed1D3Add451055F9Ef".to_string()),
+        };
+        let pending = build_forget_for_vprogram(&account, &message, "User deletion").unwrap();
+        assert_eq!(pending.message_type, MessageType::Forget);
+        let value: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        let hashes = value["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].as_str().unwrap(), message.item_hash.to_string());
+        assert_eq!(value["reason"], "User deletion");
     }
 
     #[test]
