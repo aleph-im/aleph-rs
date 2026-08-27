@@ -757,7 +757,7 @@ pub(crate) async fn build_instance_show(
         (hash, entry)
     } else {
         let matches = scheduler
-            .find_vms_by_hash_prefix(&args.vm_id)
+            .find_vms_by_hash_prefix_and_type(&args.vm_id, VmKind::Instance.scheduler_vm_type())
             .await
             .with_context(|| {
                 format!(
