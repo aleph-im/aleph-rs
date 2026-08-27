@@ -24,7 +24,16 @@ pub enum ManifestError {
     TooManyCpuModels(usize),
     #[error("boot.platform_roothash must be 64 lowercase hex chars")]
     BadPlatformRoothash,
+    #[error("bundle.size is {0}; must be between 1 and {MAX_BUNDLE_SIZE} bytes")]
+    BadBundleSize(u64),
 }
+
+/// Upper bound on `bundle.size`. The tarball is downloaded into memory and
+/// then extracted, and every member is separately capped at 1 GiB by
+/// `bundle::extract_members`, so a bundle above this is not a runtime we
+/// can use anyway. Bounding it here keeps a hostile manifest from steering
+/// `fetch_bundle_artifacts` into a multi-gigabyte allocation.
+pub const MAX_BUNDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Contract the runtime imposes on the workload volume's contents, e.g.
 /// "aleph.compose/1". Absent means: opaque ext4, runtime-defined.
@@ -144,15 +153,21 @@ impl RuntimeManifest {
         if !is_lowercase_hex_64(&manifest.boot.platform_roothash) {
             return Err(ManifestError::BadPlatformRoothash);
         }
+        // `bundle.size` is the download cap: zero can never match a real
+        // tarball, and an absurd value would let the manifest dictate how
+        // much we are willing to buffer.
+        if manifest.bundle.size == 0 || manifest.bundle.size > MAX_BUNDLE_SIZE {
+            return Err(ManifestError::BadBundleSize(manifest.bundle.size));
+        }
         Ok(manifest)
     }
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
 
-    const VALID_MANIFEST: &str = r#"{
+    pub(crate) const VALID_MANIFEST: &str = r#"{
   "format": "aleph-vprogram-runtime",
   "format_version": 1,
   "name": "aleph-snp-attest",
@@ -210,6 +225,7 @@ mod test {
             patch if patch.contains("cpu_models") => {
                 base.replace(r#""cpu_models": ["EPYC-v4"]"#, patch)
             }
+            patch if patch.contains("size") => base.replace(r#""size": 57522386"#, patch),
             _ => base.to_string(),
         }
     }
@@ -240,6 +256,8 @@ mod test {
                 "at most 16",
             ),
             (r#""platform_roothash": "abc""#, "platform_roothash"),
+            (r#""size": 0"#, "bundle.size is 0"),
+            (r#""size": 2147483649"#, "bundle.size is 2147483649"),
         ] {
             let json = mutate(VALID_MANIFEST, patch);
             let err = RuntimeManifest::parse(json.as_bytes()).unwrap_err();
