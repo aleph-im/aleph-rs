@@ -6,6 +6,8 @@
 //! drive `call`/`show` against it. This module resolves that mapping from a
 //! CRN's `/v2/about/executions/list` networking snapshot into a URL.
 
+use std::net::Ipv4Addr;
+
 use url::Url;
 
 use crate::crn::ActiveVmNetworking;
@@ -13,10 +15,13 @@ use crate::crn::ActiveVmNetworking;
 /// Resolve the attested endpoint for a running V-Program from its CRN
 /// networking info: `https://{host_ipv4}:{mapped_ports[attest_port].host}`.
 ///
-/// Returns `None` if the CRN hasn't reported a `host_ipv4` yet, or if
-/// `attest_port` isn't (yet) present in `mapped_ports`.
+/// Returns `None` if the CRN hasn't reported a `host_ipv4` yet, if it isn't
+/// a literal IPv4 address (the field is untrusted CRN output and is
+/// interpolated into a URL, so a hostname or path smuggled in here must
+/// not become the endpoint), or if `attest_port` isn't (yet) present in
+/// `mapped_ports`.
 pub fn resolve_attested_endpoint(net: &ActiveVmNetworking, attest_port: u16) -> Option<Url> {
-    let host_ipv4 = net.host_ipv4.as_deref()?;
+    let host_ipv4: Ipv4Addr = net.host_ipv4.as_deref()?.trim().parse().ok()?;
     let mapped = net.mapped_ports.get(&attest_port)?;
     Url::parse(&format!("https://{host_ipv4}:{}", mapped.host)).ok()
 }
@@ -65,6 +70,25 @@ mod tests {
         let net = networking(None, mapped_ports);
 
         assert!(resolve_attested_endpoint(&net, 8443).is_none());
+    }
+
+    #[test]
+    fn none_when_host_ipv4_is_not_an_address() {
+        for bad in [
+            "evil.example/path",
+            "203.0.113.5/x",
+            "[::1]",
+            "",
+            "203.0.113",
+        ] {
+            let mut mapped_ports = BTreeMap::new();
+            mapped_ports.insert(8443, mapped_port(24101));
+            let net = networking(Some(bad), mapped_ports);
+            assert!(
+                resolve_attested_endpoint(&net, 8443).is_none(),
+                "{bad:?} should not resolve"
+            );
+        }
     }
 
     #[test]
