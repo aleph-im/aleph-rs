@@ -9,6 +9,11 @@ use aleph_types::item_hash::ItemHash;
 use serde::Deserialize;
 use url::Url;
 
+/// `vm_type` value the scheduler reports (and filters on) for INSTANCE VMs.
+pub const VM_TYPE_INSTANCE: &str = "instance";
+/// `vm_type` value the scheduler reports (and filters on) for V-PROGRAM VMs.
+pub const VM_TYPE_VPROGRAM: &str = "v_program";
+
 /// One VM entry as returned by `/api/v1/vms` and `/api/v1/vms/{vm_hash}`.
 ///
 /// Typed fields cover the columns rendered by `aleph instance list`. Any
@@ -16,11 +21,6 @@ use url::Url;
 /// flow through `extra` so `--json` output can pass them on without losing
 /// information when the scheduler schema evolves.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-/// `vm_type` value the scheduler reports (and filters on) for INSTANCE VMs.
-pub const VM_TYPE_INSTANCE: &str = "instance";
-/// `vm_type` value the scheduler reports (and filters on) for V-PROGRAM VMs.
-pub const VM_TYPE_VPROGRAM: &str = "v_program";
-
 pub struct VmEntry {
     pub vm_hash: ItemHash,
     pub vm_type: String,
