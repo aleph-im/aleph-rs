@@ -323,6 +323,31 @@ mod test {
         enc.finish().unwrap()
     }
 
+    /// Cache-hit fast path of the public entry point: when all three
+    /// artifacts already sit under `cache_dir/<sha256>/`, no download is
+    /// attempted (the client points at an unroutable host) and the returned
+    /// paths are the cached ones.
+    #[tokio::test]
+    async fn fetch_bundle_artifacts_uses_the_cache_without_downloading() {
+        let manifest =
+            RuntimeManifest::parse(crate::vprogram::manifest::test::VALID_MANIFEST.as_bytes())
+                .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let bundle_dir = cache.path().join(&manifest.bundle.sha256);
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        for role in ["ovmf", "kernel", "initrd"] {
+            std::fs::write(bundle_dir.join(role), role).unwrap();
+        }
+        let client =
+            crate::client::AlephClient::new(url::Url::parse("http://test.invalid").unwrap());
+        let artifacts = fetch_bundle_artifacts(&client, &manifest, cache.path())
+            .await
+            .unwrap();
+        assert_eq!(artifacts.ovmf, bundle_dir.join("ovmf"));
+        assert_eq!(artifacts.kernel, bundle_dir.join("kernel"));
+        assert_eq!(artifacts.initrd, bundle_dir.join("initrd"));
+    }
+
     fn test_members() -> BundleMembers {
         BundleMembers {
             ovmf: "image/OVMF.fd".to_string(),
