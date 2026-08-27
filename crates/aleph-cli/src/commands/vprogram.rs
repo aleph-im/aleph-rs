@@ -196,9 +196,9 @@ async fn handle_create(
     let dry_run = args.signing.dry_run;
 
     // 1. Runtime manifest: --runtime is a STORE message hash, a contract or
-    //    implementation name from the vm-images aggregate, or absent (the
-    //    model's default contract, then its default implementation). The
-    //    aggregate is only fetched when a hash is not given.
+    //    runtime name from the vm-images aggregate, or absent (the model's
+    //    current contract, then its default runtime). The aggregate is only
+    //    fetched when a hash is not given.
     let model = if compose_input.is_some() {
         VPROGRAM_MODEL_COMPOSE
     } else {
@@ -455,7 +455,7 @@ async fn handle_create(
 pub(crate) struct ResolvedRuntime {
     pub hash: ItemHash,
     pub contract: Option<String>,
-    /// The implementation name, for display.
+    /// The catalogue runtime name, for display.
     pub label: Option<String>,
 }
 
@@ -482,13 +482,11 @@ pub(crate) fn resolve_vprogram_runtime(
         VPROGRAM_MODEL_EXEC => " (did you mean --workload?)",
         _ => "",
     };
-    let resolved = data
-        .vprogram_runtimes
-        .resolve(model, selector.as_deref(), hint)?;
+    let resolved = data.resolve_vprogram_runtime(model, selector.as_deref(), hint)?;
     Ok(ResolvedRuntime {
         hash: resolved.hash,
         contract: Some(resolved.contract),
-        label: Some(resolved.implementation),
+        label: Some(resolved.runtime),
     })
 }
 
@@ -3108,7 +3106,7 @@ mod compose_wiring_tests {
     }
 
     #[test]
-    fn runtime_identity_line_names_implementation_contract_manifest_and_provenance() {
+    fn runtime_identity_line_names_runtime_contract_manifest_and_provenance() {
         let hash: ItemHash = "afde".repeat(16).parse().unwrap();
         let m = manifest_with_source(Some(
             r#"{"repo": "https://github.com/aleph-im/aleph-vm", "rev": "ba690c65", "build": "nix build"}"#,
@@ -3156,14 +3154,13 @@ mod compose_wiring_tests {
 
     mod runtime_catalogue {
         use super::*;
-        use aleph_sdk::aggregate_models::vm_images::{
-            VProgramContract, VProgramImplementation, VProgramModel, VProgramRuntimes,
-        };
+        use aleph_sdk::aggregate_models::vm_images::{VProgramRuntimeEntry, VmImageDefaults};
         use std::collections::BTreeMap;
 
-        fn implementation(hash: &str) -> VProgramImplementation {
-            VProgramImplementation {
+        fn entry(hash: &str, contract: &str) -> VProgramRuntimeEntry {
+            VProgramRuntimeEntry {
                 hash: hash.repeat(16).parse().unwrap(),
+                contract: contract.into(),
                 display_name: None,
                 description: None,
                 deprecated: false,
@@ -3171,35 +3168,22 @@ mod compose_wiring_tests {
         }
 
         fn data() -> VmImagesData {
-            let mut models = BTreeMap::new();
-            for (model, contract) in [("exec", "aleph.exec/1"), ("compose", "aleph.compose/1")] {
-                models.insert(
-                    model.to_string(),
-                    VProgramModel {
-                        default_contract: contract.to_string(),
-                        display_name: None,
-                        description: None,
-                    },
-                );
-            }
-            let mut contracts = BTreeMap::new();
-            for (contract, model, name, hash) in [
-                ("aleph.exec/1", "exec", "exec-1.0", "aaaa"),
-                ("aleph.compose/1", "compose", "compose-1.0", "bbbb"),
-            ] {
-                contracts.insert(
-                    contract.to_string(),
-                    VProgramContract {
-                        model: model.to_string(),
-                        default: Some(name.to_string()),
-                        implementations: BTreeMap::from([(name.to_string(), implementation(hash))]),
-                        display_name: None,
-                        description: None,
-                    },
-                );
-            }
             VmImagesData {
-                vprogram_runtimes: VProgramRuntimes { models, contracts },
+                vprogram_runtimes: BTreeMap::from([
+                    ("exec-1.0".to_string(), entry("aaaa", "aleph.exec/1")),
+                    ("compose-1.0".to_string(), entry("bbbb", "aleph.compose/1")),
+                ]),
+                vprogram_contracts: BTreeMap::from([
+                    ("aleph.exec/1".to_string(), "exec-1.0".to_string()),
+                    ("aleph.compose/1".to_string(), "compose-1.0".to_string()),
+                ]),
+                defaults: VmImageDefaults {
+                    vprogram_models: BTreeMap::from([
+                        ("exec".to_string(), "aleph.exec/1".to_string()),
+                        ("compose".to_string(), "aleph.compose/1".to_string()),
+                    ]),
+                    ..Default::default()
+                },
                 ..Default::default()
             }
         }
@@ -3234,7 +3218,7 @@ mod compose_wiring_tests {
         }
 
         #[test]
-        fn contract_or_implementation_selectors() {
+        fn contract_or_runtime_selectors() {
             let by_contract = resolve_vprogram_runtime(
                 Some(ImageRef::Preset("aleph.compose/1".into())),
                 VPROGRAM_MODEL_COMPOSE,
@@ -3283,7 +3267,7 @@ mod compose_wiring_tests {
         }
 
         #[test]
-        fn unknown_implementation_lists_available() {
+        fn unknown_runtime_lists_available() {
             let err = resolve_vprogram_runtime(
                 Some(ImageRef::Preset("nope".into())),
                 VPROGRAM_MODEL_EXEC,
