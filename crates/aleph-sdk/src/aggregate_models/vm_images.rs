@@ -21,8 +21,31 @@ pub struct VmImagesData {
     pub runtimes: BTreeMap<String, ImageEntry>,
     #[serde(default)]
     pub firmwares: BTreeMap<String, ImageEntry>,
+    /// V-Program runtime bundles (the STORE message of a runtime manifest),
+    /// keyed by preset slug. Each declares the workload contract it serves.
+    #[serde(default)]
+    pub vprogram_runtimes: BTreeMap<String, VProgramRuntimeEntry>,
     #[serde(default)]
     pub defaults: VmImageDefaults,
+}
+
+/// Workload contract served by the plain `aleph vprogram create` flow.
+pub const VPROGRAM_CONTRACT_EXEC: &str = "aleph.exec/1";
+/// Workload contract served by `aleph vprogram create --compose`.
+pub const VPROGRAM_CONTRACT_COMPOSE: &str = "aleph.compose/1";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VProgramRuntimeEntry {
+    /// STORE message hash of the runtime manifest.
+    pub hash: ItemHash,
+    /// Workload contract the bundle implements, e.g. `aleph.exec/1`.
+    pub contract: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub deprecated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +80,10 @@ pub struct VmImageDefaults {
     pub firmware: Option<String>,
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Default V-Program runtime preset per workload contract, e.g.
+    /// `{"aleph.exec/1": "exec", "aleph.compose/1": "compose"}`.
+    #[serde(default)]
+    pub vprogram_runtimes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +96,10 @@ pub enum VmImagesError {
     },
     #[error("vm-images aggregate has no default {kind} configured")]
     NoDefault { kind: &'static str },
+    #[error(
+        "vm-images aggregate has no default V-Program runtime for workload contract {contract:?}"
+    )]
+    NoDefaultForContract { contract: String },
 }
 
 impl VmImagesData {
@@ -114,6 +145,42 @@ impl VmImagesData {
                 name: name.to_string(),
                 available: join_active_names(self.active_firmwares().iter().map(|(n, _)| *n)),
             })
+    }
+
+    pub fn active_vprogram_runtimes(&self) -> Vec<(&str, &VProgramRuntimeEntry)> {
+        self.vprogram_runtimes
+            .iter()
+            .filter(|(_, e)| !e.deprecated)
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+
+    pub fn vprogram_runtime(&self, name: &str) -> Result<&VProgramRuntimeEntry, VmImagesError> {
+        self.vprogram_runtimes
+            .get(name)
+            .ok_or_else(|| VmImagesError::UnknownPreset {
+                kind: "V-Program runtime",
+                name: name.to_string(),
+                available: join_active_names(
+                    self.active_vprogram_runtimes().iter().map(|(n, _)| *n),
+                ),
+            })
+    }
+
+    /// The default V-Program runtime for a workload contract, per
+    /// `defaults.vprogram_runtimes`.
+    pub fn default_vprogram_runtime(
+        &self,
+        contract: &str,
+    ) -> Result<&VProgramRuntimeEntry, VmImagesError> {
+        let name = self
+            .defaults
+            .vprogram_runtimes
+            .get(contract)
+            .ok_or_else(|| VmImagesError::NoDefaultForContract {
+                contract: contract.to_string(),
+            })?;
+        self.vprogram_runtime(name)
     }
 
     pub fn runtime(&self, name: &str) -> Result<&ImageEntry, VmImagesError> {
@@ -168,9 +235,26 @@ mod tests {
                 "display_name": "OVMF (default)"
               }
             },
+            "vprogram_runtimes": {
+              "exec": {
+                "hash": "3333333333333333333333333333333333333333333333333333333333333333",
+                "contract": "aleph.exec/1",
+                "display_name": "V-Program exec runtime"
+              },
+              "compose": {
+                "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+                "contract": "aleph.compose/1"
+              },
+              "exec-old": {
+                "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+                "contract": "aleph.exec/1",
+                "deprecated": true
+              }
+            },
             "defaults": {
               "rootfs": "ubuntu24",
-              "firmware": "ovmf-default"
+              "firmware": "ovmf-default",
+              "vprogram_runtimes": {"aleph.exec/1": "exec", "aleph.compose/1": "compose"}
             },
             "unknown_section": {"ignored": true}
           }
@@ -304,6 +388,52 @@ mod tests {
                 .display_name
                 .as_deref(),
             Some("Python 3.11")
+        );
+    }
+
+    #[test]
+    fn vprogram_runtime_lookup_and_defaults_by_contract() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let data = &agg.vm_images;
+        assert_eq!(data.vprogram_runtimes.len(), 3);
+        assert_eq!(data.active_vprogram_runtimes().len(), 2);
+
+        let exec = data
+            .default_vprogram_runtime(VPROGRAM_CONTRACT_EXEC)
+            .unwrap();
+        assert_eq!(exec.hash.to_string(), "3".repeat(64));
+        assert_eq!(exec.contract, "aleph.exec/1");
+        let compose = data
+            .default_vprogram_runtime(VPROGRAM_CONTRACT_COMPOSE)
+            .unwrap();
+        assert_eq!(compose.hash.to_string(), "4".repeat(64));
+
+        assert!(data.vprogram_runtime("exec-old").unwrap().deprecated);
+        let err = data.vprogram_runtime("nope").unwrap_err().to_string();
+        assert!(
+            err.contains("unknown V-Program runtime preset 'nope'"),
+            "{err}"
+        );
+        assert!(err.contains("compose, exec"), "{err}");
+        assert!(!err.contains("exec-old"), "{err}");
+
+        let err = data
+            .default_vprogram_runtime("aleph.other/1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("aleph.other/1"), "{err}");
+    }
+
+    #[test]
+    fn vprogram_runtimes_absent_in_old_aggregates() {
+        let json = r#"{"vm-images": {"defaults": {"rootfs": "ubuntu24"}}}"#;
+        let agg: VmImagesAggregate = serde_json::from_str(json).unwrap();
+        assert!(agg.vm_images.vprogram_runtimes.is_empty());
+        assert!(agg.vm_images.defaults.vprogram_runtimes.is_empty());
+        assert!(
+            agg.vm_images
+                .default_vprogram_runtime(VPROGRAM_CONTRACT_EXEC)
+                .is_err()
         );
     }
 }

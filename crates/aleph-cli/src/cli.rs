@@ -3241,9 +3241,13 @@ pub struct VProgramCreateArgs {
     )]
     pub image_archives: Vec<String>,
 
-    /// Item hash of the runtime manifest store message.
-    #[arg(long)]
-    pub runtime: ItemHash,
+    /// Runtime bundle: a preset slug from the vm-images aggregate
+    /// (`vprogram_runtimes`) or the item hash of a runtime manifest STORE
+    /// message. When omitted, resolves to the aggregate's default runtime
+    /// for the workload contract in use: aleph.exec/1 for --workload,
+    /// aleph.compose/1 for --compose.
+    #[arg(long, value_parser = parse_image_ref)]
+    pub runtime: Option<ImageRef>,
 
     /// Extra read-only data volume image (repeatable, max 8); each is
     /// verity-bound into the attested TCB in flag order.

@@ -5,9 +5,13 @@ use std::path::{Path, PathBuf};
 
 use super::instance::{InstanceRow, format_item_hash_short, format_node_short};
 use super::instance_target::{VmKind, pick_unique_match};
+use aleph_sdk::aggregate_models::vm_images::{
+    VPROGRAM_CONTRACT_COMPOSE, VPROGRAM_CONTRACT_EXEC, VmImagesData,
+};
 use aleph_sdk::attest::{
     MeasurementPin, PlatformPolicy, PlatformPosture, PolicyPin, attested_request,
 };
+use aleph_sdk::caching_aggregate_client::CachingAggregateClient;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
     hash_file,
@@ -36,8 +40,8 @@ use url::Url;
 
 use crate::account::CliAccount;
 use crate::cli::{
-    PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramDeleteArgs,
-    VProgramListArgs, VProgramShowArgs,
+    ImageRef, PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs,
+    VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
 };
 use crate::common::{
     confirm_action, render_upload_progress, resolve_account, resolve_address,
@@ -191,12 +195,34 @@ async fn handle_create(
     }
     let dry_run = args.signing.dry_run;
 
-    // 1. Runtime manifest (args.runtime is a STORE message hash).
+    // 1. Runtime manifest: --runtime is a STORE message hash, a preset slug
+    //    from the vm-images aggregate, or absent (aggregate default for the
+    //    workload contract in use). The aggregate is only fetched when needed.
+    let contract = if compose_input.is_some() {
+        VPROGRAM_CONTRACT_COMPOSE
+    } else {
+        VPROGRAM_CONTRACT_EXEC
+    };
+    let vm_images = if matches!(args.runtime, Some(ImageRef::Hash(_))) {
+        VmImagesData::default()
+    } else {
+        CachingAggregateClient::new(aleph_client)
+            .get_vm_images_aggregate()
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "failed to fetch vm-images aggregate: {e}. \
+                     As a fallback, pass --runtime with the runtime manifest's item hash."
+                )
+            })?
+            .vm_images
+    };
+    let runtime = resolve_vprogram_runtime(args.runtime.clone(), contract, &vm_images)?;
     if !json {
-        eprintln!("Fetching runtime manifest {}...", args.runtime);
+        eprintln!("Fetching runtime manifest {runtime}...");
     }
     let manifest_bytes = aleph_client
-        .download_file_by_message_hash(&args.runtime)
+        .download_file_by_message_hash(&runtime)
         .await?
         .with_verification()
         .bytes()
@@ -205,6 +231,8 @@ async fn handle_create(
 
     if compose_input.is_some() {
         check_compose_contract(manifest.workload.as_ref())?;
+    } else {
+        check_exec_contract(manifest.workload.as_ref())?;
     }
 
     // Cheap slot check right after the manifest is known: instantiate_cmdline
@@ -357,7 +385,7 @@ async fn handle_create(
     }
 
     let wait = args.wait;
-    let mut builder = VProgramBuilder::new(&account, args.runtime, workload, verification)
+    let mut builder = VProgramBuilder::new(&account, runtime, workload, verification)
         .vcpus(args.vcpus)
         .memory(MiB::from(u64::from(args.memory)))
         .internet(!args.no_internet)
@@ -412,6 +440,48 @@ async fn handle_create(
         }
     }
     Ok(())
+}
+
+/// Resolve `--runtime` against an in-memory `VmImagesData`. Pure: does no
+/// network I/O. `None` picks the aggregate's default preset for `contract`.
+pub(crate) fn resolve_vprogram_runtime(
+    runtime: Option<ImageRef>,
+    contract: &str,
+    data: &VmImagesData,
+) -> Result<ItemHash> {
+    Ok(match runtime {
+        Some(ImageRef::Hash(h)) => h,
+        Some(ImageRef::Preset(name)) => {
+            let entry = data.vprogram_runtime(&name)?;
+            if entry.contract != contract {
+                bail!(
+                    "runtime preset {name:?} serves workload contract {:?}, but this \
+                     invocation needs {contract:?}{}",
+                    entry.contract,
+                    if entry.contract == VPROGRAM_CONTRACT_COMPOSE {
+                        " (did you mean --compose?)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            entry.hash.clone()
+        }
+        None => data.default_vprogram_runtime(contract)?.hash.clone(),
+    })
+}
+
+/// Refuse a plain (--workload) create against a runtime that declares the
+/// compose contract: such a bundle expects a compose-built workload volume
+/// and would fail to boot a raw image. Pure and I/O-free.
+pub(crate) fn check_exec_contract(workload: Option<&WorkloadSpec>) -> Result<()> {
+    match workload {
+        Some(w) if w.contract == VPROGRAM_CONTRACT_COMPOSE => bail!(
+            "this runtime declares workload contract {VPROGRAM_CONTRACT_COMPOSE:?}; build the \
+             workload with --compose instead of --workload"
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// Refuse --compose against a runtime that does not declare the compose
@@ -2917,6 +2987,127 @@ mod compose_wiring_tests {
     #[test]
     fn compose_contract_gate_rejects_a_contractless_runtime() {
         assert!(check_compose_contract(None).is_err());
+    }
+
+    #[test]
+    fn exec_contract_gate_rejects_only_the_compose_contract() {
+        let compose = WorkloadSpec {
+            contract: "aleph.compose/1".into(),
+            upstream_port: Some(8080),
+        };
+        let err = check_exec_contract(Some(&compose)).unwrap_err().to_string();
+        assert!(err.contains("--compose"), "{err}");
+        let exec = WorkloadSpec {
+            contract: "aleph.exec/1".into(),
+            upstream_port: Some(8080),
+        };
+        check_exec_contract(Some(&exec)).unwrap();
+        check_exec_contract(None).unwrap();
+    }
+
+    mod runtime_presets {
+        use super::*;
+        use aleph_sdk::aggregate_models::vm_images::{VProgramRuntimeEntry, VmImageDefaults};
+        use std::collections::BTreeMap;
+
+        fn entry(hash: &str, contract: &str) -> VProgramRuntimeEntry {
+            VProgramRuntimeEntry {
+                hash: hash.repeat(16).parse().unwrap(),
+                contract: contract.into(),
+                display_name: None,
+                description: None,
+                deprecated: false,
+            }
+        }
+
+        fn data() -> VmImagesData {
+            let mut vprogram_runtimes = BTreeMap::new();
+            vprogram_runtimes.insert("exec".to_string(), entry("aaaa", "aleph.exec/1"));
+            vprogram_runtimes.insert("compose".to_string(), entry("bbbb", "aleph.compose/1"));
+            let mut defaults_by_contract = BTreeMap::new();
+            defaults_by_contract.insert("aleph.exec/1".to_string(), "exec".to_string());
+            defaults_by_contract.insert("aleph.compose/1".to_string(), "compose".to_string());
+            VmImagesData {
+                vprogram_runtimes,
+                defaults: VmImageDefaults {
+                    vprogram_runtimes: defaults_by_contract,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn hash_bypasses_the_aggregate() {
+            let raw: ItemHash = "cafe".repeat(16).parse().unwrap();
+            let got = resolve_vprogram_runtime(
+                Some(ImageRef::Hash(raw.clone())),
+                VPROGRAM_CONTRACT_EXEC,
+                &VmImagesData::default(),
+            )
+            .unwrap();
+            assert_eq!(got, raw);
+        }
+
+        #[test]
+        fn omitted_picks_the_default_for_the_contract() {
+            let exec = resolve_vprogram_runtime(None, VPROGRAM_CONTRACT_EXEC, &data()).unwrap();
+            assert_eq!(exec.to_string(), "aaaa".repeat(16));
+            let compose =
+                resolve_vprogram_runtime(None, VPROGRAM_CONTRACT_COMPOSE, &data()).unwrap();
+            assert_eq!(compose.to_string(), "bbbb".repeat(16));
+        }
+
+        #[test]
+        fn preset_must_match_the_contract() {
+            let got = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("compose".into())),
+                VPROGRAM_CONTRACT_COMPOSE,
+                &data(),
+            )
+            .unwrap();
+            assert_eq!(got.to_string(), "bbbb".repeat(16));
+
+            let err = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("compose".into())),
+                VPROGRAM_CONTRACT_EXEC,
+                &data(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("did you mean --compose?"), "{err}");
+
+            let err = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("exec".into())),
+                VPROGRAM_CONTRACT_COMPOSE,
+                &data(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("aleph.compose/1"), "{err}");
+            assert!(!err.contains("did you mean"), "{err}");
+        }
+
+        #[test]
+        fn omitted_without_defaults_is_an_error() {
+            let err =
+                resolve_vprogram_runtime(None, VPROGRAM_CONTRACT_EXEC, &VmImagesData::default())
+                    .unwrap_err()
+                    .to_string();
+            assert!(err.contains("aleph.exec/1"), "{err}");
+        }
+
+        #[test]
+        fn unknown_preset_lists_available() {
+            let err = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("nope".into())),
+                VPROGRAM_CONTRACT_EXEC,
+                &data(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("compose, exec"), "{err}");
+        }
     }
 
     #[test]
