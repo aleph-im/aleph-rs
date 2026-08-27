@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use futures_util::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
 
 use crate::client::{AlephClient, AlephStorageClient};
@@ -22,6 +23,8 @@ pub enum BundleError {
     ChecksumMismatch { expected: String, actual: String },
     #[error("bundle size mismatch: manifest says {expected} bytes, downloaded {actual}")]
     SizeMismatch { expected: u64, actual: u64 },
+    #[error("bundle download exceeded the manifest-declared size of {expected} bytes; aborted")]
+    TooLarge { expected: u64 },
     #[error("bundle member has unsafe path {0:?}")]
     UnsafeMemberPath(String),
     #[error("bundle is missing declared member for role {0}")]
@@ -82,9 +85,11 @@ pub async fn fetch_bundle_artifacts(
     // Deliberately no `.with_verification()`: `verify_bundle_bytes` below
     // checks both size and sha256 against the manifest, which is strictly
     // stronger than the download-layer hash-only check and avoids hashing
-    // the payload twice.
+    // the payload twice. The body is streamed and capped at the declared
+    // size so a manifest/node disagreement fails at the cap instead of
+    // after buffering an arbitrarily large response.
     let download = client.download_file_by_message_hash(&bundle_ref).await?;
-    let bytes = download.bytes().await?;
+    let bytes = read_capped(download.into_stream(), manifest.bundle.size).await?;
 
     verify_bundle_bytes(&bytes, &manifest.bundle.sha256, manifest.bundle.size)?;
 
@@ -125,6 +130,31 @@ fn bundle_cache_key(sha256: &str) -> Result<&str, BundleError> {
         )));
     }
     Ok(sha256)
+}
+
+/// Preallocation ceiling for the download buffer: `expected` is untrusted
+/// manifest input, so it must not drive an arbitrarily large allocation
+/// before a single byte has arrived.
+const READ_PREALLOC_CAP: u64 = 64 * 1024 * 1024;
+
+/// Collect `stream` into memory, aborting with [`BundleError::TooLarge`] as
+/// soon as the running total exceeds `expected` bytes. A short body is not
+/// an error here; `verify_bundle_bytes` reports it as a size mismatch.
+async fn read_capped<S>(mut stream: S, expected: u64) -> Result<Vec<u8>, BundleError>
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    let mut out = Vec::with_capacity(expected.min(READ_PREALLOC_CAP) as usize);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(reqwest_middleware::Error::from)
+            .map_err(crate::client::MessageError::from)?;
+        if (out.len() as u64).saturating_add(chunk.len() as u64) > expected {
+            return Err(BundleError::TooLarge { expected });
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 /// Verify that `bytes` matches the manifest-declared sha256 digest and size.
@@ -316,6 +346,42 @@ mod test {
     fn cache_key_accepts_valid_hash() {
         let good = "0".repeat(64);
         assert_eq!(bundle_cache_key(&good).unwrap(), good);
+    }
+
+    #[tokio::test]
+    async fn read_capped_aborts_once_the_declared_size_is_exceeded() {
+        let chunks: Vec<Result<bytes::Bytes, reqwest::Error>> = vec![
+            Ok(bytes::Bytes::from_static(b"aaaa")),
+            Ok(bytes::Bytes::from_static(b"bbbb")),
+            Ok(bytes::Bytes::from_static(b"cc")),
+        ];
+        let err = read_capped(futures_util::stream::iter(chunks), 9)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BundleError::TooLarge { expected: 9 }),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_capped_collects_a_body_within_the_declared_size() {
+        let chunks = || -> Vec<Result<bytes::Bytes, reqwest::Error>> {
+            vec![
+                Ok(bytes::Bytes::from_static(b"aaaa")),
+                Ok(bytes::Bytes::from_static(b"bb")),
+            ]
+        };
+        // Exactly at the cap.
+        let out = read_capped(futures_util::stream::iter(chunks()), 6)
+            .await
+            .unwrap();
+        assert_eq!(out, b"aaaabb");
+        // Short bodies are left to `verify_bundle_bytes`.
+        let out = read_capped(futures_util::stream::iter(chunks()), 100)
+            .await
+            .unwrap();
+        assert_eq!(out, b"aaaabb");
     }
 
     #[test]
