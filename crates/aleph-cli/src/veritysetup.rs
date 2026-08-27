@@ -56,8 +56,8 @@ impl Veritysetup {
     /// and validates it's 64 lowercase hex digits.
     fn parse_root_hash(stdout: &str) -> Result<String, VerityError> {
         for line in stdout.lines() {
-            if line.starts_with("Root hash:") {
-                let hash = line.strip_prefix("Root hash:").unwrap().trim();
+            if let Some(rest) = line.strip_prefix("Root hash:") {
+                let hash = rest.trim();
                 // Validate: 64 lowercase hex characters
                 if hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
                 {

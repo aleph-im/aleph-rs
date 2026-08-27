@@ -268,13 +268,12 @@ async fn handle_create(
     // after every cheap local/manifest gate above has already passed.
     //
     // `_built_workload` (the compose-built ext4 image) and
-    // `_built_workload_dir` (its containing tempdir, which the `.verity`
-    // sidecar `verity_format` writes below also lands in) are `None` for
+    // `_built_workload_dir` (its containing tempdir) are `None` for
     // --workload, where the file is caller-owned. Both are bound by this
     // `let`, in this function's scope, which is what keeps them alive - and
     // their backing files un-deleted - until after `upload_pair` runs; a
     // narrower scope (e.g. dropping them at the end of the match arm) would
-    // delete the image/sidecar before they could be uploaded.
+    // delete the image before it could be uploaded.
     let (workload_path, _built_workload, _built_workload_dir): (
         PathBuf,
         Option<tempfile::NamedTempFile>,
@@ -316,13 +315,30 @@ async fn handle_create(
         }
     };
 
-    // 3. Verity-hash the workload and any extra volumes. Hash trees land
-    //    next to the images as <name>.<ext>.verity (content-derived, so
-    //    overwriting an existing one is fine).
-    let workload_verity = verity_format(&veritysetup, &workload_path, json).await?;
+    // 3. Verity-hash the workload and any extra volumes. Hash trees are
+    //    build artifacts, not user files, so they go in a tempdir rather
+    //    than next to a caller-owned --workload/--volume path. `verity_dir`
+    //    must outlive the uploads in step 4: it is bound here, in this
+    //    function's scope, for the same reason as `_built_workload_dir`.
+    let verity_dir = tempfile::tempdir().context("creating verity scratch dir")?;
+    let workload_verity = verity_format(
+        &veritysetup,
+        &workload_path,
+        &verity_dir.path().join("workload.verity"),
+        json,
+    )
+    .await?;
     let mut volume_verities = Vec::new();
-    for path in &args.volumes {
-        volume_verities.push(verity_format(&veritysetup, path, json).await?);
+    for (i, path) in args.volumes.iter().enumerate() {
+        volume_verities.push(
+            verity_format(
+                &veritysetup,
+                path,
+                &verity_dir.path().join(format!("volume-{i}.verity")),
+                json,
+            )
+            .await?,
+        );
     }
 
     // 4. Upload each data image + hash tree as STORE messages. Under
@@ -728,27 +744,23 @@ struct VerityArtifact {
     root_hash: String,
 }
 
-/// Run `veritysetup format` on `data`, writing the hash tree next to it as
-/// `<file_name>.verity` (appending, not replacing, the existing extension).
-async fn verity_format(vs: &Veritysetup, data: &Path, json: bool) -> Result<VerityArtifact> {
+/// Run `veritysetup format` on `data`, writing the hash tree to `hash_tree`.
+async fn verity_format(
+    vs: &Veritysetup,
+    data: &Path,
+    hash_tree: &Path,
+    json: bool,
+) -> Result<VerityArtifact> {
     if !json {
         eprintln!("Computing dm-verity hash for {}...", data.display());
     }
-    let hash_tree = {
-        let mut name = data
-            .file_name()
-            .map(|n| n.to_os_string())
-            .unwrap_or_default();
-        name.push(".verity");
-        data.with_file_name(name)
-    };
-    let root_hash = vs.format(data, &hash_tree).await?;
+    let root_hash = vs.format(data, hash_tree).await?;
     if !json {
         eprintln!("  Root hash: {root_hash}");
     }
     Ok(VerityArtifact {
         data: data.to_path_buf(),
-        hash_tree,
+        hash_tree: hash_tree.to_path_buf(),
         root_hash,
     })
 }
