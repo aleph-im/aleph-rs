@@ -229,9 +229,6 @@ async fn handle_create(
         .bytes()
         .await?;
     let manifest = RuntimeManifest::parse(&manifest_bytes)?;
-    if !json {
-        eprintln!("{}", runtime_identity_line(&runtime, &manifest));
-    }
 
     match &runtime.contract {
         // Catalogue-resolved: the manifest must implement exactly the
@@ -240,6 +237,9 @@ async fn handle_create(
         // Raw hash: only the model-level gates apply.
         None if compose_input.is_some() => check_compose_contract(manifest.workload.as_ref())?,
         None => check_exec_contract(manifest.workload.as_ref())?,
+    }
+    if !json {
+        eprintln!("{}", runtime_identity_line(&runtime, &manifest));
     }
 
     // Cheap slot check right after the manifest is known: instantiate_cmdline
@@ -3075,6 +3075,12 @@ mod compose_wiring_tests {
             upstream_port: Some(8080),
         };
         check_exec_contract(Some(&exec)).unwrap();
+        // The base runtime contract used by the manifest fixture is accepted too.
+        let builtin = WorkloadSpec {
+            contract: "aleph.builtin/1".into(),
+            upstream_port: Some(8080),
+        };
+        check_exec_contract(Some(&builtin)).unwrap();
         check_exec_contract(None).unwrap();
     }
 
@@ -3084,6 +3090,7 @@ mod compose_wiring_tests {
             r#"{{
               "format": "aleph-vprogram-runtime", "format_version": 1,
               "name": "aleph-snp-attest", "version": "2026.08.20", "platform": "sev_snp",
+              "workload": {{ "contract": "aleph.exec/1", "upstream_port": 8080 }},
               "bundle": {{ "ref": "{h}", "sha256": "{h}", "size": 1,
                 "members": {{ "ovmf": "a", "kernel": "b", "initrd": "c",
                   "platform_rootfs": "d", "platform_hash_tree": "e" }} }},
@@ -3097,10 +3104,10 @@ mod compose_wiring_tests {
         RuntimeManifest::parse(json.as_bytes()).expect("test manifest parses")
     }
 
-    fn resolved(label: Option<&str>, hash: &ItemHash) -> ResolvedRuntime {
+    fn resolved(label: Option<&str>, contract: Option<&str>, hash: &ItemHash) -> ResolvedRuntime {
         ResolvedRuntime {
             hash: hash.clone(),
-            contract: label.map(|_| "aleph.exec/1".to_string()),
+            contract: contract.map(str::to_string),
             label: label.map(str::to_string),
         }
     }
@@ -3112,11 +3119,11 @@ mod compose_wiring_tests {
             r#"{"repo": "https://github.com/aleph-im/aleph-vm", "rev": "ba690c65", "build": "nix build"}"#,
         ));
         assert_eq!(
-            runtime_identity_line(&resolved(Some("exec-1.0"), &hash), &m),
+            runtime_identity_line(&resolved(Some("exec-1.0"), Some("aleph.exec/1"), &hash), &m),
             "Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
         );
         assert_eq!(
-            runtime_identity_line(&resolved(None, &hash), &m),
+            runtime_identity_line(&resolved(None, None, &hash), &m),
             format!(
                 "Using runtime {hash} (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
             )
@@ -3128,11 +3135,13 @@ mod compose_wiring_tests {
         let hash: ItemHash = "afde".repeat(16).parse().unwrap();
         let m = manifest_with_source(None);
         assert_eq!(
-            runtime_identity_line(&resolved(Some("exec-1.0"), &hash), &m),
+            runtime_identity_line(&resolved(Some("exec-1.0"), Some("aleph.exec/1"), &hash), &m),
             "Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20)"
         );
         let m = manifest_with_source(Some(r#"{"rev": "ba690c65"}"#));
-        assert!(runtime_identity_line(&resolved(None, &hash), &m).ends_with(", rev ba690c65)"));
+        assert!(
+            runtime_identity_line(&resolved(None, None, &hash), &m).ends_with(", rev ba690c65)")
+        );
     }
 
     #[test]
@@ -3277,5 +3286,44 @@ mod compose_wiring_tests {
             .to_string();
             assert!(err.contains("exec-1.0"), "{err}");
         }
+    }
+
+    #[test]
+    fn image_archive_specs_parse_and_reject_garbage() {
+        let (name, path) = parse_image_archive("fib-service:latest=./fib.tar").unwrap();
+        assert_eq!(name, "fib-service:latest");
+        assert_eq!(path, PathBuf::from("./fib.tar"));
+        assert!(parse_image_archive("no-equals-sign").is_err());
+    }
+
+    #[test]
+    fn parse_image_archives_rejects_a_duplicate_image_key() {
+        let specs = vec!["web=./a.tar".to_string(), "web=./b.tar".to_string()];
+        let err = parse_image_archives(&specs).unwrap_err().to_string();
+        assert!(err.contains("web") && err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn parse_image_archives_accepts_distinct_images() {
+        let specs = vec!["web=./a.tar".to_string(), "db=./b.tar".to_string()];
+        let archives = parse_image_archives(&specs).unwrap();
+        assert_eq!(archives.len(), 2);
+    }
+
+    #[test]
+    fn check_archive_keys_rejects_a_key_with_no_matching_image() {
+        let archives = BTreeMap::from([("typo-nginx".to_string(), PathBuf::from("./a.tar"))]);
+        let images = vec!["nginx:1.27".to_string()];
+        let err = check_archive_keys_are_known_images(&archives, &images)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("typo-nginx"), "{err}");
+    }
+
+    #[test]
+    fn check_archive_keys_accepts_an_exact_match() {
+        let archives = BTreeMap::from([("nginx:1.27".to_string(), PathBuf::from("./a.tar"))]);
+        let images = vec!["nginx:1.27".to_string()];
+        check_archive_keys_are_known_images(&archives, &images).unwrap();
     }
 }

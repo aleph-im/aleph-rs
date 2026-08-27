@@ -37,8 +37,6 @@ pub struct VmImagesData {
 pub const VPROGRAM_MODEL_EXEC: &str = "exec";
 /// Workload model served by `aleph vprogram create --compose`.
 pub const VPROGRAM_MODEL_COMPOSE: &str = "compose";
-/// Workload contract served by the plain `aleph vprogram create` flow.
-pub const VPROGRAM_CONTRACT_EXEC: &str = "aleph.exec/1";
 /// Workload contract served by `aleph vprogram create --compose`.
 pub const VPROGRAM_CONTRACT_COMPOSE: &str = "aleph.compose/1";
 
@@ -80,6 +78,17 @@ pub struct ResolvedVProgramRuntime {
     pub contract: String,
     pub runtime: String,
     pub hash: ItemHash,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageEntry {
+    pub hash: ItemHash,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub deprecated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
