@@ -511,7 +511,13 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mkfs = MkfsExt4 { path: fake };
+        let debugfs = dir.path().join("debugfs");
+        std::fs::write(&debugfs, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&debugfs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mkfs = MkfsExt4 {
+            path: fake,
+            debugfs,
+        };
 
         let archive_path = dir.path().join("nginx.tar");
         let archive_bytes = b"fake tar bytes";
@@ -555,6 +561,12 @@ mod tests {
         let (_first_dir, first) = build_workload_image(&mkfs, pinned_yaml, &archives)
             .await
             .unwrap();
+        // Cross a wall-clock second boundary between the two builds: staged
+        // files' ctime (which userspace cannot set) differs across it, and
+        // that is exactly what the build must normalize away. Without this
+        // the test only caught the bug when the builds happened to straddle
+        // a second by chance.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         let (_second_dir, second) = build_workload_image(&mkfs, pinned_yaml, &archives)
             .await
             .unwrap();
