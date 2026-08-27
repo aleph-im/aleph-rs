@@ -1,3 +1,4 @@
+use aleph_types::message::execution::environment::MAX_MEASUREMENTS;
 use serde::Deserialize;
 
 pub const MANIFEST_FORMAT: &str = "aleph-vprogram-runtime";
@@ -19,6 +20,8 @@ pub enum ManifestError {
     KernelHashesRequired,
     #[error("boot.cpu_models must not be empty")]
     NoCpuModels,
+    #[error("boot.cpu_models lists {0} models; at most {MAX_MEASUREMENTS} are supported")]
+    TooManyCpuModels(usize),
     #[error("boot.platform_roothash must be 64 lowercase hex chars")]
     BadPlatformRoothash,
 }
@@ -129,6 +132,15 @@ impl RuntimeManifest {
         if manifest.boot.cpu_models.is_empty() {
             return Err(ManifestError::NoCpuModels);
         }
+        // Every CPU model becomes one `LaunchMeasurement` in the message, and
+        // `TeeVerification` caps those at `MAX_MEASUREMENTS`. Reject the
+        // manifest up front instead of computing N launch digests only to
+        // fail at message-build time.
+        if manifest.boot.cpu_models.len() > MAX_MEASUREMENTS {
+            return Err(ManifestError::TooManyCpuModels(
+                manifest.boot.cpu_models.len(),
+            ));
+        }
         if !is_lowercase_hex_64(&manifest.boot.platform_roothash) {
             return Err(ManifestError::BadPlatformRoothash);
         }
@@ -223,6 +235,10 @@ mod test {
             (r#""method": "igvm""#, "unsupported boot method"),
             (r#""kernel_hashes": false"#, "kernel_hashes"),
             (r#""cpu_models": []"#, "cpu_models"),
+            (
+                r#""cpu_models": ["EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4", "EPYC-v4"]"#,
+                "at most 16",
+            ),
             (r#""platform_roothash": "abc""#, "platform_roothash"),
         ] {
             let json = mutate(VALID_MANIFEST, patch);
