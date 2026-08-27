@@ -5,9 +5,13 @@ use std::path::{Path, PathBuf};
 
 use super::instance::{InstanceRow, format_item_hash_short, format_node_short};
 use super::instance_target::{VmKind, pick_unique_match};
+use aleph_sdk::aggregate_models::vm_images::{
+    VPROGRAM_CONTRACT_COMPOSE, VPROGRAM_MODEL_COMPOSE, VPROGRAM_MODEL_EXEC, VmImagesData,
+};
 use aleph_sdk::attest::{
     MeasurementPin, PlatformPolicy, PlatformPosture, PolicyPin, attested_request,
 };
+use aleph_sdk::caching_aggregate_client::CachingAggregateClient;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
     hash_file,
@@ -36,8 +40,8 @@ use url::Url;
 
 use crate::account::CliAccount;
 use crate::cli::{
-    PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramDeleteArgs,
-    VProgramListArgs, VProgramShowArgs,
+    ImageRef, PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs,
+    VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
 };
 use crate::common::{
     confirm_action, render_upload_progress, resolve_account, resolve_address,
@@ -191,20 +195,51 @@ async fn handle_create(
     }
     let dry_run = args.signing.dry_run;
 
-    // 1. Runtime manifest (args.runtime is a STORE message hash).
+    // 1. Runtime manifest: --runtime is a STORE message hash, a contract or
+    //    runtime name from the vm-images aggregate, or absent (the model's
+    //    current contract, then its default runtime). The aggregate is only
+    //    fetched when a hash is not given.
+    let model = if compose_input.is_some() {
+        VPROGRAM_MODEL_COMPOSE
+    } else {
+        VPROGRAM_MODEL_EXEC
+    };
+    let vm_images = if matches!(args.runtime, Some(ImageRef::Hash(_))) {
+        VmImagesData::default()
+    } else {
+        CachingAggregateClient::new(aleph_client)
+            .get_vm_images_aggregate()
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "failed to fetch vm-images aggregate: {e}. \
+                     As a fallback, pass --runtime with the runtime manifest's item hash."
+                )
+            })?
+            .vm_images
+    };
+    let runtime = resolve_vprogram_runtime(args.runtime.clone(), model, &vm_images)?;
     if !json {
-        eprintln!("Fetching runtime manifest {}...", args.runtime);
+        eprintln!("Fetching runtime manifest {}...", runtime.hash);
     }
     let manifest_bytes = aleph_client
-        .download_file_by_message_hash(&args.runtime)
+        .download_file_by_message_hash(&runtime.hash)
         .await?
         .with_verification()
         .bytes()
         .await?;
     let manifest = RuntimeManifest::parse(&manifest_bytes)?;
 
-    if compose_input.is_some() {
-        check_compose_contract(manifest.workload.as_ref())?;
+    match &runtime.contract {
+        // Catalogue-resolved: the manifest must implement exactly the
+        // contract the aggregate claims for it.
+        Some(contract) => check_contract_matches(contract, manifest.workload.as_ref())?,
+        // Raw hash: only the model-level gates apply.
+        None if compose_input.is_some() => check_compose_contract(manifest.workload.as_ref())?,
+        None => check_exec_contract(manifest.workload.as_ref())?,
+    }
+    if !json {
+        eprintln!("{}", runtime_identity_line(&runtime, &manifest));
     }
 
     // Cheap slot check right after the manifest is known: instantiate_cmdline
@@ -357,7 +392,7 @@ async fn handle_create(
     }
 
     let wait = args.wait;
-    let mut builder = VProgramBuilder::new(&account, args.runtime, workload, verification)
+    let mut builder = VProgramBuilder::new(&account, runtime.hash, workload, verification)
         .vcpus(args.vcpus)
         .memory(MiB::from(u64::from(args.memory)))
         .internet(!args.no_internet)
@@ -414,21 +449,129 @@ async fn handle_create(
     Ok(())
 }
 
+/// What `--runtime` resolved to. `contract` / `label` are `None` when the
+/// user pinned a raw manifest hash (nothing in the aggregate was consulted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedRuntime {
+    pub hash: ItemHash,
+    pub contract: Option<String>,
+    /// The catalogue runtime name, for display.
+    pub label: Option<String>,
+}
+
+/// Resolve `--runtime` for workload `model` against an in-memory
+/// `VmImagesData`. Pure: does no network I/O.
+pub(crate) fn resolve_vprogram_runtime(
+    runtime: Option<ImageRef>,
+    model: &str,
+    data: &VmImagesData,
+) -> Result<ResolvedRuntime> {
+    let selector = match runtime {
+        Some(ImageRef::Hash(hash)) => {
+            return Ok(ResolvedRuntime {
+                hash,
+                contract: None,
+                label: None,
+            });
+        }
+        Some(ImageRef::Preset(name)) => Some(name),
+        None => None,
+    };
+    let hint = |found: &str| match found {
+        VPROGRAM_MODEL_COMPOSE => " (did you mean --compose?)",
+        VPROGRAM_MODEL_EXEC => " (did you mean --workload?)",
+        _ => "",
+    };
+    let resolved = data.resolve_vprogram_runtime(model, selector.as_deref(), hint)?;
+    Ok(ResolvedRuntime {
+        hash: resolved.hash,
+        contract: Some(resolved.contract),
+        label: Some(resolved.runtime),
+    })
+}
+
+/// One-line description of the runtime a create resolved to, e.g.
+/// `Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)`.
+/// Falls back to the hash when no catalogue entry was involved and omits
+/// the provenance when the manifest carries no `source` block.
+pub(crate) fn runtime_identity_line(
+    runtime: &ResolvedRuntime,
+    manifest: &RuntimeManifest,
+) -> String {
+    let mut details = String::new();
+    if let Some(w) = &manifest.workload {
+        details.push_str(&format!("{}; ", w.contract));
+    }
+    details.push_str(&format!("{} {}", manifest.name, manifest.version));
+    if let Some(source) = &manifest.source {
+        let repo = source
+            .repo
+            .as_deref()
+            .map(|r| r.trim_end_matches('/'))
+            .and_then(|r| r.rsplit('/').next())
+            .filter(|r| !r.is_empty());
+        match (repo, source.rev.as_deref()) {
+            (Some(repo), Some(rev)) => details.push_str(&format!(", {repo}@{rev}")),
+            (Some(repo), None) => details.push_str(&format!(", {repo}")),
+            (None, Some(rev)) => details.push_str(&format!(", rev {rev}")),
+            (None, None) => {}
+        }
+    }
+    let what = runtime
+        .label
+        .clone()
+        .unwrap_or_else(|| runtime.hash.to_string());
+    format!("Using runtime {what} ({details})")
+}
+
+/// Refuse a catalogue-resolved runtime whose manifest does not declare the
+/// contract the aggregate lists it under: either the aggregate is wrong or
+/// the bundle was swapped, and both mean the workload would not boot.
+pub(crate) fn check_contract_matches(
+    expected: &str,
+    workload: Option<&WorkloadSpec>,
+) -> Result<()> {
+    match workload {
+        Some(w) if w.contract == expected => Ok(()),
+        Some(w) => bail!(
+            "the vm-images aggregate lists this runtime under workload contract {expected:?}, \
+             but its manifest declares {:?}",
+            w.contract
+        ),
+        None => bail!(
+            "the vm-images aggregate lists this runtime under workload contract {expected:?}, \
+             but its manifest declares no workload contract"
+        ),
+    }
+}
+
+/// Refuse a plain (--workload) create against a runtime that declares the
+/// compose contract: such a bundle expects a compose-built workload volume
+/// and would fail to boot a raw image. Pure and I/O-free.
+pub(crate) fn check_exec_contract(workload: Option<&WorkloadSpec>) -> Result<()> {
+    match workload {
+        Some(w) if w.contract == VPROGRAM_CONTRACT_COMPOSE => bail!(
+            "this runtime declares workload contract {VPROGRAM_CONTRACT_COMPOSE:?}; build the \
+             workload with --compose instead of --workload"
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// Refuse --compose against a runtime that does not declare the compose
 /// workload contract, so a compose workload cannot land on e.g. a builtin
 /// runtime. Pure and I/O-free so it's directly unit-testable.
 pub(crate) fn check_compose_contract(workload: Option<&WorkloadSpec>) -> Result<()> {
-    const COMPOSE_CONTRACT: &str = "aleph.compose/1";
     match workload {
-        Some(w) if w.contract == COMPOSE_CONTRACT => Ok(()),
+        Some(w) if w.contract == VPROGRAM_CONTRACT_COMPOSE => Ok(()),
         Some(w) => bail!(
             "--compose requires a runtime declaring workload contract \
-             {COMPOSE_CONTRACT:?}, but this runtime declares {:?}",
+             {VPROGRAM_CONTRACT_COMPOSE:?}, but this runtime declares {:?}",
             w.contract
         ),
         None => bail!(
             "--compose requires a runtime declaring workload contract \
-             {COMPOSE_CONTRACT:?}, but this runtime manifest declares no \
+             {VPROGRAM_CONTRACT_COMPOSE:?}, but this runtime manifest declares no \
              workload contract"
         ),
     }
@@ -2917,6 +3060,232 @@ mod compose_wiring_tests {
     #[test]
     fn compose_contract_gate_rejects_a_contractless_runtime() {
         assert!(check_compose_contract(None).is_err());
+    }
+
+    #[test]
+    fn exec_contract_gate_rejects_only_the_compose_contract() {
+        let compose = WorkloadSpec {
+            contract: "aleph.compose/1".into(),
+            upstream_port: Some(8080),
+        };
+        let err = check_exec_contract(Some(&compose)).unwrap_err().to_string();
+        assert!(err.contains("--compose"), "{err}");
+        let exec = WorkloadSpec {
+            contract: "aleph.exec/1".into(),
+            upstream_port: Some(8080),
+        };
+        check_exec_contract(Some(&exec)).unwrap();
+        // The base runtime contract used by the manifest fixture is accepted too.
+        let builtin = WorkloadSpec {
+            contract: "aleph.builtin/1".into(),
+            upstream_port: Some(8080),
+        };
+        check_exec_contract(Some(&builtin)).unwrap();
+        check_exec_contract(None).unwrap();
+    }
+
+    fn manifest_with_source(source: Option<&str>) -> RuntimeManifest {
+        let source = source.map_or(String::new(), |s| format!(r#", "source": {s}"#));
+        let json = format!(
+            r#"{{
+              "format": "aleph-vprogram-runtime", "format_version": 1,
+              "name": "aleph-snp-attest", "version": "2026.08.20", "platform": "sev_snp",
+              "workload": {{ "contract": "aleph.exec/1", "upstream_port": 8080 }},
+              "bundle": {{ "ref": "{h}", "sha256": "{h}", "size": 1,
+                "members": {{ "ovmf": "a", "kernel": "b", "initrd": "c",
+                  "platform_rootfs": "d", "platform_hash_tree": "e" }} }},
+              "boot": {{ "method": "qemu-direct-kernel", "kernel_hashes": true, "cpu_models": ["EPYC-Genoa"],
+                "platform_roothash": "{h}",
+                "cmdline_template": "roothash={{platform_roothash}} workload_roothash={{workload_roothash}}" }},
+              "attestation": []{source}
+            }}"#,
+            h = "cb".repeat(32)
+        );
+        RuntimeManifest::parse(json.as_bytes()).expect("test manifest parses")
+    }
+
+    fn resolved(label: Option<&str>, contract: Option<&str>, hash: &ItemHash) -> ResolvedRuntime {
+        ResolvedRuntime {
+            hash: hash.clone(),
+            contract: contract.map(str::to_string),
+            label: label.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn runtime_identity_line_names_runtime_contract_manifest_and_provenance() {
+        let hash: ItemHash = "afde".repeat(16).parse().unwrap();
+        let m = manifest_with_source(Some(
+            r#"{"repo": "https://github.com/aleph-im/aleph-vm", "rev": "ba690c65", "build": "nix build"}"#,
+        ));
+        assert_eq!(
+            runtime_identity_line(&resolved(Some("exec-1.0"), Some("aleph.exec/1"), &hash), &m),
+            "Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
+        );
+        assert_eq!(
+            runtime_identity_line(&resolved(None, None, &hash), &m),
+            format!(
+                "Using runtime {hash} (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
+            )
+        );
+    }
+
+    #[test]
+    fn runtime_identity_line_degrades_without_source() {
+        let hash: ItemHash = "afde".repeat(16).parse().unwrap();
+        let m = manifest_with_source(None);
+        assert_eq!(
+            runtime_identity_line(&resolved(Some("exec-1.0"), Some("aleph.exec/1"), &hash), &m),
+            "Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20)"
+        );
+        let m = manifest_with_source(Some(r#"{"rev": "ba690c65"}"#));
+        assert!(
+            runtime_identity_line(&resolved(None, None, &hash), &m).ends_with(", rev ba690c65)")
+        );
+    }
+
+    #[test]
+    fn contract_match_gate() {
+        let w = WorkloadSpec {
+            contract: "aleph.exec/1".into(),
+            upstream_port: Some(8080),
+        };
+        check_contract_matches("aleph.exec/1", Some(&w)).unwrap();
+        let err = check_contract_matches("aleph.exec/2", Some(&w))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("aleph.exec/2") && err.contains("aleph.exec/1"),
+            "{err}"
+        );
+        assert!(check_contract_matches("aleph.exec/1", None).is_err());
+    }
+
+    mod runtime_catalogue {
+        use super::*;
+        use aleph_sdk::aggregate_models::vm_images::{VProgramRuntimeEntry, VmImageDefaults};
+        use std::collections::BTreeMap;
+
+        fn entry(hash: &str, contract: &str) -> VProgramRuntimeEntry {
+            VProgramRuntimeEntry {
+                hash: hash.repeat(16).parse().unwrap(),
+                contract: contract.into(),
+                display_name: None,
+                description: None,
+                deprecated: false,
+            }
+        }
+
+        fn data() -> VmImagesData {
+            VmImagesData {
+                vprogram_runtimes: BTreeMap::from([
+                    ("exec-1.0".to_string(), entry("aaaa", "aleph.exec/1")),
+                    ("compose-1.0".to_string(), entry("bbbb", "aleph.compose/1")),
+                ]),
+                vprogram_contracts: BTreeMap::from([
+                    ("aleph.exec/1".to_string(), "exec-1.0".to_string()),
+                    ("aleph.compose/1".to_string(), "compose-1.0".to_string()),
+                ]),
+                defaults: VmImageDefaults {
+                    vprogram_models: BTreeMap::from([
+                        ("exec".to_string(), "aleph.exec/1".to_string()),
+                        ("compose".to_string(), "aleph.compose/1".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn hash_bypasses_the_aggregate() {
+            let raw: ItemHash = "cafe".repeat(16).parse().unwrap();
+            let got = resolve_vprogram_runtime(
+                Some(ImageRef::Hash(raw.clone())),
+                VPROGRAM_MODEL_EXEC,
+                &VmImagesData::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                got,
+                ResolvedRuntime {
+                    hash: raw,
+                    contract: None,
+                    label: None
+                }
+            );
+        }
+
+        #[test]
+        fn omitted_picks_the_default_for_the_model() {
+            let exec = resolve_vprogram_runtime(None, VPROGRAM_MODEL_EXEC, &data()).unwrap();
+            assert_eq!(exec.hash.to_string(), "aaaa".repeat(16));
+            assert_eq!(exec.contract.as_deref(), Some("aleph.exec/1"));
+            assert_eq!(exec.label.as_deref(), Some("exec-1.0"));
+            let compose = resolve_vprogram_runtime(None, VPROGRAM_MODEL_COMPOSE, &data()).unwrap();
+            assert_eq!(compose.hash.to_string(), "bbbb".repeat(16));
+        }
+
+        #[test]
+        fn contract_or_runtime_selectors() {
+            let by_contract = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("aleph.compose/1".into())),
+                VPROGRAM_MODEL_COMPOSE,
+                &data(),
+            )
+            .unwrap();
+            let by_impl = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("compose-1.0".into())),
+                VPROGRAM_MODEL_COMPOSE,
+                &data(),
+            )
+            .unwrap();
+            assert_eq!(by_contract, by_impl);
+        }
+
+        #[test]
+        fn wrong_model_hints_at_the_other_flag() {
+            let err = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("compose-1.0".into())),
+                VPROGRAM_MODEL_EXEC,
+                &data(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("did you mean --compose?"), "{err}");
+
+            let err = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("aleph.exec/1".into())),
+                VPROGRAM_MODEL_COMPOSE,
+                &data(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("did you mean --workload?"), "{err}");
+        }
+
+        #[test]
+        fn omitted_without_catalogue_is_an_error() {
+            let err = resolve_vprogram_runtime(None, VPROGRAM_MODEL_EXEC, &VmImagesData::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("no default contract for V-Program workload model \"exec\""),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn unknown_runtime_lists_available() {
+            let err = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("nope".into())),
+                VPROGRAM_MODEL_EXEC,
+                &data(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("exec-1.0"), "{err}");
+        }
     }
 
     #[test]
