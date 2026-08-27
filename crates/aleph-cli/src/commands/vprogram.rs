@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use super::instance::{InstanceRow, format_item_hash_short, format_node_short};
 use super::instance_target::{VmKind, pick_unique_match};
 use aleph_sdk::aggregate_models::vm_images::{
-    VPROGRAM_CONTRACT_COMPOSE, VPROGRAM_CONTRACT_EXEC, VmImagesData,
+    VPROGRAM_CONTRACT_COMPOSE, VPROGRAM_MODEL_COMPOSE, VPROGRAM_MODEL_EXEC, VmImagesData,
 };
 use aleph_sdk::attest::{
     MeasurementPin, PlatformPolicy, PlatformPosture, PolicyPin, attested_request,
@@ -195,13 +195,14 @@ async fn handle_create(
     }
     let dry_run = args.signing.dry_run;
 
-    // 1. Runtime manifest: --runtime is a STORE message hash, a preset slug
-    //    from the vm-images aggregate, or absent (aggregate default for the
-    //    workload contract in use). The aggregate is only fetched when needed.
-    let contract = if compose_input.is_some() {
-        VPROGRAM_CONTRACT_COMPOSE
+    // 1. Runtime manifest: --runtime is a STORE message hash, a contract or
+    //    implementation name from the vm-images aggregate, or absent (the
+    //    model's default contract, then its default implementation). The
+    //    aggregate is only fetched when a hash is not given.
+    let model = if compose_input.is_some() {
+        VPROGRAM_MODEL_COMPOSE
     } else {
-        VPROGRAM_CONTRACT_EXEC
+        VPROGRAM_MODEL_EXEC
     };
     let vm_images = if matches!(args.runtime, Some(ImageRef::Hash(_))) {
         VmImagesData::default()
@@ -217,35 +218,28 @@ async fn handle_create(
             })?
             .vm_images
     };
-    let runtime = resolve_vprogram_runtime(args.runtime.clone(), contract, &vm_images)?;
-    // The preset slug the hash came from, for the identity line below.
-    let preset = match &args.runtime {
-        Some(ImageRef::Hash(_)) => None,
-        Some(ImageRef::Preset(name)) => Some(name.as_str()),
-        None => vm_images
-            .defaults
-            .vprogram_runtimes
-            .get(contract)
-            .map(String::as_str),
-    };
+    let runtime = resolve_vprogram_runtime(args.runtime.clone(), model, &vm_images)?;
     if !json {
-        eprintln!("Fetching runtime manifest {runtime}...");
+        eprintln!("Fetching runtime manifest {}...", runtime.hash);
     }
     let manifest_bytes = aleph_client
-        .download_file_by_message_hash(&runtime)
+        .download_file_by_message_hash(&runtime.hash)
         .await?
         .with_verification()
         .bytes()
         .await?;
     let manifest = RuntimeManifest::parse(&manifest_bytes)?;
     if !json {
-        eprintln!("{}", runtime_identity_line(preset, &runtime, &manifest));
+        eprintln!("{}", runtime_identity_line(&runtime, &manifest));
     }
 
-    if compose_input.is_some() {
-        check_compose_contract(manifest.workload.as_ref())?;
-    } else {
-        check_exec_contract(manifest.workload.as_ref())?;
+    match &runtime.contract {
+        // Catalogue-resolved: the manifest must implement exactly the
+        // contract the aggregate claims for it.
+        Some(contract) => check_contract_matches(contract, manifest.workload.as_ref())?,
+        // Raw hash: only the model-level gates apply.
+        None if compose_input.is_some() => check_compose_contract(manifest.workload.as_ref())?,
+        None => check_exec_contract(manifest.workload.as_ref())?,
     }
 
     // Cheap slot check right after the manifest is known: instantiate_cmdline
@@ -398,7 +392,7 @@ async fn handle_create(
     }
 
     let wait = args.wait;
-    let mut builder = VProgramBuilder::new(&account, runtime, workload, verification)
+    let mut builder = VProgramBuilder::new(&account, runtime.hash, workload, verification)
         .vcpus(args.vcpus)
         .memory(MiB::from(u64::from(args.memory)))
         .internet(!args.no_internet)
@@ -455,45 +449,62 @@ async fn handle_create(
     Ok(())
 }
 
-/// Resolve `--runtime` against an in-memory `VmImagesData`. Pure: does no
-/// network I/O. `None` picks the aggregate's default preset for `contract`.
+/// What `--runtime` resolved to. `contract` / `label` are `None` when the
+/// user pinned a raw manifest hash (nothing in the aggregate was consulted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedRuntime {
+    pub hash: ItemHash,
+    pub contract: Option<String>,
+    /// The implementation name, for display.
+    pub label: Option<String>,
+}
+
+/// Resolve `--runtime` for workload `model` against an in-memory
+/// `VmImagesData`. Pure: does no network I/O.
 pub(crate) fn resolve_vprogram_runtime(
     runtime: Option<ImageRef>,
-    contract: &str,
+    model: &str,
     data: &VmImagesData,
-) -> Result<ItemHash> {
-    Ok(match runtime {
-        Some(ImageRef::Hash(h)) => h,
-        Some(ImageRef::Preset(name)) => {
-            let entry = data.vprogram_runtime(&name)?;
-            if entry.contract != contract {
-                bail!(
-                    "runtime preset {name:?} serves workload contract {:?}, but this \
-                     invocation needs {contract:?}{}",
-                    entry.contract,
-                    if entry.contract == VPROGRAM_CONTRACT_COMPOSE {
-                        " (did you mean --compose?)"
-                    } else {
-                        ""
-                    }
-                );
-            }
-            entry.hash.clone()
+) -> Result<ResolvedRuntime> {
+    let selector = match runtime {
+        Some(ImageRef::Hash(hash)) => {
+            return Ok(ResolvedRuntime {
+                hash,
+                contract: None,
+                label: None,
+            });
         }
-        None => data.default_vprogram_runtime(contract)?.hash.clone(),
+        Some(ImageRef::Preset(name)) => Some(name),
+        None => None,
+    };
+    let hint = |found: &str| match found {
+        VPROGRAM_MODEL_COMPOSE => " (did you mean --compose?)",
+        VPROGRAM_MODEL_EXEC => " (did you mean --workload?)",
+        _ => "",
+    };
+    let resolved = data
+        .vprogram_runtimes
+        .resolve(model, selector.as_deref(), hint)?;
+    Ok(ResolvedRuntime {
+        hash: resolved.hash,
+        contract: Some(resolved.contract),
+        label: Some(resolved.implementation),
     })
 }
 
 /// One-line description of the runtime a create resolved to, e.g.
-/// `Using runtime exec-1.0 (aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)`.
-/// Falls back to the hash when no preset was involved and omits the
-/// provenance when the manifest carries no `source` block.
+/// `Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)`.
+/// Falls back to the hash when no catalogue entry was involved and omits
+/// the provenance when the manifest carries no `source` block.
 pub(crate) fn runtime_identity_line(
-    preset: Option<&str>,
-    hash: &ItemHash,
+    runtime: &ResolvedRuntime,
     manifest: &RuntimeManifest,
 ) -> String {
-    let mut details = format!("{} {}", manifest.name, manifest.version);
+    let mut details = String::new();
+    if let Some(w) = &manifest.workload {
+        details.push_str(&format!("{}; ", w.contract));
+    }
+    details.push_str(&format!("{} {}", manifest.name, manifest.version));
     if let Some(source) = &manifest.source {
         let repo = source
             .repo
@@ -508,8 +519,32 @@ pub(crate) fn runtime_identity_line(
             (None, None) => {}
         }
     }
-    let what = preset.map_or_else(|| hash.to_string(), str::to_string);
+    let what = runtime
+        .label
+        .clone()
+        .unwrap_or_else(|| runtime.hash.to_string());
     format!("Using runtime {what} ({details})")
+}
+
+/// Refuse a catalogue-resolved runtime whose manifest does not declare the
+/// contract the aggregate lists it under: either the aggregate is wrong or
+/// the bundle was swapped, and both mean the workload would not boot.
+pub(crate) fn check_contract_matches(
+    expected: &str,
+    workload: Option<&WorkloadSpec>,
+) -> Result<()> {
+    match workload {
+        Some(w) if w.contract == expected => Ok(()),
+        Some(w) => bail!(
+            "the vm-images aggregate lists this runtime under workload contract {expected:?}, \
+             but its manifest declares {:?}",
+            w.contract
+        ),
+        None => bail!(
+            "the vm-images aggregate lists this runtime under workload contract {expected:?}, \
+             but its manifest declares no workload contract"
+        ),
+    }
 }
 
 /// Refuse a plain (--workload) create against a runtime that declares the
@@ -3064,19 +3099,29 @@ mod compose_wiring_tests {
         RuntimeManifest::parse(json.as_bytes()).expect("test manifest parses")
     }
 
+    fn resolved(label: Option<&str>, hash: &ItemHash) -> ResolvedRuntime {
+        ResolvedRuntime {
+            hash: hash.clone(),
+            contract: label.map(|_| "aleph.exec/1".to_string()),
+            label: label.map(str::to_string),
+        }
+    }
+
     #[test]
-    fn runtime_identity_line_names_preset_manifest_and_provenance() {
+    fn runtime_identity_line_names_implementation_contract_manifest_and_provenance() {
         let hash: ItemHash = "afde".repeat(16).parse().unwrap();
         let m = manifest_with_source(Some(
             r#"{"repo": "https://github.com/aleph-im/aleph-vm", "rev": "ba690c65", "build": "nix build"}"#,
         ));
         assert_eq!(
-            runtime_identity_line(Some("exec-1.0"), &hash, &m),
-            "Using runtime exec-1.0 (aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
+            runtime_identity_line(&resolved(Some("exec-1.0"), &hash), &m),
+            "Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
         );
         assert_eq!(
-            runtime_identity_line(None, &hash, &m),
-            format!("Using runtime {hash} (aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)")
+            runtime_identity_line(&resolved(None, &hash), &m),
+            format!(
+                "Using runtime {hash} (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
+            )
         );
     }
 
@@ -3085,22 +3130,40 @@ mod compose_wiring_tests {
         let hash: ItemHash = "afde".repeat(16).parse().unwrap();
         let m = manifest_with_source(None);
         assert_eq!(
-            runtime_identity_line(Some("exec-1.0"), &hash, &m),
-            "Using runtime exec-1.0 (aleph-snp-attest 2026.08.20)"
+            runtime_identity_line(&resolved(Some("exec-1.0"), &hash), &m),
+            "Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20)"
         );
         let m = manifest_with_source(Some(r#"{"rev": "ba690c65"}"#));
-        assert!(runtime_identity_line(None, &hash, &m).ends_with(", rev ba690c65)"));
+        assert!(runtime_identity_line(&resolved(None, &hash), &m).ends_with(", rev ba690c65)"));
     }
 
-    mod runtime_presets {
+    #[test]
+    fn contract_match_gate() {
+        let w = WorkloadSpec {
+            contract: "aleph.exec/1".into(),
+            upstream_port: Some(8080),
+        };
+        check_contract_matches("aleph.exec/1", Some(&w)).unwrap();
+        let err = check_contract_matches("aleph.exec/2", Some(&w))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("aleph.exec/2") && err.contains("aleph.exec/1"),
+            "{err}"
+        );
+        assert!(check_contract_matches("aleph.exec/1", None).is_err());
+    }
+
+    mod runtime_catalogue {
         use super::*;
-        use aleph_sdk::aggregate_models::vm_images::{VProgramRuntimeEntry, VmImageDefaults};
+        use aleph_sdk::aggregate_models::vm_images::{
+            VProgramContract, VProgramImplementation, VProgramModel, VProgramRuntimes,
+        };
         use std::collections::BTreeMap;
 
-        fn entry(hash: &str, contract: &str) -> VProgramRuntimeEntry {
-            VProgramRuntimeEntry {
+        fn implementation(hash: &str) -> VProgramImplementation {
+            VProgramImplementation {
                 hash: hash.repeat(16).parse().unwrap(),
-                contract: contract.into(),
                 display_name: None,
                 description: None,
                 deprecated: false,
@@ -3108,18 +3171,35 @@ mod compose_wiring_tests {
         }
 
         fn data() -> VmImagesData {
-            let mut vprogram_runtimes = BTreeMap::new();
-            vprogram_runtimes.insert("exec".to_string(), entry("aaaa", "aleph.exec/1"));
-            vprogram_runtimes.insert("compose".to_string(), entry("bbbb", "aleph.compose/1"));
-            let mut defaults_by_contract = BTreeMap::new();
-            defaults_by_contract.insert("aleph.exec/1".to_string(), "exec".to_string());
-            defaults_by_contract.insert("aleph.compose/1".to_string(), "compose".to_string());
+            let mut models = BTreeMap::new();
+            for (model, contract) in [("exec", "aleph.exec/1"), ("compose", "aleph.compose/1")] {
+                models.insert(
+                    model.to_string(),
+                    VProgramModel {
+                        default_contract: contract.to_string(),
+                        display_name: None,
+                        description: None,
+                    },
+                );
+            }
+            let mut contracts = BTreeMap::new();
+            for (contract, model, name, hash) in [
+                ("aleph.exec/1", "exec", "exec-1.0", "aaaa"),
+                ("aleph.compose/1", "compose", "compose-1.0", "bbbb"),
+            ] {
+                contracts.insert(
+                    contract.to_string(),
+                    VProgramContract {
+                        model: model.to_string(),
+                        default: Some(name.to_string()),
+                        implementations: BTreeMap::from([(name.to_string(), implementation(hash))]),
+                        display_name: None,
+                        description: None,
+                    },
+                );
+            }
             VmImagesData {
-                vprogram_runtimes,
-                defaults: VmImageDefaults {
-                    vprogram_runtimes: defaults_by_contract,
-                    ..Default::default()
-                },
+                vprogram_runtimes: VProgramRuntimes { models, contracts },
                 ..Default::default()
             }
         }
@@ -3129,35 +3209,52 @@ mod compose_wiring_tests {
             let raw: ItemHash = "cafe".repeat(16).parse().unwrap();
             let got = resolve_vprogram_runtime(
                 Some(ImageRef::Hash(raw.clone())),
-                VPROGRAM_CONTRACT_EXEC,
+                VPROGRAM_MODEL_EXEC,
                 &VmImagesData::default(),
             )
             .unwrap();
-            assert_eq!(got, raw);
+            assert_eq!(
+                got,
+                ResolvedRuntime {
+                    hash: raw,
+                    contract: None,
+                    label: None
+                }
+            );
         }
 
         #[test]
-        fn omitted_picks_the_default_for_the_contract() {
-            let exec = resolve_vprogram_runtime(None, VPROGRAM_CONTRACT_EXEC, &data()).unwrap();
-            assert_eq!(exec.to_string(), "aaaa".repeat(16));
-            let compose =
-                resolve_vprogram_runtime(None, VPROGRAM_CONTRACT_COMPOSE, &data()).unwrap();
-            assert_eq!(compose.to_string(), "bbbb".repeat(16));
+        fn omitted_picks_the_default_for_the_model() {
+            let exec = resolve_vprogram_runtime(None, VPROGRAM_MODEL_EXEC, &data()).unwrap();
+            assert_eq!(exec.hash.to_string(), "aaaa".repeat(16));
+            assert_eq!(exec.contract.as_deref(), Some("aleph.exec/1"));
+            assert_eq!(exec.label.as_deref(), Some("exec-1.0"));
+            let compose = resolve_vprogram_runtime(None, VPROGRAM_MODEL_COMPOSE, &data()).unwrap();
+            assert_eq!(compose.hash.to_string(), "bbbb".repeat(16));
         }
 
         #[test]
-        fn preset_must_match_the_contract() {
-            let got = resolve_vprogram_runtime(
-                Some(ImageRef::Preset("compose".into())),
-                VPROGRAM_CONTRACT_COMPOSE,
+        fn contract_or_implementation_selectors() {
+            let by_contract = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("aleph.compose/1".into())),
+                VPROGRAM_MODEL_COMPOSE,
                 &data(),
             )
             .unwrap();
-            assert_eq!(got.to_string(), "bbbb".repeat(16));
+            let by_impl = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("compose-1.0".into())),
+                VPROGRAM_MODEL_COMPOSE,
+                &data(),
+            )
+            .unwrap();
+            assert_eq!(by_contract, by_impl);
+        }
 
+        #[test]
+        fn wrong_model_hints_at_the_other_flag() {
             let err = resolve_vprogram_runtime(
-                Some(ImageRef::Preset("compose".into())),
-                VPROGRAM_CONTRACT_EXEC,
+                Some(ImageRef::Preset("compose-1.0".into())),
+                VPROGRAM_MODEL_EXEC,
                 &data(),
             )
             .unwrap_err()
@@ -3165,74 +3262,36 @@ mod compose_wiring_tests {
             assert!(err.contains("did you mean --compose?"), "{err}");
 
             let err = resolve_vprogram_runtime(
-                Some(ImageRef::Preset("exec".into())),
-                VPROGRAM_CONTRACT_COMPOSE,
+                Some(ImageRef::Preset("aleph.exec/1".into())),
+                VPROGRAM_MODEL_COMPOSE,
                 &data(),
             )
             .unwrap_err()
             .to_string();
-            assert!(err.contains("aleph.compose/1"), "{err}");
-            assert!(!err.contains("did you mean"), "{err}");
+            assert!(err.contains("did you mean --workload?"), "{err}");
         }
 
         #[test]
-        fn omitted_without_defaults_is_an_error() {
-            let err =
-                resolve_vprogram_runtime(None, VPROGRAM_CONTRACT_EXEC, &VmImagesData::default())
-                    .unwrap_err()
-                    .to_string();
-            assert!(err.contains("aleph.exec/1"), "{err}");
+        fn omitted_without_catalogue_is_an_error() {
+            let err = resolve_vprogram_runtime(None, VPROGRAM_MODEL_EXEC, &VmImagesData::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("unknown V-Program workload model \"exec\""),
+                "{err}"
+            );
         }
 
         #[test]
-        fn unknown_preset_lists_available() {
+        fn unknown_implementation_lists_available() {
             let err = resolve_vprogram_runtime(
                 Some(ImageRef::Preset("nope".into())),
-                VPROGRAM_CONTRACT_EXEC,
+                VPROGRAM_MODEL_EXEC,
                 &data(),
             )
             .unwrap_err()
             .to_string();
-            assert!(err.contains("compose, exec"), "{err}");
+            assert!(err.contains("exec-1.0"), "{err}");
         }
-    }
-
-    #[test]
-    fn image_archive_specs_parse_and_reject_garbage() {
-        let (name, path) = parse_image_archive("fib-service:latest=./fib.tar").unwrap();
-        assert_eq!(name, "fib-service:latest");
-        assert_eq!(path, PathBuf::from("./fib.tar"));
-        assert!(parse_image_archive("no-equals-sign").is_err());
-    }
-
-    #[test]
-    fn parse_image_archives_rejects_a_duplicate_image_key() {
-        let specs = vec!["web=./a.tar".to_string(), "web=./b.tar".to_string()];
-        let err = parse_image_archives(&specs).unwrap_err().to_string();
-        assert!(err.contains("web") && err.contains("duplicate"), "{err}");
-    }
-
-    #[test]
-    fn parse_image_archives_accepts_distinct_images() {
-        let specs = vec!["web=./a.tar".to_string(), "db=./b.tar".to_string()];
-        let archives = parse_image_archives(&specs).unwrap();
-        assert_eq!(archives.len(), 2);
-    }
-
-    #[test]
-    fn check_archive_keys_rejects_a_key_with_no_matching_image() {
-        let archives = BTreeMap::from([("typo-nginx".to_string(), PathBuf::from("./a.tar"))]);
-        let images = vec!["nginx:1.27".to_string()];
-        let err = check_archive_keys_are_known_images(&archives, &images)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("typo-nginx"), "{err}");
-    }
-
-    #[test]
-    fn check_archive_keys_accepts_an_exact_match() {
-        let archives = BTreeMap::from([("nginx:1.27".to_string(), PathBuf::from("./a.tar"))]);
-        let images = vec!["nginx:1.27".to_string()];
-        check_archive_keys_are_known_images(&archives, &images).unwrap();
     }
 }

@@ -3241,11 +3241,13 @@ pub struct VProgramCreateArgs {
     )]
     pub image_archives: Vec<String>,
 
-    /// Runtime bundle: a preset slug from the vm-images aggregate
-    /// (`vprogram_runtimes`) or the item hash of a runtime manifest STORE
-    /// message. When omitted, resolves to the aggregate's default runtime
-    /// for the workload contract in use: aleph.exec/1 for --workload,
-    /// aleph.compose/1 for --compose.
+    /// Runtime bundle. The vm-images aggregate catalogues V-Program
+    /// runtimes as workload model -> contract -> implementation; --workload
+    /// uses the `exec` model and --compose the `compose` model, and when
+    /// omitted the model's default contract and that contract's default
+    /// implementation are used. Pass a contract (`aleph.exec/1`, its default
+    /// implementation), an implementation (`exec-1.0`), or the item hash of
+    /// a runtime manifest STORE message to override.
     #[arg(long, value_parser = parse_image_ref)]
     pub runtime: Option<ImageRef>,
 
