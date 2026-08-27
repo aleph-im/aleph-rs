@@ -205,6 +205,11 @@ pub enum VProgramError {
     NotAmendable,
     #[error("comment must be at most {MAX_RUNTIME_COMMENT_LENGTH} characters, got {0}")]
     CommentTooLong(usize),
+    #[error(
+        "V-Programs only accept verity-bound volumes: classic machine volumes are unmeasured \
+         input inside an attested VM"
+    )]
+    UnverifiedVolumes,
 }
 
 /// Message content for scheduling a verifiable program (V-Program): an
@@ -252,8 +257,8 @@ impl VerifiableProgramContent {
 // `base` is serialized manually (rather than via `#[serde(flatten)]`) because
 // `ExecutableContent` carries its own `volumes: Vec<MachineVolume>` field,
 // which would otherwise collide on the wire with the verified-volume list
-// below. V-Programs never populate `base.volumes` (see
-// `RawVerifiableProgramContent`), so it is always dropped here.
+// below. `base.volumes` is always empty for a V-Program (enforced by the
+// `TryFrom` below), so it is always dropped here.
 impl Serialize for VerifiableProgramContent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -314,6 +319,13 @@ impl TryFrom<RawVerifiableProgramContent> for VerifiableProgramContent {
         }
         if raw.volumes.len() > MAX_VERIFIED_VOLUMES {
             return Err(VProgramError::TooManyVerifiedVolumes(raw.volumes.len()));
+        }
+        // The outer `volumes` field claims the wire key before `flatten`
+        // sees it, so `base.volumes` should be structurally empty. Enforce
+        // the invariant rather than rely on serde field-ordering behaviour:
+        // the custom `Serialize` above silently drops `base.volumes`.
+        if !raw.base.volumes.is_empty() {
+            return Err(VProgramError::UnverifiedVolumes);
         }
         Ok(Self {
             base: raw.base,
@@ -548,6 +560,21 @@ mod test {
                 "{bad_volume} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn test_vprogram_content_rejects_populated_base_volumes() {
+        // Build via the raw struct directly: on the wire the outer `volumes`
+        // key wins, so this path is only reachable programmatically.
+        let json = vprogram_content_json(r#"{"type": "credit"}"#);
+        let mut raw: RawVerifiableProgramContent = serde_json::from_str(&json).unwrap();
+        assert!(raw.base.volumes.is_empty());
+        raw.base.volumes.push(
+            serde_json::from_str(r#"{"ephemeral": true, "mount": "/var/cache", "size_mib": 5}"#)
+                .unwrap(),
+        );
+        let err = VerifiableProgramContent::try_from(raw).unwrap_err();
+        assert!(matches!(err, VProgramError::UnverifiedVolumes));
     }
 
     #[test]
