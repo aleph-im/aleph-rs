@@ -3178,6 +3178,39 @@ Examples:
   aleph vprogram call <hash> /echo -X POST -d '{\"a\":1}' -H 'Content-Type: application/json'
   aleph vprogram call <hash> /fib/10 --json | jq .body")]
     Call(Box<VProgramCallArgs>),
+    /// Forget a V-PROGRAM message (send a FORGET).
+    #[command(long_about = "\
+Delete a V-Program. Forgets the corresponding V-PROGRAM message.
+
+This command does ONLY the FORGET. It does NOT erase the VM on the CRN; the
+scheduler picks the forgotten message up and tears the VM down on its own.
+
+Examples:
+  aleph vprogram delete a41fb91c3e68
+  aleph vprogram delete a41fb91c3e68 --reason \"decommission\"
+  aleph vprogram delete a41fb91c3e68 --dry-run --json
+")]
+    Delete(VProgramDeleteArgs),
+}
+
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Args)]
+pub struct VProgramDeleteArgs {
+    /// V-PROGRAM item hash to forget. Accepts a unique prefix (e.g. the
+    /// 12-char hash shown by `aleph vprogram list`); the scheduler matches it
+    /// server-side.
+    pub vm_id: String,
+
+    /// Reason recorded on the FORGET message.
+    #[arg(long, default_value = "User deletion")]
+    pub reason: String,
+
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[command(flatten)]
+    pub signing: SigningArgs,
 }
 
 #[cfg(feature = "vprogram")]
@@ -4567,6 +4600,52 @@ mod vprogram_create_args_tests {
             panic!("wrong variant");
         };
         assert_eq!(args.wait, Some(600));
+    }
+
+    #[test]
+    fn vprogram_delete_parses_minimal_invocation() {
+        let hash = "cafe".repeat(16);
+        let cli = Cli::try_parse_from(["aleph", "vprogram", "delete", &hash]).unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Delete(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.vm_id, hash);
+        assert_eq!(args.reason, "User deletion");
+        assert!(!args.yes);
+        assert!(!args.signing.dry_run);
+    }
+
+    #[test]
+    fn vprogram_delete_accepts_prefix_reason_yes_and_dry_run() {
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "delete",
+            "cafecafecafe",
+            "--reason",
+            "decommission",
+            "-y",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Delete(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.vm_id, "cafecafecafe");
+        assert_eq!(args.reason, "decommission");
+        assert!(args.yes);
+        assert!(args.signing.dry_run);
+    }
+
+    #[test]
+    fn vprogram_delete_rejects_missing_vm_id() {
+        assert!(Cli::try_parse_from(["aleph", "vprogram", "delete"]).is_err());
     }
 
     #[test]
