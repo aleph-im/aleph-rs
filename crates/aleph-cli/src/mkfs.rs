@@ -31,9 +31,17 @@ impl MkfsExt4 {
     /// Locate the `mkfs.ext4` binary on PATH. Returns `MkfsError::NotFound`
     /// (with an install hint in the message) if it's missing.
     pub fn find() -> Result<Self, MkfsError> {
-        which::which("mkfs.ext4")
+        Self::find_in(std::env::var_os("PATH"))
+    }
+
+    /// `find`, searching `path` (a PATH-style list) instead of the process
+    /// environment.
+    pub(crate) fn find_in<P: AsRef<std::ffi::OsStr>>(path: Option<P>) -> Result<Self, MkfsError> {
+        which::which_in_global("mkfs.ext4", path)
+            .ok()
+            .and_then(|mut found| found.next())
             .map(|path| Self { path })
-            .map_err(|_| MkfsError::NotFound)
+            .ok_or(MkfsError::NotFound)
     }
 
     /// Shell out to `mkfs.ext4 -b 4096 -d <staging> <out>`. `out` must already
@@ -101,16 +109,10 @@ mod tests {
 
     #[test]
     fn find_reports_not_found_when_path_is_empty() {
-        let prev = std::env::var_os("PATH");
-        // SAFETY: tests in this crate run with --test-threads=1 so env
-        // mutation is single-threaded; the prev value is restored after.
-        unsafe { std::env::set_var("PATH", "") };
-        let result = MkfsExt4::find();
-        if let Some(prev) = prev {
-            unsafe { std::env::set_var("PATH", prev) };
-        } else {
-            unsafe { std::env::remove_var("PATH") };
-        }
+        // Inject the search path rather than mutating the process-wide PATH:
+        // tests run in parallel, and the other `find_*` tests in this crate
+        // do the same lookup, so an env round-trip races and flakes.
+        let result = MkfsExt4::find_in(Some(""));
         assert!(matches!(result, Err(MkfsError::NotFound)));
     }
 

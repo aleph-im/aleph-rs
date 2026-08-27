@@ -43,17 +43,25 @@ impl ContainerTool {
     /// Returns `ContainerError::NotFound` (with an install hint in the
     /// message) if neither is present.
     pub fn find() -> Result<Self, ContainerError> {
-        if let Ok(path) = which::which("podman") {
-            return Ok(Self {
-                path,
-                flavor: Flavor::Podman,
-            });
-        }
-        if let Ok(path) = which::which("docker") {
-            return Ok(Self {
-                path,
-                flavor: Flavor::Docker,
-            });
+        Self::find_in(std::env::var_os("PATH"))
+    }
+
+    /// `find`, searching `path` (a PATH-style list) instead of the process
+    /// environment.
+    pub(crate) fn find_in<P: AsRef<std::ffi::OsStr>>(
+        path: Option<P>,
+    ) -> Result<Self, ContainerError> {
+        let path = path.as_ref().map(AsRef::as_ref);
+        for (name, flavor) in [("podman", Flavor::Podman), ("docker", Flavor::Docker)] {
+            if let Some(found) = which::which_in_global(name, path)
+                .ok()
+                .and_then(|mut found| found.next())
+            {
+                return Ok(Self {
+                    path: found,
+                    flavor,
+                });
+            }
         }
         Err(ContainerError::NotFound)
     }
@@ -174,18 +182,32 @@ mod tests {
         fake
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn find_in_prefers_podman_over_docker_on_the_given_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["podman", "docker"] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let tool = ContainerTool::find_in(Some(dir.path())).unwrap();
+        assert_eq!(tool.flavor, Flavor::Podman);
+        assert_eq!(tool.path, dir.path().join("podman"));
+
+        std::fs::remove_file(dir.path().join("podman")).unwrap();
+        let tool = ContainerTool::find_in(Some(dir.path())).unwrap();
+        assert_eq!(tool.flavor, Flavor::Docker);
+    }
+
     #[test]
     fn find_reports_not_found_when_path_is_empty() {
-        let prev = std::env::var_os("PATH");
-        // SAFETY: tests in this crate run with --test-threads=1 so env
-        // mutation is single-threaded; the prev value is restored after.
-        unsafe { std::env::set_var("PATH", "") };
-        let result = ContainerTool::find();
-        if let Some(prev) = prev {
-            unsafe { std::env::set_var("PATH", prev) };
-        } else {
-            unsafe { std::env::remove_var("PATH") };
-        }
+        // Inject the search path rather than mutating the process-wide PATH:
+        // tests run in parallel, and the other `find_*` tests in this crate
+        // do the same lookup, so an env round-trip races and flakes.
+        let result = ContainerTool::find_in(Some(""));
         assert!(matches!(result, Err(ContainerError::NotFound)));
     }
 
