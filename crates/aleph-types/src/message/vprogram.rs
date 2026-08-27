@@ -146,9 +146,12 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
     type Error = TeeError;
 
     fn try_from(raw: RawTeeVerification) -> Result<Self, Self::Error> {
-        // TeePlatform only has SevSnp today; dispatch policy validation per
-        // backend when other platforms (e.g. TDX) are added.
-        validate_snp_policy(raw.policy)?;
+        // Policy semantics are per platform: dispatch on the backend so a
+        // future variant (e.g. TDX) cannot silently inherit SNP validation.
+        // Adding a variant is a compile error here until it gets its own arm.
+        match raw.backend {
+            TeePlatform::SevSnp => validate_snp_policy(raw.policy)?,
+        }
         if raw.measurements.is_empty() {
             return Err(TeeError::SnpModeRequires("measurements"));
         }
