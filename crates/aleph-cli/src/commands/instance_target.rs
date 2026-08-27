@@ -36,14 +36,43 @@ pub async fn resolve_vm(scheduler_url: &Url, input: &str) -> Result<(ItemHash, V
         .find_vms_by_hash_prefix(input)
         .await
         .with_context(|| format!("looking up VMs matching prefix `{input}` in the scheduler"))?;
-    pick_unique_match(input, matches)
+    pick_unique_match(input, matches, VmKind::Instance)
 }
 
-pub fn pick_unique_match(input: &str, matches: Vec<VmEntry>) -> Result<(ItemHash, VmEntry)> {
+/// Which command family a VM lookup is done for; only affects the wording
+/// of the "no match" / "ambiguous" errors.
+#[derive(Debug, Clone, Copy)]
+pub enum VmKind {
+    Instance,
+    VProgram,
+}
+
+impl VmKind {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Instance => "instance",
+            Self::VProgram => "V-Program",
+        }
+    }
+
+    fn list_command(self) -> &'static str {
+        match self {
+            Self::Instance => "aleph instance list",
+            Self::VProgram => "aleph vprogram list",
+        }
+    }
+}
+
+pub fn pick_unique_match(
+    input: &str,
+    matches: Vec<VmEntry>,
+    kind: VmKind,
+) -> Result<(ItemHash, VmEntry)> {
     match matches.len() {
         0 => bail!(
-            "no instance matches `{input}`. Run `aleph instance list` to see available hashes, \
-             or pass a full hash."
+            "no {} matches `{input}`. Run `{}` to see available hashes, or pass a full hash.",
+            kind.noun(),
+            kind.list_command()
         ),
         1 => {
             let entry = matches.into_iter().next().expect("len() == 1");
@@ -54,7 +83,8 @@ pub fn pick_unique_match(input: &str, matches: Vec<VmEntry>) -> Result<(ItemHash
             let mut hashes: Vec<String> = matches.iter().map(|v| v.vm_hash.to_string()).collect();
             hashes.sort();
             bail!(
-                "prefix `{input}` is ambiguous, matches {n} instances:\n  {}",
+                "prefix `{input}` is ambiguous, matches {n} {}s:\n  {}",
+                kind.noun(),
                 hashes.join("\n  ")
             )
         }
@@ -232,13 +262,13 @@ mod tests {
         let entries = vec![vm_entry(
             "4e7df823423f0000000000000000000000000000000000000000000000000001",
         )];
-        let (hash, _) = pick_unique_match("4e7df", entries).unwrap();
+        let (hash, _) = pick_unique_match("4e7df", entries, VmKind::Instance).unwrap();
         assert!(hash.to_string().starts_with("4e7df"));
     }
 
     #[test]
     fn pick_unique_match_empty() {
-        let err = pick_unique_match("dead", vec![]).unwrap_err();
+        let err = pick_unique_match("dead", vec![], VmKind::Instance).unwrap_err();
         assert!(err.to_string().contains("no instance matches `dead`"));
     }
 
@@ -248,12 +278,27 @@ mod tests {
             vm_entry("4e7df823423f0000000000000000000000000000000000000000000000000001"),
             vm_entry("4e7df823423f0000000000000000000000000000000000000000000000000002"),
         ];
-        let err = pick_unique_match("4e7df", entries).unwrap_err();
+        let err = pick_unique_match("4e7df", entries, VmKind::Instance).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ambiguous"));
         assert!(msg.contains("matches 2 instances"));
         assert!(msg.contains("0000000000000001"));
         assert!(msg.contains("0000000000000002"));
+    }
+
+    #[test]
+    fn pick_unique_match_vprogram_wording() {
+        let err = pick_unique_match("dead", vec![], VmKind::VProgram).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no V-Program matches `dead`"), "{msg}");
+        assert!(msg.contains("aleph vprogram list"), "{msg}");
+
+        let entries = vec![
+            vm_entry("4e7df823423f0000000000000000000000000000000000000000000000000001"),
+            vm_entry("4e7df823423f0000000000000000000000000000000000000000000000000002"),
+        ];
+        let err = pick_unique_match("4e7df", entries, VmKind::VProgram).unwrap_err();
+        assert!(err.to_string().contains("matches 2 V-Programs"), "{err}");
     }
 
     const FULL_HASH: &str = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
