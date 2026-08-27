@@ -218,6 +218,16 @@ async fn handle_create(
             .vm_images
     };
     let runtime = resolve_vprogram_runtime(args.runtime.clone(), contract, &vm_images)?;
+    // The preset slug the hash came from, for the identity line below.
+    let preset = match &args.runtime {
+        Some(ImageRef::Hash(_)) => None,
+        Some(ImageRef::Preset(name)) => Some(name.as_str()),
+        None => vm_images
+            .defaults
+            .vprogram_runtimes
+            .get(contract)
+            .map(String::as_str),
+    };
     if !json {
         eprintln!("Fetching runtime manifest {runtime}...");
     }
@@ -228,6 +238,9 @@ async fn handle_create(
         .bytes()
         .await?;
     let manifest = RuntimeManifest::parse(&manifest_bytes)?;
+    if !json {
+        eprintln!("{}", runtime_identity_line(preset, &runtime, &manifest));
+    }
 
     if compose_input.is_some() {
         check_compose_contract(manifest.workload.as_ref())?;
@@ -471,6 +484,34 @@ pub(crate) fn resolve_vprogram_runtime(
     })
 }
 
+/// One-line description of the runtime a create resolved to, e.g.
+/// `Using runtime exec-1.0 (aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)`.
+/// Falls back to the hash when no preset was involved and omits the
+/// provenance when the manifest carries no `source` block.
+pub(crate) fn runtime_identity_line(
+    preset: Option<&str>,
+    hash: &ItemHash,
+    manifest: &RuntimeManifest,
+) -> String {
+    let mut details = format!("{} {}", manifest.name, manifest.version);
+    if let Some(source) = &manifest.source {
+        let repo = source
+            .repo
+            .as_deref()
+            .map(|r| r.trim_end_matches('/'))
+            .and_then(|r| r.rsplit('/').next())
+            .filter(|r| !r.is_empty());
+        match (repo, source.rev.as_deref()) {
+            (Some(repo), Some(rev)) => details.push_str(&format!(", {repo}@{rev}")),
+            (Some(repo), None) => details.push_str(&format!(", {repo}")),
+            (None, Some(rev)) => details.push_str(&format!(", rev {rev}")),
+            (None, None) => {}
+        }
+    }
+    let what = preset.map_or_else(|| hash.to_string(), str::to_string);
+    format!("Using runtime {what} ({details})")
+}
+
 /// Refuse a plain (--workload) create against a runtime that declares the
 /// compose contract: such a bundle expects a compose-built workload volume
 /// and would fail to boot a raw image. Pure and I/O-free.
@@ -488,17 +529,16 @@ pub(crate) fn check_exec_contract(workload: Option<&WorkloadSpec>) -> Result<()>
 /// workload contract, so a compose workload cannot land on e.g. a builtin
 /// runtime. Pure and I/O-free so it's directly unit-testable.
 pub(crate) fn check_compose_contract(workload: Option<&WorkloadSpec>) -> Result<()> {
-    const COMPOSE_CONTRACT: &str = "aleph.compose/1";
     match workload {
-        Some(w) if w.contract == COMPOSE_CONTRACT => Ok(()),
+        Some(w) if w.contract == VPROGRAM_CONTRACT_COMPOSE => Ok(()),
         Some(w) => bail!(
             "--compose requires a runtime declaring workload contract \
-             {COMPOSE_CONTRACT:?}, but this runtime declares {:?}",
+             {VPROGRAM_CONTRACT_COMPOSE:?}, but this runtime declares {:?}",
             w.contract
         ),
         None => bail!(
             "--compose requires a runtime declaring workload contract \
-             {COMPOSE_CONTRACT:?}, but this runtime manifest declares no \
+             {VPROGRAM_CONTRACT_COMPOSE:?}, but this runtime manifest declares no \
              workload contract"
         ),
     }
@@ -3003,6 +3043,53 @@ mod compose_wiring_tests {
         };
         check_exec_contract(Some(&exec)).unwrap();
         check_exec_contract(None).unwrap();
+    }
+
+    fn manifest_with_source(source: Option<&str>) -> RuntimeManifest {
+        let source = source.map_or(String::new(), |s| format!(r#", "source": {s}"#));
+        let json = format!(
+            r#"{{
+              "format": "aleph-vprogram-runtime", "format_version": 1,
+              "name": "aleph-snp-attest", "version": "2026.08.20", "platform": "sev_snp",
+              "bundle": {{ "ref": "{h}", "sha256": "{h}", "size": 1,
+                "members": {{ "ovmf": "a", "kernel": "b", "initrd": "c",
+                  "platform_rootfs": "d", "platform_hash_tree": "e" }} }},
+              "boot": {{ "method": "qemu-direct-kernel", "kernel_hashes": true, "cpu_models": ["EPYC-Genoa"],
+                "platform_roothash": "{h}",
+                "cmdline_template": "roothash={{platform_roothash}} workload_roothash={{workload_roothash}}" }},
+              "attestation": []{source}
+            }}"#,
+            h = "cb".repeat(32)
+        );
+        RuntimeManifest::parse(json.as_bytes()).expect("test manifest parses")
+    }
+
+    #[test]
+    fn runtime_identity_line_names_preset_manifest_and_provenance() {
+        let hash: ItemHash = "afde".repeat(16).parse().unwrap();
+        let m = manifest_with_source(Some(
+            r#"{"repo": "https://github.com/aleph-im/aleph-vm", "rev": "ba690c65", "build": "nix build"}"#,
+        ));
+        assert_eq!(
+            runtime_identity_line(Some("exec-1.0"), &hash, &m),
+            "Using runtime exec-1.0 (aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
+        );
+        assert_eq!(
+            runtime_identity_line(None, &hash, &m),
+            format!("Using runtime {hash} (aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)")
+        );
+    }
+
+    #[test]
+    fn runtime_identity_line_degrades_without_source() {
+        let hash: ItemHash = "afde".repeat(16).parse().unwrap();
+        let m = manifest_with_source(None);
+        assert_eq!(
+            runtime_identity_line(Some("exec-1.0"), &hash, &m),
+            "Using runtime exec-1.0 (aleph-snp-attest 2026.08.20)"
+        );
+        let m = manifest_with_source(Some(r#"{"rev": "ba690c65"}"#));
+        assert!(runtime_identity_line(None, &hash, &m).ends_with(", rev ba690c65)"));
     }
 
     mod runtime_presets {

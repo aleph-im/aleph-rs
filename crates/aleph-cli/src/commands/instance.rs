@@ -2711,13 +2711,12 @@ mod tests {
             );
             VmImagesData {
                 rootfs,
-                runtimes: BTreeMap::new(),
                 firmwares,
                 defaults: VmImageDefaults {
-                    rootfs: None,
                     firmware: Some("ovmf-default".to_string()),
-                    runtime: None,
+                    ..Default::default()
                 },
+                ..Default::default()
             }
         }
 
@@ -2833,14 +2832,12 @@ mod tests {
                 },
             );
             VmImagesData {
-                rootfs: BTreeMap::new(),
                 runtimes,
-                firmwares: BTreeMap::new(),
                 defaults: VmImageDefaults {
-                    rootfs: None,
-                    firmware: None,
                     runtime: Some("python312".to_string()),
+                    ..Default::default()
                 },
+                ..Default::default()
             }
         }
 

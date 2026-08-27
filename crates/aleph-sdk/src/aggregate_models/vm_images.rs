@@ -168,7 +168,9 @@ impl VmImagesData {
     }
 
     /// The default V-Program runtime for a workload contract, per
-    /// `defaults.vprogram_runtimes`.
+    /// `defaults.vprogram_runtimes`. Like `rootfs()` / `runtime()`, a
+    /// deprecated entry is still returned if the defaults point at it:
+    /// deprecation hides a preset from listings, it does not disable it.
     pub fn default_vprogram_runtime(
         &self,
         contract: &str,
