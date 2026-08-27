@@ -27,6 +27,14 @@ pub enum BundleError {
     TooLarge { expected: u64 },
     #[error("bundle member has unsafe path {0:?}")]
     UnsafeMemberPath(String),
+    #[error(
+        "bundle member for role {role} declares {size} bytes, above the {limit}-byte per-member limit"
+    )]
+    MemberTooLarge {
+        role: &'static str,
+        size: u64,
+        limit: u64,
+    },
     #[error("bundle is missing declared member for role {0}")]
     MissingMember(&'static str),
     #[error("bundle.sha256 is not a valid storage hash: {0}")]
@@ -194,7 +202,23 @@ fn verify_bundle_bytes(
 /// of the members we care about. Each matched entry is written to
 /// `<role>.part` and atomically renamed into place. A role whose member
 /// path never shows up in the archive is reported as `MissingMember`.
+/// Per-member cap on extracted size. `bundle.size` bounds the *compressed*
+/// tarball (see `read_capped`), but gzip inflates a crafted archive by
+/// orders of magnitude; this bounds what any one member can write to disk.
+/// Generous against real artifacts (OVMF is a few MiB, kernel tens of MiB,
+/// initrd at most a few hundred MiB).
+const MAX_MEMBER_SIZE: u64 = 1024 * 1024 * 1024;
+
 fn extract_members(bytes: &[u8], members: &BundleMembers, dir: &Path) -> Result<(), BundleError> {
+    extract_members_with_limit(bytes, members, dir, MAX_MEMBER_SIZE)
+}
+
+fn extract_members_with_limit(
+    bytes: &[u8],
+    members: &BundleMembers,
+    dir: &Path,
+    max_member_size: u64,
+) -> Result<(), BundleError> {
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
 
@@ -223,16 +247,32 @@ fn extract_members(bytes: &[u8], members: &BundleMembers, dir: &Path) -> Result<
 
         for (i, (member_path, role)) in roles.iter().enumerate() {
             if path_str == *member_path {
+                let size = entry.header().size()?;
+                if size > max_member_size {
+                    return Err(BundleError::MemberTooLarge {
+                        role,
+                        size,
+                        limit: max_member_size,
+                    });
+                }
                 let target = dir.join(role);
                 let part = dir.join(format!("{role}.part"));
                 {
                     let mut file = fs::File::create(&part)?;
-                    std::io::copy(&mut entry, &mut file)?;
+                    // `take` enforces the declared size even if the stream
+                    // carries more; the header check above bounds the
+                    // declaration itself.
+                    std::io::copy(&mut std::io::Read::take(&mut entry, size), &mut file)?;
                 }
                 fs::rename(&part, &target)?;
                 found[i] = true;
                 break;
             }
+        }
+        // Stop reading once every member is extracted: the rest of the
+        // archive is not needed, and iterating it is untrusted work.
+        if found.iter().all(|&f| f) {
+            break;
         }
     }
 
@@ -427,6 +467,60 @@ mod test {
             extract_members(&bytes, &test_members(), dir.path()).unwrap_err(),
             BundleError::MissingMember(_)
         ));
+    }
+
+    #[test]
+    fn extract_stops_after_the_last_member() {
+        // A traversal entry *after* the three members must never be seen:
+        // with the early exit it is not iterated, so extraction succeeds.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = make_test_bundle(&[
+            ("image/OVMF.fd", b"ovmf"),
+            ("image/bzImage", b"kernel"),
+            ("image/initrd", b"initrd"),
+            ("../escape", b"never read"),
+        ]);
+        extract_members(&bytes, &test_members(), dir.path()).unwrap();
+        assert_eq!(fs::read(dir.path().join("initrd")).unwrap(), b"initrd");
+        // ...and the same entry *before* the members is still rejected.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = make_test_bundle(&[
+            ("../escape", b"seen"),
+            ("image/OVMF.fd", b"ovmf"),
+            ("image/bzImage", b"kernel"),
+            ("image/initrd", b"initrd"),
+        ]);
+        assert!(matches!(
+            extract_members(&bytes, &test_members(), dir.path()).unwrap_err(),
+            BundleError::UnsafeMemberPath(_)
+        ));
+    }
+
+    #[test]
+    fn extract_rejects_members_above_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = make_test_bundle(&[
+            ("image/OVMF.fd", b"ovmf"),
+            ("image/bzImage", b"a kernel that is larger than the limit"),
+            ("image/initrd", b"initrd"),
+        ]);
+        let err = extract_members_with_limit(&bytes, &test_members(), dir.path(), 16).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BundleError::MemberTooLarge {
+                    role: "kernel",
+                    size: 38,
+                    limit: 16
+                }
+            ),
+            "{err}"
+        );
+        // Nothing partial is left behind for the rejected member.
+        assert!(!dir.path().join("kernel").exists());
+        assert!(!dir.path().join("kernel.part").exists());
+        // Members at or under the limit extract normally.
+        extract_members_with_limit(&bytes, &test_members(), dir.path(), 38).unwrap();
     }
 
     #[test]
