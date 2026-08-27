@@ -28,6 +28,11 @@ pub enum ContainerError {
          pass it with --image-archive instead"
     )]
     NoDigest(String),
+    #[error(
+        "image {image:?}: unexpected `image inspect` output {output:?}; expected a single \
+         `<name>@sha256:<64 hex>` repo digest"
+    )]
+    MalformedDigest { image: String, output: String },
     #[error("failed to invoke container tool: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -107,6 +112,16 @@ impl ContainerTool {
         if digest.is_empty() || digest == "<no value>" {
             return Err(ContainerError::NoDigest(image.to_string()));
         }
+        // The digest is baked into the measured compose file by
+        // `pin_images`, so anything the tool prints on stdout that is not a
+        // repo digest (a warning line, a multi-line template result) must
+        // not be accepted as one.
+        if !is_repo_digest(&digest) {
+            return Err(ContainerError::MalformedDigest {
+                image: image.to_string(),
+                output: digest,
+            });
+        }
         Ok(digest)
     }
 
@@ -136,8 +151,48 @@ impl ContainerTool {
     }
 }
 
+/// `<name>@sha256:<64 lowercase hex>` on a single line, where `<name>` is a
+/// non-empty reference with no whitespace or `@`.
+fn is_repo_digest(s: &str) -> bool {
+    let Some((name, digest)) = s.rsplit_once('@') else {
+        return false;
+    };
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return false;
+    };
+    !name.is_empty()
+        && !name.contains(|c: char| c.is_whitespace() || c == '@')
+        && hex.len() == 64
+        && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repo_digest_format() {
+        let good = format!("docker.io/library/nginx@sha256:{}", "ab".repeat(32));
+        assert!(is_repo_digest(&good));
+        assert!(is_repo_digest(&format!(
+            "localhost:5000/x/y@sha256:{}",
+            "0".repeat(64)
+        )));
+        for bad in [
+            String::new(),
+            "nginx".to_string(),
+            format!("@sha256:{}", "ab".repeat(32)),
+            format!("nginx@sha256:{}", "ab".repeat(31)),
+            format!("nginx@sha256:{}", "AB".repeat(32)),
+            format!("nginx@sha512:{}", "ab".repeat(32)),
+            format!(
+                "WARN: something\ndocker.io/library/nginx@sha256:{}",
+                "ab".repeat(32)
+            ),
+            format!("nginx@sha256:{} trailing", "ab".repeat(32)),
+        ] {
+            assert!(!is_repo_digest(&bad), "{bad:?} should be rejected");
+        }
+    }
+
     use super::*;
 
     /// Spawning a binary that was just written can intermittently fail with
@@ -197,8 +252,9 @@ mod tests {
         let fake = write_fake_tool(
             dir.path(),
             &format!(
-                "#!/bin/sh\necho \"$@\" >> {}\nprintf 'docker.io/library/nginx@sha256:abc\\n'\n",
-                argv_log.display()
+                "#!/bin/sh\necho \"$@\" >> {}\nprintf 'docker.io/library/nginx@sha256:{}\\n'\n",
+                argv_log.display(),
+                "ab".repeat(32)
             ),
         );
 
@@ -209,7 +265,10 @@ mod tests {
         let digest = retry_text_file_busy(|| tool.resolve_digest("nginx:1.27"))
             .await
             .unwrap();
-        assert_eq!(digest, "docker.io/library/nginx@sha256:abc");
+        assert_eq!(
+            digest,
+            format!("docker.io/library/nginx@sha256:{}", "ab".repeat(32))
+        );
 
         let argv = std::fs::read_to_string(&argv_log).unwrap();
         assert!(argv.contains("image inspect --format {{index .RepoDigests 0}} nginx:1.27"));
@@ -229,6 +288,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ContainerError::NoDigest(image) if image == "nginx:1.27"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_digest_rejects_output_that_is_not_a_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = write_fake_tool(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\nprintf 'WARN: storage.conf is deprecated\\ndocker.io/library/nginx@sha256:{}\\n'\n",
+                "ab".repeat(32)
+            ),
+        );
+        let tool = ContainerTool {
+            path: fake,
+            flavor: Flavor::Podman,
+        };
+        let err = retry_text_file_busy(|| tool.resolve_digest("nginx:1.27"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ContainerError::MalformedDigest { ref image, .. } if image == "nginx:1.27"),
+            "{err}"
+        );
     }
 
     #[cfg(unix)]
