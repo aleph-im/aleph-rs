@@ -3196,7 +3196,7 @@ Examples:
     ///
     /// Locates the VM through the scheduler (or --crn), then streams the
     /// guest's console output as the CRN relays it: stdout lines go to
-    /// stdout, stderr and CRN notices ([system] ...) to stderr. Streams
+    /// stdout, stderr and CRN notices (prefixed `[system]`) to stderr. Streams
     /// until the VM stops or the connection drops; for a stopped VM the CRN
     /// sends the past logs it kept and closes. Authenticated as the owner
     /// (or a delegate) with the signing identity; no attestation is
