@@ -42,6 +42,12 @@ pub enum ComposeError {
          digest; a digest reference must be `name@sha256:<64 lowercase hex>`"
     )]
     BadDigestImage { service: String, image: String },
+    #[error("service {service:?}: volume bind {entry:?}: {reason}")]
+    BadVolumeBind {
+        service: String,
+        entry: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -83,11 +89,14 @@ pub struct ComposeService {
     pub tmpfs: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
+    /// Verified-volume binds: `/volumes/<i>[/subpath]:<target>:ro` short
+    /// syntax only, validated by `volume_bind_checks`. Serialized (unlike
+    /// the rejected keys) so accepted binds reach the guest's compose file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volumes: Option<Vec<String>>,
     // Known-rejected service keys.
     #[serde(default, skip_serializing)]
     build: Option<Value>,
-    #[serde(default, skip_serializing)]
-    volumes: Option<Value>,
     #[serde(default, skip_serializing)]
     ports: Option<Value>,
     #[serde(default, skip_serializing)]
@@ -110,14 +119,18 @@ pub struct ValidatedCompose {
 
 /// Parse and validate a compose file against the aleph.compose/1 subset.
 /// Pure and I/O-free so it's directly unit-testable.
-pub(crate) fn parse_and_validate(text: &str) -> Result<ValidatedCompose, ComposeError> {
+pub(crate) fn parse_and_validate(
+    text: &str,
+    declared_volumes: usize,
+) -> Result<ValidatedCompose, ComposeError> {
     let file: ComposeFile = serde_norway::from_str(text)?;
 
     for (key, present, reason) in [
         (
             "volumes",
             file.volumes.is_some(),
-            "persistent volumes are not supported in v1; use service-level `tmpfs:` for scratch space",
+            "top-level named volumes are not supported; verified volumes are declared with \
+             --volume and bound per-service as /volumes/<i>:<target>:ro",
         ),
         (
             "networks",
@@ -146,7 +159,7 @@ pub(crate) fn parse_and_validate(text: &str) -> Result<ValidatedCompose, Compose
 
     let mut warnings = Vec::new();
     for (name, service) in &file.services {
-        service_checks(name, service)?;
+        service_checks(name, service, declared_volumes)?;
         if service.restart.is_some() {
             warnings.push(format!(
                 "service {name:?}: `restart` is accepted but ignored in v1 \
@@ -158,17 +171,16 @@ pub(crate) fn parse_and_validate(text: &str) -> Result<ValidatedCompose, Compose
     Ok(ValidatedCompose { file, warnings })
 }
 
-fn service_checks(name: &str, s: &ComposeService) -> Result<(), ComposeError> {
-    let rejected: [(&'static str, bool, &'static str); 8] = [
+fn service_checks(
+    name: &str,
+    s: &ComposeService,
+    declared_volumes: usize,
+) -> Result<(), ComposeError> {
+    let rejected: [(&'static str, bool, &'static str); 7] = [
         (
             "build",
             s.build.is_some(),
             "nothing can be built in-guest; reference a prebuilt image",
-        ),
-        (
-            "volumes",
-            s.volumes.is_some(),
-            "persistent volumes are not supported in v1; `tmpfs:` mounts are",
         ),
         (
             "ports",
@@ -225,6 +237,9 @@ fn service_checks(name: &str, s: &ComposeService) -> Result<(), ComposeError> {
             image: image.to_string(),
         });
     }
+    if let Some(binds) = &s.volumes {
+        volume_bind_checks(name, binds, declared_volumes)?;
+    }
     match s.network_mode.as_deref() {
         Some("host") => Ok(()),
         other => Err(ComposeError::BadNetworkMode {
@@ -232,6 +247,69 @@ fn service_checks(name: &str, s: &ComposeService) -> Result<(), ComposeError> {
             found: other.unwrap_or("<unset>").to_string(),
         }),
     }
+}
+
+/// aleph.compose/1 verified-volume binds: the only accepted service-level
+/// `volumes` entries are short-syntax read-only binds sourced from the
+/// guest's verified-volume mounts: `/volumes/<i>[/subpath]:<target>:ro`.
+/// `<i>` is the volume's message list order (the CLI's `--volume` flag
+/// order) and must reference a volume the message actually declares. The
+/// compose file is verity-bound, so an accepted bind is measured intent;
+/// everything else about `volumes:` (named volumes, writable binds, host
+/// paths) stays rejected.
+fn volume_bind_checks(
+    name: &str,
+    binds: &[String],
+    declared_volumes: usize,
+) -> Result<(), ComposeError> {
+    for entry in binds {
+        let reject = |reason: String| ComposeError::BadVolumeBind {
+            service: name.to_string(),
+            entry: entry.clone(),
+            reason,
+        };
+        let parts: Vec<&str> = entry.split(':').collect();
+        let &[source, target, mode] = parts.as_slice() else {
+            return Err(reject(
+                "must be `/volumes/<i>[/subpath]:<target>:ro` short syntax (ro is required)".into(),
+            ));
+        };
+        if mode != "ro" {
+            return Err(reject(
+                "mode must be exactly `ro`; verified volumes are read-only".into(),
+            ));
+        }
+        let Some(rel) = source.strip_prefix("/volumes/") else {
+            return Err(reject(
+                "source must live under /volumes/ (the verified-volume mounts; --volume order is the index)".into(),
+            ));
+        };
+        let mut segments = rel.split('/');
+        let Some(index) = segments
+            .next()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            return Err(reject(
+                "source must start with a volume index: /volumes/<i>".into(),
+            ));
+        };
+        if segments.any(|s| s.is_empty() || s == "." || s == "..") {
+            return Err(reject(
+                "source subpath must not contain empty, `.` or `..` segments".into(),
+            ));
+        }
+        if index >= declared_volumes {
+            return Err(reject(format!(
+                "references /volumes/{index} but the message declares {declared_volumes} volume(s); \
+                 `--volume` order is the index"
+            )));
+        }
+        if !target.starts_with('/') {
+            return Err(reject("target must be an absolute path".into()));
+        }
+    }
+    Ok(())
 }
 
 /// Unique image references in service-name order.
@@ -389,84 +467,152 @@ mod tests {
                     command: [\"nginx\", \"-g\", \"daemon off;\"]\n    entrypoint: /entry.sh\n    \
                     environment:\n      A: b\n    depends_on: [db]\n    tmpfs:\n      - /scratch\n  \
                     db:\n    image: postgres:16\n    network_mode: host\n";
-        let v = parse_and_validate(text).unwrap();
+        let v = parse_and_validate(text, 0).unwrap();
         assert_eq!(v.file.services.len(), 2);
         assert!(v.warnings.is_empty());
     }
 
     #[test]
     fn restart_is_accepted_with_a_warning() {
-        let v = parse_and_validate(&svc("    restart: always\n")).unwrap();
+        let v = parse_and_validate(&svc("    restart: always\n"), 0).unwrap();
         assert_eq!(v.warnings.len(), 1);
         assert!(v.warnings[0].contains("restart"));
     }
 
     #[test]
     fn rejects_build() {
-        let err = parse_and_validate(&svc("    build: .\n")).unwrap_err();
+        let err = parse_and_validate(&svc("    build: .\n"), 0).unwrap_err();
         assert!(err.to_string().contains("build"), "{err}");
     }
 
     #[test]
-    fn rejects_volumes() {
-        let err = parse_and_validate(&svc("    volumes:\n      - data:/var/lib\n")).unwrap_err();
-        assert!(err.to_string().contains("volumes"), "{err}");
+    fn accepts_a_verified_volume_bind_and_serializes_it() {
+        let text = svc("    volumes:\n      - /volumes/0:/weights:ro\n");
+        let validated = parse_and_validate(&text, 1).unwrap();
+        let yaml = to_yaml(&validated.file).unwrap();
+        assert!(
+            yaml.contains("/volumes/0:/weights:ro"),
+            "the bind must survive re-serialization into the workload compose file: {yaml}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_subpath_bind() {
+        let text = svc("    volumes:\n      - /volumes/1/model/q4:/weights:ro\n");
+        parse_and_validate(&text, 2).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_bind_past_the_declared_volume_count() {
+        let text = svc("    volumes:\n      - /volumes/2:/weights:ro\n");
+        let err = parse_and_validate(&text, 2).unwrap_err();
+        assert!(err.to_string().contains("declares 2 volume"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_writable_bind() {
+        for entry in ["/volumes/0:/weights:rw", "/volumes/0:/weights"] {
+            let text = svc(&format!("    volumes:\n      - {entry}\n"));
+            let err = parse_and_validate(&text, 1).unwrap_err();
+            assert!(err.to_string().contains("ro"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_bind_outside_the_volume_mounts() {
+        let err =
+            parse_and_validate(&svc("    volumes:\n      - /data:/weights:ro\n"), 1).unwrap_err();
+        assert!(err.to_string().contains("/volumes/"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_traversing_bind() {
+        let err = parse_and_validate(
+            &svc("    volumes:\n      - /volumes/0/../1:/weights:ro\n"),
+            2,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("segments"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_relative_bind_target() {
+        let err = parse_and_validate(&svc("    volumes:\n      - /volumes/0:weights:ro\n"), 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn rejects_long_syntax_volume_entries() {
+        // Mapping-form entries fail at deserialization (Vec<String>), which
+        // is fine: the accepted grammar is the short string syntax only.
+        let text = svc(
+            "    volumes:\n      - type: bind\n        source: /volumes/0\n        target: /w\n",
+        );
+        assert!(parse_and_validate(&text, 1).is_err());
+    }
+
+    #[test]
+    fn rejects_named_volume_entries() {
+        let err =
+            parse_and_validate(&svc("    volumes:\n      - data:/var/lib:ro\n"), 1).unwrap_err();
+        assert!(err.to_string().contains("/volumes/"), "{err}");
     }
 
     #[test]
     fn rejects_ports_and_explains_the_entrypoint_contract() {
-        let err = parse_and_validate(&svc("    ports:\n      - \"80:80\"\n")).unwrap_err();
+        let err = parse_and_validate(&svc("    ports:\n      - \"80:80\"\n"), 0).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ports") && msg.contains("8080"), "{msg}");
     }
 
     #[test]
     fn rejects_secrets() {
-        assert!(parse_and_validate(&svc("    secrets: [s]\n")).is_err());
+        assert!(parse_and_validate(&svc("    secrets: [s]\n"), 0).is_err());
     }
     #[test]
     fn rejects_env_file() {
-        assert!(parse_and_validate(&svc("    env_file: .env\n")).is_err());
+        assert!(parse_and_validate(&svc("    env_file: .env\n"), 0).is_err());
     }
     #[test]
     fn rejects_privileged() {
-        assert!(parse_and_validate(&svc("    privileged: true\n")).is_err());
+        assert!(parse_and_validate(&svc("    privileged: true\n"), 0).is_err());
     }
     #[test]
     fn rejects_devices() {
-        assert!(parse_and_validate(&svc("    devices: [\"/dev/kvm\"]\n")).is_err());
+        assert!(parse_and_validate(&svc("    devices: [\"/dev/kvm\"]\n"), 0).is_err());
     }
     #[test]
     fn rejects_cap_add() {
-        assert!(parse_and_validate(&svc("    cap_add: [NET_ADMIN]\n")).is_err());
+        assert!(parse_and_validate(&svc("    cap_add: [NET_ADMIN]\n"), 0).is_err());
     }
 
     #[test]
     fn rejects_unknown_service_keys() {
-        let err = parse_and_validate(&svc("    gpus: all\n")).unwrap_err();
+        let err = parse_and_validate(&svc("    gpus: all\n"), 0).unwrap_err();
         assert!(err.to_string().contains("gpus"), "{err}");
     }
 
     #[test]
     fn rejects_top_level_volumes() {
         let text = format!("{MINIMAL}volumes:\n  data: {{}}\n");
-        assert!(parse_and_validate(&text).is_err());
+        assert!(parse_and_validate(&text, 0).is_err());
     }
 
     #[test]
     fn rejects_a_service_without_an_image() {
         let text = "services:\n  web:\n    network_mode: host\n";
-        let err = parse_and_validate(text).unwrap_err();
+        let err = parse_and_validate(text, 0).unwrap_err();
         assert!(err.to_string().contains("image"), "{err}");
     }
 
     #[test]
     fn requires_host_network_mode_on_every_service() {
         let text = "services:\n  web:\n    image: nginx:1.27\n";
-        let err = parse_and_validate(text).unwrap_err();
+        let err = parse_and_validate(text, 0).unwrap_err();
         assert!(err.to_string().contains("network_mode"), "{err}");
         let text = "services:\n  web:\n    image: nginx:1.27\n    network_mode: bridge\n";
-        assert!(parse_and_validate(text).is_err());
+        assert!(parse_and_validate(text, 0).is_err());
     }
 
     /// #348: a digest-form `image:` is the user's audited identity claim and
@@ -477,7 +623,7 @@ mod tests {
             "services:\n  web:\n    image: nginx@sha256:{}\n    network_mode: host\n",
             "ab".repeat(32)
         );
-        parse_and_validate(&text).unwrap();
+        parse_and_validate(&text, 0).unwrap();
     }
 
     /// An `image:` containing `@` that is not `name@sha256:<64 hex>` can
@@ -492,7 +638,7 @@ mod tests {
             "nginx@latest".to_string(),
         ] {
             let text = format!("services:\n  web:\n    image: \"{bad}\"\n    network_mode: host\n");
-            let err = parse_and_validate(&text).unwrap_err();
+            let err = parse_and_validate(&text, 0).unwrap_err();
             assert!(
                 matches!(err, ComposeError::BadDigestImage { ref service, .. } if service == "web"),
                 "{bad}: {err}"
@@ -529,7 +675,7 @@ mod tests {
             "services:\n  db:\n    image: postgres:16\n    network_mode: host\n  \
              web:\n    image: nginx@sha256:{hex}\n    network_mode: host\n"
         );
-        let mut v = parse_and_validate(&text).unwrap();
+        let mut v = parse_and_validate(&text, 0).unwrap();
         retag_digest_images(&mut v.file);
         let yaml = to_yaml(&v.file).unwrap();
         assert!(
@@ -538,25 +684,25 @@ mod tests {
         );
         assert!(yaml.contains("image: postgres:16"), "{yaml}");
         assert!(!yaml.contains('@'), "{yaml}");
-        parse_and_validate(&yaml).unwrap();
+        parse_and_validate(&yaml, 0).unwrap();
     }
 
     #[test]
     fn rejects_an_empty_services_map() {
-        assert!(parse_and_validate("services: {}\n").is_err());
+        assert!(parse_and_validate("services: {}\n", 0).is_err());
     }
 
     #[test]
     fn version_and_name_are_tolerated() {
         let text = format!("version: \"3.9\"\nname: demo\n{MINIMAL}");
-        parse_and_validate(&text).unwrap();
+        parse_and_validate(&text, 0).unwrap();
     }
 
     /// #348: the staged compose file keeps the original tag so it matches
     /// what `podman load` restores from the saved archive.
     #[test]
     fn to_yaml_keeps_image_references_verbatim() {
-        let v = parse_and_validate(MINIMAL).unwrap();
+        let v = parse_and_validate(MINIMAL, 0).unwrap();
         let yaml = to_yaml(&v.file).unwrap();
         assert!(yaml.contains("image: nginx:1.27"), "{yaml}");
         assert!(!yaml.contains("@sha256:"), "{yaml}");
@@ -564,8 +710,8 @@ mod tests {
 
     #[test]
     fn serialized_yaml_round_trips_through_the_validator() {
-        let v = parse_and_validate(MINIMAL).unwrap();
-        parse_and_validate(&to_yaml(&v.file).unwrap()).unwrap();
+        let v = parse_and_validate(MINIMAL, 0).unwrap();
+        parse_and_validate(&to_yaml(&v.file).unwrap(), 0).unwrap();
     }
 
     #[test]
