@@ -23,6 +23,16 @@ use url::Url;
 /// The returned `VmEntry` lets the caller skip a second scheduler round-trip
 /// when looking up the CRN URL.
 pub async fn resolve_vm(scheduler_url: &Url, input: &str) -> Result<(ItemHash, VmEntry)> {
+    resolve_vm_for(scheduler_url, input, VmKind::Instance).await
+}
+
+/// [`resolve_vm`] for a given command family: prefix lookups are filtered on
+/// `kind`'s scheduler `vm_type`, and errors name that kind.
+pub async fn resolve_vm_for(
+    scheduler_url: &Url,
+    input: &str,
+    kind: VmKind,
+) -> Result<(ItemHash, VmEntry)> {
     let scheduler = SchedulerClient::new(scheduler_url.clone());
 
     if let Ok(hash) = ItemHash::try_from(input) {
@@ -30,15 +40,15 @@ pub async fn resolve_vm(scheduler_url: &Url, input: &str) -> Result<(ItemHash, V
             .get_vm(&hash)
             .await
             .context("querying scheduler")?
-            .ok_or_else(|| anyhow!("instance {hash} not found in the scheduler"))?;
+            .ok_or_else(|| anyhow!("{} {hash} not found in the scheduler", kind.noun()))?;
         return Ok((hash, entry));
     }
 
     let matches = scheduler
-        .find_vms_by_hash_prefix_and_type(input, VmKind::Instance.scheduler_vm_type())
+        .find_vms_by_hash_prefix_and_type(input, kind.scheduler_vm_type())
         .await
         .with_context(|| format!("looking up VMs matching prefix `{input}` in the scheduler"))?;
-    pick_unique_match(input, matches, VmKind::Instance)
+    pick_unique_match(input, matches, kind)
 }
 
 /// Which command family a VM lookup is done for. Selects the scheduler
@@ -235,14 +245,24 @@ pub async fn resolve_target(
     vm_id_input: &str,
     crn_override: Option<&str>,
 ) -> Result<(ItemHash, Url)> {
+    resolve_target_for(scheduler_url, vm_id_input, crn_override, VmKind::Instance).await
+}
+
+/// [`resolve_target`] for a given command family (see [`resolve_vm_for`]).
+pub async fn resolve_target_for(
+    scheduler_url: &Url,
+    vm_id_input: &str,
+    crn_override: Option<&str>,
+    kind: VmKind,
+) -> Result<(ItemHash, Url)> {
     match (crn_override, ItemHash::try_from(vm_id_input)) {
         (Some(crn), Ok(hash)) => Ok((hash, resolve_crn(scheduler_url, crn).await?)),
         (Some(crn), Err(_)) => {
-            let (hash, _) = resolve_vm(scheduler_url, vm_id_input).await?;
+            let (hash, _) = resolve_vm_for(scheduler_url, vm_id_input, kind).await?;
             Ok((hash, resolve_crn(scheduler_url, crn).await?))
         }
         (None, _) => {
-            let (hash, entry) = resolve_vm(scheduler_url, vm_id_input).await?;
+            let (hash, entry) = resolve_vm_for(scheduler_url, vm_id_input, kind).await?;
             let url = crn_url_from_entry(scheduler_url, &hash, &entry).await?;
             Ok((hash, url))
         }
@@ -618,5 +638,70 @@ mod tests {
             .unwrap();
         assert_eq!(hash.to_string(), FULL_HASH);
         assert_eq!(url.as_str(), "https://crn.example.io/");
+    }
+
+    #[tokio::test]
+    async fn resolve_target_for_vprogram_prefix_filters_on_vprogram_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/vms"))
+            .and(query_param("vm_hash", "5a586d"))
+            .and(query_param("vm_type", "v_program"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [{
+                    "vm_hash": FULL_HASH,
+                    "vm_type": "v_program",
+                    "allocated_node": NODE_HASH,
+                    "status": "dispatched",
+                    "scheduling_status": "scheduled",
+                    "migration_target": null,
+                    "owner": null,
+                }],
+                "pagination": {
+                    "page": 1, "page_size": 200, "total_items": 1, "total_pages": 1,
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{NODE_HASH}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_hash": NODE_HASH,
+                "address": "https://crn.example.io/",
+                "status": "ok",
+            })))
+            .mount(&server)
+            .await;
+
+        let (hash, url) = resolve_target_for(
+            &Url::parse(&server.uri()).unwrap(),
+            "5a586d",
+            None,
+            VmKind::VProgram,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hash.to_string(), FULL_HASH);
+        assert_eq!(url.as_str(), "https://crn.example.io/");
+    }
+
+    #[tokio::test]
+    async fn resolve_vm_for_full_hash_not_found_names_the_kind() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/vms/{FULL_HASH}")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = resolve_vm_for(
+            &Url::parse(&server.uri()).unwrap(),
+            FULL_HASH,
+            VmKind::VProgram,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("V-Program"), "{err}");
     }
 }

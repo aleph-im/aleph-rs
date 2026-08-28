@@ -87,6 +87,10 @@ pub async fn dispatch(
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             handle_delete(aleph_client, ccn_url, scheduler_url, json, args).await
         }
+        VProgramCommand::Logs(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            super::crn::handle_logs(scheduler_url, json, args, VmKind::VProgram).await
+        }
     }
 }
 
