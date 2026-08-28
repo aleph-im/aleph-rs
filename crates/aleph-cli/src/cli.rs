@@ -2155,7 +2155,7 @@ pub struct AuthorizationRevokeArgs {
     pub signing: SigningArgs,
 }
 
-#[derive(Args)]
+#[derive(Debug, Args)]
 pub struct CrnArgs {
     /// CRN to target: either a node hash or unique hash prefix or suffix
     /// (resolved to its URL via the scheduler; a suffix matches the shorthand
@@ -2168,8 +2168,9 @@ pub struct CrnArgs {
     #[arg(long, alias = "crn-url")]
     pub crn: Option<String>,
 
-    /// VM instance item hash. Accepts a unique prefix (e.g. the 12-char hash
-    /// shown by `aleph instance list`); the scheduler matches it server-side.
+    /// VM item hash. Accepts a unique prefix (e.g. the 12-char hash shown by
+    /// `aleph instance list` / `aleph vprogram list`); the scheduler matches
+    /// it server-side among VMs of the command's kind.
     pub vm_id: String,
 
     #[command(flatten)]
@@ -3191,6 +3192,21 @@ Examples:
   aleph vprogram delete a41fb91c3e68 --dry-run --json
 ")]
     Delete(VProgramDeleteArgs),
+    /// Stream a V-PROGRAM's logs from its CRN.
+    ///
+    /// Locates the VM through the scheduler (or --crn), then streams the
+    /// guest's console output as the CRN relays it: stdout lines go to
+    /// stdout, stderr and CRN notices ([system] ...) to stderr. Streams
+    /// until the VM stops or the connection drops; for a stopped VM the CRN
+    /// sends the past logs it kept and closes. Authenticated as the owner
+    /// (or a delegate) with the signing identity; no attestation is
+    /// involved, this is the plain CRN operator channel.
+    ///
+    /// Examples:
+    ///   aleph vprogram logs a41fb91c3e68
+    ///   aleph vprogram logs a41fb91c3e68 --json | jq -r .message
+    #[command(verbatim_doc_comment)]
+    Logs(CrnArgs),
 }
 
 #[cfg(feature = "vprogram")]

@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use url::Url;
 
 use crate::cli::{CrnArgs, CrnStartArgs, InstanceReinstallArgs, SigningArgs};
-use crate::commands::instance_target::resolve_target;
+use crate::commands::instance_target::{VmKind, resolve_target, resolve_target_for};
 use crate::common::{confirm_action, resolve_account};
 
 fn build_client(crn_url: &Url, signing: &SigningArgs) -> Result<CrnClient> {
@@ -166,8 +166,17 @@ fn sanitize_log(s: &str) -> String {
     result
 }
 
-pub async fn handle_logs(scheduler_url: Url, json: bool, args: CrnArgs) -> Result<()> {
-    let (vm_id, crn_url) = resolve_target(&scheduler_url, &args.vm_id, args.crn.as_deref()).await?;
+/// Stream a VM's logs from its CRN. `kind` selects the scheduler `vm_type`
+/// used to expand a hash prefix (instances and V-Programs share the same
+/// CRN log endpoint and owner-auth; only the lookup differs).
+pub async fn handle_logs(
+    scheduler_url: Url,
+    json: bool,
+    args: CrnArgs,
+    kind: VmKind,
+) -> Result<()> {
+    let (vm_id, crn_url) =
+        resolve_target_for(&scheduler_url, &args.vm_id, args.crn.as_deref(), kind).await?;
     let client = build_client(&crn_url, &args.signing)?;
     let mut stream = std::pin::pin!(client.stream_logs(&vm_id).await?);
 

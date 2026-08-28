@@ -567,7 +567,13 @@ pub async fn handle_instance_command(
         }
         InstanceCommand::Logs(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
-            crn::handle_logs(scheduler_url, json, args).await?
+            crn::handle_logs(
+                scheduler_url,
+                json,
+                args,
+                super::instance_target::VmKind::Instance,
+            )
+            .await?
         }
         InstanceCommand::Ssh(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
