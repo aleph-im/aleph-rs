@@ -263,8 +263,8 @@ async fn handle_create(
 
     // Materialize the workload image: either the prebuilt path from
     // --workload, or (for --compose) pull/resolve/save every image not
-    // covered by --image-archive, digest-pin the compose file, and build an
-    // ext4 image from it. Network access (image pulls) only happens here,
+    // covered by --image-archive, stage the compose file verbatim, and build
+    // an ext4 image from it. Network access (image pulls) only happens here,
     // after every cheap local/manifest gate above has already passed.
     //
     // `_built_workload` (the compose-built ext4 image) and
@@ -284,29 +284,33 @@ async fn handle_create(
             None,
             None,
         ),
-        Some((mut validated, archives, mkfs, container)) => {
-            let mut pins = BTreeMap::new();
+        Some((validated, archives, mkfs, container)) => {
             let mut resolved: Vec<(String, PathBuf)> = Vec::new();
             let mut save_tmp = Vec::new(); // keep pulled archives alive until staged
             for image in compose::image_names(&validated.file) {
                 if let Some(path) = archives.get(&image) {
-                    pins.insert(image.clone(), image.clone());
                     resolved.push((image, path.clone()));
                 } else {
                     let tool = container.as_ref().expect("find() ran when pulls needed");
                     if !json {
                         eprintln!("Pulling {image}...");
                     }
-                    tool.pull(&image).await?;
-                    let pinned = tool.resolve_digest(&image).await?;
                     let tmp = tempfile::Builder::new().suffix(".tar").tempfile()?;
-                    tool.save_archive(&pinned, tmp.path()).await?;
-                    pins.insert(image.clone(), pinned);
+                    // Saved from the original tag, never the digest (#348):
+                    // only a tag survives the archive save/load round trip
+                    // that the guest's `podman load` performs. The digest is
+                    // reported for provenance; the image bytes are pinned by
+                    // the verity-measured workload volume.
+                    let digest = tool.pull_and_save(&image, tmp.path()).await?;
+                    if !json {
+                        eprintln!("Pulled {image} ({digest})");
+                    }
                     resolved.push((image, tmp.path().to_path_buf()));
                     save_tmp.push(tmp);
                 }
             }
-            compose::pin_images(&mut validated.file, &pins)?;
+            // Image references are staged verbatim so they match the tags
+            // embedded in the archives.
             let yaml = compose::to_yaml(&validated.file)?;
             let (dir, image) = compose::build_workload_image(&mkfs, &yaml, &resolved).await?;
             let path = image.path().to_path_buf();

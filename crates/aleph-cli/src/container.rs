@@ -120,10 +120,10 @@ impl ContainerTool {
         if digest.is_empty() || digest == "<no value>" {
             return Err(ContainerError::NoDigest(image.to_string()));
         }
-        // The digest is baked into the measured compose file by
-        // `pin_images`, so anything the tool prints on stdout that is not a
-        // repo digest (a warning line, a multi-line template result) must
-        // not be accepted as one.
+        // The digest is reported to the caller as the image's provenance,
+        // so anything the tool prints on stdout that is not a repo digest
+        // (a warning line, a multi-line template result) must not be
+        // accepted as one.
         if !is_repo_digest(&digest) {
             return Err(ContainerError::MalformedDigest {
                 image: image.to_string(),
@@ -133,10 +133,33 @@ impl ContainerTool {
         Ok(digest)
     }
 
+    /// Pull `image`, resolve its registry digest, and save it to `out`.
+    /// Returns the resolved `name@sha256:...` digest for reporting.
+    ///
+    /// The archive is deliberately saved from the ORIGINAL reference, not the
+    /// resolved digest (#348): `docker save name@sha256:...` writes a
+    /// docker-archive with `RepoTags: null` and no RepoDigests, so `podman
+    /// load` in the guest imports a bare image ID that compose cannot match
+    /// against the `image:` string. A tagged archive round-trips: the tag is
+    /// restored on load and compose resolves it from local storage. Image
+    /// integrity is carried by the verity-measured workload volume bytes, not
+    /// by the name in the compose file; the digest is still resolved so a
+    /// locally-built image is refused (`ContainerError::NoDigest`) and the
+    /// exact identity can be surfaced to the caller.
+    pub async fn pull_and_save(&self, image: &str, out: &Path) -> Result<String, ContainerError> {
+        self.pull(image).await?;
+        let digest = self.resolve_digest(image).await?;
+        self.save_archive(image, out).await?;
+        Ok(digest)
+    }
+
     /// Shell out to save `image` to an archive at `out`. Podman writes an
     /// OCI archive (`save --format oci-archive -o <out> <image>`); docker
     /// writes its own docker-archive format (`save -o <out> <image>`), which
     /// `podman load` in the guest also accepts.
+    ///
+    /// `image` should be a tagged reference (see [`Self::pull_and_save`]);
+    /// only tags survive the save/load round trip.
     pub async fn save_archive(&self, image: &str, out: &Path) -> Result<(), ContainerError> {
         let mut cmd = tokio::process::Command::new(&self.path);
         cmd.arg("save");
@@ -399,6 +422,52 @@ mod tests {
         let argv = std::fs::read_to_string(&argv_log).unwrap();
         let expected = format!("save -o {} nginx:1.27", out.to_str().unwrap());
         assert_eq!(argv.trim(), expected);
+    }
+
+    /// Regression test for #348: the archive must be saved from the ORIGINAL
+    /// reference. `docker save name@sha256:...` writes `RepoTags: null` and
+    /// docker-archives carry no RepoDigests, so `podman load` in the guest
+    /// imports a bare image ID that compose cannot match against `image:`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pull_and_save_saves_from_the_original_reference_not_the_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv");
+        let digest = format!("docker.io/library/nginx@sha256:{}", "ab".repeat(32));
+        let fake = write_fake_tool(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> {}\ncase \"$1\" in inspect|image) printf '{digest}\\n';; esac\nexit 0\n",
+                argv_log.display()
+            ),
+        );
+
+        let tool = ContainerTool {
+            path: fake,
+            flavor: Flavor::Docker,
+        };
+        let out = dir.path().join("nginx.tar");
+        let resolved = retry_text_file_busy(|| tool.pull_and_save("nginx:1.27", &out))
+            .await
+            .unwrap();
+        assert_eq!(resolved, digest);
+
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        let lines: Vec<&str> = argv.lines().collect();
+        assert_eq!(lines[0], "pull nginx:1.27");
+        assert_eq!(
+            lines[1],
+            "image inspect --format {{index .RepoDigests 0}} nginx:1.27"
+        );
+        assert_eq!(
+            lines[2],
+            format!("save -o {} nginx:1.27", out.to_str().unwrap())
+        );
+        assert!(
+            !lines[2].contains("@sha256:"),
+            "save must not receive the digest-pinned reference: {}",
+            lines[2]
+        );
     }
 
     #[cfg(unix)]

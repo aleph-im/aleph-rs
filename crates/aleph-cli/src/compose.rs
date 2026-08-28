@@ -37,8 +37,14 @@ pub enum ComposeError {
          v1 stacks share the guest network namespace and talk over localhost"
     )]
     BadNetworkMode { service: String, found: String },
-    #[error("no digest or archive resolved for image {0:?}")]
-    UnpinnedImage(String),
+    #[error(
+        "service {service:?} references image {image:?} by digest; \
+         `podman load` in the guest cannot restore a digest reference from a \
+         saved archive, so the stack could not resolve it. Use a tag instead \
+         (the workload volume is verity-measured, so the exact image bytes \
+         are pinned regardless of the name)"
+    )]
+    DigestImage { service: String, image: String },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -209,8 +215,19 @@ fn service_checks(name: &str, s: &ComposeService) -> Result<(), ComposeError> {
             });
         }
     }
-    if s.image.as_deref().unwrap_or("").is_empty() {
+    let image = s.image.as_deref().unwrap_or("");
+    if image.is_empty() {
         return Err(ComposeError::MissingImage(name.to_string()));
+    }
+    // A digest reference (`name@sha256:...`) is not restorable from a saved
+    // archive by `podman load` (#348): docker-archives carry no RepoDigests
+    // and oci-archives only a tag annotation. Refuse here rather than let
+    // the guest's compose stack fail and the fail-closed init power off.
+    if image.contains('@') {
+        return Err(ComposeError::DigestImage {
+            service: name.to_string(),
+            image: image.to_string(),
+        });
     }
     match s.network_mode.as_deref() {
         Some("host") => Ok(()),
@@ -231,22 +248,11 @@ pub(crate) fn image_names(file: &ComposeFile) -> Vec<String> {
         .collect()
 }
 
-/// Rewrite every service's image to its digest-pinned form so the measured
-/// compose file names exact image identities, not floating tags.
-pub(crate) fn pin_images(
-    file: &mut ComposeFile,
-    pins: &BTreeMap<String, String>,
-) -> Result<(), ComposeError> {
-    for service in file.services.values_mut() {
-        let image = service.image.as_mut().expect("validated: image present");
-        match pins.get(image) {
-            Some(pinned) => *image = pinned.clone(),
-            None => return Err(ComposeError::UnpinnedImage(image.clone())),
-        }
-    }
-    Ok(())
-}
-
+/// Serialize the validated compose file for staging. Image references are
+/// written verbatim (never rewritten to a digest): the archive saved
+/// alongside carries that same tag, which is what `podman load` in the
+/// guest restores and compose matches against (#348). The exact image
+/// bytes are pinned by the verity-measured workload volume, not by the name.
 pub(crate) fn to_yaml(file: &ComposeFile) -> Result<String, ComposeError> {
     Ok(serde_norway::to_string(file)?)
 }
@@ -443,6 +449,24 @@ mod tests {
         assert!(parse_and_validate(text).is_err());
     }
 
+    /// #348: a digest-form `image:` cannot be restored by `podman load` from
+    /// either archive format (docker-archive has no RepoDigests, oci-archive
+    /// only carries a tag annotation), so the stack would fail to resolve it
+    /// in the guest. Refuse at create time instead of a silent guest poweroff.
+    #[test]
+    fn rejects_a_digest_form_image_reference() {
+        let text = format!(
+            "services:\n  web:\n    image: nginx@sha256:{}\n    network_mode: host\n",
+            "ab".repeat(32)
+        );
+        let err = parse_and_validate(&text).unwrap_err();
+        assert!(
+            matches!(err, ComposeError::DigestImage { ref service, .. } if service == "web"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("tag"), "{err}");
+    }
+
     #[test]
     fn rejects_an_empty_services_map() {
         assert!(parse_and_validate("services: {}\n").is_err());
@@ -454,34 +478,19 @@ mod tests {
         parse_and_validate(&text).unwrap();
     }
 
+    /// #348: the staged compose file keeps the original tag so it matches
+    /// what `podman load` restores from the saved archive.
     #[test]
-    fn pin_images_rewrites_every_reference() {
-        let mut v = parse_and_validate(MINIMAL).unwrap();
-        let pins = BTreeMap::from([(
-            "nginx:1.27".to_string(),
-            "docker.io/library/nginx@sha256:abc123".to_string(),
-        )]);
-        pin_images(&mut v.file, &pins).unwrap();
+    fn to_yaml_keeps_image_references_verbatim() {
+        let v = parse_and_validate(MINIMAL).unwrap();
         let yaml = to_yaml(&v.file).unwrap();
-        assert!(yaml.contains("docker.io/library/nginx@sha256:abc123"));
-        assert!(!yaml.contains("nginx:1.27"));
+        assert!(yaml.contains("image: nginx:1.27"), "{yaml}");
+        assert!(!yaml.contains("@sha256:"), "{yaml}");
     }
 
     #[test]
-    fn pin_images_fails_on_a_missing_pin() {
-        let mut v = parse_and_validate(MINIMAL).unwrap();
-        let err = pin_images(&mut v.file, &BTreeMap::new()).unwrap_err();
-        assert!(err.to_string().contains("nginx:1.27"), "{err}");
-    }
-
-    #[test]
-    fn rewritten_yaml_round_trips_through_the_validator() {
-        let mut v = parse_and_validate(MINIMAL).unwrap();
-        let pins = BTreeMap::from([(
-            "nginx:1.27".to_string(),
-            "docker.io/library/nginx@sha256:abc123".to_string(),
-        )]);
-        pin_images(&mut v.file, &pins).unwrap();
+    fn serialized_yaml_round_trips_through_the_validator() {
+        let v = parse_and_validate(MINIMAL).unwrap();
         parse_and_validate(&to_yaml(&v.file).unwrap()).unwrap();
     }
 
