@@ -3275,7 +3275,7 @@ pub struct VProgramCreateArgs {
 
     /// Verified data volume ext4 image (repeatable, up to 8). Each volume is
     /// dm-verity-formatted, published, and mounted read-only in the guest at
-    /// /volumes/<index> in flag order. Compose services reference them with
+    /// `/volumes/<index>` in flag order. Compose services reference them with
     /// `volumes: ["/volumes/<index>:<target>:ro"]`.
     #[arg(long = "volume")]
     pub volumes: Vec<PathBuf>,
