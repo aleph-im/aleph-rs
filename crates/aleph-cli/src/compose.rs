@@ -265,7 +265,12 @@ fn service_checks(
 /// than "no literal `..`": it rejects anything that could be rewritten by
 /// interpolation, and it accepts only a canonical decimal index and a
 /// tightly bounded subpath character set, so a passing entry means exactly
-/// what it says and always resolves to a real, guest-mounted source.
+/// what it says and its source names a path under a guest-mounted volume.
+///
+/// That guarantee is lexical only: the volume image's own contents are not
+/// inspected, so a symlink inside it can still point outside `/volumes`
+/// and podman resolves bind sources on the guest filesystem. Confining
+/// resolved sources (a realpath check) is the guest runtime's job.
 fn volume_bind_checks(
     name: &str,
     binds: &[String],
@@ -305,19 +310,17 @@ fn volume_bind_checks(
         let is_canonical_index = !index_segment.is_empty()
             && index_segment.bytes().all(|b| b.is_ascii_digit())
             && (index_segment == "0" || !index_segment.starts_with('0'));
-        let bad_index = || {
-            reject(
+        if !is_canonical_index {
+            return Err(reject(
                 "source must start with a canonical volume index: /volumes/<i> (decimal, no \
                  leading zeros or sign)"
                     .into(),
-            )
-        };
-        if !is_canonical_index {
-            return Err(bad_index());
+            ));
         }
-        let Ok(index) = index_segment.parse::<usize>() else {
-            return Err(bad_index());
-        };
+        // A canonical index too large for `usize` is out of range like any
+        // other too-large index (the declared count is at most
+        // MAX_VERIFIED_VOLUMES), so let the range check below report it.
+        let index = index_segment.parse::<usize>().unwrap_or(usize::MAX);
         let is_valid_subpath_segment = |s: &str| {
             !s.is_empty()
                 && s != "."
@@ -335,8 +338,8 @@ fn volume_bind_checks(
         }
         if index >= declared_volumes {
             return Err(reject(format!(
-                "references /volumes/{index} but the message declares {declared_volumes} volume(s); \
-                 `--volume` order is the index"
+                "references /volumes/{index_segment} but the message declares \
+                 {declared_volumes} volume(s); `--volume` order is the index"
             )));
         }
         if !target.starts_with('/') {
@@ -531,6 +534,22 @@ mod tests {
     }
 
     #[test]
+    fn serialized_binds_round_trip_through_the_validator() {
+        let text = svc("    volumes:\n      - /volumes/0/model:/weights:ro\n");
+        let v = parse_and_validate(&text, 1).unwrap();
+        parse_and_validate(&to_yaml(&v.file).unwrap(), 1).unwrap();
+    }
+
+    /// `volumes: []` binds nothing; it validates and serializes through as
+    /// an empty list rather than being stripped or rejected.
+    #[test]
+    fn an_empty_volumes_list_validates_and_serializes_through() {
+        let v = parse_and_validate(&svc("    volumes: []\n"), 0).unwrap();
+        let yaml = to_yaml(&v.file).unwrap();
+        assert!(yaml.contains("volumes: []"), "{yaml}");
+    }
+
+    #[test]
     fn accepts_a_subpath_bind() {
         let text = svc("    volumes:\n      - /volumes/1/model/q4:/weights:ro\n");
         parse_and_validate(&text, 2).unwrap();
@@ -605,6 +624,16 @@ mod tests {
         let err =
             parse_and_validate(&svc("    volumes:\n      - /volumes/0:/w:ro\n"), 0).unwrap_err();
         assert!(err.to_string().contains("declares 0 volume"), "{err}");
+    }
+
+    /// A canonical all-digit index too large for `usize` is out of range
+    /// like any other too-large index; it must not be blamed on formatting.
+    #[test]
+    fn rejects_an_index_that_overflows_usize_as_out_of_range() {
+        let entry = format!("/volumes/{}:/w:ro", "9".repeat(39));
+        let text = svc(&format!("    volumes:\n      - {entry}\n"));
+        let err = parse_and_validate(&text, 1).unwrap_err();
+        assert!(err.to_string().contains("declares 1 volume"), "{err}");
     }
 
     #[test]
