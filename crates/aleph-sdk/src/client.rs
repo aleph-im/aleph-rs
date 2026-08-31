@@ -1006,6 +1006,21 @@ impl FileDownload {
     }
 }
 
+/// A message the server returned but that this SDK fails to deserialize (a
+/// schema variant this SDK does not yet know about, or genuinely malformed
+/// data).
+///
+/// Yielded as the `Err` half of the per-message `Result` produced by
+/// [`get_messages_iterator_with_undecodable`](AlephMessageClient::get_messages_iterator_with_undecodable),
+/// so a single unreadable message does not abort an otherwise-valid page.
+#[derive(Debug)]
+pub struct UndecodableMessage {
+    /// The raw object's `item_hash`, when present and a string.
+    pub item_hash: Option<String>,
+    /// The deserialization error, stringified.
+    pub error: String,
+}
+
 pub trait AlephMessageClient {
     fn get_message(
         &self,
@@ -1030,6 +1045,30 @@ pub trait AlephMessageClient {
         filter: MessageFilter,
         pagination: Option<u32>,
     ) -> impl Stream<Item = Result<Message, MessageError>> + Send + '_;
+
+    /// Like [`get_messages_iterator`](Self::get_messages_iterator), but tolerant of
+    /// individual messages this SDK's validator rejects.
+    ///
+    /// Each stream item is itself a `Result`: a message that fails to
+    /// deserialize is yielded as `Err(`[`UndecodableMessage`]`)` instead of
+    /// aborting the stream, so one unreadable message (e.g. a schema variant
+    /// this SDK does not yet understand) does not blind a caller to the rest
+    /// of the page. Transport and HTTP errors still terminate the stream with
+    /// an outer `Err`.
+    ///
+    /// The default implementation maps [`get_messages_iterator`](Self::get_messages_iterator),
+    /// so every message parses; it exists so implementors of this trait
+    /// keep compiling without overriding this method. [`AlephClient`] overrides
+    /// it with a true per-message-tolerant implementation.
+    fn get_messages_iterator_with_undecodable(
+        &self,
+        filter: MessageFilter,
+        pagination: Option<u32>,
+    ) -> impl Stream<Item = Result<Result<Box<Message>, UndecodableMessage>, MessageError>> + Send + '_
+    {
+        self.get_messages_iterator(filter, pagination)
+            .map(|result| result.map(|message| Ok(Box::new(message))))
+    }
 
     fn subscribe_to_messages(
         &self,
@@ -1832,6 +1871,42 @@ impl AlephMessageClient for AlephClient {
         }
     }
 
+    fn get_messages_iterator_with_undecodable(
+        &self,
+        filter: MessageFilter,
+        pagination: Option<u32>,
+    ) -> impl Stream<Item = Result<Result<Box<Message>, UndecodableMessage>, MessageError>> + Send + '_
+    {
+        let pagination = pagination
+            .unwrap_or(CURSOR_DEFAULT_PAGINATION)
+            .min(CURSOR_MAX_PAGINATION);
+        async_stream::try_stream! {
+            let mut cursor: Option<String> = None;
+            loop {
+                let response = self
+                    .get_messages_cursor_raw(&filter, cursor.as_deref(), pagination)
+                    .await?;
+                for value in response.messages {
+                    let item_hash = value
+                        .get("item_hash")
+                        .and_then(|hash| hash.as_str())
+                        .map(str::to_owned);
+                    yield match serde_json::from_value::<Message>(value) {
+                        Ok(message) => Ok(Box::new(message)),
+                        Err(error) => Err(UndecodableMessage {
+                            item_hash,
+                            error: error.to_string(),
+                        }),
+                    };
+                }
+                cursor = match response.next_cursor {
+                    Some(c) => Some(c),
+                    None => break,
+                };
+            }
+        }
+    }
+
     async fn subscribe_to_messages(
         &self,
         filter: &MessageFilter,
@@ -1899,6 +1974,18 @@ const CURSOR_DEFAULT_PAGINATION: u32 = 200;
 #[derive(Debug, Deserialize)]
 struct MessagesCursorResponse {
     messages: Vec<Message>,
+    next_cursor: Option<String>,
+}
+
+/// Cursor-mode response for messages, with each message left as raw JSON.
+///
+/// Used by [`get_messages_iterator_with_undecodable`](AlephMessageClient::get_messages_iterator_with_undecodable)
+/// so a message that fails to deserialize into [`Message`] can be reported as
+/// an [`UndecodableMessage`] instead of aborting the whole page. Private, only
+/// used by that iterator.
+#[derive(Debug, Deserialize)]
+struct MessagesCursorResponseRaw {
+    messages: Vec<serde_json::Value>,
     next_cursor: Option<String>,
 }
 
@@ -1978,6 +2065,43 @@ impl AlephClient {
             .map_err(reqwest_middleware::Error::from)?;
 
         let resp: MessagesCursorResponse = response
+            .json()
+            .await
+            .map_err(reqwest_middleware::Error::from)?;
+        Ok(resp)
+    }
+
+    /// Like [`get_messages_cursor`](Self::get_messages_cursor), but leaves each
+    /// message as raw JSON instead of deserializing it into [`Message`].
+    ///
+    /// Used by [`get_messages_iterator_with_undecodable`](AlephMessageClient::get_messages_iterator_with_undecodable)
+    /// so a per-message deserialization failure can be reported instead of
+    /// failing the whole page.
+    async fn get_messages_cursor_raw(
+        &self,
+        filter: &MessageFilter,
+        cursor: Option<&str>,
+        pagination: u32,
+    ) -> Result<MessagesCursorResponseRaw, MessageError> {
+        let url = self
+            .ccn_url
+            .join("/api/v0/messages.json")
+            .unwrap_or_else(|e| panic!("invalid url: {e}"));
+
+        let req = self
+            .http_client
+            .get(url)
+            .query(&filter)
+            .query(&[("cursor", cursor.unwrap_or(""))])
+            .query(&[("pagination", &pagination.to_string())]);
+
+        let response = req
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(reqwest_middleware::Error::from)?;
+
+        let resp: MessagesCursorResponseRaw = response
             .json()
             .await
             .map_err(reqwest_middleware::Error::from)?;
@@ -5180,5 +5304,118 @@ mod account_files_tests {
         let rejected: RejectedMessage = serde_json::from_value(body).unwrap();
         assert_eq!(rejected.item_type, ItemType::Storage);
         assert!(rejected.item_content.is_none());
+    }
+}
+
+#[cfg(test)]
+mod message_iterator_with_undecodable_tests {
+    use super::*;
+    use aleph_types::item_hash;
+    use futures_util::TryStreamExt;
+    use serde_json::json;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A message this SDK's validator accepts. Same shape as the
+    /// `INLINE_UNSIGNED_POST` fixture used by the message-verification tests
+    /// above, which is known to deserialize into `Message`.
+    fn valid_message_json() -> serde_json::Value {
+        json!({
+            "sender": "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef",
+            "chain": "ETH",
+            "signature": null,
+            "type": "POST",
+            "item_content": "{\"type\":\"05567c5b-0606-4a6e-a639-25734c06e2a0\",\"address\":\"0xB68B9D4f3771c246233823ed1D3Add451055F9Ef\",\"content\":{\"body\":\"Hello World\"},\"time\":1762515431.653}",
+            "item_type": "inline",
+            "item_hash": "d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c",
+            "time": 1762515431.653,
+            "channel": "TEST",
+            "content": {
+                "address": "0xB68B9D4f3771c246233823ed1D3Add451055F9Ef",
+                "time": 1762515431.653,
+                "content": { "body": "Hello World" },
+                "ref": null,
+                "type": "05567c5b-0606-4a6e-a639-25734c06e2a0"
+            },
+            "confirmed": false,
+            "confirmations": []
+        })
+    }
+
+    /// An object the server returns that this SDK's `Message` validator
+    /// rejects (missing every field but `item_hash` and `type`), but that
+    /// still carries an `item_hash` for `UndecodableMessage` to report.
+    fn undecodable_message_json() -> serde_json::Value {
+        json!({
+            "item_hash": "deadbeef",
+            "type": "VPROGRAM",
+        })
+    }
+
+    #[tokio::test]
+    async fn iterator_yields_valid_and_invalid_in_order() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v0/messages.json"))
+            .and(query_param("cursor", ""))
+            .and(query_param("pagination", "200"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messages": [valid_message_json(), undecodable_message_json()],
+                "next_cursor": null,
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let items: Vec<Result<Box<Message>, UndecodableMessage>> = client
+            .get_messages_iterator_with_undecodable(MessageFilter::default(), None)
+            .try_collect()
+            .await
+            .expect("no transport error should occur");
+
+        assert_eq!(items.len(), 2, "both messages should be yielded");
+        match &items[0] {
+            Ok(message) => {
+                assert_eq!(
+                    message.item_hash,
+                    item_hash!("d281eb8a69ba1f4dda2d71aaf3ded06caa92edd690ef3d0632f41aa91167762c")
+                );
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        match &items[1] {
+            Err(UndecodableMessage { item_hash, error }) => {
+                assert_eq!(item_hash.as_deref(), Some("deadbeef"));
+                assert!(!error.is_empty());
+            }
+            other => panic!("expected Err(UndecodableMessage), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn iterator_still_fails_on_transport_errors() {
+        let server = MockServer::start().await;
+
+        // A 404 is not retried by the transient-error middleware, so this
+        // stays fast while still exercising the "transport error aborts the
+        // stream" path.
+        Mock::given(method("GET"))
+            .and(path("/api/v0/messages.json"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let err = client
+            .get_messages_iterator_with_undecodable(MessageFilter::default(), None)
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("a transport error must fail the stream, not be swallowed");
+
+        assert!(
+            matches!(err, MessageError::HttpError(_)),
+            "expected HttpError, got {err:?}"
+        );
     }
 }
