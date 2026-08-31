@@ -27,6 +27,7 @@ use super::certs;
 use super::platform::{PlatformPolicy, PlatformPosture};
 use super::tcb::{TcbFloor, TcbFloorPolicy};
 use super::{AttestationReport, TeeType};
+use aleph_types::message::execution::environment::SevSnpRegisters;
 
 /// AMD ARK certificates use CN = "ARK-{product}" (e.g. "ARK-Milan").
 const AMD_ARK_CN_PREFIX: &str = "ARK-";
@@ -124,8 +125,11 @@ impl std::str::FromStr for AmdProduct {
 /// chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationResult {
-    /// Hex-encoded 48-byte launch measurement from the report.
-    pub measurement: String,
+    /// Launch measurement registers from the signed report, in the same
+    /// shape a V-PROGRAM message pins them (`LaunchMeasurement.registers`),
+    /// so a pin check is structural equality on one type. SEV-SNP pins
+    /// `launch` only; a second platform turns this into an enum.
+    pub registers: SevSnpRegisters,
     /// SEV-SNP guest policy the VM was actually launched with, from the
     /// signed report. Callers comparing against an expected policy (e.g. the
     /// one pinned on a V-PROGRAM message) must use this value: a host that
@@ -264,7 +268,9 @@ fn verify_report_with_vcek(
     platform.check(&posture)?;
 
     Ok(VerificationResult {
-        measurement: hex::encode(report.measurement),
+        registers: SevSnpRegisters {
+            launch: hex::encode(report.measurement),
+        },
         policy: u64::from(report.policy),
         launch_tcb: report.launch_tcb,
         reported_tcb: report.reported_tcb,
@@ -1105,10 +1111,10 @@ mod tests {
         // so a regression that silently accepts a *different* measurement
         // doesn't slip through unnoticed.
         assert_eq!(
-            result.measurement,
+            result.registers.launch,
             "7a1e5c266c0108dbc9bb94fa926951320940915d0aafb42464bd88b579ea158d3e1a0dc39b2c60bd95b9c480cd81841f"
         );
-        assert_eq!(result.measurement, hex::encode(report.measurement));
+        assert_eq!(result.registers.launch, hex::encode(report.measurement));
 
         // The policy must be surfaced from the SIGNED report so callers can
         // compare it against the expected (message-pinned) policy. Cross-check
