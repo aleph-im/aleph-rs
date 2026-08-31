@@ -100,8 +100,8 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-aleph-sdk = "0.9"
-aleph-types = "0.9"
+aleph-sdk = "0.18"
+aleph-types = "0.18"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -135,7 +135,7 @@ The SDK also covers posting, aggregates, file storage, instance management, cred
 To trim dependencies (e.g. for a server that only verifies hashes):
 
 ```toml
-aleph-types = { version = "0.9", default-features = false }
+aleph-types = { version = "0.18", default-features = false }
 ```
 
 ---
