@@ -3114,12 +3114,15 @@ pub enum VProgramCommand {
     /// Instead of a prebuilt image, --compose builds the workload from a
     /// Docker Compose file (the aleph.compose/1 subset: image, command,
     /// entrypoint, environment, depends_on, tmpfs; every service must set
-    /// network_mode: host). Images are pulled from their tag by default (the
-    /// resolved digest is reported; the image bytes are pinned by the
-    /// verity-measured workload volume); pass --image-archive IMAGE=PATH
-    /// (repeatable) to supply a prebuilt archive instead of pulling. Digest
-    /// references (name@sha256:...) are rejected: podman load cannot restore
-    /// them from a saved archive. The guest exposes a single attested
+    /// network_mode: host). A tag reference is pulled and the resolved
+    /// digest reported; a digest reference (name@sha256:...) is pulled by
+    /// digest, so the declared hash is enforced and a mismatch fails the
+    /// pull, and is staged under a deterministic local tag embedding that
+    /// digest. Either way the image bytes are pinned by the verity-measured
+    /// workload volume. Pass --image-archive IMAGE=PATH (repeatable) to
+    /// supply a prebuilt archive instead of pulling (tag references only:
+    /// an archive cannot be verified against a declared digest). The guest
+    /// exposes a single attested
     /// endpoint that proxies to 127.0.0.1:8080, so the runtime manifest must
     /// declare workload.contract: "aleph.compose/1".
     Create(Box<VProgramCreateArgs>),

@@ -177,6 +177,7 @@ async fn handle_create(
             }
             let images = compose::image_names(&validated.file);
             check_archive_keys_are_known_images(&archives, &images)?;
+            check_archives_do_not_cover_digest_images(&archives)?;
             let mkfs = MkfsExt4::find()?;
             let needs_pull = images.iter().any(|i| !archives.contains_key(i));
             let container = if needs_pull {
@@ -284,7 +285,7 @@ async fn handle_create(
             None,
             None,
         ),
-        Some((validated, archives, mkfs, container)) => {
+        Some((mut validated, archives, mkfs, container)) => {
             let mut resolved: Vec<(String, PathBuf)> = Vec::new();
             let mut save_tmp = Vec::new(); // keep pulled archives alive until staged
             for image in compose::image_names(&validated.file) {
@@ -296,21 +297,35 @@ async fn handle_create(
                         eprintln!("Pulling {image}...");
                     }
                     let tmp = tempfile::Builder::new().suffix(".tar").tempfile()?;
-                    // Saved from the original tag, never the digest (#348):
-                    // only a tag survives the archive save/load round trip
-                    // that the guest's `podman load` performs. The digest is
-                    // reported for provenance; the image bytes are pinned by
-                    // the verity-measured workload volume.
-                    let digest = tool.pull_and_save(&image, tmp.path()).await?;
-                    if !json {
-                        eprintln!("Pulled {image} ({digest})");
+                    // The archive is always saved from a tag, never a digest
+                    // reference (#348): only a tag survives the save/load
+                    // round trip that the guest's `podman load` performs. A
+                    // digest reference is pulled by digest (the engine
+                    // enforces the declared hash and fails loudly on
+                    // mismatch) and staged under its deterministic pinned
+                    // tag; a tag reference is saved as-is and the resolved
+                    // digest reported for provenance. Either way the image
+                    // bytes are pinned by the verity-measured workload
+                    // volume.
+                    if let Some(tag) = compose::pinned_tag(&image) {
+                        tool.pull_and_save_pinned(&image, &tag, tmp.path()).await?;
+                        if !json {
+                            eprintln!("Pulled {image} (staged as {tag})");
+                        }
+                        resolved.push((tag, tmp.path().to_path_buf()));
+                    } else {
+                        let digest = tool.pull_and_save(&image, tmp.path()).await?;
+                        if !json {
+                            eprintln!("Pulled {image} ({digest})");
+                        }
+                        resolved.push((image, tmp.path().to_path_buf()));
                     }
-                    resolved.push((image, tmp.path().to_path_buf()));
                     save_tmp.push(tmp);
                 }
             }
-            // Image references are staged verbatim so they match the tags
-            // embedded in the archives.
+            // Stage tag references verbatim and digest references as their
+            // pinned tag, matching the tags embedded in the archives.
+            compose::retag_digest_images(&mut validated.file);
             let yaml = compose::to_yaml(&validated.file)?;
             let (dir, image) = compose::build_workload_image(&mkfs, &yaml, &resolved).await?;
             let path = image.path().to_path_buf();
@@ -650,6 +665,26 @@ pub(crate) fn check_archive_keys_are_known_images(
              ({images:?}); IMAGE must match the compose file's image string exactly"
         );
     }
+}
+
+/// Error out if an --image-archive key is a digest reference: the archive's
+/// bytes carry no registry digest to verify the declared identity against,
+/// so accepting it would stage the digest claim unenforced. Pure and
+/// I/O-free so it's directly unit-testable.
+pub(crate) fn check_archives_do_not_cover_digest_images(
+    archives: &BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    for image in archives.keys() {
+        if compose::pinned_tag(image).is_some() {
+            bail!(
+                "--image-archive cannot supply {image:?}: the image is referenced by \
+                 digest, and a prebuilt archive cannot be verified against it; drop \
+                 --image-archive for it so the digest-enforced pull runs, or reference \
+                 the image by tag"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// One sample of the VM's attested endpoint via the scheduler + CRN.
@@ -3341,5 +3376,25 @@ mod compose_wiring_tests {
         let archives = BTreeMap::from([("nginx:1.27".to_string(), PathBuf::from("./a.tar"))]);
         let images = vec!["nginx:1.27".to_string()];
         check_archive_keys_are_known_images(&archives, &images).unwrap();
+    }
+
+    /// A digest-referenced image declares an identity the CLI must enforce;
+    /// a caller-supplied archive has no registry digest to enforce it
+    /// against, so the combination is refused rather than staged unverified.
+    #[test]
+    fn check_archives_do_not_cover_digest_images_rejects_the_combination() {
+        let image = format!("nginx@sha256:{}", "ab".repeat(32));
+        let archives = BTreeMap::from([(image.clone(), PathBuf::from("./a.tar"))]);
+        let err = check_archives_do_not_cover_digest_images(&archives)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("digest"), "{err}");
+        assert!(err.contains(&image), "{err}");
+    }
+
+    #[test]
+    fn check_archives_do_not_cover_digest_images_accepts_tagged_keys() {
+        let archives = BTreeMap::from([("nginx:1.27".to_string(), PathBuf::from("./a.tar"))]);
+        check_archives_do_not_cover_digest_images(&archives).unwrap();
     }
 }
