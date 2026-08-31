@@ -30,7 +30,9 @@ use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::base::Payment;
-use aleph_types::message::execution::environment::{LaunchMeasurement, validate_snp_policy};
+use aleph_types::message::execution::environment::{
+    LaunchMeasurement, SevSnpRegisters, validate_snp_policy,
+};
 use aleph_types::message::{
     MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType, StorageEngine, TeeVerification,
     VerifiableProgramContent, VerifiedVolume, VerifiedWorkload,
@@ -1475,8 +1477,8 @@ fn format_list_text(rows: &[InstanceRow]) -> String {
 ///   *after* `attested_request` returns - before trusting the response body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MeasurementExpectation {
-    Pin(Vec<u8>),
-    MemberOf(Vec<Vec<u8>>),
+    Pin(SevSnpRegisters),
+    MemberOf(Vec<SevSnpRegisters>),
 }
 
 /// Resolve which measurement(s) an attested call must match, per the
@@ -1507,7 +1509,11 @@ pub(crate) fn resolve_expected_measurement(
                 hex_str.len()
             );
         }
-        return Ok(MeasurementExpectation::Pin(bytes));
+        // Re-encode so the pin compares structurally against the lowercase
+        // hex the SDK derives from the signed report.
+        return Ok(MeasurementExpectation::Pin(SevSnpRegisters {
+            launch: hex::encode(bytes),
+        }));
     }
 
     match measurements.len() {
@@ -1515,29 +1521,18 @@ pub(crate) fn resolve_expected_measurement(
             "V-Program message pins no launch measurements; cannot verify attestation without \
              --expected-measurement"
         ),
-        1 => Ok(MeasurementExpectation::Pin(snp_launch_bytes(
-            &measurements[0],
-        )?)),
-        _ => {
-            let mut digests = Vec::with_capacity(measurements.len());
-            for m in measurements {
-                digests.push(snp_launch_bytes(m)?);
-            }
-            Ok(MeasurementExpectation::MemberOf(digests))
-        }
+        // The message's registers are the pin, same type both sides. While
+        // sev_snp is the only platform defined this is infallible; when a
+        // second platform lands, `registers` becomes an enum and this must
+        // fail closed on an entry the client cannot check rather than skip
+        // it, since skipping would narrow the accepted set silently.
+        1 => Ok(MeasurementExpectation::Pin(
+            measurements[0].registers.clone(),
+        )),
+        _ => Ok(MeasurementExpectation::MemberOf(
+            measurements.iter().map(|m| m.registers.clone()).collect(),
+        )),
     }
-}
-
-/// The SEV-SNP launch digest of one measurement, as raw bytes.
-///
-/// Infallible on the platform axis while sev_snp is the only one defined. When
-/// a second platform lands, `registers` becomes an enum and this must fail
-/// closed on an entry the client cannot check rather than skipping it, since
-/// skipping would narrow the accepted set without the user knowing.
-fn snp_launch_bytes(m: &LaunchMeasurement) -> Result<Vec<u8>> {
-    let digest = m.snp_launch_digest();
-    hex::decode(digest)
-        .with_context(|| format!("message launch register is not valid hex: {digest:?}"))
 }
 
 /// True if `policy` has the SEV-SNP DEBUG bit (19) set: the host may then
@@ -1714,12 +1709,12 @@ fn check_fresh_consistency(
              than the one that served the response; refusing to transfer liveness"
         );
     }
-    if fresh.measurement != response.measurement {
+    if fresh.registers != response.registers {
         bail!(
-            "fresh report measurement {} does not match the response's verified \
-             measurement {}",
-            fresh.measurement,
-            response.measurement
+            "fresh report launch measurement {} does not match the response's verified \
+             launch measurement {}",
+            fresh.registers.launch,
+            response.registers.launch
         );
     }
     if fresh.policy != response.policy {
@@ -1822,7 +1817,7 @@ pub(crate) fn render_call_result(
         // No validity flag: `attested_request` only ever returns a response
         // whose attestation verified, so the measurement is the evidence.
         let out = serde_json::json!({
-            "measurement": response.measurement,
+            "registers": response.registers,
             "policy": format!("{:#x}", response.policy),
             "effective_tcb_floor": tcb_floor_json(min_tcb.for_silicon(response.cpuid_family, response.cpuid_model, response.cpuid_stepping)),
             "cpuid": {
@@ -1873,7 +1868,7 @@ pub(crate) fn render_call_result(
         if verbose {
             meta.push_str(&format!(
                 "\nmeasurement: {}\npolicy: {:#x}\nlaunch TCB: {}\nplatform: {}",
-                response.measurement,
+                response.registers.launch,
                 response.policy,
                 tcb_line(
                     response.launch_tcb.fmc,
@@ -1950,7 +1945,7 @@ async fn handle_call(
     let body = args.data.clone().map(bytes::Bytes::from);
 
     let handshake_pin = match &expected {
-        MeasurementExpectation::Pin(bytes) => MeasurementPin::Exact(bytes.as_slice()),
+        MeasurementExpectation::Pin(registers) => MeasurementPin::Exact(registers),
         // Fleet flow: the exact model is only known from the response, so
         // the handshake pin is explicitly deferred; the MemberOf allow-list
         // check below is what discharges the CallerVerified obligation.
@@ -2012,13 +2007,11 @@ async fn handle_call(
         // which model the guest would present), so the membership check is
         // deferred to here.
         MeasurementExpectation::MemberOf(set) => {
-            let got = hex::decode(&response.measurement)
-                .context("attested_request returned a non-hex measurement")?;
-            if !set.iter().any(|m| m == &got) {
+            if !set.contains(&response.registers) {
                 bail!(
                     "measurement mismatch: guest presented {} which matches none of the \
                      measurements pinned on the V-Program message",
-                    response.measurement
+                    response.registers.launch
                 );
             }
         }
@@ -2028,13 +2021,11 @@ async fn handle_call(
         // `MemberOf` post-check above, so the trust decision never rests on a
         // single site.
         MeasurementExpectation::Pin(pin) => {
-            let got = hex::decode(&response.measurement)
-                .context("attested_request returned a non-hex measurement")?;
-            if &got != pin {
+            if &response.registers != pin {
                 bail!(
                     "measurement mismatch: guest presented {} which does not match the \
                      pinned launch measurement",
-                    response.measurement
+                    response.registers.launch
                 );
             }
         }
@@ -2530,14 +2521,19 @@ mod call_tests {
         );
     }
 
+    /// Registers pinning `launch` as given, the shape the resolver now
+    /// yields and the SDK derives.
+    fn regs(launch: &str) -> SevSnpRegisters {
+        SevSnpRegisters {
+            launch: launch.to_string(),
+        }
+    }
+
     #[test]
     fn resolve_expected_measurement_accepts_a_full_length_override() {
         let digest = "cd".repeat(48);
         let expected = resolve_expected_measurement(&[], Some(&digest)).unwrap();
-        assert_eq!(
-            expected,
-            MeasurementExpectation::Pin(hex::decode(&digest).unwrap())
-        );
+        assert_eq!(expected, MeasurementExpectation::Pin(regs(&digest)));
     }
 
     #[test]
@@ -2547,10 +2543,7 @@ mod call_tests {
 
         let expected = resolve_expected_measurement(&measurements, None).unwrap();
 
-        assert_eq!(
-            expected,
-            MeasurementExpectation::Pin(hex::decode(&digest).unwrap())
-        );
+        assert_eq!(expected, MeasurementExpectation::Pin(regs(&digest)));
     }
 
     #[test]
@@ -2563,7 +2556,7 @@ mod call_tests {
 
         assert_eq!(
             expected,
-            MeasurementExpectation::Pin(hex::decode(&override_digest).unwrap())
+            MeasurementExpectation::Pin(regs(&override_digest))
         );
     }
 
@@ -2580,10 +2573,7 @@ mod call_tests {
 
         assert_eq!(
             expected,
-            MeasurementExpectation::MemberOf(vec![
-                hex::decode(&digest_a).unwrap(),
-                hex::decode(&digest_b).unwrap(),
-            ])
+            MeasurementExpectation::MemberOf(vec![regs(&digest_a), regs(&digest_b)])
         );
     }
 
@@ -2635,7 +2625,9 @@ mod call_tests {
 
     fn dummy_response(measurement: &str, body: &[u8]) -> AttestedResponse {
         AttestedResponse {
-            measurement: measurement.to_string(),
+            registers: SevSnpRegisters {
+                launch: measurement.to_string(),
+            },
             policy: 0x30000,
             launch_tcb: Default::default(),
             reported_tcb: Default::default(),
@@ -2790,7 +2782,11 @@ mod call_tests {
             v.get("attestation_valid").is_none(),
             "no redundant always-true validity flag in call output"
         );
-        assert_eq!(v["measurement"], serde_json::json!("ab".repeat(48)));
+        assert_eq!(v["registers"]["launch"], serde_json::json!("ab".repeat(48)));
+        assert!(
+            v.get("measurement").is_none(),
+            "scalar key must be gone: {v}"
+        );
         // The verified policy is evidence alongside the measurement: hex,
         // matching the format used in --policy and error messages.
         assert_eq!(v["policy"], serde_json::json!("0x30000"));
@@ -3025,7 +3021,7 @@ mod call_tests {
     fn fresh_consistency_rejects_key_measurement_and_policy_drift() {
         let response = dummy_response(&"ab".repeat(48), b"ok");
         let fresh = FreshAttestation {
-            measurement: response.measurement.clone(),
+            registers: response.registers.clone(),
             policy: response.policy,
             launch_tcb: response.launch_tcb,
             reported_tcb: response.reported_tcb,
@@ -3042,7 +3038,7 @@ mod call_tests {
         assert!(check_fresh_consistency(&wrong_key, &response).is_err());
 
         let mut wrong_measurement = fresh.clone();
-        wrong_measurement.measurement = "cd".repeat(48);
+        wrong_measurement.registers.launch = "cd".repeat(48);
         assert!(check_fresh_consistency(&wrong_measurement, &response).is_err());
 
         let mut wrong_policy = fresh;

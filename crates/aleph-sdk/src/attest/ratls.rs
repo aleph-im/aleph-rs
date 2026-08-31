@@ -56,6 +56,7 @@ use super::tcb::TcbFloorPolicy;
 use super::verify::{AmdProduct, VerificationResult, verify_sev_snp_report};
 use super::x509::{AttestError, extract_attestation_from_cert};
 use super::{AttestationReport, TeeType};
+use aleph_types::message::execution::environment::SevSnpRegisters;
 
 /// Domain tag the guest agent mixes into the key-binding hash:
 /// `report_data = SHA-384(KEY_BINDING_DOMAIN || public_key) || zeros`.
@@ -112,22 +113,22 @@ fn verify_fresh_binding(
 /// cannot know the exact measurement before the handshake (fleet flows
 /// where the guest's model is only learned from the response) must opt out
 /// explicitly with [`MeasurementPin::CallerVerified`], and then MUST check
-/// the returned [`AttestedResponse::measurement`] against its own
+/// the returned [`AttestedResponse::registers`] against its own
 /// allow-list: with this variant nothing else will.
 #[derive(Debug, Clone, Copy)]
 pub enum MeasurementPin<'a> {
     /// Reject the handshake unless the report's launch measurement equals
-    /// exactly these bytes (48 for SEV-SNP).
-    Exact(&'a [u8]),
+    /// exactly these registers (for SEV-SNP, the 48-byte launch digest).
+    Exact(&'a SevSnpRegisters),
     /// Skip the handshake-time measurement check; the caller takes over the
     /// obligation to validate the measurement returned by the call.
     CallerVerified,
 }
 
 impl<'a> MeasurementPin<'a> {
-    fn as_option(self) -> Option<&'a [u8]> {
+    fn as_option(self) -> Option<&'a SevSnpRegisters> {
         match self {
-            MeasurementPin::Exact(bytes) => Some(bytes),
+            MeasurementPin::Exact(registers) => Some(registers),
             MeasurementPin::CallerVerified => None,
         }
     }
@@ -164,8 +165,9 @@ impl PolicyPin {
 /// is no validity flag to check.
 #[derive(Debug, Clone)]
 pub struct AttestedResponse {
-    /// Hex-encoded launch measurement from the verified report.
-    pub measurement: String,
+    /// Launch measurement registers from the verified report, in the shape
+    /// the V-PROGRAM message pins them.
+    pub registers: SevSnpRegisters,
     /// SEV-SNP guest policy from the verified report.
     pub policy: u64,
     /// TCB the VM was launched under (Option A gates on this).
@@ -199,8 +201,8 @@ pub struct AttestedResponse {
 /// [`AttestedResponse`]: no validity flag).
 #[derive(Debug, Clone)]
 pub struct FreshAttestation {
-    /// Hex-encoded launch measurement from the verified fresh report.
-    pub measurement: String,
+    /// Launch measurement registers from the verified fresh report.
+    pub registers: SevSnpRegisters,
     /// SEV-SNP guest policy from the verified fresh report.
     pub policy: u64,
     /// TCB the VM was launched under (Option A gates on this).
@@ -501,7 +503,7 @@ pub async fn attested_request(
     let url = base_url.join(path)?;
 
     let verifier = SnpCertVerifier::new(
-        measurement.as_option().map(<[u8]>::to_vec),
+        measurement.as_option().map(launch_bytes),
         policy.as_option(),
     );
     let client = build_attested_client(verifier.clone())?;
@@ -557,7 +559,7 @@ pub async fn attested_request(
     let body = response.bytes().await.map_err(AttestError::Http)?;
 
     Ok(AttestedResponse {
-        measurement: result.measurement,
+        registers: result.registers,
         policy: result.policy,
         launch_tcb: result.launch_tcb,
         reported_tcb: result.reported_tcb,
@@ -572,26 +574,35 @@ pub async fn attested_request(
     })
 }
 
+/// The pinned launch digest as bytes, for the handshake's constant-time
+/// comparison. A register value that does not decode can match nothing, so
+/// it yields an empty pin, which rejects every report: fail closed.
+fn launch_bytes(registers: &SevSnpRegisters) -> Vec<u8> {
+    hex::decode(&registers.launch).unwrap_or_default()
+}
+
 /// Re-run the measurement and policy pins against a VERIFIED fresh report.
 /// These normally run during the TLS handshake against the cert report;
 /// the fresh report arrives in a response body, so they must be re-applied
 /// to its signed fields explicitly.
 fn check_fresh_pins(
     result: &VerificationResult,
-    expected_measurement: Option<&[u8]>,
+    expected_registers: Option<&SevSnpRegisters>,
     expected_policy: Option<u64>,
 ) -> Result<(), AttestError> {
-    if let Some(expected) = expected_measurement {
+    if let Some(expected) = expected_registers {
         // Same constant-time comparison as the handshake-time pin in
         // `verify_snp_cert`, for consistency across the attest module. A
-        // non-hex `measurement` cannot match any pin, so it is a mismatch.
-        let matches = hex::decode(&result.measurement)
-            .map(|got| got.ct_eq(expected).unwrap_u8() == 1)
+        // register that does not decode cannot match any pin, so it is a
+        // mismatch (`launch_bytes` yields an empty pin for the same reason).
+        let expected_bytes = launch_bytes(expected);
+        let matches = hex::decode(&result.registers.launch)
+            .map(|got| got.ct_eq(&expected_bytes).unwrap_u8() == 1)
             .unwrap_or(false);
         if !matches {
             return Err(AttestError::FreshMeasurementMismatch {
-                expected: hex::encode(expected),
-                got: result.measurement.clone(),
+                expected: expected.launch.clone(),
+                got: result.registers.launch.clone(),
             });
         }
     }
@@ -678,7 +689,7 @@ async fn fresh_attestation_with_nonce(
     verify_fresh_binding(&dto.data, &response.served_public_key, nonce)?;
 
     Ok(FreshAttestation {
-        measurement: result.measurement,
+        registers: result.registers,
         policy: result.policy,
         launch_tcb: result.launch_tcb,
         reported_tcb: result.reported_tcb,
@@ -697,10 +708,11 @@ mod tests {
     use crate::attest::x509::{ATTESTATION_OID, encode_attestation_extension};
 
     #[test]
-    fn measurement_pin_exact_carries_the_bytes() {
+    fn measurement_pin_exact_carries_the_registers() {
+        let registers = regs("aa");
         assert_eq!(
-            MeasurementPin::Exact(&[0xAA, 0xBB]).as_option(),
-            Some([0xAA, 0xBB].as_slice())
+            MeasurementPin::Exact(&registers).as_option(),
+            Some(&registers)
         );
         assert_eq!(MeasurementPin::CallerVerified.as_option(), None);
     }
@@ -1228,9 +1240,18 @@ mod tests {
         assert!(matches!(err, AttestError::FreshnessBinding));
     }
 
+    /// Registers whose launch digest is `byte` repeated 48 times, hex.
+    fn regs(byte: &str) -> SevSnpRegisters {
+        SevSnpRegisters {
+            launch: byte.repeat(48),
+        }
+    }
+
     fn dummy_verification(measurement_hex: &str, policy: u64) -> VerificationResult {
         VerificationResult {
-            measurement: measurement_hex.to_string(),
+            registers: SevSnpRegisters {
+                launch: measurement_hex.to_string(),
+            },
             policy,
             launch_tcb: Default::default(),
             reported_tcb: Default::default(),
@@ -1247,14 +1268,14 @@ mod tests {
     #[test]
     fn fresh_pins_accept_matching_measurement_and_policy() {
         let v = dummy_verification(&"ab".repeat(48), 0x30000);
-        check_fresh_pins(&v, Some(&[0xAB; 48]), Some(0x30000)).expect("matching pins must pass");
+        check_fresh_pins(&v, Some(&regs("ab")), Some(0x30000)).expect("matching pins must pass");
         check_fresh_pins(&v, None, None).expect("absent pins must pass");
     }
 
     #[test]
     fn fresh_pins_reject_a_measurement_mismatch() {
         let v = dummy_verification(&"ab".repeat(48), 0x30000);
-        let err = check_fresh_pins(&v, Some(&[0xCD; 48]), None).unwrap_err();
+        let err = check_fresh_pins(&v, Some(&regs("cd")), None).unwrap_err();
         assert!(matches!(err, AttestError::FreshMeasurementMismatch { .. }));
     }
 
@@ -1262,10 +1283,10 @@ mod tests {
     fn fresh_pins_reject_a_non_hex_or_short_measurement() {
         // Uppercase hex decodes to the same bytes and must still match.
         let v = dummy_verification(&"AB".repeat(48), 0x30000);
-        check_fresh_pins(&v, Some(&[0xAB; 48]), None).expect("case-insensitive hex must pass");
+        check_fresh_pins(&v, Some(&regs("ab")), None).expect("case-insensitive hex must pass");
         for bad in ["zz", &"ab".repeat(47), ""] {
             let v = dummy_verification(bad, 0x30000);
-            let err = check_fresh_pins(&v, Some(&[0xAB; 48]), None).unwrap_err();
+            let err = check_fresh_pins(&v, Some(&regs("ab")), None).unwrap_err();
             assert!(
                 matches!(err, AttestError::FreshMeasurementMismatch { .. }),
                 "{bad:?}"
