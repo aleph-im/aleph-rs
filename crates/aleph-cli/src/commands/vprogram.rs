@@ -172,7 +172,7 @@ async fn handle_create(
         (None, Some(compose_path)) => {
             let text = std::fs::read_to_string(compose_path)
                 .with_context(|| format!("reading compose file {}", compose_path.display()))?;
-            let validated = compose::parse_and_validate(&text)?;
+            let validated = compose::parse_and_validate(&text, args.volumes.len())?;
             for w in &validated.warnings {
                 eprintln!("warning: {w}");
             }

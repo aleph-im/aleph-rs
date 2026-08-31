@@ -3273,8 +3273,10 @@ pub struct VProgramCreateArgs {
     #[arg(long, value_parser = parse_image_ref)]
     pub runtime: Option<ImageRef>,
 
-    /// Extra read-only data volume image (repeatable, max 8); each is
-    /// verity-bound into the attested TCB in flag order.
+    /// Verified data volume ext4 image (repeatable, up to 8). Each volume is
+    /// dm-verity-formatted, published, and mounted read-only in the guest at
+    /// `/volumes/<index>` in flag order. Compose services reference them with
+    /// `volumes: ["/volumes/<index>:<target>:ro"]`.
     #[arg(long = "volume")]
     pub volumes: Vec<PathBuf>,
 
