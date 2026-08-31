@@ -1016,6 +1016,11 @@ impl FileDownload {
 #[derive(Debug)]
 pub struct UndecodableMessage {
     /// The raw object's `item_hash`, when present and a string.
+    ///
+    /// Kept as a plain `String` rather than an [`ItemHash`], because the hash
+    /// of a message this SDK cannot decode may itself be unparseable. To
+    /// compare against known [`ItemHash`] values, compare with their
+    /// `to_string()` form.
     pub item_hash: Option<String>,
     /// The deserialization error, stringified.
     pub error: String,
@@ -1055,6 +1060,10 @@ pub trait AlephMessageClient {
     /// this SDK does not yet understand) does not blind a caller to the rest
     /// of the page. Transport and HTTP errors still terminate the stream with
     /// an outer `Err`.
+    ///
+    /// The parsed message is boxed so the stream item stays small: `Message`
+    /// is large, and without the `Box` every yielded `Result` would be sized
+    /// for it.
     ///
     /// The default implementation maps [`get_messages_iterator`](Self::get_messages_iterator),
     /// so every message parses; it exists so implementors of this trait
@@ -2046,29 +2055,8 @@ impl AlephClient {
         cursor: Option<&str>,
         pagination: u32,
     ) -> Result<MessagesCursorResponse, MessageError> {
-        let url = self
-            .ccn_url
-            .join("/api/v0/messages.json")
-            .unwrap_or_else(|e| panic!("invalid url: {e}"));
-
-        let req = self
-            .http_client
-            .get(url)
-            .query(&filter)
-            .query(&[("cursor", cursor.unwrap_or(""))])
-            .query(&[("pagination", &pagination.to_string())]);
-
-        let response = req
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(reqwest_middleware::Error::from)?;
-
-        let resp: MessagesCursorResponse = response
-            .json()
+        self.get_messages_cursor_impl(filter, cursor, pagination)
             .await
-            .map_err(reqwest_middleware::Error::from)?;
-        Ok(resp)
     }
 
     /// Like [`get_messages_cursor`](Self::get_messages_cursor), but leaves each
@@ -2083,6 +2071,19 @@ impl AlephClient {
         cursor: Option<&str>,
         pagination: u32,
     ) -> Result<MessagesCursorResponseRaw, MessageError> {
+        self.get_messages_cursor_impl(filter, cursor, pagination)
+            .await
+    }
+
+    /// Shared request path for the cursor-mode message endpoints: `T` decides
+    /// how the page body is deserialized ([`MessagesCursorResponse`] for the
+    /// strict iterator, [`MessagesCursorResponseRaw`] for the tolerant one).
+    async fn get_messages_cursor_impl<T: DeserializeOwned>(
+        &self,
+        filter: &MessageFilter,
+        cursor: Option<&str>,
+        pagination: u32,
+    ) -> Result<T, MessageError> {
         let url = self
             .ccn_url
             .join("/api/v0/messages.json")
@@ -2101,7 +2102,7 @@ impl AlephClient {
             .error_for_status()
             .map_err(reqwest_middleware::Error::from)?;
 
-        let resp: MessagesCursorResponseRaw = response
+        let resp: T = response
             .json()
             .await
             .map_err(reqwest_middleware::Error::from)?;
@@ -5343,12 +5344,14 @@ mod message_iterator_with_undecodable_tests {
     }
 
     /// An object the server returns that this SDK's `Message` validator
-    /// rejects (missing every field but `item_hash` and `type`), but that
-    /// still carries an `item_hash` for `UndecodableMessage` to report.
+    /// rejects: the `type` is the real wire name of a v-program (the message
+    /// kind behind the production incident), so deserialization fails on the
+    /// missing remaining fields, not on an invalid type string. It still
+    /// carries an `item_hash` for `UndecodableMessage` to report.
     fn undecodable_message_json() -> serde_json::Value {
         json!({
             "item_hash": "deadbeef",
-            "type": "VPROGRAM",
+            "type": "V-PROGRAM",
         })
     }
 
@@ -5391,6 +5394,180 @@ mod message_iterator_with_undecodable_tests {
             }
             other => panic!("expected Err(UndecodableMessage), got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn tolerant_iterator_walks_cursor_until_exhausted() {
+        let server = MockServer::start().await;
+
+        // First page: one valid and one undecodable message, next_cursor=ABC.
+        Mock::given(method("GET"))
+            .and(path("/api/v0/messages.json"))
+            .and(query_param("cursor", ""))
+            .and(query_param("pagination", "200"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messages": [valid_message_json(), undecodable_message_json()],
+                "next_cursor": "ABC",
+            })))
+            .mount(&server)
+            .await;
+
+        // Second page: one valid message, no next_cursor.
+        Mock::given(method("GET"))
+            .and(path("/api/v0/messages.json"))
+            .and(query_param("cursor", "ABC"))
+            .and(query_param("pagination", "200"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messages": [valid_message_json()],
+                "next_cursor": null,
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AlephClient::new(Url::parse(&server.uri()).unwrap());
+        let items: Vec<Result<Box<Message>, UndecodableMessage>> = client
+            .get_messages_iterator_with_undecodable(MessageFilter::default(), None)
+            .try_collect()
+            .await
+            .expect("no transport error should occur");
+
+        assert_eq!(items.len(), 3, "both pages should be walked in order");
+        assert!(items[0].is_ok());
+        assert!(items[1].is_err(), "undecodable message must not be dropped");
+        assert!(items[2].is_ok());
+    }
+
+    /// Implements only the strict iterator, to exercise the trait's default
+    /// `get_messages_iterator_with_undecodable`.
+    struct StrictOnlyClient;
+
+    impl AlephMessageClient for StrictOnlyClient {
+        async fn get_message(
+            &self,
+            _item_hash: &ItemHash,
+        ) -> Result<MessageWithStatus<Message>, MessageError> {
+            unimplemented!()
+        }
+
+        async fn get_messages(
+            &self,
+            _filter: &MessageFilter,
+            _pagination: PaginationParams,
+        ) -> Result<Vec<Message>, MessageError> {
+            unimplemented!()
+        }
+
+        fn get_messages_iterator(
+            &self,
+            _filter: MessageFilter,
+            _pagination: Option<u32>,
+        ) -> impl Stream<Item = Result<Message, MessageError>> + Send + '_ {
+            let message: Message =
+                serde_json::from_value(valid_message_json()).expect("fixture must parse");
+            futures_util::stream::iter(vec![Ok(message)])
+        }
+
+        async fn subscribe_to_messages(
+            &self,
+            _filter: &MessageFilter,
+            _history: Option<u32>,
+        ) -> Result<impl Stream<Item = Result<Message, MessageError>> + Send + Unpin, MessageError>
+        {
+            Ok(futures_util::stream::empty())
+        }
+
+        async fn post_message(
+            &self,
+            _message: &PendingMessage,
+            _sync: bool,
+        ) -> Result<PostMessageResponse, MessageError> {
+            unimplemented!()
+        }
+
+        async fn get_messages_and_verify(
+            &self,
+            _filter: &MessageFilter,
+        ) -> Result<Vec<MessageVerification>, MessageError>
+        where
+            Self: AlephStorageClient + Sync,
+        {
+            unimplemented!()
+        }
+    }
+
+    impl AlephStorageClient for StrictOnlyClient {
+        async fn get_file_size(&self, _file_hash: &ItemHash) -> Result<Bytes, MessageError> {
+            unimplemented!()
+        }
+
+        async fn get_file_metadata_by_message_hash(
+            &self,
+            _message_hash: &ItemHash,
+        ) -> Result<FileMetadata, MessageError> {
+            unimplemented!()
+        }
+
+        async fn get_file_metadata_by_ref(
+            &self,
+            _file_ref: &FileRef,
+        ) -> Result<FileMetadata, MessageError> {
+            unimplemented!()
+        }
+
+        async fn download_file_by_hash(
+            &self,
+            _file_hash: &ItemHash,
+        ) -> Result<FileDownload, MessageError> {
+            unimplemented!()
+        }
+
+        async fn upload_to_storage(
+            &self,
+            _data: &[u8],
+            _message: Option<&PendingMessage>,
+            _sync: bool,
+        ) -> Result<ItemHash, StorageError> {
+            unimplemented!()
+        }
+
+        async fn upload_to_ipfs(
+            &self,
+            _data: &[u8],
+            _message: Option<&PendingMessage>,
+            _sync: bool,
+        ) -> Result<ItemHash, StorageError> {
+            unimplemented!()
+        }
+
+        async fn upload_file_to_storage(
+            &self,
+            _path: impl AsRef<std::path::Path> + Send,
+            _message: Option<&PendingMessage>,
+            _sync: bool,
+        ) -> Result<ItemHash, StorageError> {
+            unimplemented!()
+        }
+
+        async fn upload_file_to_ipfs(
+            &self,
+            _path: impl AsRef<std::path::Path> + Send,
+            _message: Option<&PendingMessage>,
+            _sync: bool,
+        ) -> Result<ItemHash, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn default_impl_maps_every_strict_message_to_ok() {
+        let items: Vec<Result<Box<Message>, UndecodableMessage>> = StrictOnlyClient
+            .get_messages_iterator_with_undecodable(MessageFilter::default(), None)
+            .try_collect()
+            .await
+            .expect("the strict stream yields no error");
+
+        assert_eq!(items.len(), 1);
+        assert!(items[0].is_ok());
     }
 
     #[tokio::test]
