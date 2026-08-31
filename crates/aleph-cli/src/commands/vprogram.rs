@@ -29,6 +29,7 @@ use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::execution::base::Payment;
 use aleph_types::message::execution::environment::{LaunchMeasurement, validate_snp_policy};
 use aleph_types::message::{
     MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType, StorageEngine, TeeVerification,
@@ -817,7 +818,10 @@ async fn upload_file(
         return Ok(file_hash);
     }
 
-    let mut builder = StoreBuilder::new(account, file_hash, StorageEngine::Storage);
+    // V-Programs are credit-only; without an explicit payment type the store
+    // defaults to hold on the CCN, which rejects token-less wallets with 402.
+    let mut builder =
+        StoreBuilder::new(account, file_hash, StorageEngine::Storage).payment(Payment::credits());
     if let Some(owner) = owner {
         builder = builder.on_behalf_of(owner.clone());
     }
