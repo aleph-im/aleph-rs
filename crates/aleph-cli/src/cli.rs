@@ -3115,9 +3115,15 @@ pub enum VProgramCommand {
     /// Instead of a prebuilt image, --compose builds the workload from a
     /// Docker Compose file (the aleph.compose/1 subset: image, command,
     /// entrypoint, environment, depends_on, tmpfs; every service must set
-    /// network_mode: host). Images are pulled and digest-pinned by default;
-    /// pass --image-archive IMAGE=PATH (repeatable) to supply a prebuilt
-    /// archive instead of pulling. The guest exposes a single attested
+    /// network_mode: host). A tag reference is pulled and the resolved
+    /// digest reported; a digest reference (name@sha256:...) is pulled by
+    /// digest, so the declared hash is enforced and a mismatch fails the
+    /// pull, and is staged under a deterministic local tag embedding that
+    /// digest. Either way the image bytes are pinned by the verity-measured
+    /// workload volume. Pass --image-archive IMAGE=PATH (repeatable) to
+    /// supply a prebuilt archive instead of pulling (tag references only:
+    /// an archive cannot be verified against a declared digest). The guest
+    /// exposes a single attested
     /// endpoint that proxies to 127.0.0.1:8080, so the runtime manifest must
     /// declare workload.contract: "aleph.compose/1".
     Create(Box<VProgramCreateArgs>),
@@ -3244,7 +3250,7 @@ pub struct VProgramCreateArgs {
     /// Build the workload from a Docker Compose file (aleph.compose/1 subset:
     /// image/command/entrypoint/environment/depends_on/tmpfs, every service
     /// with network_mode host; environment values are public and measured).
-    /// Images are pulled and digest-pinned unless supplied via --image-archive.
+    /// Images are pulled by tag unless supplied via --image-archive.
     #[arg(long, value_name = "COMPOSE_FILE")]
     pub compose: Option<PathBuf>,
 

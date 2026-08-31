@@ -37,8 +37,11 @@ pub enum ComposeError {
          v1 stacks share the guest network namespace and talk over localhost"
     )]
     BadNetworkMode { service: String, found: String },
-    #[error("no digest or archive resolved for image {0:?}")]
-    UnpinnedImage(String),
+    #[error(
+        "service {service:?} references image {image:?} with a malformed \
+         digest; a digest reference must be `name@sha256:<64 lowercase hex>`"
+    )]
+    BadDigestImage { service: String, image: String },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -209,8 +212,18 @@ fn service_checks(name: &str, s: &ComposeService) -> Result<(), ComposeError> {
             });
         }
     }
-    if s.image.as_deref().unwrap_or("").is_empty() {
+    let image = s.image.as_deref().unwrap_or("");
+    if image.is_empty() {
         return Err(ComposeError::MissingImage(name.to_string()));
+    }
+    // A digest reference is accepted as the user's audited identity claim:
+    // the pull enforces it and staging retags it (see `retag_digest_images`).
+    // Anything else containing `@` can neither be pulled nor enforced.
+    if image.contains('@') && crate::container::split_repo_digest(image).is_none() {
+        return Err(ComposeError::BadDigestImage {
+            service: name.to_string(),
+            image: image.to_string(),
+        });
     }
     match s.network_mode.as_deref() {
         Some("host") => Ok(()),
@@ -231,22 +244,35 @@ pub(crate) fn image_names(file: &ComposeFile) -> Vec<String> {
         .collect()
 }
 
-/// Rewrite every service's image to its digest-pinned form so the measured
-/// compose file names exact image identities, not floating tags.
-pub(crate) fn pin_images(
-    file: &mut ComposeFile,
-    pins: &BTreeMap<String, String>,
-) -> Result<(), ComposeError> {
-    for service in file.services.values_mut() {
-        let image = service.image.as_mut().expect("validated: image present");
-        match pins.get(image) {
-            Some(pinned) => *image = pinned.clone(),
-            None => return Err(ComposeError::UnpinnedImage(image.clone())),
-        }
-    }
-    Ok(())
+/// The deterministic local tag a digest reference is staged under:
+/// `name@sha256:<hex>` becomes `name:sha256-<hex>`. The full digest is kept
+/// in the tag (a tag may be up to 128 characters, `sha256-` plus 64 hex
+/// fits) so the measured compose file still carries the audited identity
+/// verbatim. `None` for tag references, which are staged as-is.
+pub(crate) fn pinned_tag(image: &str) -> Option<String> {
+    crate::container::split_repo_digest(image).map(|(name, hex)| format!("{name}:sha256-{hex}"))
 }
 
+/// Rewrite every digest-referenced service image to its [`pinned_tag`], the
+/// name `podman load` restores from the archive saved under that same tag
+/// (#348); tag references stay verbatim. Run after pulling and before
+/// [`to_yaml`], so the staged compose file matches the staged archives.
+pub(crate) fn retag_digest_images(file: &mut ComposeFile) {
+    for service in file.services.values_mut() {
+        if let Some(image) = service.image.as_mut()
+            && let Some(tag) = pinned_tag(image)
+        {
+            *image = tag;
+        }
+    }
+}
+
+/// Serialize the validated compose file for staging. Tag references are
+/// written verbatim and digest references as their [`pinned_tag`]: in both
+/// cases the archive saved alongside carries that same tag, which is what
+/// `podman load` in the guest restores and compose matches against (#348).
+/// The exact image bytes are pinned by the verity-measured workload volume,
+/// not by the name.
 pub(crate) fn to_yaml(file: &ComposeFile) -> Result<String, ComposeError> {
     Ok(serde_norway::to_string(file)?)
 }
@@ -443,6 +469,78 @@ mod tests {
         assert!(parse_and_validate(text).is_err());
     }
 
+    /// #348: a digest-form `image:` is the user's audited identity claim and
+    /// must be accepted; the pull enforces it and staging retags it.
+    #[test]
+    fn accepts_a_well_formed_digest_image_reference() {
+        let text = format!(
+            "services:\n  web:\n    image: nginx@sha256:{}\n    network_mode: host\n",
+            "ab".repeat(32)
+        );
+        parse_and_validate(&text).unwrap();
+    }
+
+    /// An `image:` containing `@` that is not `name@sha256:<64 hex>` can
+    /// neither be pulled nor enforced; refuse it with a specific error.
+    #[test]
+    fn rejects_a_malformed_digest_image_reference() {
+        for bad in [
+            format!("nginx@sha256:{}", "ab".repeat(31)),
+            format!("nginx@sha512:{}", "ab".repeat(32)),
+            format!("nginx@sha256:{}", "AB".repeat(32)),
+            format!("@sha256:{}", "ab".repeat(32)),
+            "nginx@latest".to_string(),
+        ] {
+            let text = format!("services:\n  web:\n    image: \"{bad}\"\n    network_mode: host\n");
+            let err = parse_and_validate(&text).unwrap_err();
+            assert!(
+                matches!(err, ComposeError::BadDigestImage { ref service, .. } if service == "web"),
+                "{bad}: {err}"
+            );
+            assert!(err.to_string().contains("sha256"), "{err}");
+        }
+    }
+
+    /// The pinned tag is a pure function of the digest reference and embeds
+    /// the full digest, so the measured compose file keeps the audited
+    /// identity visible and two builds stage identical bytes.
+    #[test]
+    fn pinned_tag_embeds_the_full_digest_and_ignores_tag_references() {
+        let hex = "ab".repeat(32);
+        assert_eq!(
+            pinned_tag(&format!("nginx@sha256:{hex}")).as_deref(),
+            Some(format!("nginx:sha256-{hex}").as_str())
+        );
+        assert_eq!(
+            pinned_tag(&format!("localhost:5000/x/y@sha256:{hex}")).as_deref(),
+            Some(format!("localhost:5000/x/y:sha256-{hex}").as_str())
+        );
+        assert_eq!(pinned_tag("nginx:1.27"), None);
+        assert_eq!(pinned_tag("nginx"), None);
+    }
+
+    /// Digest references are rewritten to their pinned tag in the staged
+    /// compose file - the name `podman load` restores from the archive saved
+    /// under that same tag - while plain tags stay verbatim.
+    #[test]
+    fn retag_digest_images_rewrites_services_to_pinned_tags() {
+        let hex = "ab".repeat(32);
+        let text = format!(
+            "services:\n  db:\n    image: postgres:16\n    network_mode: host\n  \
+             web:\n    image: nginx@sha256:{hex}\n    network_mode: host\n"
+        );
+        let mut v = parse_and_validate(&text).unwrap();
+        retag_digest_images(&mut v.file);
+        let yaml = to_yaml(&v.file).unwrap();
+        assert!(
+            yaml.contains(&format!("image: nginx:sha256-{hex}")),
+            "{yaml}"
+        );
+        assert!(yaml.contains("image: postgres:16"), "{yaml}");
+        assert!(!yaml.contains('@'), "{yaml}");
+        parse_and_validate(&yaml).unwrap();
+    }
+
     #[test]
     fn rejects_an_empty_services_map() {
         assert!(parse_and_validate("services: {}\n").is_err());
@@ -454,34 +552,19 @@ mod tests {
         parse_and_validate(&text).unwrap();
     }
 
+    /// #348: the staged compose file keeps the original tag so it matches
+    /// what `podman load` restores from the saved archive.
     #[test]
-    fn pin_images_rewrites_every_reference() {
-        let mut v = parse_and_validate(MINIMAL).unwrap();
-        let pins = BTreeMap::from([(
-            "nginx:1.27".to_string(),
-            "docker.io/library/nginx@sha256:abc123".to_string(),
-        )]);
-        pin_images(&mut v.file, &pins).unwrap();
+    fn to_yaml_keeps_image_references_verbatim() {
+        let v = parse_and_validate(MINIMAL).unwrap();
         let yaml = to_yaml(&v.file).unwrap();
-        assert!(yaml.contains("docker.io/library/nginx@sha256:abc123"));
-        assert!(!yaml.contains("nginx:1.27"));
+        assert!(yaml.contains("image: nginx:1.27"), "{yaml}");
+        assert!(!yaml.contains("@sha256:"), "{yaml}");
     }
 
     #[test]
-    fn pin_images_fails_on_a_missing_pin() {
-        let mut v = parse_and_validate(MINIMAL).unwrap();
-        let err = pin_images(&mut v.file, &BTreeMap::new()).unwrap_err();
-        assert!(err.to_string().contains("nginx:1.27"), "{err}");
-    }
-
-    #[test]
-    fn rewritten_yaml_round_trips_through_the_validator() {
-        let mut v = parse_and_validate(MINIMAL).unwrap();
-        let pins = BTreeMap::from([(
-            "nginx:1.27".to_string(),
-            "docker.io/library/nginx@sha256:abc123".to_string(),
-        )]);
-        pin_images(&mut v.file, &pins).unwrap();
+    fn serialized_yaml_round_trips_through_the_validator() {
+        let v = parse_and_validate(MINIMAL).unwrap();
         parse_and_validate(&to_yaml(&v.file).unwrap()).unwrap();
     }
 
