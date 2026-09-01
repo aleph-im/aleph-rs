@@ -12,6 +12,7 @@
 //! shorthand IDs printed by `aleph instance list`, which are hash suffixes),
 //! or a raw CRN URL (anything containing `://`).
 
+use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_sdk::scheduler::{
     NodeEntry, SchedulerClient, VM_TYPE_INSTANCE, VM_TYPE_VPROGRAM, VmEntry,
 };
@@ -146,9 +147,10 @@ fn node_entry_to_url(node: &NodeEntry) -> Result<Url> {
     })
 }
 
-/// Resolve a node-hash fragment (an anchored prefix or suffix) to the node's
-/// endpoint URL. Errors when the fragment matches no node or more than one.
-async fn node_fragment_to_url(scheduler_url: &Url, fragment: &str) -> Result<Url> {
+/// Resolve a node-hash fragment (an anchored prefix or suffix) to the
+/// scheduler's entry for that node. Errors when the fragment matches no node
+/// or more than one.
+async fn node_fragment_to_entry(scheduler_url: &Url, fragment: &str) -> Result<NodeEntry> {
     let scheduler = SchedulerClient::new(scheduler_url.clone());
     let matches = scheduler
         .find_nodes_by_hash_fragment(fragment)
@@ -156,7 +158,7 @@ async fn node_fragment_to_url(scheduler_url: &Url, fragment: &str) -> Result<Url
         .with_context(|| format!("looking up nodes matching `{fragment}` in the scheduler"))?;
     match matches.len() {
         0 => bail!("`{fragment}` matches no CRN node. Pass a full node hash or the CRN's URL."),
-        1 => node_entry_to_url(&matches[0]),
+        1 => Ok(matches.into_iter().next().expect("len() == 1")),
         n => {
             let mut hashes: Vec<&str> = matches.iter().map(|m| m.node_hash.as_str()).collect();
             hashes.sort_unstable();
@@ -166,6 +168,33 @@ async fn node_fragment_to_url(scheduler_url: &Url, fragment: &str) -> Result<Url
             )
         }
     }
+}
+
+/// Resolve a node-hash fragment (an anchored prefix or suffix) to the node's
+/// endpoint URL. Errors when the fragment matches no node or more than one.
+async fn node_fragment_to_url(scheduler_url: &Url, fragment: &str) -> Result<Url> {
+    node_entry_to_url(&node_fragment_to_entry(scheduler_url, fragment).await?)
+}
+
+/// Resolve a user-supplied node hash (`--crn-hash`) to a full node hash. A
+/// full 64-char hash is returned as-is without consulting the scheduler (so
+/// pinning to a node the scheduler does not list yet keeps working, as does
+/// `--dry-run` offline); anything else is treated as a node-hash fragment
+/// (an anchored prefix or suffix, including the shorthand IDs printed by
+/// `aleph instance list`) and must identify exactly one node.
+pub async fn resolve_node_hash(scheduler_url: &Url, input: &str) -> Result<NodeHash> {
+    if let Ok(hash) = input.parse::<NodeHash>() {
+        return Ok(hash);
+    }
+    let entry = node_fragment_to_entry(scheduler_url, input)
+        .await
+        .with_context(|| format!("resolving --crn-hash node hash fragment `{input}`"))?;
+    entry.node_hash.parse().with_context(|| {
+        format!(
+            "scheduler returned an invalid node hash `{}` for `{input}`",
+            entry.node_hash
+        )
+    })
 }
 
 /// Translate a `VmEntry` to the URL of the CRN it's allocated to.
@@ -571,6 +600,89 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("`beef` matches no CRN node"));
         assert!(msg.contains("full node hash"));
+    }
+
+    #[tokio::test]
+    async fn resolve_node_hash_full_hash_skips_scheduler() {
+        // No mock mounted: a full hash must not hit the scheduler at all.
+        let server = MockServer::start().await;
+        let hash = resolve_node_hash(&Url::parse(&server.uri()).unwrap(), NODE_HASH)
+            .await
+            .unwrap();
+        assert_eq!(hash.to_string(), NODE_HASH);
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_node_hash_prefix_resolves_via_scheduler() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", "d704"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(node_page(&[NODE_HASH])))
+            .mount(&server)
+            .await;
+
+        let hash = resolve_node_hash(&Url::parse(&server.uri()).unwrap(), "d704")
+            .await
+            .unwrap();
+        assert_eq!(hash.to_string(), NODE_HASH);
+    }
+
+    #[tokio::test]
+    async fn resolve_node_hash_suffix_resolves_via_scheduler() {
+        let suffix = &NODE_HASH[NODE_HASH.len() - 10..];
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", suffix))
+            .respond_with(ResponseTemplate::new(200).set_body_json(node_page(&[NODE_HASH])))
+            .mount(&server)
+            .await;
+
+        let hash = resolve_node_hash(&Url::parse(&server.uri()).unwrap(), suffix)
+            .await
+            .unwrap();
+        assert_eq!(hash.to_string(), NODE_HASH);
+    }
+
+    #[tokio::test]
+    async fn resolve_node_hash_ambiguous_prefix_errors() {
+        let other_hash = "d704c0ffee2fb600c5998581cb9af01bd74a9cf61b586ccc849ad78e0709d88";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", "d704"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(node_page(&[NODE_HASH, other_hash])),
+            )
+            .mount(&server)
+            .await;
+
+        let err = resolve_node_hash(&Url::parse(&server.uri()).unwrap(), "d704")
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--crn-hash"));
+        assert!(msg.contains("ambiguous"));
+        assert!(msg.contains("matches 2 nodes"));
+    }
+
+    #[tokio::test]
+    async fn resolve_node_hash_unknown_prefix_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .and(query_param("hash", "beef"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(node_page(&[])))
+            .mount(&server)
+            .await;
+
+        let err = resolve_node_hash(&Url::parse(&server.uri()).unwrap(), "beef")
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("`beef` matches no CRN node"));
     }
 
     #[tokio::test]

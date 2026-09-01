@@ -3303,9 +3303,12 @@ pub struct VProgramCreateArgs {
     #[arg(long)]
     pub allow_debug: bool,
 
-    /// CRN node hash. Pins the V-Program to a specific compute node.
+    /// CRN node hash. Pins the V-Program to a specific compute node. Accepts
+    /// a full hash or a unique fragment (an anchored prefix or suffix, such as
+    /// the shorthand IDs printed by `aleph instance list`), resolved through
+    /// the scheduler.
     #[arg(long)]
-    pub crn_hash: Option<NodeHash>,
+    pub crn_hash: Option<String>,
 
     /// Channel to publish the message on.
     #[arg(long)]
@@ -4508,7 +4511,31 @@ mod vprogram_create_args_tests {
         assert_eq!(args.policy, 0x30001);
         assert_eq!(args.volumes.len(), 2);
         assert!(args.no_internet);
-        assert_eq!(args.crn_hash.unwrap().to_string(), "ab".repeat(32));
+        assert_eq!(args.crn_hash.unwrap(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn vprogram_create_crn_hash_accepts_fragment() {
+        // Fragments are resolved through the scheduler at run time, so clap
+        // must accept them verbatim rather than demanding a full hash.
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "my-vprogram",
+            "--workload",
+            "/tmp/w.ext4",
+            "--crn-hash",
+            "d704be0b15",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.crn_hash.as_deref(), Some("d704be0b15"));
     }
 
     #[test]

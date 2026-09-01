@@ -203,6 +203,17 @@ async fn handle_create(
     }
     let dry_run = args.signing.dry_run;
 
+    // Resolve --crn-hash up front so a typo or ambiguous fragment fails
+    // before any verity hashing or uploads. A full hash passes through
+    // without a scheduler round-trip.
+    let crn_hash = match args.crn_hash.as_deref() {
+        Some(input) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            Some(super::instance_target::resolve_node_hash(&scheduler_url, input).await?)
+        }
+        None => None,
+    };
+
     // 1. Runtime manifest: --runtime is a STORE message hash, a contract or
     //    runtime name from the vm-images aggregate, or absent (the model's
     //    current contract, then its default runtime). The aggregate is only
@@ -443,7 +454,7 @@ async fn handle_create(
             "name".to_string(),
             serde_json::json!(args.name),
         )]));
-    if let Some(crn_hash) = args.crn_hash {
+    if let Some(crn_hash) = crn_hash {
         builder = builder.node_hash(crn_hash.to_string());
     }
     if let Some(channel) = args.channel {
