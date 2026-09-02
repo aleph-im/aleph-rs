@@ -15,6 +15,7 @@
 //! updating the deployed guest agent.
 //!
 pub mod certs;
+pub mod owner_auth;
 pub mod platform;
 pub mod ratls;
 pub mod tcb;
