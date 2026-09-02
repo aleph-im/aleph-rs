@@ -1895,6 +1895,24 @@ Examples:
     Attest(InstanceAttestArgs),
     /// Attest an SNP instance, then unlock its encrypted rootfs (inject the LUKS passphrase).
     #[cfg(feature = "vprogram")]
+    #[command(long_about = "\
+Attest an SNP instance, then inject its LUKS passphrase (and any extra
+secrets) over the same attested RA-TLS channel.
+
+Only the instance owner (its `content.address`, i.e. the `--on-behalf-of`
+beneficiary when one was used at create) may unlock it: the request is
+signed with the resolved account and rejected by the guest agent otherwise.
+
+The passphrase is always sourced via --passphrase-file, else
+$ALEPH_LUKS_PASSPHRASE, else an interactive prompt; passing
+`--secret luks_passphrase=...` is rejected; use --passphrase-file or the
+environment variable instead. --secret may still be repeated for any other
+KEY=VALUE the guest's cloud-init or provisioning expects.
+
+Injection is owner-gated and overwriting: re-running unlock is the normal
+recovery after the CRN rebooted the VM (its attested TLS key rotates on
+every boot, so a stale signed request is rejected) or after a mistyped
+passphrase.")]
     Unlock(InstanceUnlockArgs),
 }
 
@@ -2165,9 +2183,12 @@ pub struct InstanceUnlockArgs {
     /// Read the LUKS passphrase from this file (else $ALEPH_LUKS_PASSPHRASE, else prompt).
     #[arg(long)]
     pub passphrase_file: Option<PathBuf>,
-    /// Additional secret KEY=VALUE to inject (repeatable).
+    /// Additional secret KEY=VALUE to inject (repeatable). `luks_passphrase` is
+    /// always rejected here: use --passphrase-file or $ALEPH_LUKS_PASSPHRASE instead.
     #[arg(long = "secret")]
     pub secrets: Vec<String>,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
 }
 
 #[derive(Subcommand)]
