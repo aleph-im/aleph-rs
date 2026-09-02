@@ -75,6 +75,9 @@ pub async fn dispatch(
         VProgramCommand::Create(args) => {
             handle_create(aleph_client, ccn_url, network_override, json, *args).await
         }
+        VProgramCommand::Run(args) => {
+            super::vprogram_run::handle_run(aleph_client, json, *args).await
+        }
         VProgramCommand::Show(args) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             handle_show(aleph_client, scheduler_url, json, args).await
@@ -159,10 +162,10 @@ async fn handle_create(
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
     check_debug_policy(args.policy, args.allow_debug)?;
-    if args.volumes.len() > MAX_VERIFIED_VOLUMES {
+    if args.build.volumes.len() > MAX_VERIFIED_VOLUMES {
         bail!("at most {MAX_VERIFIED_VOLUMES} --volume flags are supported");
     }
-    let compose_input = match (&args.workload, &args.compose) {
+    let compose_input = match (&args.build.workload, &args.build.compose) {
         (Some(path), None) => {
             if !path.exists() {
                 bail!("workload image not found: {}", path.display());
@@ -172,11 +175,11 @@ async fn handle_create(
         (None, Some(compose_path)) => {
             let text = std::fs::read_to_string(compose_path)
                 .with_context(|| format!("reading compose file {}", compose_path.display()))?;
-            let validated = compose::parse_and_validate(&text, args.volumes.len())?;
+            let validated = compose::parse_and_validate(&text, args.build.volumes.len())?;
             for w in &validated.warnings {
                 eprintln!("warning: {w}");
             }
-            let archives = parse_image_archives(&args.image_archives)?;
+            let archives = parse_image_archives(&args.build.image_archives)?;
             for path in archives.values() {
                 if !path.exists() {
                     bail!("image archive not found: {}", path.display());
@@ -196,7 +199,7 @@ async fn handle_create(
         }
         _ => unreachable!("clap enforces exactly one of --workload/--compose"),
     };
-    for path in &args.volumes {
+    for path in &args.build.volumes {
         if !path.exists() {
             bail!("volume image not found: {}", path.display());
         }
@@ -223,7 +226,7 @@ async fn handle_create(
     } else {
         VPROGRAM_MODEL_EXEC
     };
-    let vm_images = if matches!(args.runtime, Some(ImageRef::Hash(_))) {
+    let vm_images = if matches!(args.build.runtime, Some(ImageRef::Hash(_))) {
         VmImagesData::default()
     } else {
         CachingAggregateClient::new(aleph_client)
@@ -237,7 +240,7 @@ async fn handle_create(
             })?
             .vm_images
     };
-    let runtime = resolve_vprogram_runtime(args.runtime.clone(), model, &vm_images)?;
+    let runtime = resolve_vprogram_runtime(args.build.runtime.clone(), model, &vm_images)?;
     if !json {
         eprintln!("Fetching runtime manifest {}...", runtime.hash);
     }
@@ -270,7 +273,7 @@ async fn handle_create(
         &manifest.boot.cmdline_template,
         &manifest.boot.platform_roothash,
         &"0".repeat(64),
-        &vec!["0".repeat(64); args.volumes.len()],
+        &vec!["0".repeat(64); args.build.volumes.len()],
     )?;
 
     // 2. Bundle artifacts (cached locally by bundle sha256).
@@ -299,7 +302,7 @@ async fn handle_create(
         Option<tempfile::TempDir>,
     ) = match compose_input {
         None => (
-            args.workload.clone().expect("clap: workload set"),
+            args.build.workload.clone().expect("clap: workload set"),
             None,
             None,
         ),
@@ -366,7 +369,7 @@ async fn handle_create(
     )
     .await?;
     let mut volume_verities = Vec::new();
-    for (i, path) in args.volumes.iter().enumerate() {
+    for (i, path) in args.build.volumes.iter().enumerate() {
         volume_verities.push(
             verity_format(
                 &veritysetup,
@@ -419,8 +422,12 @@ async fn handle_create(
             manifest.boot.cpu_models.len()
         );
     }
-    let measurements =
-        compute_measurements(&artifacts, &cmdline, args.vcpus, &manifest.boot.cpu_models)?;
+    let measurements = compute_measurements(
+        &artifacts,
+        &cmdline,
+        args.build.vcpus,
+        &manifest.boot.cpu_models,
+    )?;
 
     // 6. Assemble and publish.
     let verification = serde_json::from_value::<TeeVerification>(serde_json::json!({
@@ -446,8 +453,8 @@ async fn handle_create(
 
     let wait = args.wait;
     let mut builder = VProgramBuilder::new(&account, runtime.hash, workload, verification)
-        .vcpus(args.vcpus)
-        .memory(MiB::from(u64::from(args.memory)))
+        .vcpus(args.build.vcpus)
+        .memory(MiB::from(u64::from(args.build.memory)))
         .internet(!args.no_internet)
         .volumes(volumes)
         .metadata(std::collections::HashMap::from([(
