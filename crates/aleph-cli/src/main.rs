@@ -12,6 +12,7 @@ mod compose;
 mod config;
 #[cfg(feature = "vprogram")]
 mod container;
+mod luks;
 #[cfg(feature = "vprogram")]
 mod mkfs;
 mod program;
