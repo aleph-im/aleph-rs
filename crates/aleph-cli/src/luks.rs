@@ -35,7 +35,6 @@ re-run with sudo, or pre-encrypt with cryptsetup and pass --image";
 /// `cryptsetup` and `losetup` binaries on PATH. The loop device attached
 /// during this call, and the `aleph-luks-<pid>` device-mapper entry it opens,
 /// are torn down before returning on every exit path, success or failure.
-#[allow(dead_code)] // wired into the `instance create` flow in a later task
 pub async fn encrypt_rootfs(
     plain: &Path,
     out: &Path,

@@ -23,6 +23,7 @@ pub mod post;
 pub mod program;
 pub mod sync;
 pub mod token;
+pub mod upload;
 #[cfg(feature = "vprogram")]
 pub mod vprogram;
 pub mod website;
