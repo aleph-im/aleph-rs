@@ -599,6 +599,14 @@ pub async fn handle_instance_command(
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             super::confidential::dispatch(scheduler_url, json, sub).await?;
         }
+        #[cfg(feature = "vprogram")]
+        InstanceCommand::Attest(_args) => {
+            bail!("not implemented");
+        }
+        #[cfg(feature = "vprogram")]
+        InstanceCommand::Unlock(_args) => {
+            bail!("not implemented");
+        }
     }
     Ok(())
 }
