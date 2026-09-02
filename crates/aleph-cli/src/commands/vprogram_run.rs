@@ -112,7 +112,7 @@ impl LineScanner {
         let missing = MARKERS
             .iter()
             .zip(self.seen.iter())
-            .find(|(_, &seen)| !seen)
+            .find(|&(_, &seen)| !seen)
             .map(|(m, _)| *m)
             .unwrap_or("");
         format!("guest never printed {missing:?} within {timeout_secs}s")
