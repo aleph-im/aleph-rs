@@ -1,5 +1,7 @@
 pub mod account;
 pub mod aggregate;
+#[cfg(feature = "vprogram")]
+pub mod attest_common;
 pub mod authorization;
 pub mod confidential;
 pub mod config;
