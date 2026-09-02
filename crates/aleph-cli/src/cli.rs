@@ -2153,7 +2153,7 @@ pub struct InstanceAttestArgs {
     #[arg(long)]
     pub accept_outdated_tcb: bool,
     /// Required platform posture (repeatable; see `vprogram call --require-platform`).
-    #[arg(long)]
+    #[arg(long, value_delimiter = ',')]
     pub require_platform: Vec<PlatformRequirement>,
 }
 
@@ -4397,6 +4397,44 @@ mod instance_attest_unlock_args_tests {
             } => args,
             _ => panic!("expected instance unlock"),
         }
+    }
+
+    fn parse_attest(extra: &[&str]) -> InstanceAttestArgs {
+        let mut argv = vec!["aleph", "instance", "attest"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv).expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command: InstanceCommand::Attest(args),
+            } => args,
+            _ => panic!("expected instance attest"),
+        }
+    }
+
+    #[test]
+    fn instance_attest_require_platform_accepts_comma_separated_values() {
+        let args = parse_attest(&["deadbeef", "--require-platform", "smt-off,tsme,alias-check"]);
+        assert_eq!(
+            args.require_platform,
+            vec![
+                PlatformRequirement::SmtOff,
+                PlatformRequirement::Tsme,
+                PlatformRequirement::AliasCheck,
+            ]
+        );
+
+        // Repeating the flag still works alongside the comma form.
+        let args = parse_attest(&[
+            "deadbeef",
+            "--require-platform",
+            "smt-off",
+            "--require-platform",
+            "tsme",
+        ]);
+        assert_eq!(
+            args.require_platform,
+            vec![PlatformRequirement::SmtOff, PlatformRequirement::Tsme]
+        );
     }
 
     #[test]

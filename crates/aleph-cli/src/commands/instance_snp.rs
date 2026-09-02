@@ -10,19 +10,26 @@
 use std::path::Path;
 
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
-use aleph_sdk::client::{AlephClient, AlephStorageClient};
+use aleph_sdk::attest::{FreshAttestation, MeasurementPin, PolicyPin, fresh_attestation};
+use aleph_sdk::client::{AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus};
+use aleph_sdk::crn::fetch_active_vms;
 use aleph_sdk::instance_runtime::bundle::fetch_instance_bundle_artifacts;
 use aleph_sdk::instance_runtime::cmdline::instantiate_instance_cmdline;
 use aleph_sdk::instance_runtime::manifest::InstanceRuntimeManifest;
 use aleph_sdk::vprogram::measure::compute_measurements;
+use aleph_sdk::vprogram::status::resolve_attested_endpoint;
 use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::environment::{
-    DEFAULT_SNP_POLICY, LaunchMeasurement, TeeMode, TrustedExecutionEnvironment,
+    DEFAULT_SNP_POLICY, LaunchMeasurement, SevSnpRegisters, TeeMode, TrustedExecutionEnvironment,
 };
+use aleph_types::message::{InstanceContent, MessageContentEnum};
 use anyhow::{Context, Result, anyhow, bail};
+use url::Url;
 
-use crate::cli::ImageRef;
+use crate::cli::{ImageRef, InstanceAttestArgs};
+use crate::commands::attest_common::{self, MeasurementExpectation};
+use crate::commands::instance_target::{self, VmKind};
 
 /// Environment variable carrying the LUKS passphrase for `--encrypt-rootfs`,
 /// the middle source in `read_passphrase`'s precedence (after
@@ -156,6 +163,329 @@ pub(crate) async fn build_snp_trusted_execution(
     Ok((tee, manifest))
 }
 
+// ---------------------------------------------------------------------
+// `aleph instance attest <vm-id>`
+// ---------------------------------------------------------------------
+
+/// Fixed RA-TLS attestation transport port for SNP instance runtimes. Kept
+/// as its own constant (rather than reusing `vprogram::ATTEST_PORT`) so
+/// `instance attest`/`instance unlock` do not depend on the `vprogram`
+/// module's private internals; both name the same runtime convention today.
+pub(crate) const INSTANCE_ATTEST_PORT: u16 = 8443;
+
+/// The result of a successful `instance attest`: the verified fresh
+/// attestation evidence, the endpoint it was gathered from, the instance
+/// message's content (`instance unlock` reads `content.address` for the
+/// owner check), and which measurement(s) were pinned for the call.
+pub(crate) struct AttestOutcome {
+    pub fresh: FreshAttestation,
+    pub endpoint: Url,
+    #[allow(dead_code)] // consumed by `instance unlock`, wired up in a later task
+    pub content: InstanceContent,
+    #[allow(dead_code)] // consumed by `instance unlock`, wired up in a later task
+    pub expectation: MeasurementExpectation,
+}
+
+/// Reject anything that isn't a `sev_snp` confidential instance, naming the
+/// actual mode (or its absence) in the error. Pure: no I/O, so directly
+/// unit-testable.
+pub(crate) fn check_snp_instance(
+    content: &InstanceContent,
+) -> Result<&TrustedExecutionEnvironment> {
+    let Some(tee) = content.environment.trusted_execution.as_ref() else {
+        bail!("not an SNP confidential instance (mode: none, no trusted_execution)");
+    };
+    match tee.mode {
+        Some(TeeMode::SevSnp) => Ok(tee),
+        Some(mode) => bail!("not an SNP confidential instance (mode: {})", mode.as_str()),
+        None => bail!("not an SNP confidential instance (mode: sev, legacy)"),
+    }
+}
+
+/// Whether `registers` satisfies `expectation`: exact equality for `Pin`,
+/// set membership for `MemberOf`. Pure: no I/O.
+pub(crate) fn measurement_is_expected(
+    registers: &SevSnpRegisters,
+    expectation: &MeasurementExpectation,
+) -> bool {
+    match expectation {
+        MeasurementExpectation::Pin(pin) => registers == pin,
+        MeasurementExpectation::MemberOf(set) => set.contains(registers),
+    }
+}
+
+/// Resolve the instance's message, verify it declares `sev_snp`, discover
+/// its attested endpoint, and run a fresh-nonce RA-TLS challenge against the
+/// pinned measurement, guest policy, and TCB floor. Never sends a secret:
+/// `instance unlock` (Task 12) builds the owner-authenticated injection on
+/// top of the returned [`AttestOutcome`].
+///
+/// `--crn` is honored the same way `instance ssh` honors it (via
+/// `instance_target::resolve_target_for`): the override picks which CRN to
+/// address for both the message-placement check and the attested-endpoint
+/// discovery, bypassing the scheduler's own placement record.
+pub(crate) async fn run_instance_attest(
+    aleph_client: &AlephClient,
+    scheduler_url: &Url,
+    args: &InstanceAttestArgs,
+) -> Result<AttestOutcome> {
+    let (item_hash, crn_url) = instance_target::resolve_target_for(
+        scheduler_url,
+        &args.vm_id,
+        args.crn.as_deref(),
+        VmKind::Instance,
+    )
+    .await?;
+
+    let with_status = aleph_client
+        .get_message(&item_hash)
+        .await
+        .with_context(|| format!("failed to fetch instance {item_hash}"))?;
+    let message = match with_status {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Removed { .. } => bail!("instance {item_hash} has been removed"),
+        MessageWithStatus::Pending { .. } => {
+            bail!("instance {item_hash} is still pending; try again in a few seconds")
+        }
+        MessageWithStatus::Forgotten { .. } => {
+            bail!("instance {item_hash} has already been forgotten")
+        }
+        MessageWithStatus::Rejected { .. } => {
+            bail!("instance {item_hash} was rejected by the network")
+        }
+    };
+    let MessageContentEnum::Instance(content) = message.content().clone() else {
+        bail!(
+            "item {item_hash} is not an INSTANCE message (got {:?})",
+            message.message_type
+        );
+    };
+
+    let tee = check_snp_instance(&content)?;
+    let policy = tee.policy;
+    let measurements = tee.measurements.as_deref().unwrap_or(&[]);
+    let expectation = attest_common::resolve_expected_measurement(
+        measurements,
+        args.expected_measurement.as_deref(),
+    )?;
+
+    let endpoint = match &args.url {
+        Some(url) => url.clone(),
+        None => {
+            let http = reqwest::Client::new();
+            let net = fetch_active_vms(&http, &crn_url)
+                .await
+                .with_context(|| format!("fetching executions from CRN {crn_url}"))?;
+            net.0
+                .get(&item_hash)
+                .and_then(|vm| vm.networking.clone())
+                .and_then(|n| resolve_attested_endpoint(&n, INSTANCE_ATTEST_PORT))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "instance {item_hash} is running on CRN {crn_url} but its attestation \
+                         port ({INSTANCE_ATTEST_PORT}) is not yet mapped; try again shortly, or \
+                         pass --url to bypass discovery"
+                    )
+                })?
+        }
+    };
+
+    let measurement_pin = match &expectation {
+        MeasurementExpectation::Pin(registers) => MeasurementPin::Exact(registers),
+        // Fleet flow: the exact model is only known from the response, so
+        // the handshake pin is explicitly deferred; the `measurement_is_expected`
+        // check below is what discharges the CallerVerified obligation.
+        MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
+    };
+    let policy_pin = PolicyPin::Exact(policy);
+    let platform_policy = attest_common::platform_policy_from(&args.require_platform);
+
+    let min_tcb = attest_common::resolve_tcb_floor(
+        aleph_client,
+        args.amd_product,
+        args.min_tcb.as_ref(),
+        args.accept_outdated_tcb,
+    )
+    .await?;
+
+    let fresh = fresh_attestation(
+        &endpoint,
+        measurement_pin,
+        policy_pin,
+        args.amd_product,
+        &min_tcb,
+        &platform_policy,
+    )
+    .await
+    .map_err(|e| anyhow!("attestation failed: {e}"))?;
+
+    // Post-handshake re-check on the verified (SIGNED) measurement: for a
+    // `Pin` this is belt-and-suspenders on top of the handshake pin; for a
+    // `MemberOf` fleet it is the ONLY place the guest's measurement is
+    // checked against the pinned set, since the handshake could not pin one
+    // model ahead of time.
+    if !measurement_is_expected(&fresh.registers, &expectation) {
+        match &expectation {
+            MeasurementExpectation::Pin(pin) => bail!(
+                "measurement mismatch: guest presented {} which does not match the pinned \
+                 launch measurement {}",
+                fresh.registers.launch,
+                pin.launch
+            ),
+            MeasurementExpectation::MemberOf(set) => {
+                let pinned: Vec<&str> = set.iter().map(|r| r.launch.as_str()).collect();
+                bail!(
+                    "measurement mismatch: guest presented {} which matches none of the \
+                     pinned measurements [{}]",
+                    fresh.registers.launch,
+                    pinned.join(", ")
+                );
+            }
+        }
+    }
+
+    Ok(AttestOutcome {
+        fresh,
+        endpoint,
+        content,
+        expectation,
+    })
+}
+
+fn on(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
+}
+
+/// `component=value` rendering of a TCB, matching `vprogram call`'s style.
+/// Takes the individual fields (rather than the `sev` crate's `TcbVersion`
+/// directly) so this module does not need `sev` as a direct dependency.
+fn tcb_summary(fmc: Option<u8>, bootloader: u8, tee: u8, snp: u8, microcode: u8) -> String {
+    let mut parts = Vec::new();
+    if let Some(fmc) = fmc {
+        parts.push(format!("fmc={fmc}"));
+    }
+    parts.push(format!("bootloader={bootloader}"));
+    parts.push(format!("tee={tee}"));
+    parts.push(format!("snp={snp}"));
+    parts.push(format!("microcode={microcode}"));
+    parts.join(" ")
+}
+
+/// One-line platform posture, matching `vprogram call`'s style.
+fn platform_summary(p: &aleph_sdk::attest::PlatformPosture) -> String {
+    format!(
+        "SMT={} TSME={} ECC={} RAPL={} ciphertext-hiding={} alias-check={} ({:#x})",
+        on(p.smt_enabled),
+        on(p.tsme_enabled),
+        on(p.ecc_enabled),
+        on(!p.rapl_disabled),
+        on(p.ciphertext_hiding_enabled),
+        if p.alias_check_complete { "yes" } else { "no" },
+        p.raw,
+    )
+}
+
+/// Print the `instance attest` result: measurement, policy, launch/reported
+/// TCB, chip, platform posture, endpoint. Mirrors `vprogram call`'s
+/// evidence rendering.
+fn print_attest_summary(outcome: &AttestOutcome, json: bool) {
+    let fresh = &outcome.fresh;
+    if json {
+        let out = serde_json::json!({
+            "verified": true,
+            "measurement": fresh.registers.launch,
+            "policy": format!("{:#x}", fresh.policy),
+            "launch_tcb": {
+                "fmc": fresh.launch_tcb.fmc,
+                "bootloader": fresh.launch_tcb.bootloader,
+                "tee": fresh.launch_tcb.tee,
+                "snp": fresh.launch_tcb.snp,
+                "microcode": fresh.launch_tcb.microcode,
+            },
+            "reported_tcb": {
+                "fmc": fresh.reported_tcb.fmc,
+                "bootloader": fresh.reported_tcb.bootloader,
+                "tee": fresh.reported_tcb.tee,
+                "snp": fresh.reported_tcb.snp,
+                "microcode": fresh.reported_tcb.microcode,
+            },
+            "cpuid": {
+                "family": fresh.cpuid_family,
+                "model": fresh.cpuid_model,
+                "stepping": fresh.cpuid_stepping,
+            },
+            "platform_info": {
+                "raw": format!("{:#x}", fresh.platform.raw),
+                "smt_enabled": fresh.platform.smt_enabled,
+                "tsme_enabled": fresh.platform.tsme_enabled,
+                "ecc_enabled": fresh.platform.ecc_enabled,
+                "rapl_disabled": fresh.platform.rapl_disabled,
+                "ciphertext_hiding_enabled": fresh.platform.ciphertext_hiding_enabled,
+                "alias_check_complete": fresh.platform.alias_check_complete,
+            },
+            "endpoint": outcome.endpoint.as_str(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("attest summary always serializes")
+        );
+    } else {
+        println!("Instance is genuine: verified AMD SEV-SNP attestation (fresh nonce)");
+        println!("measurement: {}", fresh.registers.launch);
+        println!("policy: {:#x}", fresh.policy);
+        println!(
+            "launch TCB: {}",
+            tcb_summary(
+                fresh.launch_tcb.fmc,
+                fresh.launch_tcb.bootloader,
+                fresh.launch_tcb.tee,
+                fresh.launch_tcb.snp,
+                fresh.launch_tcb.microcode,
+            )
+        );
+        println!(
+            "reported TCB: {}",
+            tcb_summary(
+                fresh.reported_tcb.fmc,
+                fresh.reported_tcb.bootloader,
+                fresh.reported_tcb.tee,
+                fresh.reported_tcb.snp,
+                fresh.reported_tcb.microcode,
+            )
+        );
+        println!(
+            "chip: family={} model={} stepping={}",
+            fresh
+                .cpuid_family
+                .map_or("unknown".to_string(), |f| format!("{f:#x}")),
+            fresh
+                .cpuid_model
+                .map_or("unknown".to_string(), |m| format!("{m:#x}")),
+            fresh
+                .cpuid_stepping
+                .map_or("unknown".to_string(), |s| s.to_string()),
+        );
+        println!("platform: {}", platform_summary(&fresh.platform));
+        println!("endpoint: {}", outcome.endpoint);
+    }
+}
+
+/// `aleph instance attest <vm-id>`: verify the instance's RA-TLS
+/// certificate chain and launch measurement, printing the evidence. Exits
+/// nonzero (via the returned `Err` propagating out of `main`) on any
+/// verification failure.
+pub(crate) async fn handle_instance_attest(
+    aleph_client: &AlephClient,
+    scheduler_url: &Url,
+    json: bool,
+    args: &InstanceAttestArgs,
+) -> Result<()> {
+    let outcome = run_instance_attest(aleph_client, scheduler_url, args).await?;
+    print_attest_summary(&outcome, json);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +596,122 @@ mod tests {
         assert_eq!(tee.policy, 0x30000);
         assert!(tee.firmware.is_none());
         assert!(tee.attestation_port.is_none());
+    }
+
+    use aleph_types::message::execution::base::{ExecutableContent, Payment};
+    use aleph_types::message::execution::environment::{InstanceEnvironment, MachineResources};
+    use aleph_types::message::execution::volume::{
+        ParentVolume, PersistentVolumeSize, RootfsVolume, VolumePersistence,
+    };
+    use memsizes::MiB;
+
+    /// A minimal, otherwise-valid `InstanceContent` with the given
+    /// `trusted_execution`, for exercising `check_snp_instance` without a
+    /// full message fixture. Constructed directly (bypassing
+    /// `InstanceContent`'s `TryFrom` validation, e.g. the measured-mode
+    /// credit-only check), since `check_snp_instance` itself doesn't care.
+    fn minimal_instance_content(
+        trusted_execution: Option<TrustedExecutionEnvironment>,
+    ) -> InstanceContent {
+        InstanceContent {
+            base: ExecutableContent {
+                allow_amend: false,
+                metadata: None,
+                variables: None,
+                resources: MachineResources {
+                    vcpus: 1,
+                    memory: MiB::from(128),
+                    seconds: 1,
+                    published_ports: None,
+                },
+                payment: Some(Payment::credits()),
+                requirements: None,
+                volumes: vec![],
+                replaces: None,
+                authorized_keys: None,
+            },
+            environment: InstanceEnvironment {
+                internet: false,
+                aleph_api: false,
+                hypervisor: None,
+                trusted_execution,
+                reproducible: false,
+                shared_cache: false,
+            },
+            rootfs: RootfsVolume {
+                parent: ParentVolume {
+                    reference: "aa".repeat(32).parse().unwrap(),
+                    use_latest: false,
+                },
+                persistence: VolumePersistence::Host,
+                size_mib: PersistentVolumeSize::try_from(1u64).unwrap(),
+                forgotten_by: None,
+            },
+        }
+    }
+
+    #[test]
+    fn check_snp_instance_rejects_missing_trusted_execution() {
+        let content = minimal_instance_content(None);
+        let err = check_snp_instance(&content).unwrap_err().to_string();
+        assert!(
+            err.contains("not an SNP confidential instance"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn check_snp_instance_rejects_legacy_sev_mode() {
+        let tee = TrustedExecutionEnvironment {
+            firmware: Some("bb".repeat(32).parse().unwrap()),
+            policy: 1,
+            mode: None, // legacy SEV: mode is absent, not Some(TeeMode::Sev).
+            runtime: None,
+            measurements: None,
+            attestation_port: None,
+        };
+        let content = minimal_instance_content(Some(tee));
+        let err = check_snp_instance(&content).unwrap_err().to_string();
+        assert!(
+            err.contains("not an SNP confidential instance"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn check_snp_instance_accepts_sev_snp() {
+        let tee = TrustedExecutionEnvironment {
+            firmware: None,
+            policy: 0x30000,
+            mode: Some(TeeMode::SevSnp),
+            runtime: Some("cc".repeat(32).parse().unwrap()),
+            measurements: Some(vec![]),
+            attestation_port: None,
+        };
+        let content = minimal_instance_content(Some(tee));
+        let got = check_snp_instance(&content).unwrap();
+        assert_eq!(got.mode, Some(TeeMode::SevSnp));
+    }
+
+    fn regs(launch: &str) -> SevSnpRegisters {
+        SevSnpRegisters {
+            launch: launch.to_string(),
+        }
+    }
+
+    #[test]
+    fn measurement_is_expected_pin_is_exact_equality() {
+        let pin = MeasurementExpectation::Pin(regs(&"aa".repeat(48)));
+        assert!(measurement_is_expected(&regs(&"aa".repeat(48)), &pin));
+        assert!(!measurement_is_expected(&regs(&"bb".repeat(48)), &pin));
+    }
+
+    #[test]
+    fn measurement_is_expected_member_of_is_set_membership() {
+        let set =
+            MeasurementExpectation::MemberOf(vec![regs(&"aa".repeat(48)), regs(&"bb".repeat(48))]);
+        assert!(measurement_is_expected(&regs(&"aa".repeat(48)), &set));
+        assert!(measurement_is_expected(&regs(&"bb".repeat(48)), &set));
+        assert!(!measurement_is_expected(&regs(&"cc".repeat(48)), &set));
     }
 }
