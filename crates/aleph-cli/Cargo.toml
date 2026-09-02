@@ -118,3 +118,7 @@ path = "src/main.rs"
 [[test]]
 name = "vprogram_compose_cli"
 required-features = ["vprogram"]
+
+[[test]]
+name = "vprogram_run_cli"
+required-features = ["vprogram"]
