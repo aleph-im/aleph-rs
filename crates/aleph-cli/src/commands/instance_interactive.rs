@@ -121,8 +121,9 @@ pub async fn resolve_interactive(
         if let (Some(options), Some(model_ids)) = (&gpu_options, &args.gpu) {
             args.resolved_gpus = Some(resolve_node_gpu_props(options, model_ids, chosen)?);
         }
-        // Validate the hash here so a malformed CRN list entry is reported at
-        // the picker rather than misread as a fragment to resolve later.
+        // The handler re-parses this field after the picker returns; validate
+        // here as well so a malformed CRN list entry is reported with this
+        // specific message rather than the handler's generic one.
         chosen.hash.parse::<NodeHash>().map_err(|e| {
             anyhow!(
                 "CRN list returned an invalid node hash '{}': {}",
