@@ -126,6 +126,6 @@ fn fails_on_a_missing_local_manifest_before_network() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
-    assert!(stderr.contains("reading runtime manifest"), "{stderr}");
+    assert!(stderr.contains("runtime manifest not found"), "{stderr}");
     assert!(!stderr.contains("example.invalid"), "{stderr}");
 }

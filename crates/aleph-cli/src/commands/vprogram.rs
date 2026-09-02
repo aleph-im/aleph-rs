@@ -476,6 +476,12 @@ pub(crate) async fn prepare_local_build(
             manifest: manifest_path,
             bundle: bundle_path,
         } => {
+            if !manifest_path.exists() {
+                bail!("runtime manifest not found: {}", manifest_path.display());
+            }
+            if !bundle_path.exists() {
+                bail!("runtime bundle not found: {}", bundle_path.display());
+            }
             let manifest_bytes = std::fs::read(&manifest_path)
                 .with_context(|| format!("reading runtime manifest {}", manifest_path.display()))?;
             let manifest = RuntimeManifest::parse(&manifest_bytes)?;
