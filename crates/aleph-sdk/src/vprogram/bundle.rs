@@ -5,7 +5,8 @@
 //! pinning the tarball (native storage or IPFS), with a local disk cache keyed
 //! by the manifest's declared sha256, verifies its hash and size, and extracts
 //! the OVMF firmware, kernel, and initrd members that the launch pipeline
-//! needs.
+//! needs, plus the platform rootfs and its hash tree when the manifest
+//! declares them (a local boot needs those two as well).
 //!
 //! `fetch_bundle_artifacts_from` and `BundleSource` are manifest-flavor
 //! independent: `fetch_bundle_artifacts` is the V-Program-specific wrapper
@@ -60,12 +61,65 @@ pub struct BundleArtifacts {
     pub ovmf: PathBuf,
     pub kernel: PathBuf,
     pub initrd: PathBuf,
+    /// The platform rootfs and its dm-verity hash tree, present when the
+    /// source declared them (see [`BundleSource::platform`]).
+    pub platform: Option<PlatformArtifacts>,
+}
+
+/// Local filesystem paths of a bundle's platform rootfs and hash tree.
+#[derive(Debug, Clone)]
+pub struct PlatformArtifacts {
+    pub rootfs: PathBuf,
+    pub hash_tree: PathBuf,
+}
+
+/// Cache file name per bundle role, in extraction order.
+const ROLE_OVMF: &str = "ovmf";
+const ROLE_KERNEL: &str = "kernel";
+const ROLE_INITRD: &str = "initrd";
+const ROLE_PLATFORM_ROOTFS: &str = "platform_rootfs";
+const ROLE_PLATFORM_HASH_TREE: &str = "platform_hash_tree";
+
+impl BundleArtifacts {
+    /// The member paths under `dir`, named after their roles; the platform
+    /// pair only when `with_platform`.
+    pub fn in_dir(dir: &Path, with_platform: bool) -> Self {
+        Self {
+            ovmf: dir.join(ROLE_OVMF),
+            kernel: dir.join(ROLE_KERNEL),
+            initrd: dir.join(ROLE_INITRD),
+            platform: with_platform.then(|| PlatformArtifacts {
+                rootfs: dir.join(ROLE_PLATFORM_ROOTFS),
+                hash_tree: dir.join(ROLE_PLATFORM_HASH_TREE),
+            }),
+        }
+    }
+
+    /// True when every member file exists (a cache hit). A directory written
+    /// by an older CLI holds only ovmf/kernel/initrd and is not a hit for a
+    /// source that also wants the platform pair.
+    pub fn all_present(&self) -> bool {
+        self.paths().into_iter().all(Path::exists)
+    }
+
+    fn paths(&self) -> Vec<&Path> {
+        let mut paths = vec![
+            self.ovmf.as_path(),
+            self.kernel.as_path(),
+            self.initrd.as_path(),
+        ];
+        if let Some(platform) = &self.platform {
+            paths.push(platform.rootfs.as_path());
+            paths.push(platform.hash_tree.as_path());
+        }
+        paths
+    }
 }
 
 /// The bundle fields a runtime manifest needs to describe, independent of
 /// which manifest flavor (vprogram, instance runtime) declares them: the
 /// message pinning the tarball, its declared hash and size, and the archive
-/// paths of the three members the launch pipeline extracts.
+/// paths of the members to extract.
 #[derive(Debug, Clone)]
 pub struct BundleSource {
     /// STORE message hash pinning the bundle tarball.
@@ -75,13 +129,41 @@ pub struct BundleSource {
     pub ovmf: String,
     pub kernel: String,
     pub initrd: String,
+    /// The platform rootfs and its dm-verity hash tree. The vprogram flavor
+    /// declares both (booting the runtime locally needs them); the instance
+    /// flavor declares neither, so its bundle yields only the three members
+    /// the SEV-SNP launch measurement covers.
+    pub platform: Option<PlatformMembers>,
+}
+
+/// Archive paths of a bundle's platform rootfs and hash tree.
+#[derive(Debug, Clone)]
+pub struct PlatformMembers {
+    pub rootfs: String,
+    pub hash_tree: String,
+}
+
+impl BundleSource {
+    /// Archive path and cache role of every member to extract, in order.
+    fn roles(&self) -> Vec<(&str, &'static str)> {
+        let mut roles = vec![
+            (self.ovmf.as_str(), ROLE_OVMF),
+            (self.kernel.as_str(), ROLE_KERNEL),
+            (self.initrd.as_str(), ROLE_INITRD),
+        ];
+        if let Some(platform) = &self.platform {
+            roles.push((platform.rootfs.as_str(), ROLE_PLATFORM_ROOTFS));
+            roles.push((platform.hash_tree.as_str(), ROLE_PLATFORM_HASH_TREE));
+        }
+        roles
+    }
 }
 
 /// Fetch, verify, and extract the runtime bundle referenced by `manifest`.
 ///
-/// Caches extracted artifacts under `cache_dir/<bundle.sha256>/`. If `ovmf`,
-/// `kernel`, and `initrd` already exist there, returns immediately without
-/// touching the network.
+/// Caches extracted artifacts under `cache_dir/<bundle.sha256>/`. If all five
+/// members already exist there, returns immediately without touching the
+/// network.
 pub async fn fetch_bundle_artifacts(
     client: &AlephClient,
     manifest: &RuntimeManifest,
@@ -94,15 +176,19 @@ pub async fn fetch_bundle_artifacts(
         ovmf: manifest.bundle.members.ovmf.clone(),
         kernel: manifest.bundle.members.kernel.clone(),
         initrd: manifest.bundle.members.initrd.clone(),
+        platform: Some(PlatformMembers {
+            rootfs: manifest.bundle.members.platform_rootfs.clone(),
+            hash_tree: manifest.bundle.members.platform_hash_tree.clone(),
+        }),
     };
     fetch_bundle_artifacts_from(client, &source, cache_dir).await
 }
 
 /// Fetch, verify, and extract the runtime bundle described by `source`.
 ///
-/// Caches extracted artifacts under `cache_dir/<source.sha256>/`. If `ovmf`,
-/// `kernel`, and `initrd` already exist there, returns immediately without
-/// touching the network.
+/// Caches extracted artifacts under `cache_dir/<source.sha256>/`. If every
+/// member `source` declares already exists there, returns immediately
+/// without touching the network.
 pub async fn fetch_bundle_artifacts_from(
     client: &AlephClient,
     source: &BundleSource,
@@ -110,13 +196,8 @@ pub async fn fetch_bundle_artifacts_from(
 ) -> Result<BundleArtifacts, BundleError> {
     let cache_key = bundle_cache_key(&source.sha256)?;
     let bundle_dir = cache_dir.join(cache_key);
-    let artifacts = BundleArtifacts {
-        ovmf: bundle_dir.join("ovmf"),
-        kernel: bundle_dir.join("kernel"),
-        initrd: bundle_dir.join("initrd"),
-    };
-
-    if artifacts.ovmf.exists() && artifacts.kernel.exists() && artifacts.initrd.exists() {
+    let artifacts = BundleArtifacts::in_dir(&bundle_dir, source.platform.is_some());
+    if artifacts.all_present() {
         return Ok(artifacts);
     }
 
@@ -147,13 +228,7 @@ pub async fn fetch_bundle_artifacts_from(
     verify_bundle_bytes(&bytes, &source.sha256, source.size)?;
 
     fs::create_dir_all(&bundle_dir)?;
-    extract_named_members(
-        &bytes,
-        &source.ovmf,
-        &source.kernel,
-        &source.initrd,
-        &bundle_dir,
-    )?;
+    extract_named_members(&bytes, &source.roles(), &bundle_dir)?;
 
     Ok(artifacts)
 }
@@ -244,8 +319,8 @@ fn verify_bundle_bytes(
     Ok(())
 }
 
-/// Extract the `ovmf`, `kernel`, and `initrd` members declared in `members`
-/// from the gzipped tar archive `bytes` into `dir`, named after their roles.
+/// Extract the members declared in `members` from the gzipped tar archive
+/// `bytes` into `dir`, named after their roles.
 ///
 /// Every entry's path is checked for traversal (absolute paths or `..`
 /// components) before it is compared against the declared member paths;
@@ -263,7 +338,7 @@ const MAX_MEMBER_SIZE: u64 = 1024 * 1024 * 1024;
 /// Test-only wrapper kept in the `BundleMembers` shape: exercises
 /// `extract_named_members_with_limit`, the shared primitive
 /// `fetch_bundle_artifacts_from` also calls, through the vprogram manifest's
-/// own member type so the existing extraction tests need no changes.
+/// own member type (all five roles) so the extraction tests read naturally.
 #[cfg(test)]
 fn extract_members(bytes: &[u8], members: &BundleMembers, dir: &Path) -> Result<(), BundleError> {
     extract_members_with_limit(bytes, members, dir, MAX_MEMBER_SIZE)
@@ -276,44 +351,39 @@ fn extract_members_with_limit(
     dir: &Path,
     max_member_size: u64,
 ) -> Result<(), BundleError> {
-    extract_named_members_with_limit(
-        bytes,
-        &members.ovmf,
-        &members.kernel,
-        &members.initrd,
-        dir,
-        max_member_size,
-    )
+    let roles = [
+        (members.ovmf.as_str(), ROLE_OVMF),
+        (members.kernel.as_str(), ROLE_KERNEL),
+        (members.initrd.as_str(), ROLE_INITRD),
+        (members.platform_rootfs.as_str(), ROLE_PLATFORM_ROOTFS),
+        (members.platform_hash_tree.as_str(), ROLE_PLATFORM_HASH_TREE),
+    ];
+    extract_named_members_with_limit(bytes, &roles, dir, max_member_size)
 }
 
-/// Extract the `ovmf`, `kernel`, and `initrd` members at the given archive
-/// paths from the gzipped tar archive `bytes` into `dir`, named after their
-/// roles. See `extract_members` for the full extraction contract; this is
-/// the manifest-flavor-independent core it (and `fetch_bundle_artifacts_from`)
+/// Extract the members at the given `(archive path, role)` pairs from the
+/// gzipped tar archive `bytes` into `dir`, named after their roles. See
+/// `extract_members` for the full extraction contract; this is the
+/// manifest-flavor-independent core it (and `fetch_bundle_artifacts_from`)
 /// delegate to.
 fn extract_named_members(
     bytes: &[u8],
-    ovmf: &str,
-    kernel: &str,
-    initrd: &str,
+    roles: &[(&str, &'static str)],
     dir: &Path,
 ) -> Result<(), BundleError> {
-    extract_named_members_with_limit(bytes, ovmf, kernel, initrd, dir, MAX_MEMBER_SIZE)
+    extract_named_members_with_limit(bytes, roles, dir, MAX_MEMBER_SIZE)
 }
 
 fn extract_named_members_with_limit(
     bytes: &[u8],
-    ovmf: &str,
-    kernel: &str,
-    initrd: &str,
+    roles: &[(&str, &'static str)],
     dir: &Path,
     max_member_size: u64,
 ) -> Result<(), BundleError> {
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
 
-    let roles: [(&str, &'static str); 3] = [(ovmf, "ovmf"), (kernel, "kernel"), (initrd, "initrd")];
-    let mut found = [false; 3];
+    let mut found = vec![false; roles.len()];
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -409,7 +479,7 @@ mod test {
         enc.finish().unwrap()
     }
 
-    /// Cache-hit fast path of the public entry point: when all three
+    /// Cache-hit fast path of the public entry point: when all five
     /// artifacts already sit under `cache_dir/<sha256>/`, no download is
     /// attempted (the client points at an unroutable host) and the returned
     /// paths are the cached ones.
@@ -421,7 +491,13 @@ mod test {
         let cache = tempfile::tempdir().unwrap();
         let bundle_dir = cache.path().join(&manifest.bundle.sha256);
         std::fs::create_dir_all(&bundle_dir).unwrap();
-        for role in ["ovmf", "kernel", "initrd"] {
+        for role in [
+            "ovmf",
+            "kernel",
+            "initrd",
+            "platform_rootfs",
+            "platform_hash_tree",
+        ] {
             std::fs::write(bundle_dir.join(role), role).unwrap();
         }
         let client =
@@ -432,6 +508,63 @@ mod test {
         assert_eq!(artifacts.ovmf, bundle_dir.join("ovmf"));
         assert_eq!(artifacts.kernel, bundle_dir.join("kernel"));
         assert_eq!(artifacts.initrd, bundle_dir.join("initrd"));
+        let platform = artifacts.platform.unwrap();
+        assert_eq!(platform.rootfs, bundle_dir.join("platform_rootfs"));
+        assert_eq!(platform.hash_tree, bundle_dir.join("platform_hash_tree"));
+    }
+
+    /// A cache dir written by an older CLI holds only ovmf/kernel/initrd.
+    /// It must NOT count as a hit for the vprogram flavor: the boot path
+    /// needs the rootfs and its hash tree, so the bundle is fetched again
+    /// (here: fails at download, which proves the fast path was skipped).
+    #[tokio::test]
+    async fn fetch_bundle_artifacts_refetches_a_three_member_legacy_cache() {
+        let manifest =
+            RuntimeManifest::parse(crate::vprogram::manifest::test::VALID_MANIFEST.as_bytes())
+                .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let bundle_dir = cache.path().join(&manifest.bundle.sha256);
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        for role in ["ovmf", "kernel", "initrd"] {
+            std::fs::write(bundle_dir.join(role), role).unwrap();
+        }
+        let client =
+            crate::client::AlephClient::new(url::Url::parse("http://test.invalid").unwrap());
+        let err = fetch_bundle_artifacts(&client, &manifest, cache.path())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BundleError::Download(_)), "{err}");
+    }
+
+    /// The same three-member cache IS a hit for a source without the
+    /// platform pair (the instance runtime flavor).
+    #[tokio::test]
+    async fn fetch_bundle_artifacts_from_without_platform_hits_a_three_member_cache() {
+        let manifest =
+            RuntimeManifest::parse(crate::vprogram::manifest::test::VALID_MANIFEST.as_bytes())
+                .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let bundle_dir = cache.path().join(&manifest.bundle.sha256);
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        for role in ["ovmf", "kernel", "initrd"] {
+            std::fs::write(bundle_dir.join(role), role).unwrap();
+        }
+        let source = BundleSource {
+            reference: manifest.bundle.reference.clone(),
+            sha256: manifest.bundle.sha256.clone(),
+            size: manifest.bundle.size,
+            ovmf: manifest.bundle.members.ovmf.clone(),
+            kernel: manifest.bundle.members.kernel.clone(),
+            initrd: manifest.bundle.members.initrd.clone(),
+            platform: None,
+        };
+        let client =
+            crate::client::AlephClient::new(url::Url::parse("http://test.invalid").unwrap());
+        let artifacts = fetch_bundle_artifacts_from(&client, &source, cache.path())
+            .await
+            .unwrap();
+        assert_eq!(artifacts.initrd, bundle_dir.join("initrd"));
+        assert!(artifacts.platform.is_none());
     }
 
     fn test_members() -> BundleMembers {
@@ -558,11 +691,21 @@ mod test {
             ("image/OVMF.fd", b"o"),
             ("image/bzImage", b"k"),
             ("image/initrd", b"i"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
         ]);
         extract_members(&bytes, &test_members(), dir.path()).unwrap();
         assert_eq!(std::fs::read(dir.path().join("ovmf")).unwrap(), b"o");
         assert_eq!(std::fs::read(dir.path().join("kernel")).unwrap(), b"k");
         assert_eq!(std::fs::read(dir.path().join("initrd")).unwrap(), b"i");
+        assert_eq!(
+            std::fs::read(dir.path().join("platform_rootfs")).unwrap(),
+            b"r"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("platform_hash_tree")).unwrap(),
+            b"v"
+        );
     }
 
     #[test]
@@ -582,13 +725,15 @@ mod test {
 
     #[test]
     fn extract_stops_after_the_last_member() {
-        // A traversal entry *after* the three members must never be seen:
+        // A traversal entry *after* the five members must never be seen:
         // with the early exit it is not iterated, so extraction succeeds.
         let dir = tempfile::tempdir().unwrap();
         let bytes = make_test_bundle(&[
             ("image/OVMF.fd", b"ovmf"),
             ("image/bzImage", b"kernel"),
             ("image/initrd", b"initrd"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
             ("../escape", b"never read"),
         ]);
         extract_members(&bytes, &test_members(), dir.path()).unwrap();
@@ -600,6 +745,8 @@ mod test {
             ("image/OVMF.fd", b"ovmf"),
             ("image/bzImage", b"kernel"),
             ("image/initrd", b"initrd"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
         ]);
         assert!(matches!(
             extract_members(&bytes, &test_members(), dir.path()).unwrap_err(),
@@ -614,6 +761,8 @@ mod test {
             ("image/OVMF.fd", b"ovmf"),
             ("image/bzImage", b"a kernel that is larger than the limit"),
             ("image/initrd", b"initrd"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
         ]);
         let err = extract_members_with_limit(&bytes, &test_members(), dir.path(), 16).unwrap_err();
         assert!(

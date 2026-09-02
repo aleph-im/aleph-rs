@@ -22,6 +22,9 @@ pub fn bundle_source(manifest: &InstanceRuntimeManifest) -> BundleSource {
         ovmf: manifest.bundle.members.ovmf.clone(),
         kernel: manifest.bundle.members.kernel.clone(),
         initrd: manifest.bundle.members.initrd.clone(),
+        // The instance flavor's manifest declares no platform rootfs: its
+        // rootfs is LUKS-encrypted and never extracted by the CLI.
+        platform: None,
     }
 }
 
@@ -66,5 +69,6 @@ mod tests {
         assert_eq!(s.ovmf, "fw/ovmf.fd");
         assert_eq!(s.kernel, "bzImage");
         assert_eq!(s.initrd, "initrd.img");
+        assert!(s.platform.is_none());
     }
 }
