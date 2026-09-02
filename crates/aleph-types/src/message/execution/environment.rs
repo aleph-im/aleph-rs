@@ -502,6 +502,9 @@ impl TrustedExecutionEnvironment {
                     }
                     Some(m) => m,
                 };
+                // A measured TeeMode and its TeePlatform share a wire name
+                // ("sev_snp", "tdx"); this comparison relies on keeping that
+                // naming aligned when adding a platform.
                 for measurement in measurements {
                     if measurement.platform.as_str() != mode_str {
                         return Err(TeeError::MeasurementPlatformMismatch {
