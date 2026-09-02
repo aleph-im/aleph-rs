@@ -217,10 +217,21 @@ mod tests {
         assert_eq!(read_passphrase(Some(&p)).unwrap(), "hunter2\n");
     }
 
+    /// Guards every test in this module that touches `LUKS_PASSPHRASE_ENV_VAR`.
+    /// `cargo test` runs tests in parallel threads within one process, so
+    /// without this lock one test's set_var -> read -> assert window could be
+    /// clobbered by another's concurrent set_var on the same process-global
+    /// variable (an intermittent, hard-to-reproduce CI flake). Held for the
+    /// full body of each test below, not just around the set/remove calls, so
+    /// the env var's value cannot change between one test's write and its
+    /// `read_passphrase` call.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn passphrase_env_var_used_when_no_file_given() {
-        // SAFETY: `ALEPH_LUKS_PASSPHRASE` is dedicated to this test; no other
-        // test in this crate reads or writes it.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: held under ENV_LOCK, so no other test in this module
+        // observes or mutates ALEPH_LUKS_PASSPHRASE concurrently.
         unsafe {
             std::env::set_var(LUKS_PASSPHRASE_ENV_VAR, "s3cr3t-from-env");
         }
@@ -233,6 +244,7 @@ mod tests {
 
     #[test]
     fn passphrase_file_wins_over_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: see `passphrase_env_var_used_when_no_file_given`.
         unsafe {
             std::env::set_var(LUKS_PASSPHRASE_ENV_VAR, "from-env-should-lose");
