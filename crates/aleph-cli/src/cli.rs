@@ -2035,7 +2035,7 @@ pub struct InstancePriceArgs {
     #[arg(long, conflicts_with = "gpu")]
     pub list_gpus: bool,
 
-    /// Use confidential VM pricing (AMD SEV).
+    /// Use confidential VM pricing (SEV-SNP and legacy SEV share the tier).
     #[arg(long)]
     pub confidential: bool,
 }
@@ -2151,7 +2151,8 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub immutable_volume: Option<Vec<String>>,
 
-    /// Launch a confidential VM (AMD SEV).
+    /// Launch a confidential VM (AMD SEV-SNP by default; --tee sev selects
+    /// the deprecated legacy SEV flow).
     #[arg(long)]
     pub confidential: bool,
 
