@@ -172,20 +172,32 @@ pub enum TeeError {
     #[error("digest must be lowercase hex")]
     DigestNotLowercaseHex,
     #[error(
-        "firmware belongs to the SEV flow and must not be set in sev_snp mode; use runtime instead"
+        "firmware belongs to the SEV flow and must not be set in {0} mode; use runtime instead"
     )]
-    FirmwareInSnpMode,
-    #[error("sev_snp mode requires {0}")]
-    SnpModeRequires(&'static str),
-    #[error("{0} is only valid in sev_snp mode")]
-    SnpOnlyField(&'static str),
+    FirmwareInMeasuredMode(&'static str),
+    #[error("{mode} mode requires {field}")]
+    MeasuredModeRequires {
+        mode: &'static str,
+        field: &'static str,
+    },
+    #[error("{0} is only valid in the measured TEE modes (sev_snp, tdx)")]
+    MeasuredOnlyField(&'static str),
     #[error("at most {MAX_MEASUREMENTS} measurements are allowed, got {0}")]
     TooManyMeasurements(usize),
-    #[error("measurement platform {got} does not match the declared backend {expected}")]
+    #[error("measurement platform {got} does not match the declared TEE {expected}")]
     MeasurementPlatformMismatch {
         expected: &'static str,
         got: &'static str,
     },
+    #[error("platform {platform} cannot declare {registers} registers")]
+    RegistersPlatformMismatch {
+        platform: &'static str,
+        registers: &'static str,
+    },
+    #[error("tdx mode has no host-chosen launch policy; policy must be left at its default")]
+    TdxPolicySet,
+    #[error("V-PROGRAM supports only the sev_snp backend")]
+    UnsupportedVProgramBackend,
 }
 
 /// Raise an error unless the value is a plausible SEV-SNP guest policy.
@@ -199,12 +211,14 @@ pub fn validate_snp_policy(policy: u64) -> Result<(), TeeError> {
 
 /// TEE platforms with defined launch-measurement semantics.
 ///
-/// Grows over protocol upgrades (e.g. "tdx" with MRTD digests). Unknown
-/// platforms are schema-invalid: nothing unverifiable gets network blessing.
+/// Grows over protocol upgrades. Unknown platforms are schema-invalid:
+/// nothing unverifiable gets network blessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TeePlatform {
     #[serde(rename = "sev_snp")]
     SevSnp,
+    #[serde(rename = "tdx")]
+    Tdx,
 }
 
 impl TeePlatform {
@@ -213,6 +227,7 @@ impl TeePlatform {
     pub fn as_str(self) -> &'static str {
         match self {
             TeePlatform::SevSnp => "sev_snp",
+            TeePlatform::Tdx => "tdx",
         }
     }
 }
@@ -236,7 +251,7 @@ where
     let value = String::deserialize(deserializer)?;
     if value.len() != REGISTER_HEX_LEN {
         return Err(D::Error::custom(TeeError::BadDigestLength {
-            platform: "sev_snp",
+            platform: "register",
             expected: REGISTER_HEX_LEN,
             got: value.len(),
         }));
@@ -255,14 +270,10 @@ where
 /// A TEE's launch identity is not always a single value. SEV-SNP has one
 /// launch digest, while platforms such as Intel TDX spread it over several
 /// hardware registers (MRTD plus RTMRs), which is why the wire shape is an
-/// object rather than a scalar. Only SEV-SNP is defined today, so this is a
-/// concrete struct rather than a generic map: `deny_unknown_fields` plus a
-/// required field give the closed key set natively, with no validator to keep
-/// in step, and no unbounded map to parse before rejecting.
-///
-/// Adding a platform turns [`LaunchMeasurement::registers`] into an enum
-/// discriminated on `platform`. That is a schema release either way, since an
-/// unknown platform is already schema-invalid.
+/// object rather than a scalar. Each platform gets a concrete struct rather
+/// than a generic map: `deny_unknown_fields` plus required fields give the
+/// closed key set natively, with no validator to keep in step, and no
+/// unbounded map to parse before rejecting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SevSnpRegisters {
@@ -270,27 +281,124 @@ pub struct SevSnpRegisters {
     pub launch: String,
 }
 
+/// The measurement registers Intel TDX pins: firmware, boot chain, config.
+///
+/// The pinned set is `{mrtd, rtmr1, rtmr2, mrconfigid}`. `rtmr0` is
+/// deliberately absent: TDVF extends the VMM-supplied memory layout and the
+/// variable store into it, which are deployment parameters, not code
+/// identity. `rtmr3` is absent because it carries the launch-TCB commitment,
+/// which a verifier *derives* rather than compares against a declared
+/// constant; keeping it out of the schema lets enforcement harden later
+/// without a protocol change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TdxRegisters {
+    #[serde(deserialize_with = "deserialize_register")]
+    pub mrtd: String,
+    #[serde(deserialize_with = "deserialize_register")]
+    pub rtmr1: String,
+    #[serde(deserialize_with = "deserialize_register")]
+    pub rtmr2: String,
+    #[serde(deserialize_with = "deserialize_register")]
+    pub mrconfigid: String,
+}
+
+/// Per-platform measurement registers, discriminated on the sibling
+/// `platform` field of [`LaunchMeasurement`].
+///
+/// The wire shape is untagged: the member key sets are disjoint and closed
+/// (`deny_unknown_fields`), so parsing is unambiguous, and the
+/// [`LaunchMeasurement`] constructor enforces that the parsed member matches
+/// the declared platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MeasurementRegisters {
+    SevSnp(SevSnpRegisters),
+    Tdx(TdxRegisters),
+}
+
+impl MeasurementRegisters {
+    /// The platform whose register set this is.
+    pub fn platform(&self) -> TeePlatform {
+        match self {
+            MeasurementRegisters::SevSnp(_) => TeePlatform::SevSnp,
+            MeasurementRegisters::Tdx(_) => TeePlatform::Tdx,
+        }
+    }
+
+    /// The registers as (name, value) pairs in wire order, for display sites
+    /// that render any platform's set without matching on it.
+    pub fn entries(&self) -> Vec<(&'static str, &str)> {
+        match self {
+            MeasurementRegisters::SevSnp(r) => vec![("launch", r.launch.as_str())],
+            MeasurementRegisters::Tdx(r) => vec![
+                ("mrtd", r.mrtd.as_str()),
+                ("rtmr1", r.rtmr1.as_str()),
+                ("rtmr2", r.rtmr2.as_str()),
+                ("mrconfigid", r.mrconfigid.as_str()),
+            ],
+        }
+    }
+
+    /// The SEV-SNP registers, if this is an SEV-SNP set.
+    pub fn as_sev_snp(&self) -> Option<&SevSnpRegisters> {
+        match self {
+            MeasurementRegisters::SevSnp(r) => Some(r),
+            MeasurementRegisters::Tdx(_) => None,
+        }
+    }
+}
+
 /// Supervisor-opaque verification annotation, validated by the CCN.
 ///
 /// Declares the launch digest a verifier should expect. Multiple entries
 /// (one per vcpu_type) keep a message verifiable across a mixed CPU fleet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawLaunchMeasurement")]
 pub struct LaunchMeasurement {
     /// TEE platform these registers apply to.
     pub platform: TeePlatform,
-    /// Expected measurement registers; sev_snp declares `{"launch"}`.
-    pub registers: SevSnpRegisters,
+    /// Expected measurement registers; sev_snp declares `{"launch"}`, tdx
+    /// declares `{"mrtd", "rtmr1", "rtmr2", "mrconfigid"}`.
+    pub registers: MeasurementRegisters,
     /// QEMU CPU model these registers were computed for (e.g. "EPYC-v4").
     /// Required by direct-boot measurement recipes, absent for igvm bundles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcpu_type: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLaunchMeasurement {
+    platform: TeePlatform,
+    registers: MeasurementRegisters,
+    #[serde(default)]
+    vcpu_type: Option<String>,
+}
+
+impl TryFrom<RawLaunchMeasurement> for LaunchMeasurement {
+    type Error = TeeError;
+
+    fn try_from(raw: RawLaunchMeasurement) -> Result<Self, Self::Error> {
+        if raw.registers.platform() != raw.platform {
+            return Err(TeeError::RegistersPlatformMismatch {
+                platform: raw.platform.as_str(),
+                registers: raw.registers.platform().as_str(),
+            });
+        }
+        Ok(Self {
+            platform: raw.platform,
+            registers: raw.registers,
+            vcpu_type: raw.vcpu_type,
+        })
+    }
+}
+
 impl LaunchMeasurement {
-    /// The SEV-SNP launch digest, i.e. the `launch` register.
-    pub fn snp_launch_digest(&self) -> &str {
-        &self.registers.launch
+    /// The SEV-SNP launch digest, i.e. the `launch` register; `None` for
+    /// another platform's register set.
+    pub fn snp_launch_digest(&self) -> Option<&str> {
+        self.registers.as_sev_snp().map(|r| r.launch.as_str())
     }
 }
 
@@ -307,17 +415,44 @@ pub enum TeeMode {
     Sev,
     #[serde(rename = "sev_snp")]
     SevSnp,
+    #[serde(rename = "tdx")]
+    Tdx,
+}
+
+impl TeeMode {
+    /// The mode's wire string (its serde rename, e.g. "sev_snp").
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TeeMode::Sev => "sev",
+            TeeMode::SevSnp => "sev_snp",
+            TeeMode::Tdx => "tdx",
+        }
+    }
+
+    /// The measurement platform this mode launches with; `None` for legacy
+    /// SEV, which predates launch measurements. Adding a mode forces an arm
+    /// here, keeping the mode/platform pairing compiler-checked.
+    pub fn platform(self) -> Option<TeePlatform> {
+        match self {
+            TeeMode::Sev => None,
+            TeeMode::SevSnp => Some(TeePlatform::SevSnp),
+            TeeMode::Tdx => Some(TeePlatform::Tdx),
+        }
+    }
 }
 
 /// Trusted Execution Environment properties.
 ///
-/// Two modes coexist:
+/// Two families of modes coexist:
 /// - mode None or Sev (legacy): AMD SEV/SEV-ES with the CRN-mediated
 ///   launch-secret flow; `firmware` references the confidential OVMF and
 ///   `policy` uses AMD SEV bit semantics (AmdSevPolicy).
-/// - mode SevSnp: measured boot from a runtime bundle with direct
-///   client-to-guest attestation; `policy` uses SEV-SNP 64-bit semantics
-///   and `measurements` carry the expected launch digests.
+/// - measured modes (SevSnp, Tdx): measured boot from a runtime bundle with
+///   direct client-to-guest attestation; `measurements` carry the expected
+///   registers. In sev_snp mode `policy` uses the SEV-SNP 64-bit
+///   guest-policy semantics. In tdx mode there is no host-chosen launch
+///   policy at all (TDATTRIBUTES and XFAM are set by the TDX module and
+///   measured, not selected), so `policy` must be left at its default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawTrustedExecutionEnvironment")]
 pub struct TrustedExecutionEnvironment {
@@ -331,13 +466,13 @@ pub struct TrustedExecutionEnvironment {
     /// TEE mode; None means legacy SEV (kept for wire stability).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<TeeMode>,
-    /// Measured runtime bundle store message (sev_snp mode only).
+    /// Measured runtime bundle store message (measured modes only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<ItemHash>,
-    /// Expected launch digests (sev_snp mode only); CCN-validated.
+    /// Expected measurement registers (measured modes only); CCN-validated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurements: Option<Vec<LaunchMeasurement>>,
-    /// In-guest attestation port (sev_snp mode only); None means the runtime
+    /// In-guest attestation port (measured modes only); None means the runtime
     /// bundle default (8443).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_port: Option<NonZeroU16>,
@@ -348,31 +483,69 @@ impl TrustedExecutionEnvironment {
         self.mode == Some(TeeMode::SevSnp)
     }
 
+    /// Measured-boot modes: runtime bundle plus declared registers.
+    pub fn is_measured(&self) -> bool {
+        matches!(self.mode, Some(TeeMode::SevSnp) | Some(TeeMode::Tdx))
+    }
+
     fn check_mode_consistency(&self) -> Result<(), TeeError> {
-        if self.is_snp() {
-            if self.firmware.is_some() {
-                return Err(TeeError::FirmwareInSnpMode);
-            }
-            if self.runtime.is_none() {
-                return Err(TeeError::SnpModeRequires("runtime"));
-            }
-            match self.measurements.as_deref() {
-                None | Some([]) => return Err(TeeError::SnpModeRequires("measurements")),
-                Some(m) if m.len() > MAX_MEASUREMENTS => {
-                    return Err(TeeError::TooManyMeasurements(m.len()));
+        match self.mode {
+            Some(mode @ (TeeMode::SevSnp | TeeMode::Tdx)) => {
+                let mode_str = mode.as_str();
+                if self.firmware.is_some() {
+                    return Err(TeeError::FirmwareInMeasuredMode(mode_str));
                 }
-                Some(_) => {}
+                if self.runtime.is_none() {
+                    return Err(TeeError::MeasuredModeRequires {
+                        mode: mode_str,
+                        field: "runtime",
+                    });
+                }
+                let measurements = match self.measurements.as_deref() {
+                    None | Some([]) => {
+                        return Err(TeeError::MeasuredModeRequires {
+                            mode: mode_str,
+                            field: "measurements",
+                        });
+                    }
+                    Some(m) if m.len() > MAX_MEASUREMENTS => {
+                        return Err(TeeError::TooManyMeasurements(m.len()));
+                    }
+                    Some(m) => m,
+                };
+                let expected_platform = mode.platform().expect("measured modes have a platform");
+                for measurement in measurements {
+                    if measurement.platform != expected_platform {
+                        return Err(TeeError::MeasurementPlatformMismatch {
+                            expected: expected_platform.as_str(),
+                            got: measurement.platform.as_str(),
+                        });
+                    }
+                }
+                match mode {
+                    TeeMode::SevSnp => validate_snp_policy(self.policy)?,
+                    // TDX has no host-chosen launch policy: TDATTRIBUTES and
+                    // XFAM are set by the TDX module and measured, not
+                    // selected. Reject any non-default value rather than
+                    // inventing a meaning.
+                    TeeMode::Tdx => {
+                        if self.policy != default_amd_sev_policy() {
+                            return Err(TeeError::TdxPolicySet);
+                        }
+                    }
+                    TeeMode::Sev => unreachable!("matched as measured above"),
+                }
             }
-            validate_snp_policy(self.policy)?;
-        } else {
-            if self.runtime.is_some() {
-                return Err(TeeError::SnpOnlyField("runtime"));
-            }
-            if self.measurements.is_some() {
-                return Err(TeeError::SnpOnlyField("measurements"));
-            }
-            if self.attestation_port.is_some() {
-                return Err(TeeError::SnpOnlyField("attestation_port"));
+            None | Some(TeeMode::Sev) => {
+                if self.runtime.is_some() {
+                    return Err(TeeError::MeasuredOnlyField("runtime"));
+                }
+                if self.measurements.is_some() {
+                    return Err(TeeError::MeasuredOnlyField("measurements"));
+                }
+                if self.attestation_port.is_some() {
+                    return Err(TeeError::MeasuredOnlyField("attestation_port"));
+                }
             }
         }
         Ok(())
@@ -603,7 +776,7 @@ mod test {
         ))
         .unwrap();
         assert_eq!(m.platform, TeePlatform::SevSnp);
-        assert_eq!(m.snp_launch_digest(), SNP_DIGEST);
+        assert_eq!(m.snp_launch_digest(), Some(SNP_DIGEST));
         assert_eq!(m.vcpu_type.as_deref(), Some("EPYC-v4"));
         // vcpu_type is optional: absent for igvm-recipe bundles
         let m: LaunchMeasurement = serde_json::from_str(&format!(
@@ -685,5 +858,189 @@ mod test {
         validate_snp_policy((1 << 40) | (1 << 17)).unwrap(); // >u32 range is fine
         assert!(validate_snp_policy(0x1).is_err()); // the AMD SEV default lacks bit 17
         assert!(validate_snp_policy(0x10000).is_err()); // SMT bit alone, no bit 17
+    }
+
+    fn tdx_registers_json() -> String {
+        format!(
+            r#"{{"mrtd": "{m}", "rtmr1": "{r1}", "rtmr2": "{r2}", "mrconfigid": "{c}"}}"#,
+            m = "11".repeat(48),
+            r1 = "22".repeat(48),
+            r2 = "33".repeat(48),
+            c = "44".repeat(48),
+        )
+    }
+
+    fn tdx_tee_json() -> String {
+        format!(
+            r#"{{"mode": "tdx", "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{{"platform": "tdx", "registers": {}}}]}}"#,
+            tdx_registers_json()
+        )
+    }
+
+    #[test]
+    fn test_launch_measurement_tdx_valid() {
+        let json = format!(
+            r#"{{"platform": "tdx", "registers": {}, "vcpu_type": "GraniteRapids"}}"#,
+            tdx_registers_json()
+        );
+        let m: LaunchMeasurement = serde_json::from_str(&json).unwrap();
+        assert_eq!(m.platform, TeePlatform::Tdx);
+        let MeasurementRegisters::Tdx(registers) = &m.registers else {
+            panic!("expected tdx registers");
+        };
+        assert_eq!(registers.mrtd, "11".repeat(48));
+        assert_eq!(registers.mrconfigid, "44".repeat(48));
+        assert_eq!(m.vcpu_type.as_deref(), Some("GraniteRapids"));
+        // no launch register on a tdx set
+        assert_eq!(m.snp_launch_digest(), None);
+        // vcpu_type stays optional on tdx too
+        let json = format!(
+            r#"{{"platform": "tdx", "registers": {}}}"#,
+            tdx_registers_json()
+        );
+        let m: LaunchMeasurement = serde_json::from_str(&json).unwrap();
+        assert_eq!(m.vcpu_type, None);
+    }
+
+    #[test]
+    fn test_launch_measurement_tdx_key_set_is_closed() {
+        // the pinned set is exactly {mrtd, rtmr1, rtmr2, mrconfigid}: rtmr0
+        // (deployment parameters) and rtmr3 (derived launch-TCB commitment)
+        // are deliberately not pinnable
+        for missing in ["mrtd", "rtmr1", "rtmr2", "mrconfigid"] {
+            let registers = tdx_registers_json().replace(missing, &format!("x{missing}"));
+            let json = format!(r#"{{"platform": "tdx", "registers": {registers}}}"#);
+            assert!(
+                serde_json::from_str::<LaunchMeasurement>(&json).is_err(),
+                "renamed {missing} should be rejected"
+            );
+        }
+        for forbidden in ["rtmr0", "rtmr3", "launch"] {
+            let registers = tdx_registers_json().replace(
+                "\"mrtd\"",
+                &format!("\"{forbidden}\": \"{}\", \"mrtd\"", "55".repeat(48)),
+            );
+            let json = format!(r#"{{"platform": "tdx", "registers": {registers}}}"#);
+            assert!(
+                serde_json::from_str::<LaunchMeasurement>(&json).is_err(),
+                "extra {forbidden} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_launch_measurement_tdx_rejects_bad_register_values() {
+        for bad in ["cd".repeat(32), "zz".repeat(48), "AB".repeat(48)] {
+            let registers = tdx_registers_json().replace(&"22".repeat(48), &bad);
+            let json = format!(r#"{{"platform": "tdx", "registers": {registers}}}"#);
+            assert!(
+                serde_json::from_str::<LaunchMeasurement>(&json).is_err(),
+                "rtmr1 {bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_launch_measurement_platform_must_match_registers() {
+        // the register-set union is discriminated on `platform`
+        let json = format!(
+            r#"{{"platform": "sev_snp", "registers": {}}}"#,
+            tdx_registers_json()
+        );
+        let err = serde_json::from_str::<LaunchMeasurement>(&json).unwrap_err();
+        assert!(err.to_string().contains("cannot declare"), "{err}");
+        let json = format!(r#"{{"platform": "tdx", "registers": {{"launch": "{SNP_DIGEST}"}}}}"#);
+        assert!(serde_json::from_str::<LaunchMeasurement>(&json).is_err());
+    }
+
+    #[test]
+    fn test_launch_measurement_tdx_roundtrip() {
+        let json = format!(
+            r#"{{"platform": "tdx", "registers": {}}}"#,
+            tdx_registers_json()
+        );
+        let m: LaunchMeasurement = serde_json::from_str(&json).unwrap();
+        let value = serde_json::to_value(&m).unwrap();
+        let mut keys: Vec<&str> = value["registers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort();
+        assert_eq!(keys, vec!["mrconfigid", "mrtd", "rtmr1", "rtmr2"]);
+        let back: LaunchMeasurement = serde_json::from_value(value).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn test_trusted_execution_tdx_valid() {
+        let tee: TrustedExecutionEnvironment = serde_json::from_str(&tdx_tee_json()).unwrap();
+        assert!(tee.is_measured());
+        assert!(!tee.is_snp());
+        assert_eq!(tee.mode, Some(TeeMode::Tdx));
+        assert!(tee.runtime.is_some());
+        assert_eq!(tee.measurements.as_ref().unwrap().len(), 1);
+        // the pydantic policy default round-trips: a dump carries policy=1
+        let value = serde_json::to_value(&tee).unwrap();
+        assert_eq!(value["policy"], 1);
+        let back: TrustedExecutionEnvironment = serde_json::from_value(value).unwrap();
+        assert_eq!(back, tee);
+    }
+
+    #[test]
+    fn test_trusted_execution_tdx_rejects_invalid() {
+        // missing runtime
+        let json = format!(
+            r#"{{"mode": "tdx", "measurements": [{{"platform": "tdx", "registers": {}}}]}}"#,
+            tdx_registers_json()
+        );
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+        // missing measurements
+        let json = format!(r#"{{"mode": "tdx", "runtime": "{ITEM_HASH_HEX}"}}"#);
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+        // firmware forbidden
+        let json =
+            tdx_tee_json().replacen("{", &format!(r#"{{"firmware": "{ITEM_HASH_HEX}", "#), 1);
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+    }
+
+    #[test]
+    fn test_trusted_execution_tdx_has_no_policy() {
+        // tdx has no host-chosen launch policy: any non-default value is
+        // rejected rather than given an invented meaning
+        let json = tdx_tee_json().replacen("{", r#"{"policy": 196608, "#, 1);
+        let err = serde_json::from_str::<TrustedExecutionEnvironment>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("no host-chosen launch policy"),
+            "{err}"
+        );
+        // the explicit default is accepted (it appears in every dump)
+        let json = tdx_tee_json().replacen("{", r#"{"policy": 1, "#, 1);
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_ok());
+    }
+
+    #[test]
+    fn test_trusted_execution_measurement_platform_must_match_mode() {
+        // an sev_snp measurement under tdx mode, and vice versa
+        let json = format!(
+            r#"{{"mode": "tdx", "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]}}"#
+        );
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+        let json = format!(
+            r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{{"platform": "tdx", "registers": {}}}]}}"#,
+            tdx_registers_json()
+        );
+        assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_err());
+    }
+
+    #[test]
+    fn test_trusted_execution_tdx_attestation_port_allowed() {
+        let json = tdx_tee_json().replacen("{", r#"{"attestation_port": 8443, "#, 1);
+        let tee: TrustedExecutionEnvironment = serde_json::from_str(&json).unwrap();
+        assert_eq!(tee.attestation_port.map(NonZeroU16::get), Some(8443));
     }
 }

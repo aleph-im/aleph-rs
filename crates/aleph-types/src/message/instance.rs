@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(thiserror::Error, Debug)]
 pub enum InstanceContentError {
     #[error(
-        "SEV-SNP confidential instances are credit-only: holder-tier and PAYG stream \
+        "{0} confidential instances are credit-only: holder-tier and PAYG stream \
          payments are not supported"
     )]
-    SnpCreditOnly,
+    MeasuredCreditOnly(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,16 +35,17 @@ impl TryFrom<RawInstanceContent> for InstanceContent {
     type Error = InstanceContentError;
 
     fn try_from(raw: RawInstanceContent) -> Result<Self, Self::Error> {
-        // SEV-SNP confidential instances are credit-only.
+        // Measured confidential instances (SEV-SNP, TDX) are credit-only.
         if let Some(tee) = &raw.environment.trusted_execution
-            && tee.is_snp()
+            && tee.is_measured()
         {
             let is_credit = matches!(
                 &raw.base.payment,
                 Some(payment) if payment.payment_type == PaymentType::Credit
             );
             if !is_credit {
-                return Err(InstanceContentError::SnpCreditOnly);
+                let mode = tee.mode.expect("measured implies an explicit mode");
+                return Err(InstanceContentError::MeasuredCreditOnly(mode.as_str()));
             }
         }
         Ok(Self {
@@ -275,6 +276,64 @@ mod test {
             assert!(
                 serde_json::from_str::<InstanceContent>(&snp_instance_json(payment)).is_err(),
                 "{payment} must be rejected for SNP instances"
+            );
+        }
+    }
+
+    fn tdx_instance_json(payment: &str) -> String {
+        let r = "11".repeat(48);
+        format!(
+            r#"{{
+                "address": "0x9319Ad3B7A8E0eE24f2E639c40D8eD124C5520Ba",
+                "time": 1719502000.0,
+                "allow_amend": false,
+                "payment": {payment},
+                "environment": {{
+                    "internet": true,
+                    "aleph_api": false,
+                    "hypervisor": "qemu",
+                    "trusted_execution": {{
+                        "mode": "tdx",
+                        "runtime": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+                        "measurements": [{{"platform": "tdx", "registers":
+                            {{"mrtd": "{r}", "rtmr1": "{r}", "rtmr2": "{r}", "mrconfigid": "{r}"}}}}]
+                    }}
+                }},
+                "resources": {{"vcpus": 2, "memory": 2048, "seconds": 30}},
+                "rootfs": {{
+                    "parent": {{"ref": "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717", "use_latest": false}},
+                    "persistence": "host",
+                    "size_mib": 4096
+                }},
+                "volumes": []
+            }}"#
+        )
+    }
+
+    #[test]
+    fn test_tdx_instance_requires_credit_payment() {
+        // the credit-only rule covers every measured mode, not just sev_snp
+        let content: InstanceContent =
+            serde_json::from_str(&tdx_instance_json(r#"{"type": "credit"}"#)).unwrap();
+        assert!(
+            content
+                .environment
+                .trusted_execution
+                .as_ref()
+                .unwrap()
+                .is_measured()
+        );
+
+        for payment in [
+            r#"{"type": "hold"}"#,
+            r#"{"type": "superfluid", "chain": "AVAX"}"#,
+        ] {
+            let err =
+                serde_json::from_str::<InstanceContent>(&tdx_instance_json(payment)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("tdx confidential instances are credit-only"),
+                "{payment}: {err}"
             );
         }
     }
