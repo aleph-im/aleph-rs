@@ -21,6 +21,8 @@ pub struct VmImagesData {
     pub runtimes: BTreeMap<String, ImageEntry>,
     #[serde(default)]
     pub firmwares: BTreeMap<String, ImageEntry>,
+    #[serde(default)]
+    pub instance_runtimes: BTreeMap<String, ImageEntry>,
     /// V-Program runtime bundles keyed by name (`exec-1.0`, ...); each
     /// names the workload contract it implements.
     #[serde(default)]
@@ -112,6 +114,8 @@ pub struct VmImageDefaults {
     pub firmware: Option<String>,
     #[serde(default)]
     pub runtime: Option<String>,
+    #[serde(default)]
+    pub instance_runtime: Option<String>,
     /// Current workload contract per model: `{"exec": "aleph.exec/1"}`.
     #[serde(default)]
     pub vprogram_models: BTreeMap<String, String>,
@@ -203,6 +207,21 @@ impl VmImagesData {
                 kind: "runtime",
                 name: name.to_string(),
                 available: join_active_names(self.active_runtimes().iter().map(|(n, _)| *n)),
+            })
+    }
+
+    pub fn instance_runtime(&self, name: &str) -> Result<&ImageEntry, VmImagesError> {
+        self.instance_runtimes
+            .get(name)
+            .ok_or_else(|| VmImagesError::UnknownPreset {
+                kind: "instance_runtime",
+                name: name.to_string(),
+                available: join_active_names(
+                    self.instance_runtimes
+                        .iter()
+                        .filter(|(_, e)| !e.deprecated)
+                        .map(|(n, _)| n.as_str()),
+                ),
             })
     }
 
@@ -623,5 +642,24 @@ mod tests {
             data.resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, None, |_| "")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn instance_runtime_lookup_and_default_parse() {
+        let json = r#"{
+            "instance_runtimes": {"snp-1.0": {"hash": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe"}},
+            "defaults": {"instance_runtime": "snp-1.0"}
+        }"#;
+        let data: VmImagesData = serde_json::from_str(json).unwrap();
+        assert!(data.instance_runtime("snp-1.0").is_ok());
+        assert!(data.instance_runtime("missing").is_err());
+        assert_eq!(data.defaults.instance_runtime.as_deref(), Some("snp-1.0"));
+    }
+
+    #[test]
+    fn instance_runtime_fields_default_to_empty() {
+        let data: VmImagesData = serde_json::from_str("{}").unwrap();
+        assert!(data.instance_runtimes.is_empty());
+        assert!(data.defaults.instance_runtime.is_none());
     }
 }
