@@ -12,6 +12,7 @@ use crate::cli::{ImageRef, InstanceCreateArgs, parse_image_ref};
 use crate::commands::instance::{
     gpu_filter_groups, load_gpu_options, resolve_node_gpu_props, validate_ssh_pubkey,
 };
+use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_sdk::aggregate_models::pricing::{ComputeUnitSpec, GpuModel, PricingPerEntity};
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
 use aleph_sdk::client::AlephAggregateClient;
@@ -120,13 +121,17 @@ pub async fn resolve_interactive(
         if let (Some(options), Some(model_ids)) = (&gpu_options, &args.gpu) {
             args.resolved_gpus = Some(resolve_node_gpu_props(options, model_ids, chosen)?);
         }
-        args.crn_hash = Some(chosen.hash.parse().map_err(|e| {
+        // The handler re-parses this field after the picker returns; validate
+        // here as well so a malformed CRN list entry is reported with this
+        // specific message rather than the handler's generic one.
+        chosen.hash.parse::<NodeHash>().map_err(|e| {
             anyhow!(
                 "CRN list returned an invalid node hash '{}': {}",
                 chosen.hash,
                 e
             )
-        })?);
+        })?;
+        args.crn_hash = Some(chosen.hash.clone());
     }
 
     // Only prompt for a key file when the user has no other key source. If

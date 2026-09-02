@@ -149,15 +149,20 @@ fn node_entry_to_url(node: &NodeEntry) -> Result<Url> {
 
 /// Resolve a node-hash fragment (an anchored prefix or suffix) to the
 /// scheduler's entry for that node. Errors when the fragment matches no node
-/// or more than one.
-async fn node_fragment_to_entry(scheduler_url: &Url, fragment: &str) -> Result<NodeEntry> {
+/// or more than one. `no_match_hint` completes the "matches no CRN node"
+/// error with what the caller's flag accepts instead of a fragment.
+async fn node_fragment_to_entry(
+    scheduler_url: &Url,
+    fragment: &str,
+    no_match_hint: &str,
+) -> Result<NodeEntry> {
     let scheduler = SchedulerClient::new(scheduler_url.clone());
     let matches = scheduler
         .find_nodes_by_hash_fragment(fragment)
         .await
         .with_context(|| format!("looking up nodes matching `{fragment}` in the scheduler"))?;
     match matches.len() {
-        0 => bail!("`{fragment}` matches no CRN node. Pass a full node hash or the CRN's URL."),
+        0 => bail!("`{fragment}` matches no CRN node. {no_match_hint}"),
         1 => Ok(matches.into_iter().next().expect("len() == 1")),
         n => {
             let mut hashes: Vec<&str> = matches.iter().map(|m| m.node_hash.as_str()).collect();
@@ -173,7 +178,13 @@ async fn node_fragment_to_entry(scheduler_url: &Url, fragment: &str) -> Result<N
 /// Resolve a node-hash fragment (an anchored prefix or suffix) to the node's
 /// endpoint URL. Errors when the fragment matches no node or more than one.
 async fn node_fragment_to_url(scheduler_url: &Url, fragment: &str) -> Result<Url> {
-    node_entry_to_url(&node_fragment_to_entry(scheduler_url, fragment).await?)
+    let entry = node_fragment_to_entry(
+        scheduler_url,
+        fragment,
+        "Pass a full node hash or the CRN's URL.",
+    )
+    .await?;
+    node_entry_to_url(&entry)
 }
 
 /// Resolve a user-supplied node hash (`--crn-hash`) to a full node hash. A
@@ -186,7 +197,7 @@ pub async fn resolve_node_hash(scheduler_url: &Url, input: &str) -> Result<NodeH
     if let Ok(hash) = input.parse::<NodeHash>() {
         return Ok(hash);
     }
-    let entry = node_fragment_to_entry(scheduler_url, input)
+    let entry = node_fragment_to_entry(scheduler_url, input, "Pass a full node hash.")
         .await
         .with_context(|| format!("resolving --crn-hash node hash fragment `{input}`"))?;
     entry.node_hash.parse().with_context(|| {
@@ -683,6 +694,9 @@ mod tests {
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("`beef` matches no CRN node"));
+        assert!(msg.contains("Pass a full node hash."));
+        // --crn-hash never accepted URLs, unlike --crn.
+        assert!(!msg.contains("URL"));
     }
 
     #[tokio::test]

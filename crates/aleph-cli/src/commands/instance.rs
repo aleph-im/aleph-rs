@@ -5,6 +5,7 @@ use crate::cli::{
 use crate::common::{
     confirm_action, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview,
 };
+use aleph_sdk::aggregate_models::corechannel::NodeHash;
 use aleph_sdk::aggregate_models::vm_images::{VmImagesData, VmImagesError};
 use aleph_sdk::caching_aggregate_client::CachingAggregateClient;
 use aleph_sdk::client::{
@@ -970,6 +971,16 @@ async fn handle_instance_create(
     // each is fetched at most once for this command.
     let aggregates = CachingAggregateClient::new(aleph_client);
 
+    // Resolve --crn-hash up front so a typo or ambiguous fragment fails before
+    // any prompt, key lookup, or upload. The full hash is written back so the
+    // interactive picker (which skips node placement when a node is pinned)
+    // and the message builder below see the canonical value. A full hash
+    // passes through without a scheduler round-trip.
+    if let Some(input) = args.crn_hash.as_deref() {
+        let hash = super::instance_target::resolve_node_hash(scheduler_url, input).await?;
+        args.crn_hash = Some(hash.to_string());
+    }
+
     if args.interactive {
         crate::commands::instance_interactive::resolve_interactive(
             &mut args,
@@ -979,6 +990,15 @@ async fn handle_instance_create(
         )
         .await?;
     }
+
+    // Both the command line (resolved above) and the interactive picker leave
+    // a full node hash here.
+    let crn_hash: Option<NodeHash> = args
+        .crn_hash
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .context("invalid CRN node hash")?;
 
     // Resolve SSH keys: ad-hoc files + label-selected registered keys, falling
     // back to all registered keys when neither flag is given.
@@ -1035,7 +1055,7 @@ async fn handle_instance_create(
         gpu_props = Some(if let Some(props) = &args.resolved_gpus {
             // Interactive picker already resolved the pinned node's exact device(s).
             props.clone()
-        } else if let Some(crn_hash) = &args.crn_hash {
+        } else if let Some(crn_hash) = &crn_hash {
             // Pinned via `--crn-hash` on the command line: look the node up and use
             // its actual advertised GPU variant.
             resolve_pinned_node_gpu_props(&options, gpu_model_ids, crn_hash).await?
@@ -1171,10 +1191,10 @@ async fn handle_instance_create(
 
     // GPU requirements were resolved above (`gpu_props` is Some iff a GPU was
     // requested). Build host requirements if a CRN hash or GPU is specified.
-    if args.crn_hash.is_some() || gpu_props.is_some() {
+    if crn_hash.is_some() || gpu_props.is_some() {
         let requirements = HostRequirements {
             cpu: None,
-            node: args.crn_hash.map(|hash| NodeRequirements {
+            node: crn_hash.map(|hash| NodeRequirements {
                 owner: None,
                 address_regex: None,
                 node_hash: Some(hash.to_string()),
@@ -1436,7 +1456,7 @@ pub(crate) async fn fetch_crn_list() -> Result<aleph_sdk::crns_list::CrnListResp
 async fn resolve_pinned_node_gpu_props(
     options: &[GpuOption],
     model_ids: &[String],
-    crn_hash: &aleph_sdk::aggregate_models::corechannel::NodeHash,
+    crn_hash: &NodeHash,
 ) -> Result<Vec<GpuProperties>> {
     let list = fetch_crn_list().await?;
     pinned_node_gpu_props_from_list(&list, options, model_ids, &crn_hash.to_string())
