@@ -606,8 +606,10 @@ pub async fn handle_instance_command(
                 .await?;
         }
         #[cfg(feature = "vprogram")]
-        InstanceCommand::Unlock(_args) => {
-            bail!("not implemented");
+        InstanceCommand::Unlock(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            super::instance_snp::handle_instance_unlock(aleph_client, &scheduler_url, json, &args)
+                .await?;
         }
     }
     Ok(())

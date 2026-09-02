@@ -7,10 +7,15 @@
 //! create handler only branches on `args.tee`, it does not call into here
 //! for `--tee sev`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use aleph_sdk::aggregate_models::vm_images::VmImagesData;
-use aleph_sdk::attest::{FreshAttestation, MeasurementPin, PolicyPin, fresh_attestation};
+use aleph_sdk::attest::owner_auth::{canonical_secrets_json, inject_secret_payload};
+use aleph_sdk::attest::{
+    AttestError, AttestedResponse, FreshAttestation, InjectSecretEnvelope, MeasurementPin,
+    PolicyPin, fresh_attestation, post_secrets,
+};
 use aleph_sdk::client::{AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus};
 use aleph_sdk::crn::fetch_active_vms;
 use aleph_sdk::instance_runtime::bundle::fetch_instance_bundle_artifacts;
@@ -18,6 +23,7 @@ use aleph_sdk::instance_runtime::cmdline::instantiate_instance_cmdline;
 use aleph_sdk::instance_runtime::manifest::InstanceRuntimeManifest;
 use aleph_sdk::vprogram::measure::compute_measurements;
 use aleph_sdk::vprogram::status::resolve_attested_endpoint;
+use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::environment::{
@@ -27,9 +33,10 @@ use aleph_types::message::{InstanceContent, MessageContentEnum};
 use anyhow::{Context, Result, anyhow, bail};
 use url::Url;
 
-use crate::cli::{ImageRef, InstanceAttestArgs};
+use crate::cli::{ImageRef, InstanceAttestArgs, InstanceUnlockArgs};
 use crate::commands::attest_common::{self, MeasurementExpectation};
 use crate::commands::instance_target::{self, VmKind};
+use crate::common::resolve_account;
 
 /// Environment variable carrying the LUKS passphrase for `--encrypt-rootfs`,
 /// the middle source in `read_passphrase`'s precedence (after
@@ -175,14 +182,19 @@ pub(crate) const INSTANCE_ATTEST_PORT: u16 = 8443;
 
 /// The result of a successful `instance attest`: the verified fresh
 /// attestation evidence, the endpoint it was gathered from, the instance
-/// message's content (`instance unlock` reads `content.address` for the
-/// owner check), and which measurement(s) were pinned for the call.
+/// message's content and owner (`content.address`, i.e. the message's
+/// `Message::owner()`; `instance unlock` compares it against the signing
+/// account before touching a secret), and which measurement(s) were pinned
+/// for the call.
 pub(crate) struct AttestOutcome {
     pub fresh: FreshAttestation,
     pub endpoint: Url,
-    #[allow(dead_code)] // consumed by `instance unlock`, wired up in a later task
     pub content: InstanceContent,
-    #[allow(dead_code)] // consumed by `instance unlock`, wired up in a later task
+    /// The instance's owner address (`content.address`): the
+    /// `--on-behalf-of` beneficiary when one was used at create, else the
+    /// creator's own address. Captured from the message alongside `content`
+    /// since `InstanceContent` itself carries no address field.
+    pub owner: Address,
     pub expectation: MeasurementExpectation,
 }
 
@@ -255,6 +267,7 @@ pub(crate) async fn run_instance_attest(
             bail!("instance {item_hash} was rejected by the network")
         }
     };
+    let owner = message.owner().clone();
     let MessageContentEnum::Instance(content) = message.content().clone() else {
         bail!(
             "item {item_hash} is not an INSTANCE message (got {:?})",
@@ -349,6 +362,7 @@ pub(crate) async fn run_instance_attest(
         fresh,
         endpoint,
         content,
+        owner,
         expectation,
     })
 }
@@ -483,6 +497,259 @@ pub(crate) async fn handle_instance_attest(
 ) -> Result<()> {
     let outcome = run_instance_attest(aleph_client, scheduler_url, args).await?;
     print_attest_summary(&outcome, json);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// `aleph instance unlock <vm-id>`
+// ---------------------------------------------------------------------
+
+/// Split `extra` entries on the first `=` and merge them with the LUKS
+/// passphrase (keyed `luks_passphrase`) into one secrets map for injection.
+///
+/// Rejects: an entry with no `=` (nothing to split a key off of), an entry
+/// with an empty key, and any duplicate key, including a `luks_passphrase`
+/// extra colliding with `passphrase`. `instance unlock`'s handler always
+/// sources the passphrase via `read_passphrase`, never via `--secret`; this
+/// is what makes that the one source of truth for that key.
+pub(crate) fn collect_secrets(
+    passphrase: Option<String>,
+    extra: &[String],
+) -> Result<BTreeMap<String, String>> {
+    let mut secrets = BTreeMap::new();
+    if let Some(passphrase) = passphrase {
+        secrets.insert("luks_passphrase".to_string(), passphrase);
+    }
+    for entry in extra {
+        let Some((key, value)) = entry.split_once('=') else {
+            bail!("invalid --secret {entry:?}: expected KEY=VALUE");
+        };
+        if key.is_empty() {
+            bail!("invalid --secret {entry:?}: the key must not be empty");
+        }
+        if secrets.contains_key(key) {
+            bail!("duplicate secret key \"{key}\": each key may be given only once");
+        }
+        secrets.insert(key.to_string(), value.to_string());
+    }
+    Ok(secrets)
+}
+
+/// Reject an unlock request whose signing account is not the instance
+/// owner (the message's `content.address`). Case-insensitive, since EVM
+/// addresses are conventionally compared without regard to checksum casing.
+/// Named after the wire field in the error so a mismatch is traceable back
+/// to the on-chain message.
+pub(crate) fn check_owner_account(owner: &str, account_address: &Address) -> Result<()> {
+    if owner.eq_ignore_ascii_case(account_address.as_str()) {
+        return Ok(());
+    }
+    bail!(
+        "signing account {account_address} does not match the instance owner {owner} \
+         (content.address): only the owner may unlock this instance"
+    );
+}
+
+/// Ensure `hex` carries a `0x` prefix before it goes into the signed
+/// envelope. The EVM `sign_raw` path already produces one, but this is the
+/// last line of defense: a missing prefix would silently mismatch the
+/// agent's own EIP-191 recovery.
+fn ensure_0x_prefixed(hex: &str) -> String {
+    if hex.starts_with("0x") || hex.starts_with("0X") {
+        hex.to_string()
+    } else {
+        format!("0x{hex}")
+    }
+}
+
+/// Print the `instance unlock` result: the injected secret names, which
+/// rootfs volume they were injected into, then the same attestation
+/// evidence `instance attest` prints, sourced from the
+/// `POST /confidential/inject-secret` exchange's own verified response
+/// (not the earlier `fresh_attestation` call): this is the channel the
+/// secret was actually sent over.
+fn print_unlock_summary(
+    injected: &[String],
+    content: &InstanceContent,
+    response: &AttestedResponse,
+    endpoint: &Url,
+    json: bool,
+) {
+    let rootfs_mib: u64 = content.rootfs.size_mib.into();
+    let persistence = serde_json::to_value(&content.rootfs.persistence)
+        .expect("VolumePersistence always serializes");
+    if json {
+        let out = serde_json::json!({
+            "injected": injected,
+            "rootfs": {
+                "size_mib": rootfs_mib,
+                "persistence": persistence,
+            },
+            "verified": true,
+            "measurement": response.registers.launch,
+            "policy": format!("{:#x}", response.policy),
+            "launch_tcb": {
+                "fmc": response.launch_tcb.fmc,
+                "bootloader": response.launch_tcb.bootloader,
+                "tee": response.launch_tcb.tee,
+                "snp": response.launch_tcb.snp,
+                "microcode": response.launch_tcb.microcode,
+            },
+            "reported_tcb": {
+                "fmc": response.reported_tcb.fmc,
+                "bootloader": response.reported_tcb.bootloader,
+                "tee": response.reported_tcb.tee,
+                "snp": response.reported_tcb.snp,
+                "microcode": response.reported_tcb.microcode,
+            },
+            "cpuid": {
+                "family": response.cpuid_family,
+                "model": response.cpuid_model,
+                "stepping": response.cpuid_stepping,
+            },
+            "platform_info": {
+                "raw": format!("{:#x}", response.platform.raw),
+                "smt_enabled": response.platform.smt_enabled,
+                "tsme_enabled": response.platform.tsme_enabled,
+                "ecc_enabled": response.platform.ecc_enabled,
+                "rapl_disabled": response.platform.rapl_disabled,
+                "ciphertext_hiding_enabled": response.platform.ciphertext_hiding_enabled,
+                "alias_check_complete": response.platform.alias_check_complete,
+            },
+            "endpoint": endpoint.as_str(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("unlock summary always serializes")
+        );
+    } else {
+        println!("injected: {}", injected.join(", "));
+        println!(
+            "rootfs: {rootfs_mib} MiB ({} persistence)",
+            persistence.as_str().unwrap_or("unknown")
+        );
+        println!("measurement: {}", response.registers.launch);
+        println!("policy: {:#x}", response.policy);
+        println!(
+            "launch TCB: {}",
+            tcb_summary(
+                response.launch_tcb.fmc,
+                response.launch_tcb.bootloader,
+                response.launch_tcb.tee,
+                response.launch_tcb.snp,
+                response.launch_tcb.microcode,
+            )
+        );
+        println!(
+            "reported TCB: {}",
+            tcb_summary(
+                response.reported_tcb.fmc,
+                response.reported_tcb.bootloader,
+                response.reported_tcb.tee,
+                response.reported_tcb.snp,
+                response.reported_tcb.microcode,
+            )
+        );
+        println!("platform: {}", platform_summary(&response.platform));
+        println!("endpoint: {}", endpoint);
+    }
+}
+
+/// `aleph instance unlock <vm-id>`: attest the instance, then inject its
+/// LUKS passphrase (plus any `--secret` extras) over the same attested
+/// RA-TLS channel, signed by the resolved account.
+///
+/// No secret byte is read, let alone sent, until two independent checks
+/// pass: the attestation itself (measurement, policy, TCB floor, platform
+/// posture, all enforced inside `run_instance_attest`), then the owner
+/// check below. The injection request travels over a second, independently
+/// attested exchange (`post_secrets`), pinned to the same measurement and
+/// policy the first one verified, and its own verified measurement is
+/// re-checked before the response is trusted.
+pub(crate) async fn handle_instance_unlock(
+    aleph_client: &AlephClient,
+    scheduler_url: &Url,
+    json: bool,
+    args: &InstanceUnlockArgs,
+) -> Result<()> {
+    let account = resolve_account(&args.identity)?;
+
+    let outcome = run_instance_attest(aleph_client, scheduler_url, &args.attest).await?;
+
+    let owner = outcome.owner.as_str().to_lowercase();
+    check_owner_account(&owner, account.address())?;
+
+    let passphrase = read_passphrase(args.passphrase_file.as_deref())?;
+    let secrets = collect_secrets(Some(passphrase), &args.secrets)?;
+
+    let payload = inject_secret_payload(
+        &outcome.fresh.served_public_key,
+        &canonical_secrets_json(&secrets),
+    );
+    let signature = account
+        .sign_raw(payload.as_bytes())
+        .context("failed to sign the secret-injection payload")?;
+    let envelope = InjectSecretEnvelope {
+        secrets,
+        signature: ensure_0x_prefixed(signature.as_str()),
+    };
+
+    let measurement_pin = match &outcome.expectation {
+        MeasurementExpectation::Pin(registers) => MeasurementPin::Exact(registers),
+        // Same CallerVerified/re-check split as the attest handshake: the
+        // exact model can't be pinned ahead of time for a fleet, so the
+        // response's own measurement is checked below before anything is
+        // trusted.
+        MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
+    };
+    let policy_pin = PolicyPin::Exact(outcome.fresh.policy);
+    let platform_policy = attest_common::platform_policy_from(&args.attest.require_platform);
+    let min_tcb = attest_common::resolve_tcb_floor(
+        aleph_client,
+        args.attest.amd_product,
+        args.attest.min_tcb.as_ref(),
+        args.attest.accept_outdated_tcb,
+    )
+    .await?;
+
+    let (response, attested) = match post_secrets(
+        &outcome.endpoint,
+        &envelope,
+        measurement_pin,
+        policy_pin,
+        args.attest.amd_product,
+        &min_tcb,
+        &platform_policy,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(AttestError::InjectRejected { status, body }) => bail!(
+            "secret injection rejected: HTTP {status}: {body}\n\
+             hint: if the VM rebooted since the attestation, its TLS key changed: re-run unlock"
+        ),
+        Err(e) => return Err(anyhow!("secret injection failed: {e}")),
+    };
+
+    // Post-handshake re-check, same rationale as `run_instance_attest`'s: for
+    // a `Pin` this is belt-and-suspenders, for a `MemberOf` fleet it is the
+    // only place this exchange's measurement is checked at all, since the
+    // handshake could not pin one model ahead of time.
+    if !measurement_is_expected(&attested.registers, &outcome.expectation) {
+        bail!(
+            "measurement mismatch on the injection response: guest presented {} which is not \
+             among the pinned launch measurement(s)",
+            attested.registers.launch
+        );
+    }
+
+    print_unlock_summary(
+        &response.injected,
+        &outcome.content,
+        &attested,
+        &outcome.endpoint,
+        json,
+    );
     Ok(())
 }
 
@@ -713,5 +980,54 @@ mod tests {
         assert!(measurement_is_expected(&regs(&"aa".repeat(48)), &set));
         assert!(measurement_is_expected(&regs(&"bb".repeat(48)), &set));
         assert!(!measurement_is_expected(&regs(&"cc".repeat(48)), &set));
+    }
+
+    #[test]
+    fn collect_secrets_parses_and_rejects_duplicates() {
+        let m = collect_secrets(Some("p".into()), &["a=1".into(), "b=x=y".into()]).unwrap();
+        assert_eq!(m.get("luks_passphrase").unwrap(), "p");
+        assert_eq!(m.get("b").unwrap(), "x=y");
+        assert!(collect_secrets(Some("p".into()), &["luks_passphrase=q".into()]).is_err());
+        assert!(collect_secrets(None, &["a=1".into(), "a=2".into()]).is_err());
+        assert!(collect_secrets(None, &["noequals".into()]).is_err());
+    }
+
+    #[test]
+    fn collect_secrets_rejects_an_empty_key() {
+        assert!(collect_secrets(None, &["=value".into()]).is_err());
+    }
+
+    #[test]
+    fn owner_account_mismatch_is_named() {
+        let owner = Address::from("0x1111111111111111111111111111111111111a".to_string());
+        let signer = Address::from("0x2222222222222222222222222222222222222b".to_string());
+        let err = check_owner_account(owner.as_str(), &signer)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(owner.as_str()),
+            "error must name the owner: {err}"
+        );
+        assert!(
+            err.contains(signer.as_str()),
+            "error must name the signing account: {err}"
+        );
+        assert!(
+            err.contains("content.address"),
+            "error must name content.address: {err}"
+        );
+    }
+
+    #[test]
+    fn owner_account_match_is_case_insensitive() {
+        let owner = Address::from("0xAAAA111111111111111111111111111111111a".to_string());
+        let signer = Address::from("0xaaaa111111111111111111111111111111111A".to_string());
+        assert!(check_owner_account(owner.as_str(), &signer).is_ok());
+    }
+
+    #[test]
+    fn ensure_0x_prefixed_adds_missing_prefix_only() {
+        assert_eq!(ensure_0x_prefixed("abcd"), "0xabcd");
+        assert_eq!(ensure_0x_prefixed("0xabcd"), "0xabcd");
     }
 }
