@@ -152,8 +152,9 @@ pub async fn fetch_bundle_artifacts(
 /// cache layout `fetch_bundle_artifacts` uses, so a later fetch of the
 /// published bundle is a cache hit. `bundle.ref` is not consulted.
 ///
-/// The whole tarball is read into memory, like the download path; the
-/// manifest's `bundle.size` bounds it the same way (`MAX_BUNDLE_SIZE`).
+/// The whole tarball is read into memory, like the download path. Its size on
+/// disk is checked against the manifest's `bundle.size` *before* it is read,
+/// so pointing at the wrong file fails fast instead of being loaded first.
 pub fn import_bundle_file(
     bundle_path: &Path,
     manifest: &RuntimeManifest,
@@ -164,6 +165,13 @@ pub fn import_bundle_file(
     let artifacts = BundleArtifacts::in_dir(&bundle_dir);
     if artifacts.all_present() {
         return Ok(artifacts);
+    }
+    let len = fs::metadata(bundle_path)?.len();
+    if len != manifest.bundle.size {
+        return Err(BundleError::SizeMismatch {
+            expected: manifest.bundle.size,
+            actual: len,
+        });
     }
     let bytes = fs::read(bundle_path)?;
     verify_bundle_bytes(&bytes, &manifest.bundle.sha256, manifest.bundle.size)?;
@@ -729,6 +737,27 @@ mod test {
         std::fs::write(&path, &bytes).unwrap();
         let err = import_bundle_file(&path, &manifest, cache.path()).unwrap_err();
         assert!(matches!(err, BundleError::ChecksumMismatch { .. }), "{err}");
+        assert!(!cache.path().join(&manifest.bundle.sha256).exists());
+    }
+
+    /// A file of the wrong length is rejected on its metadata, before any of
+    /// it is read into memory.
+    #[test]
+    fn import_bundle_file_rejects_a_tarball_of_the_wrong_size() {
+        let work = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let (path, manifest) = local_bundle_fixture(work.path());
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(0);
+        std::fs::write(&path, &bytes).unwrap();
+        let err = import_bundle_file(&path, &manifest, cache.path()).unwrap_err();
+        match err {
+            BundleError::SizeMismatch { expected, actual } => {
+                assert_eq!(expected, manifest.bundle.size);
+                assert_eq!(actual, manifest.bundle.size + 1);
+            }
+            other => panic!("expected SizeMismatch, got {other}"),
+        }
         assert!(!cache.path().join(&manifest.bundle.sha256).exists());
     }
 }
