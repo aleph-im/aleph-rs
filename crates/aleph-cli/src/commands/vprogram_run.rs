@@ -250,6 +250,12 @@ async fn wait_until_ready(
 
     let mut scanner = LineScanner::new();
     let mut probing = false;
+    // One persistent ticker, always selected on, so the loop head (deadline
+    // and `try_wait`) runs on its own schedule no matter what the console
+    // does: a silent guest cannot park us in `rx.recv()` forever, and a
+    // chatty one cannot keep resetting a per-iteration timer. `tick` is
+    // cancel-safe and is not rearmed when the other branch wins.
+    let mut ticker = tokio::time::interval(PROBE_INTERVAL);
     loop {
         if Instant::now() >= deadline {
             bail!(
@@ -277,8 +283,8 @@ async fn wait_until_ready(
                     tokio::time::sleep(PROBE_INTERVAL).await;
                 }
             },
-            _ = tokio::time::sleep(PROBE_INTERVAL), if probing => {
-                if probe_http(url).await {
+            _ = ticker.tick() => {
+                if probing && probe_http(url).await {
                     return Ok(());
                 }
             }
