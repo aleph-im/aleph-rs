@@ -3314,11 +3314,11 @@ pub struct VProgramBuildArgs {
     pub volumes: Vec<PathBuf>,
 
     /// Number of virtual CPUs.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     pub vcpus: u32,
 
     /// Memory in MiB.
-    #[arg(long, default_value_t = 2048)]
+    #[arg(long, default_value_t = 2048, value_parser = clap::value_parser!(u32).range(1..))]
     pub memory: u32,
 }
 
@@ -3405,7 +3405,12 @@ pub struct VProgramRunArgs {
     pub no_internet: bool,
 
     /// Seconds to wait, from QEMU start, for the guest's agent to answer.
-    #[arg(long, default_value_t = 180, value_name = "SECS")]
+    #[arg(
+        long,
+        default_value_t = 180,
+        value_name = "SECS",
+        value_parser = clap::value_parser!(u64).range(1..=86400)
+    )]
     pub timeout: u64,
 
     /// Non-interactive: exit 0 as soon as the agent answers, then power the

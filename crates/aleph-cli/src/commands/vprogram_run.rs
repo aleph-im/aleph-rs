@@ -7,14 +7,18 @@
 //! production uses.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aleph_sdk::client::AlephClient;
+use aleph_sdk::vprogram::bundle::BundleArtifacts;
 use anyhow::{Result, bail};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
-use super::vprogram::{ATTEST_PORT, LocalBuild, RuntimeSource, prepare_local_build};
+use super::vprogram::{
+    ATTEST_PORT, LocalBuild, RuntimeSource, VerityArtifact, prepare_local_build,
+};
 use crate::cli::VProgramRunArgs;
 use crate::qemu::{Accel, LocalBootSpec, Qemu, QemuProcess};
 
@@ -23,6 +27,8 @@ const HONESTY_LINE: &str = "local mode: no SEV-SNP, SeaBIOS instead of the bundl
     user networking, plain HTTP; the launch measurement is not validated";
 /// How often the forwarded port is probed once the init markers are all in.
 const PROBE_INTERVAL: Duration = Duration::from_millis(500);
+/// Per-probe HTTP timeout.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Serial lines the guest init prints on the way up. Order differs between
 /// the exec and compose flavors, so completion is "all seen", not a sequence.
@@ -36,23 +42,42 @@ const MARKERS: [&str; 4] = [
     MARKER_LOCAL_MODE,
     MARKER_INIT_START,
 ];
+/// Indices into [`MARKERS`], i.e. into `LineScanner::seen`. A unit test pins
+/// each to its marker so reordering `MARKERS` cannot silently point the
+/// local-mode diagnosis at another marker.
+const IDX_LOCAL_MODE: usize = 2;
+const IDX_INIT_START: usize = 3;
 /// Seen when the firewall is up: with this but no LOCAL MODE line the
 /// runtime predates local mode (its init ignores the token).
 const MARKER_FIREWALL: &str = "init: firewall active";
 const FATAL_PREFIX: &str = "init: FATAL:";
 const TAIL_LINES: usize = 40;
+/// How many further serial lines after [`MARKER_INIT_START`] are allowed to go
+/// by before a missing LOCAL MODE line is called conclusive. Both inits print
+/// it either before the /sbin/init line or immediately after it, so a handful
+/// of lines of slack is enough while leaving room for interleaved kernel
+/// output.
+const LOCAL_MODE_GRACE_LINES: usize = 5;
 
 pub(crate) enum ScanEvent {
     /// A fail-closed line from init; the VM is powering off.
     Fatal(String),
     /// Every marker has been seen; start probing the forwarded port.
     Complete,
+    /// The init got far enough that it would have announced local mode, and
+    /// did not: this runtime predates the `aleph_local` token. Reported at
+    /// once instead of after the full timeout.
+    NoLocalMode,
     Continue,
 }
 
 pub(crate) struct LineScanner {
     seen: [bool; 4],
     saw_firewall: bool,
+    /// Lines fed since [`MARKER_INIT_START`] was seen, `None` until then.
+    since_init_start: Option<usize>,
+    /// [`ScanEvent::NoLocalMode`] is emitted once, not on every later line.
+    reported_no_local_mode: bool,
     tail: VecDeque<String>,
 }
 
@@ -61,6 +86,8 @@ impl LineScanner {
         Self {
             seen: [false; 4],
             saw_firewall: false,
+            since_init_start: None,
+            reported_no_local_mode: false,
             tail: VecDeque::with_capacity(TAIL_LINES),
         }
     }
@@ -83,10 +110,25 @@ impl LineScanner {
             }
         }
         if !before && self.complete() {
-            ScanEvent::Complete
-        } else {
-            ScanEvent::Continue
+            return ScanEvent::Complete;
         }
+        self.since_init_start = match self.since_init_start {
+            Some(n) => Some(n + 1),
+            // The init-start line itself counts as zero lines elapsed.
+            None if self.seen[IDX_INIT_START] => Some(0),
+            None => None,
+        };
+        if !self.reported_no_local_mode
+            && !self.seen[IDX_LOCAL_MODE]
+            && self.saw_firewall
+            && self
+                .since_init_start
+                .is_some_and(|n| n >= LOCAL_MODE_GRACE_LINES)
+        {
+            self.reported_no_local_mode = true;
+            return ScanEvent::NoLocalMode;
+        }
+        ScanEvent::Continue
     }
 
     pub(crate) fn complete(&self) -> bool {
@@ -103,7 +145,7 @@ impl LineScanner {
         if self.complete() {
             return format!("agent did not answer on tcp/{guest_port} within {timeout_secs}s");
         }
-        if self.saw_firewall && !self.seen[2] {
+        if self.saw_firewall && !self.seen[IDX_LOCAL_MODE] {
             return format!(
                 "runtime {runtime} predates local mode (no aleph_local support in its init); \
                  rebuild it from aleph-vm dev-2.1 or newer"
@@ -123,18 +165,19 @@ impl LineScanner {
     }
 }
 
+/// The probe client: short timeout so a hung connection cannot outlive a
+/// tick, and no redirect following since any response at all is the signal.
+fn probe_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(PROBE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 /// True once ANY HTTP response comes back. A bare TCP connect is not
 /// evidence: SLIRP accepts the host-side connection itself and only then
 /// tries the guest, closing without a byte when nothing listens there yet.
-pub(crate) async fn probe_http(url: &str) -> bool {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+pub(crate) async fn probe_http(client: &reqwest::Client, url: &str) -> bool {
     client.get(url).send().await.is_ok()
 }
 
@@ -152,7 +195,10 @@ pub async fn handle_run(
     // Clone rather than move: `args` is borrowed again by `boot_spec` below.
     let source = match (args.runtime_manifest.clone(), args.bundle.clone()) {
         (Some(manifest), Some(bundle)) => RuntimeSource::LocalFiles { manifest, bundle },
-        _ => RuntimeSource::Network(args.build.runtime.clone()),
+        (None, None) => RuntimeSource::Network(args.build.runtime.clone()),
+        (Some(_), None) | (None, Some(_)) => {
+            unreachable!("clap: --runtime-manifest and --bundle require each other")
+        }
     };
     let build = prepare_local_build(aleph_client, json, &args.build, source).await?;
     let runtime_label = format!("{} {}", build.manifest.name, build.manifest.version);
@@ -172,7 +218,9 @@ pub async fn handle_run(
 
     match outcome {
         Err(e) => {
-            vm.shutdown().await?;
+            // Best effort: a shutdown io error must not replace the
+            // diagnosis the caller actually needs to read.
+            let _ = vm.shutdown().await;
             Err(e)
         }
         Ok(()) => {
@@ -194,21 +242,11 @@ pub async fn handle_run(
 /// materialized cmdline, and the read-only disks in the guest device order
 /// production uses (platform pair, workload pair, then one pair per volume).
 fn boot_spec(build: &LocalBuild, args: &VProgramRunArgs, accel: Accel) -> LocalBootSpec {
-    let mut disks = vec![
-        build.artifacts.platform_rootfs.clone(),
-        build.artifacts.platform_hash_tree.clone(),
-        build.workload.data.clone(),
-        build.workload.hash_tree.clone(),
-    ];
-    for v in &build.volumes {
-        disks.push(v.data.clone());
-        disks.push(v.hash_tree.clone());
-    }
     LocalBootSpec {
         kernel: build.artifacts.kernel.clone(),
         initrd: build.artifacts.initrd.clone(),
         cmdline: build.cmdline.clone(),
-        disks,
+        disks: disk_order(&build.artifacts, &build.workload, &build.volumes),
         vcpus: args.build.vcpus,
         mem_mib: args.build.memory,
         host_port: args.port,
@@ -216,6 +254,27 @@ fn boot_spec(build: &LocalBuild, args: &VProgramRunArgs, accel: Accel) -> LocalB
         internet: !args.no_internet,
         accel,
     }
+}
+
+/// The read-only disks in the guest device order the runtime's init expects:
+/// the platform pair (vda/vdb), the workload pair, then one pair per verified
+/// volume in flag order. The cmdline's roothash slots are filled in the same
+/// order, so getting this wrong silently boots the wrong device.
+fn disk_order(
+    artifacts: &BundleArtifacts,
+    workload: &VerityArtifact,
+    volumes: &[VerityArtifact],
+) -> Vec<PathBuf> {
+    let mut disks = Vec::with_capacity(4 + 2 * volumes.len());
+    disks.push(artifacts.platform_rootfs.clone());
+    disks.push(artifacts.platform_hash_tree.clone());
+    disks.push(workload.data.clone());
+    disks.push(workload.hash_tree.clone());
+    for v in volumes {
+        disks.push(v.data.clone());
+        disks.push(v.hash_tree.clone());
+    }
+    disks
 }
 
 /// Stream the serial console to stderr, watch the init markers, then probe
@@ -250,12 +309,18 @@ async fn wait_until_ready(
 
     let mut scanner = LineScanner::new();
     let mut probing = false;
+    // One client for every probe: rebuilding it per tick threw away the
+    // connection pool and the TLS/DNS setup for no gain.
+    let client = probe_client()?;
     // One persistent ticker, always selected on, so the loop head (deadline
     // and `try_wait`) runs on its own schedule no matter what the console
     // does: a silent guest cannot park us in `rx.recv()` forever, and a
     // chatty one cannot keep resetting a per-iteration timer. `tick` is
     // cancel-safe and is not rearmed when the other branch wins.
     let mut ticker = tokio::time::interval(PROBE_INTERVAL);
+    // A probe can take longer than one interval; skipped ticks must not be
+    // replayed back-to-back as a burst of probes.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         if Instant::now() >= deadline {
             bail!(
@@ -272,11 +337,22 @@ async fn wait_until_ready(
         }
         tokio::select! {
             line = rx.recv() => match line {
-                Some(line) => match scanner.feed(&line) {
-                    ScanEvent::Fatal(line) => bail!("guest init failed closed: {line}"),
-                    ScanEvent::Complete => probing = true,
-                    ScanEvent::Continue => {}
-                },
+                Some(line) => {
+                    // Bound first: an arm below reads `scanner` again.
+                    let event = scanner.feed(&line);
+                    match event {
+                        ScanEvent::Fatal(line) => bail!("guest init failed closed: {line}"),
+                        ScanEvent::Complete => probing = true,
+                        // The init is past the point where it would have said
+                        // so: give the diagnosis the deadline would have, now.
+                        ScanEvent::NoLocalMode => bail!(
+                            "{}\n--- last serial lines ---\n{}",
+                            scanner.timeout_diagnosis(runtime_label, ATTEST_PORT, timeout_secs),
+                            scanner.tail().join("\n")
+                        ),
+                        ScanEvent::Continue => {}
+                    }
+                }
                 None => {
                     // Console closed: QEMU is exiting; the try_wait above
                     // reports it on the next turn.
@@ -284,7 +360,7 @@ async fn wait_until_ready(
                 }
             },
             _ = ticker.tick() => {
-                if probing && probe_http(url).await {
+                if probing && probe_http(&client, url).await {
                     return Ok(());
                 }
             }
@@ -325,6 +401,12 @@ mod tests {
         "init: firewall active (drop inbound except tcp/8443, loopback, and ND/PMTU icmpv6)";
 
     #[test]
+    fn marker_indices_point_at_their_markers() {
+        assert_eq!(MARKERS[IDX_LOCAL_MODE], MARKER_LOCAL_MODE);
+        assert_eq!(MARKERS[IDX_INIT_START], MARKER_INIT_START);
+    }
+
+    #[test]
     fn markers_complete_in_any_order() {
         // init.sh prints LOCAL MODE before the /sbin/init line, init-compose.sh
         // after it; the scanner must not care.
@@ -362,6 +444,42 @@ mod tests {
         assert!(msg.contains("aleph-snp-attest 2026.07.08"), "{msg}");
     }
 
+    /// The init printed the firewall line and started /sbin/init without ever
+    /// announcing local mode: it never will, so say so now instead of sitting
+    /// out the whole timeout.
+    #[test]
+    fn a_missing_local_mode_line_is_called_once_the_init_has_moved_on() {
+        let mut s = LineScanner::new();
+        s.feed(ROOT);
+        s.feed(WORKLOAD);
+        s.feed(FIREWALL);
+        assert!(matches!(s.feed(START), ScanEvent::Continue));
+        for i in 0..(LOCAL_MODE_GRACE_LINES - 1) {
+            assert!(matches!(s.feed(&format!("noise {i}")), ScanEvent::Continue));
+        }
+        assert!(matches!(
+            s.feed("one line too many"),
+            ScanEvent::NoLocalMode
+        ));
+        // Reported once, not again on every later line.
+        assert!(matches!(s.feed("more noise"), ScanEvent::Continue));
+    }
+
+    #[test]
+    fn a_local_mode_line_inside_the_grace_window_suppresses_the_verdict() {
+        let mut s = LineScanner::new();
+        s.feed(ROOT);
+        s.feed(WORKLOAD);
+        s.feed(FIREWALL);
+        s.feed(START);
+        s.feed("noise 0");
+        // init-compose.sh prints LOCAL MODE just after the /sbin/init line.
+        assert!(matches!(s.feed(LOCAL), ScanEvent::Complete));
+        for i in 0..(LOCAL_MODE_GRACE_LINES + 5) {
+            assert!(matches!(s.feed(&format!("noise {i}")), ScanEvent::Continue));
+        }
+    }
+
     #[test]
     fn timeout_after_all_markers_blames_the_agent() {
         let mut s = LineScanner::new();
@@ -395,9 +513,43 @@ mod tests {
         assert_eq!(tail[39], "line 49");
     }
 
+    /// The guest's init addresses its disks by device order, and the cmdline's
+    /// roothash slots are filled in that same order, so this vector is a wire
+    /// contract rather than an implementation detail.
+    #[test]
+    fn disk_order_is_platform_then_workload_then_volumes_in_flag_order() {
+        let artifacts = BundleArtifacts {
+            ovmf: PathBuf::from("/bundle/ovmf"),
+            kernel: PathBuf::from("/bundle/kernel"),
+            initrd: PathBuf::from("/bundle/initrd"),
+            platform_rootfs: PathBuf::from("/bundle/platform_rootfs"),
+            platform_hash_tree: PathBuf::from("/bundle/platform_hash_tree"),
+        };
+        let verity = |name: &str| VerityArtifact {
+            data: PathBuf::from(format!("/build/{name}.ext4")),
+            hash_tree: PathBuf::from(format!("/build/{name}.verity")),
+            root_hash: "0".repeat(64),
+        };
+        let volumes = [verity("vol0"), verity("vol1")];
+        assert_eq!(
+            disk_order(&artifacts, &verity("workload"), &volumes),
+            vec![
+                PathBuf::from("/bundle/platform_rootfs"),
+                PathBuf::from("/bundle/platform_hash_tree"),
+                PathBuf::from("/build/workload.ext4"),
+                PathBuf::from("/build/workload.verity"),
+                PathBuf::from("/build/vol0.ext4"),
+                PathBuf::from("/build/vol0.verity"),
+                PathBuf::from("/build/vol1.ext4"),
+                PathBuf::from("/build/vol1.verity"),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn probe_http_accepts_any_http_response_and_rejects_a_bare_close() {
         use std::io::{Read, Write};
+        let client = probe_client().unwrap();
         // A listener that answers a 404: ready.
         let ok = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let ok_port = ok.local_addr().unwrap().port();
@@ -408,7 +560,7 @@ mod tests {
                 let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
             }
         });
-        assert!(probe_http(&format!("http://127.0.0.1:{ok_port}/")).await);
+        assert!(probe_http(&client, &format!("http://127.0.0.1:{ok_port}/")).await);
 
         // A listener that accepts and closes without a byte (what SLIRP does
         // while the guest is not listening yet): not ready.
@@ -419,6 +571,6 @@ mod tests {
                 drop(s);
             }
         });
-        assert!(!probe_http(&format!("http://127.0.0.1:{closer_port}/")).await);
+        assert!(!probe_http(&client, &format!("http://127.0.0.1:{closer_port}/")).await);
     }
 }

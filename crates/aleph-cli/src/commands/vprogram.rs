@@ -159,7 +159,8 @@ async fn handle_create(
 ) -> Result<()> {
     // Cheap deploy-side gates first, then the shared local build (tool
     // gates, manifest, bundle, workload, verity, cmdline), all before any
-    // upload.
+    // upload. The numbered steps below are what `create` adds on top of that
+    // build: upload, measure, publish.
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
     check_debug_policy(args.policy, args.allow_debug)?;
@@ -184,7 +185,7 @@ async fn handle_create(
     )
     .await?;
 
-    // 4. Upload each data image + hash tree as STORE messages. Under
+    // 1. Upload each data image + hash tree as STORE messages. Under
     //    --dry-run, uploads are skipped entirely: the file hash stands in
     //    for the STORE message hash so the pending message can still be
     //    previewed without ever touching the network for the upload.
@@ -208,7 +209,7 @@ async fn handle_create(
             .push(upload_pair(aleph_client, &account, owner.as_ref(), json, dry_run, v).await?);
     }
 
-    // 5. Measurements. The cmdline was instantiated by the local build.
+    // 2. Measurements. The cmdline was instantiated by the local build.
     if !json {
         eprintln!(
             "Computing measurements ({} cpu model(s))...",
@@ -222,7 +223,7 @@ async fn handle_create(
         &build.manifest.boot.cpu_models,
     )?;
 
-    // 6. Assemble and publish.
+    // 3. Assemble and publish.
     let verification = serde_json::from_value::<TeeVerification>(serde_json::json!({
         "backend": "sev_snp",
         "policy": args.policy,
@@ -494,7 +495,7 @@ pub(crate) async fn prepare_local_build(
                     .parse()
                     .map_err(|e: aleph_types::item_hash::ItemHashError| anyhow!("{e}"))?,
                 contract: None,
-                label: Some("local file".to_string()),
+                label: Some(LOCAL_FILE_LABEL.to_string()),
             };
             check_runtime_contract(&runtime, &manifest, compose_input.is_some())?;
             if !json {
@@ -634,6 +635,11 @@ pub(crate) async fn prepare_local_build(
     })
 }
 
+/// The `label` a runtime read off disk carries. It is not a catalogue name,
+/// so `runtime_identity_line` renders it as its own wording rather than
+/// splicing it in where a runtime name goes.
+pub(crate) const LOCAL_FILE_LABEL: &str = "local file";
+
 /// What `--runtime` resolved to. `contract` / `label` are `None` when the
 /// user pinned a raw manifest hash (nothing in the aggregate was consulted).
 /// For a local-file runtime (`--runtime-manifest`/`--bundle`) the `hash` is
@@ -681,7 +687,9 @@ pub(crate) fn resolve_vprogram_runtime(
 /// One-line description of the runtime a create resolved to, e.g.
 /// `Using runtime exec-1.0 (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)`.
 /// Falls back to the hash when no catalogue entry was involved and omits
-/// the provenance when the manifest carries no `source` block.
+/// the provenance when the manifest carries no `source` block. A runtime read
+/// off disk has no catalogue name to print, so it gets its own wording:
+/// `Using local runtime file (...)`.
 pub(crate) fn runtime_identity_line(
     runtime: &ResolvedRuntime,
     manifest: &RuntimeManifest,
@@ -704,6 +712,9 @@ pub(crate) fn runtime_identity_line(
             (None, Some(rev)) => details.push_str(&format!(", rev {rev}")),
             (None, None) => {}
         }
+    }
+    if runtime.contract.is_none() && runtime.label.as_deref() == Some(LOCAL_FILE_LABEL) {
+        return format!("Using local runtime file ({details})");
     }
     let what = runtime
         .label
@@ -3364,6 +3375,18 @@ mod compose_wiring_tests {
             format!(
                 "Using runtime {hash} (aleph.exec/1; aleph-snp-attest 2026.08.20, aleph-vm@ba690c65)"
             )
+        );
+    }
+
+    #[test]
+    fn runtime_identity_line_names_a_local_file_runtime_as_such() {
+        // "local file" is not a catalogue runtime name, so it must not be
+        // spliced in where one goes ("Using runtime local file (...)").
+        let hash: ItemHash = "afde".repeat(16).parse().unwrap();
+        let m = manifest_with_source(None);
+        assert_eq!(
+            runtime_identity_line(&resolved(Some(LOCAL_FILE_LABEL), None, &hash), &m),
+            "Using local runtime file (aleph.exec/1; aleph-snp-attest 2026.08.20)"
         );
     }
 
