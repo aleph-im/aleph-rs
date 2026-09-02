@@ -2024,8 +2024,10 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub rootfs_size_mib: Option<u64>,
 
-    /// Read the LUKS passphrase for --encrypt-rootfs from this file (else
-    /// generated and printed once).
+    /// Read the LUKS passphrase for --encrypt-rootfs from this file (trims
+    /// one trailing newline). Without it, falls back to the
+    /// ALEPH_LUKS_PASSPHRASE environment variable, then a hidden interactive
+    /// prompt on a terminal, erroring if none of the three is available.
     #[arg(long)]
     pub passphrase_file: Option<PathBuf>,
 
