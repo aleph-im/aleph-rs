@@ -1004,9 +1004,14 @@ pub(crate) fn build_show(
         .iter()
         .map(|m| MeasurementSummary {
             platform: m.platform.as_str().to_string(),
-            // rendered as a map so a future multi-register platform needs no
-            // change here; sev_snp contributes its single launch register.
-            registers: BTreeMap::from([("launch".to_string(), m.snp_launch_digest().to_string())]),
+            // rendered as a map so every platform's register set shows
+            // without a per-platform arm here
+            registers: m
+                .registers
+                .entries()
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
             vcpu_type: m.vcpu_type.clone(),
         })
         .collect();
@@ -1555,22 +1560,32 @@ pub(crate) fn resolve_expected_measurement(
         }));
     }
 
-    match measurements.len() {
+    // The message's registers are the pin, same type both sides. An entry
+    // this client cannot check (another platform's register set) fails
+    // closed rather than being skipped, since skipping would narrow the
+    // accepted set silently. Unreachable through a valid message today: the
+    // schema restricts the V-PROGRAM backend to sev_snp.
+    let snp_registers: Vec<SevSnpRegisters> = measurements
+        .iter()
+        .map(|m| {
+            m.registers.as_sev_snp().cloned().ok_or_else(|| {
+                anyhow!(
+                    "the message pins a {} measurement, which this client cannot verify",
+                    m.platform.as_str()
+                )
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    match snp_registers.len() {
         0 => bail!(
             "V-Program message pins no launch measurements; cannot verify attestation without \
              --expected-measurement"
         ),
-        // The message's registers are the pin, same type both sides. While
-        // sev_snp is the only platform defined this is infallible; when a
-        // second platform lands, `registers` becomes an enum and this must
-        // fail closed on an entry the client cannot check rather than skip
-        // it, since skipping would narrow the accepted set silently.
         1 => Ok(MeasurementExpectation::Pin(
-            measurements[0].registers.clone(),
+            snp_registers.into_iter().next().expect("len checked"),
         )),
-        _ => Ok(MeasurementExpectation::MemberOf(
-            measurements.iter().map(|m| m.registers.clone()).collect(),
-        )),
+        _ => Ok(MeasurementExpectation::MemberOf(snp_registers)),
     }
 }
 

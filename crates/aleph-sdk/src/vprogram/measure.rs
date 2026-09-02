@@ -9,7 +9,7 @@
 
 use crate::vprogram::bundle::BundleArtifacts;
 use aleph_types::message::execution::environment::{
-    LaunchMeasurement, SevSnpRegisters, TeePlatform,
+    LaunchMeasurement, MeasurementRegisters, SevSnpRegisters, TeePlatform,
 };
 use sev::measurement::snp::{SnpMeasurementArgs, snp_calc_launch_digest};
 use sev::measurement::vcpu_types::CpuType;
@@ -61,9 +61,9 @@ pub fn compute_measurements(
             Ok(LaunchMeasurement {
                 platform: TeePlatform::SevSnp,
                 // SEV-SNP pins exactly one register: the launch digest.
-                registers: SevSnpRegisters {
+                registers: MeasurementRegisters::SevSnp(SevSnpRegisters {
                     launch: hex::encode(bytes),
-                },
+                }),
                 vcpu_type: Some(model.clone()),
             })
         })
@@ -127,6 +127,6 @@ mod test {
         };
         let cmdline = "console=ttyS0 root=/dev/mapper/verity-root ro roothash=cb121a317be7dc7969dd633ca9b6c3718ffe9ea6715b64e0e35a871d484b56b8";
         let m = compute_measurements(&artifacts, cmdline, 1, &["EPYC-v4".into()]).unwrap();
-        assert_eq!(m[0].snp_launch_digest(), EXPECTED);
+        assert_eq!(m[0].snp_launch_digest(), Some(EXPECTED));
     }
 }

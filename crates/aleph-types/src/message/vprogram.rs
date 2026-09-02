@@ -147,20 +147,24 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
 
     fn try_from(raw: RawTeeVerification) -> Result<Self, Self::Error> {
         // Policy semantics are per platform: dispatch on the backend so a
-        // future variant (e.g. TDX) cannot silently inherit SNP validation.
-        // Adding a variant is a compile error here until it gets its own arm.
+        // future variant cannot silently inherit SNP validation. Adding a
+        // variant is a compile error here until it gets its own arm.
         match raw.backend {
             TeePlatform::SevSnp => validate_snp_policy(raw.policy)?,
+            // The V-PROGRAM runtime vocabulary is SEV-SNP-only for now; a
+            // TDX runtime arrives as its own backend value once one exists.
+            TeePlatform::Tdx => return Err(TeeError::UnsupportedVProgramBackend),
         }
         if raw.measurements.is_empty() {
-            return Err(TeeError::SnpModeRequires("measurements"));
+            return Err(TeeError::MeasuredModeRequires {
+                mode: raw.backend.as_str(),
+                field: "measurements",
+            });
         }
         if raw.measurements.len() > MAX_MEASUREMENTS {
             return Err(TeeError::TooManyMeasurements(raw.measurements.len()));
         }
-        // Unreachable while TeePlatform has a single variant, but load-bearing
-        // the day a second platform (e.g. TDX) lands: a sev_snp backend must
-        // not carry tdx measurements, or vice versa.
+        // A sev_snp backend must not carry another platform's measurements.
         for measurement in &raw.measurements {
             if measurement.platform != raw.backend {
                 return Err(TeeError::MeasurementPlatformMismatch {
@@ -405,6 +409,35 @@ mod test {
 
         let json = r#"{"backend": "sev_snp", "measurements": []}"#;
         assert!(serde_json::from_str::<TeeVerification>(json).is_err()); // min 1
+    }
+
+    #[test]
+    fn test_tee_verification_rejects_tdx_backend() {
+        // the V-PROGRAM runtime vocabulary is SEV-SNP-only for now
+        let json = format!(
+            r#"{{"backend": "tdx",
+                 "measurements": [{{"platform": "tdx", "registers":
+                    {{"mrtd": "{r}", "rtmr1": "{r}", "rtmr2": "{r}", "mrconfigid": "{r}"}}}}]}}"#,
+            r = "11".repeat(48)
+        );
+        let err = serde_json::from_str::<TeeVerification>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("only the sev_snp backend"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_tee_verification_rejects_foreign_platform_measurements() {
+        // a tdx measurement says nothing about an sev_snp backend
+        let json = format!(
+            r#"{{"backend": "sev_snp",
+                 "measurements": [{{"platform": "tdx", "registers":
+                    {{"mrtd": "{r}", "rtmr1": "{r}", "rtmr2": "{r}", "mrconfigid": "{r}"}}}}]}}"#,
+            r = "11".repeat(48)
+        );
+        let err = serde_json::from_str::<TeeVerification>(&json).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
     }
 
     #[test]
