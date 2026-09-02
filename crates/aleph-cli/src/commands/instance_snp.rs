@@ -405,6 +405,13 @@ fn platform_summary(p: &aleph_sdk::attest::PlatformPosture) -> String {
 /// evidence rendering.
 fn print_attest_summary(outcome: &AttestOutcome, json: bool) {
     let fresh = &outcome.fresh;
+    if attest_common::policy_debug_allowed(fresh.policy) {
+        eprintln!(
+            "warning: this instance's guest policy ({:#x}) allows debugging: the host can \
+             decrypt guest memory, so this attestation is not confidential",
+            fresh.policy
+        );
+    }
     if json {
         let out = serde_json::json!({
             "verified": true,
@@ -578,6 +585,13 @@ fn print_unlock_summary(
     let rootfs_mib: u64 = content.rootfs.size_mib.into();
     let persistence = serde_json::to_value(&content.rootfs.persistence)
         .expect("VolumePersistence always serializes");
+    if attest_common::policy_debug_allowed(response.policy) {
+        eprintln!(
+            "warning: this instance's guest policy ({:#x}) allows debugging: the host can \
+             decrypt guest memory, so the injected secret is not confidential",
+            response.policy
+        );
+    }
     if json {
         let out = serde_json::json!({
             "injected": injected,

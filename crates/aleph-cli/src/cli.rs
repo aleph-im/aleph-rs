@@ -2086,6 +2086,13 @@ pub struct InstanceCreateArgs {
     #[arg(long, value_parser = parse_u64_maybe_hex)]
     pub policy: Option<u64>,
 
+    /// Allow the DEBUG bit (19) in the guest policy. The host can then
+    /// decrypt guest memory via the firmware debug API, so the deployment
+    /// is NOT confidential. This flag is required to create an SNP
+    /// instance with a debug-enabled policy.
+    #[arg(long)]
+    pub allow_debug: bool,
+
     /// Encrypt the rootfs from a local plain ext4 image instead of --image.
     /// The image must contain an executable `/sbin/init` (run chrooted, in
     /// the foreground) and any SSH keys baked in, since the encrypted rootfs
@@ -2093,7 +2100,7 @@ pub struct InstanceCreateArgs {
     #[arg(long, conflicts_with = "image")]
     pub encrypt_rootfs: Option<PathBuf>,
 
-    /// Size of the encrypted rootfs (e.g. 20GB, 20GiB). Only used with
+    /// Size of the encrypted rootfs, in MiB (e.g. 20480). Only used with
     /// --encrypt-rootfs.
     #[arg(long)]
     pub rootfs_size_mib: Option<u64>,
