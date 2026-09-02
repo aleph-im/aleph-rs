@@ -4632,11 +4632,11 @@ mod vprogram_create_args_tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(args.vcpus, 1);
-        assert_eq!(args.memory, 2048);
+        assert_eq!(args.build.vcpus, 1);
+        assert_eq!(args.build.memory, 2048);
         assert!(!args.no_internet);
         assert_eq!(args.policy, 0x30000);
-        assert!(args.volumes.is_empty());
+        assert!(args.build.volumes.is_empty());
     }
 
     #[test]
@@ -4668,7 +4668,7 @@ mod vprogram_create_args_tests {
             panic!("wrong variant");
         };
         assert_eq!(args.policy, 0x30001);
-        assert_eq!(args.volumes.len(), 2);
+        assert_eq!(args.build.volumes.len(), 2);
         assert!(args.no_internet);
         assert_eq!(args.crn.unwrap(), "ab".repeat(32));
     }
@@ -4956,8 +4956,8 @@ mod vprogram_create_args_tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(args.compose, Some(PathBuf::from("f.yml")));
-        assert_eq!(args.image_archives.len(), 2);
+        assert_eq!(args.build.compose, Some(PathBuf::from("f.yml")));
+        assert_eq!(args.build.image_archives.len(), 2);
     }
 }
 
