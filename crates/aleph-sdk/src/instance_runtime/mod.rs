@@ -5,4 +5,5 @@
 //! reusing that module's `SourceInfo` and `AttestationDescriptor` types
 //! rather than redefining them.
 pub mod bundle;
+pub mod cmdline;
 pub mod manifest;
