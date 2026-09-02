@@ -385,6 +385,22 @@ impl ConfigStore {
         Ok(proj.config_dir().join("vprogram").join("bundles"))
     }
 
+    /// Returns the per-user directory where extracted SNP confidential
+    /// instance runtime bundle artifacts (`ovmf`, `kernel`, `initrd`) are
+    /// cached, keyed by the bundle's declared sha256. Shares the same base
+    /// cache dir as `vprogram_bundle_cache_dir`, under its own subdirectory
+    /// so the two bundle flavors never collide.
+    #[cfg(feature = "vprogram")]
+    pub fn instance_runtime_cache_dir() -> Result<std::path::PathBuf, ConfigError> {
+        let proj = directories::ProjectDirs::from("", "", "aleph").ok_or_else(|| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not determine home directory",
+            ))
+        })?;
+        Ok(proj.config_dir().join("vprogram").join("instance-runtimes"))
+    }
+
     fn ensure_builtin(&self) -> Result<(), ConfigError> {
         let mut manifest = self.load_manifest()?;
         if !manifest.networks.is_empty() {

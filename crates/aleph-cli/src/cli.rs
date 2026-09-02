@@ -2006,6 +2006,12 @@ pub struct InstanceCreateArgs {
     #[arg(long, value_parser = parse_image_ref)]
     pub runtime: Option<ImageRef>,
 
+    /// SEV-SNP 64-bit guest policy override (accepts 0x-prefixed hex or a
+    /// decimal integer). Only used with --tee sev-snp; defaults to 0x30000
+    /// (no-debug, SMT allowed, reserved bit 17 set).
+    #[arg(long, value_parser = parse_u64_maybe_hex)]
+    pub policy: Option<u64>,
+
     /// Encrypt the rootfs from a local plain ext4 image instead of --image.
     /// The image must contain an executable `/sbin/init` (run chrooted, in
     /// the foreground) and any SSH keys baked in, since the encrypted rootfs
@@ -3544,14 +3550,27 @@ fn parse_amd_product(s: &str) -> Result<aleph_sdk::attest::AmdProduct, String> {
 
 /// Clap value parser for `--policy`: accepts a decimal integer or a
 /// `0x`-prefixed hex string (matching how SEV-SNP guest policies are usually
-/// quoted, e.g. `0x30000`).
-#[cfg(feature = "vprogram")]
+/// quoted, e.g. `0x30000`). Not gated behind `vprogram`: `instance create
+/// --policy` uses it unconditionally (the `vprogram create --policy` flag
+/// also uses it, in gated code).
 pub fn parse_u64_maybe_hex(s: &str) -> Result<u64, String> {
     let parsed = match s.strip_prefix("0x") {
         Some(hex) => u64::from_str_radix(hex, 16),
         None => s.parse(),
     };
     parsed.map_err(|e| format!("invalid policy value {s:?}: {e}"))
+}
+
+#[cfg(test)]
+mod parse_u64_maybe_hex_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_hex_and_decimal_and_rejects_garbage() {
+        assert_eq!(parse_u64_maybe_hex("0x30000").unwrap(), 0x30000);
+        assert_eq!(parse_u64_maybe_hex("196608").unwrap(), 0x30000);
+        assert!(parse_u64_maybe_hex("not-a-number").is_err());
+    }
 }
 
 #[cfg(test)]
@@ -4225,6 +4244,30 @@ mod instance_create_args_tests {
     fn instance_create_tee_sev_is_accepted() {
         let args = parse_create(&["--disk-size", "20GB", "--confidential", "--tee", "sev"]);
         assert_eq!(args.tee, TeeFlavor::Sev);
+    }
+
+    #[test]
+    fn policy_defaults_to_none_and_accepts_hex_or_decimal() {
+        let args = parse_create(&["--disk-size", "20GB", "--confidential"]);
+        assert_eq!(args.policy, None);
+
+        let args = parse_create(&[
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--policy",
+            "0x30000",
+        ]);
+        assert_eq!(args.policy, Some(0x30000));
+
+        let args = parse_create(&[
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--policy",
+            "196608",
+        ]);
+        assert_eq!(args.policy, Some(196608));
     }
 
     #[test]
