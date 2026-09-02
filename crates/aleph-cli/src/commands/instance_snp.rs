@@ -20,9 +20,14 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::environment::{
     DEFAULT_SNP_POLICY, LaunchMeasurement, TeeMode, TrustedExecutionEnvironment,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::ImageRef;
+
+/// Environment variable carrying the LUKS passphrase for `--encrypt-rootfs`,
+/// the middle source in `read_passphrase`'s precedence (after
+/// `--passphrase-file`, before the interactive prompt).
+pub(crate) const LUKS_PASSPHRASE_ENV_VAR: &str = "ALEPH_LUKS_PASSPHRASE";
 
 /// Default SEV-SNP 64-bit guest policy for confidential instances: no-debug,
 /// SMT allowed, reserved bit 17 set. Distinct from the aleph-types schema's
@@ -59,6 +64,38 @@ pub(crate) fn resolve_instance_runtime_ref(
 /// EVM validation) happens in `instantiate_instance_cmdline`.
 pub(crate) fn snp_owner(on_behalf_of: Option<&Address>, account_address: &Address) -> String {
     on_behalf_of.unwrap_or(account_address).to_string()
+}
+
+/// Source the LUKS passphrase for `--encrypt-rootfs`.
+///
+/// Precedence: `passphrase_file` when given (trimming exactly one trailing
+/// `\n`, matching what `echo "$pass" > file` or a text editor produces),
+/// then the `ALEPH_LUKS_PASSPHRASE` environment variable, then a hidden
+/// interactive prompt on the controlling terminal (the same `rpassword`
+/// helper `account/password.rs` uses for account passwords, a single prompt
+/// rather than the double-entry new-password flow). Errors, naming all three
+/// sources, when none is available (typically: no terminal attached, e.g. in
+/// CI or a script).
+pub(crate) fn read_passphrase(passphrase_file: Option<&Path>) -> Result<String> {
+    if let Some(path) = passphrase_file {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read passphrase file {}", path.display()))?;
+        let trimmed = contents.strip_suffix('\n').unwrap_or(&contents);
+        return Ok(trimmed.to_string());
+    }
+
+    if let Ok(p) = std::env::var(LUKS_PASSPHRASE_ENV_VAR) {
+        return Ok(p);
+    }
+
+    match rpassword::prompt_password("LUKS passphrase: ") {
+        Ok(p) => Ok(p),
+        Err(_) => bail!(
+            "no LUKS passphrase source available: pass --passphrase-file, set the \
+             {LUKS_PASSPHRASE_ENV_VAR} environment variable, or run interactively on a \
+             terminal"
+        ),
+    }
 }
 
 /// Assemble a `sev_snp` `TrustedExecutionEnvironment` from a launch
@@ -162,6 +199,52 @@ mod tests {
         // No delegation: falls back to the signer's own address.
         let got = snp_owner(None, &mine);
         assert_eq!(got, mine.to_string());
+    }
+
+    #[test]
+    fn passphrase_file_wins_and_trims_one_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pass");
+        std::fs::write(&p, "hunter2\n").unwrap();
+        assert_eq!(read_passphrase(Some(&p)).unwrap(), "hunter2");
+    }
+
+    #[test]
+    fn passphrase_file_trims_only_the_one_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pass");
+        std::fs::write(&p, "hunter2\n\n").unwrap();
+        assert_eq!(read_passphrase(Some(&p)).unwrap(), "hunter2\n");
+    }
+
+    #[test]
+    fn passphrase_env_var_used_when_no_file_given() {
+        // SAFETY: `ALEPH_LUKS_PASSPHRASE` is dedicated to this test; no other
+        // test in this crate reads or writes it.
+        unsafe {
+            std::env::set_var(LUKS_PASSPHRASE_ENV_VAR, "s3cr3t-from-env");
+        }
+        let result = read_passphrase(None);
+        unsafe {
+            std::env::remove_var(LUKS_PASSPHRASE_ENV_VAR);
+        }
+        assert_eq!(result.unwrap(), "s3cr3t-from-env");
+    }
+
+    #[test]
+    fn passphrase_file_wins_over_env_var() {
+        // SAFETY: see `passphrase_env_var_used_when_no_file_given`.
+        unsafe {
+            std::env::set_var(LUKS_PASSPHRASE_ENV_VAR, "from-env-should-lose");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pass");
+        std::fs::write(&p, "from-file-wins\n").unwrap();
+        let result = read_passphrase(Some(&p));
+        unsafe {
+            std::env::remove_var(LUKS_PASSPHRASE_ENV_VAR);
+        }
+        assert_eq!(result.unwrap(), "from-file-wins");
     }
 
     #[test]

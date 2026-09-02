@@ -14,12 +14,10 @@ use aleph_sdk::attest::{
 use aleph_sdk::caching_aggregate_client::CachingAggregateClient;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
-    hash_file,
 };
 use aleph_sdk::crn::{ActiveVmNetworking, fetch_active_vms};
-use aleph_sdk::messages::{ForgetBuilder, StoreBuilder, VProgramBuilder};
+use aleph_sdk::messages::{ForgetBuilder, VProgramBuilder};
 use aleph_sdk::scheduler::SchedulerClient;
-use aleph_sdk::verify::Hasher;
 use aleph_sdk::vprogram::bundle::fetch_bundle_artifacts;
 use aleph_sdk::vprogram::cmdline::instantiate_cmdline;
 use aleph_sdk::vprogram::manifest::{RuntimeManifest, WorkloadSpec};
@@ -29,12 +27,11 @@ use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::message::execution::base::Payment;
 use aleph_types::message::execution::environment::{
     LaunchMeasurement, SevSnpRegisters, validate_snp_policy,
 };
 use aleph_types::message::{
-    MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType, StorageEngine, TeeVerification,
+    MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType, TeeVerification,
     VerifiableProgramContent, VerifiedVolume, VerifiedWorkload,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -47,8 +44,7 @@ use crate::cli::{
     VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
 };
 use crate::common::{
-    confirm_action, render_upload_progress, resolve_account, resolve_address,
-    resolve_address_or_active, submit_or_preview,
+    confirm_action, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview,
 };
 use crate::compose;
 use crate::config::store::ConfigStore;
@@ -838,64 +834,18 @@ async fn upload_pair(
     v: &VerityArtifact,
 ) -> Result<UploadedPair> {
     Ok(UploadedPair {
-        data_message: upload_file(client, account, owner, &v.data, json, dry_run).await?,
-        tree_message: upload_file(client, account, owner, &v.hash_tree, json, dry_run).await?,
+        data_message: super::upload::upload_file(client, account, owner, &v.data, json, dry_run)
+            .await?,
+        tree_message: super::upload::upload_file(
+            client,
+            account,
+            owner,
+            &v.hash_tree,
+            json,
+            dry_run,
+        )
+        .await?,
     })
-}
-
-/// Upload one file as a STORE message on the native storage engine (default
-/// payment) and return the STORE message item hash - which is what
-/// `VerifiedWorkload`/`VerifiedVolume`'s `ref` and `hash_tree` fields carry.
-///
-/// Under `dry_run`, the network upload is skipped entirely: the file's own
-/// content hash is returned as a stand-in for the STORE message hash, since
-/// no STORE message is ever built or sent in that mode.
-async fn upload_file(
-    client: &AlephClient,
-    account: &CliAccount,
-    owner: Option<&Address>,
-    path: &Path,
-    json: bool,
-    dry_run: bool,
-) -> Result<ItemHash> {
-    if !json {
-        eprintln!("Hashing {}...", path.display());
-    }
-    let file_hash = hash_file(path, Hasher::for_storage()).await?;
-    if !json {
-        eprintln!("  File hash: {file_hash}");
-    }
-
-    if dry_run {
-        return Ok(file_hash);
-    }
-
-    // V-Programs are credit-only; without an explicit payment type the store
-    // defaults to hold on the CCN, which rejects token-less wallets with 402.
-    let mut builder =
-        StoreBuilder::new(account, file_hash, StorageEngine::Storage).payment(Payment::credits());
-    if let Some(owner) = owner {
-        builder = builder.on_behalf_of(owner.clone());
-    }
-    let pending = builder.build()?;
-
-    if !json {
-        eprintln!("Uploading {}...", path.display());
-    }
-    let on_tick: fn(u64, u64) = if json {
-        |_, _| {}
-    } else {
-        render_upload_progress
-    };
-    let upload = client
-        .upload_file_to_storage_with_progress(path, Some(&pending), true, on_tick)
-        .await;
-    if !json {
-        eprintln!();
-    }
-    upload?;
-
-    Ok(pending.item_hash)
 }
 
 // ---------------------------------------------------------------------

@@ -1145,16 +1145,61 @@ async fn handle_instance_create(
 
     let image_ref = match args.image.clone() {
         Some(img) => img,
+        // Local LUKS encryption + upload only makes sense for the measured
+        // SNP path: the CRN needs the runtime bundle's unlock protocol to
+        // hand over the passphrase, which legacy SEV (and plain, non-TEE
+        // instances) have no counterpart for.
+        #[cfg(feature = "vprogram")]
         None if snp_confidential && args.encrypt_rootfs.is_some() => {
-            // TODO(Task 10): encrypt the local rootfs and upload it here,
-            // producing the rootfs hash this needs. --encrypt-rootfs
-            // legitimately conflicts with --image at the clap level, so
-            // until that lands this is a runtime "not implemented" dead end
-            // rather than the generic "--image is required" error below.
+            let plain_rootfs = args
+                .encrypt_rootfs
+                .clone()
+                .expect("guard above checked encrypt_rootfs.is_some()");
+            let passphrase = super::instance_snp::read_passphrase(args.passphrase_file.as_deref())?;
+
+            let tmp_dir = tempfile::tempdir()
+                .context("failed to create a temp dir for the encrypted rootfs")?;
+            let encrypted_path = tmp_dir.path().join("rootfs.luks");
+            crate::luks::encrypt_rootfs(
+                &plain_rootfs,
+                &encrypted_path,
+                args.rootfs_size_mib,
+                &passphrase,
+            )
+            .await?;
+
+            // Upload before anything else that could fail: printing the hash
+            // now means a later failure (e.g. a bad --runtime) leaves the
+            // upload discoverable instead of orphaned and anonymous.
+            let on_behalf_of_addr = on_behalf_of_is_set.then_some(&owner_address);
+            let hash = super::upload::upload_file(
+                aleph_client,
+                &account,
+                on_behalf_of_addr,
+                &encrypted_path,
+                json,
+                dry_run,
+            )
+            .await?;
+            eprintln!("Uploaded encrypted rootfs: {hash}");
+
+            ImageRef::Hash(hash)
+        }
+        #[cfg(not(feature = "vprogram"))]
+        None if snp_confidential && args.encrypt_rootfs.is_some() => {
             bail!(
-                "--encrypt-rootfs is not implemented yet: local rootfs encryption and \
-                 upload for confidential SNP instances lands in a follow-up. Pass \
-                 --image with a pre-built (already encrypted) rootfs hash instead."
+                "--encrypt-rootfs requires the 'vprogram' cargo feature (enabled by \
+                 default); rebuild with it enabled, or pass --image with a pre-built \
+                 (already encrypted) rootfs hash instead"
+            );
+        }
+        None if args.encrypt_rootfs.is_some() => {
+            bail!(
+                "--encrypt-rootfs requires --confidential --tee sev-snp (the default TEE \
+                 flavor): the CRN needs the SNP runtime bundle's attested unlock protocol \
+                 to receive the passphrase. --tee sev (legacy) and non-confidential \
+                 instances are not supported; pass --image with a pre-built rootfs hash \
+                 instead."
             );
         }
         None => bail!("--image is required (or use -i)"),
