@@ -694,14 +694,20 @@ pub(crate) async fn handle_instance_unlock(
         signature: ensure_0x_prefixed(signature.as_str()),
     };
 
-    let measurement_pin = match &outcome.expectation {
-        MeasurementExpectation::Pin(registers) => MeasurementPin::Exact(registers),
-        // Same CallerVerified/re-check split as the attest handshake: the
-        // exact model can't be pinned ahead of time for a fleet, so the
-        // response's own measurement is checked below before anything is
-        // trusted.
-        MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
-    };
+    // Always pin the POST handshake to the exact registers `fresh_attestation`
+    // already verified, never `CallerVerified`, even for a `MemberOf` fleet
+    // pin (where `run_instance_attest` already checked `outcome.fresh.registers`
+    // against the pinned set). `CallerVerified` would let the handshake
+    // succeed against any genuine, policy/TCB/platform-compliant SEV-SNP
+    // guest regardless of its measurement, and the envelope (the plaintext
+    // secret) is sent as soon as the handshake completes, before any
+    // response-side check runs: a rogue-but-genuinely-attested guest could
+    // receive the passphrase before its measurement was ever checked on this
+    // exchange. With an Exact pin, a guest whose measurement changed between
+    // attest and unlock (rebooted onto a different image) fails the
+    // handshake itself, so no secret byte leaves; the recovery is the same
+    // as any other stale-attestation case here: re-run unlock.
+    let measurement_pin = MeasurementPin::Exact(&outcome.fresh.registers);
     let policy_pin = PolicyPin::Exact(outcome.fresh.policy);
     let platform_policy = attest_common::platform_policy_from(&args.attest.require_platform);
     let min_tcb = attest_common::resolve_tcb_floor(
@@ -728,20 +734,25 @@ pub(crate) async fn handle_instance_unlock(
             "secret injection rejected: HTTP {status}: {body}\n\
              hint: if the VM rebooted since the attestation, its TLS key changed: re-run unlock"
         ),
-        Err(e) => return Err(anyhow!("secret injection failed: {e}")),
+        Err(e) => bail!(
+            "secret injection failed: {e}\n\
+             hint: if the VM rebooted or was rebuilt since the attestation, its TLS key or \
+             measurement changed: re-run unlock"
+        ),
     };
 
-    // Post-handshake re-check, same rationale as `run_instance_attest`'s: for
-    // a `Pin` this is belt-and-suspenders, for a `MemberOf` fleet it is the
-    // only place this exchange's measurement is checked at all, since the
-    // handshake could not pin one model ahead of time.
-    if !measurement_is_expected(&attested.registers, &outcome.expectation) {
-        bail!(
-            "measurement mismatch on the injection response: guest presented {} which is not \
-             among the pinned launch measurement(s)",
-            attested.registers.launch
-        );
-    }
+    // Sanity check, not a gate: `measurement_pin` above already pinned the
+    // handshake to `outcome.fresh.registers` exactly, so a successful
+    // `post_secrets` call can only have verified a report presenting those
+    // same registers, which `run_instance_attest` already checked against
+    // `outcome.expectation`. Nothing here can un-send an already-sent
+    // secret; this only catches an internal inconsistency between this
+    // handler and `attested_request`'s own pin enforcement.
+    debug_assert!(
+        measurement_is_expected(&attested.registers, &outcome.expectation),
+        "post_secrets pinned MeasurementPin::Exact(&outcome.fresh.registers); the verified \
+         response's registers must equal what run_instance_attest already checked"
+    );
 
     print_unlock_summary(
         &response.injected,
