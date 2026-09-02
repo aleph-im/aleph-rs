@@ -203,10 +203,10 @@ async fn handle_create(
     }
     let dry_run = args.signing.dry_run;
 
-    // Resolve --crn-hash up front so a typo or ambiguous fragment fails
+    // Resolve --crn up front so a typo or ambiguous fragment fails
     // before any verity hashing or uploads. A full hash passes through
     // without a scheduler round-trip.
-    let crn_hash = match args.crn_hash.as_deref() {
+    let crn_hash = match args.crn.as_deref() {
         Some(input) => {
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             Some(super::instance_target::resolve_node_hash(&scheduler_url, input).await?)

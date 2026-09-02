@@ -1740,8 +1740,8 @@ if neither is given, every key registered with `aleph account ssh-key add` \
 is attached. Image accepts a preset name from the network's `vm-images` \
 aggregate (e.g. `ubuntu26`, `debian12`) or an item hash (hex or IPFS CID).
 
-Pin to a specific compute node with `--crn-hash <HASH>` (a full node hash \
-or a unique prefix/suffix, resolved through the scheduler). For an \
+Pin to a specific compute node with `--crn <HASH>` (a full node hash or a \
+unique prefix/suffix, resolved through the scheduler). For an \
 interactive walkthrough that prompts for any missing fields and lets you \
 pick a CRN from a list, pass `-i` / `--interactive`.
 
@@ -2050,9 +2050,9 @@ pub struct InstanceCreateArgs {
     /// CRN node hash. Pins the instance to a specific compute node. Accepts
     /// a full hash or a unique fragment (an anchored prefix or suffix, such as
     /// the shorthand IDs printed by `aleph instance list`), resolved through
-    /// the scheduler.
-    #[arg(long)]
-    pub crn_hash: Option<String>,
+    /// the scheduler. `--crn-hash` is accepted as an alias.
+    #[arg(long, alias = "crn-hash")]
+    pub crn: Option<String>,
 
     /// Sign on behalf of another address (requires an authorization from that address).
     #[arg(long)]
@@ -2060,7 +2060,7 @@ pub struct InstanceCreateArgs {
 
     /// Prompt interactively for any values not provided on the command line.
     /// Prompts for node placement: let the scheduler choose automatically, or
-    /// pick a specific CRN. Skipped if `--crn-hash` is already set.
+    /// pick a specific CRN. Skipped if `--crn` is already set.
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
@@ -3310,9 +3310,9 @@ pub struct VProgramCreateArgs {
     /// CRN node hash. Pins the V-Program to a specific compute node. Accepts
     /// a full hash or a unique fragment (an anchored prefix or suffix, such as
     /// the shorthand IDs printed by `aleph instance list`), resolved through
-    /// the scheduler.
-    #[arg(long)]
-    pub crn_hash: Option<String>,
+    /// the scheduler. `--crn-hash` is accepted as an alias.
+    #[arg(long, alias = "crn-hash")]
+    pub crn: Option<String>,
 
     /// Channel to publish the message on.
     #[arg(long)]
@@ -4125,17 +4125,24 @@ mod instance_create_args_tests {
     }
 
     #[test]
-    fn crn_hash_accepts_full_hash() {
-        let args = parse_create(&["--crn-hash", &"ab".repeat(32)]);
-        assert_eq!(args.crn_hash.unwrap(), "ab".repeat(32));
+    fn crn_accepts_full_hash() {
+        let args = parse_create(&["--crn", &"ab".repeat(32)]);
+        assert_eq!(args.crn.unwrap(), "ab".repeat(32));
     }
 
     #[test]
-    fn crn_hash_accepts_fragment() {
+    fn crn_accepts_fragment() {
         // Fragments are resolved through the scheduler at run time, so clap
         // must accept them verbatim rather than demanding a full hash.
+        let args = parse_create(&["--crn", "d704be0b15"]);
+        assert_eq!(args.crn.as_deref(), Some("d704be0b15"));
+    }
+
+    #[test]
+    fn crn_hash_alias_still_parses() {
+        // The pre-rename spelling keeps working for existing scripts.
         let args = parse_create(&["--crn-hash", "d704be0b15"]);
-        assert_eq!(args.crn_hash.as_deref(), Some("d704be0b15"));
+        assert_eq!(args.crn.as_deref(), Some("d704be0b15"));
     }
 }
 
@@ -4535,7 +4542,7 @@ mod vprogram_create_args_tests {
             "--volume",
             "/tmp/b.ext4",
             "--no-internet",
-            "--crn-hash",
+            "--crn",
             &"ab".repeat(32),
         ])
         .unwrap();
@@ -4548,11 +4555,34 @@ mod vprogram_create_args_tests {
         assert_eq!(args.policy, 0x30001);
         assert_eq!(args.volumes.len(), 2);
         assert!(args.no_internet);
-        assert_eq!(args.crn_hash.unwrap(), "ab".repeat(32));
+        assert_eq!(args.crn.unwrap(), "ab".repeat(32));
     }
 
     #[test]
-    fn vprogram_create_crn_hash_accepts_fragment() {
+    fn vprogram_create_crn_hash_alias_still_parses() {
+        // The pre-rename spelling keeps working for existing scripts.
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "create",
+            "my-vprogram",
+            "--workload",
+            "/tmp/w.ext4",
+            "--crn-hash",
+            &"ab".repeat(32),
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.crn.unwrap(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn vprogram_create_crn_accepts_fragment() {
         // Fragments are resolved through the scheduler at run time, so clap
         // must accept them verbatim rather than demanding a full hash.
         let cli = Cli::try_parse_from([
@@ -4562,7 +4592,7 @@ mod vprogram_create_args_tests {
             "my-vprogram",
             "--workload",
             "/tmp/w.ext4",
-            "--crn-hash",
+            "--crn",
             "d704be0b15",
         ])
         .unwrap();
@@ -4572,7 +4602,7 @@ mod vprogram_create_args_tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(args.crn_hash.as_deref(), Some("d704be0b15"));
+        assert_eq!(args.crn.as_deref(), Some("d704be0b15"));
     }
 
     #[test]

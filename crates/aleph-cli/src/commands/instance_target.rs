@@ -187,19 +187,29 @@ async fn node_fragment_to_url(scheduler_url: &Url, fragment: &str) -> Result<Url
     node_entry_to_url(&entry)
 }
 
-/// Resolve a user-supplied node hash (`--crn-hash`) to a full node hash. A
-/// full 64-char hash is returned as-is without consulting the scheduler (so
-/// pinning to a node the scheduler does not list yet keeps working, as does
-/// `--dry-run` offline); anything else is treated as a node-hash fragment
-/// (an anchored prefix or suffix, including the shorthand IDs printed by
-/// `aleph instance list`) and must identify exactly one node.
+/// Resolve a user-supplied node hash (`--crn` on the create commands) to a
+/// full node hash. A full 64-char hash is returned as-is without consulting
+/// the scheduler (so pinning to a node the scheduler does not list yet keeps
+/// working, as does `--dry-run` offline); anything else is treated as a
+/// node-hash fragment (an anchored prefix or suffix, including the shorthand
+/// IDs printed by `aleph instance list`) and must identify exactly one node.
+///
+/// Unlike the lifecycle commands' `--crn`, a URL is rejected: placement is
+/// expressed as a node hash in the message, there is no endpoint to address.
 pub async fn resolve_node_hash(scheduler_url: &Url, input: &str) -> Result<NodeHash> {
+    if input.contains("://") {
+        bail!(
+            "--crn takes a node hash (or a unique prefix/suffix) here, not a URL: \
+             placement pins a node by hash. Run `aleph instance list` to find the \
+             node's hash."
+        );
+    }
     if let Ok(hash) = input.parse::<NodeHash>() {
         return Ok(hash);
     }
     let entry = node_fragment_to_entry(scheduler_url, input, "Pass a full node hash.")
         .await
-        .with_context(|| format!("resolving --crn-hash node hash fragment `{input}`"))?;
+        .with_context(|| format!("resolving --crn node hash fragment `{input}`"))?;
     entry.node_hash.parse().with_context(|| {
         format!(
             "scheduler returned an invalid node hash `{}` for `{input}`",
@@ -674,7 +684,7 @@ mod tests {
             .await
             .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("--crn-hash"));
+        assert!(msg.contains("--crn"));
         assert!(msg.contains("ambiguous"));
         assert!(msg.contains("matches 2 nodes"));
     }
@@ -695,8 +705,23 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("`beef` matches no CRN node"));
         assert!(msg.contains("Pass a full node hash."));
-        // --crn-hash never accepted URLs, unlike --crn.
+        // The create-side --crn never accepted URLs, unlike the lifecycle one.
         assert!(!msg.contains("URL"));
+    }
+
+    #[tokio::test]
+    async fn resolve_node_hash_rejects_url_without_scheduler() {
+        // No mock mounted: a URL must be rejected locally, not looked up.
+        let server = MockServer::start().await;
+        let err = resolve_node_hash(
+            &Url::parse(&server.uri()).unwrap(),
+            "https://crn.example.io",
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not a URL"));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

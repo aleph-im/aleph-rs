@@ -971,14 +971,14 @@ async fn handle_instance_create(
     // each is fetched at most once for this command.
     let aggregates = CachingAggregateClient::new(aleph_client);
 
-    // Resolve --crn-hash up front so a typo or ambiguous fragment fails before
+    // Resolve --crn up front so a typo or ambiguous fragment fails before
     // any prompt, key lookup, or upload. The full hash is written back so the
     // interactive picker (which skips node placement when a node is pinned)
     // and the message builder below see the canonical value. A full hash
     // passes through without a scheduler round-trip.
-    if let Some(input) = args.crn_hash.as_deref() {
+    if let Some(input) = args.crn.as_deref() {
         let hash = super::instance_target::resolve_node_hash(scheduler_url, input).await?;
-        args.crn_hash = Some(hash.to_string());
+        args.crn = Some(hash.to_string());
     }
 
     if args.interactive {
@@ -994,7 +994,7 @@ async fn handle_instance_create(
     // Both the command line (resolved above) and the interactive picker leave
     // a full node hash here.
     let crn_hash: Option<NodeHash> = args
-        .crn_hash
+        .crn
         .as_deref()
         .map(str::parse)
         .transpose()
@@ -1056,7 +1056,7 @@ async fn handle_instance_create(
             // Interactive picker already resolved the pinned node's exact device(s).
             props.clone()
         } else if let Some(crn_hash) = &crn_hash {
-            // Pinned via `--crn-hash` on the command line: look the node up and use
+            // Pinned via `--crn` on the command line: look the node up and use
             // its actual advertised GPU variant.
             resolve_pinned_node_gpu_props(&options, gpu_model_ids, crn_hash).await?
         } else {
@@ -1436,7 +1436,7 @@ fn gpu_properties_from_node_gpu(gpu: &aleph_sdk::crns_list::Gpu) -> Result<GpuPr
 
 /// Fetch the active CRN list, honoring the `ALEPH_CRN_LIST_URL` override. Shared
 /// by the interactive picker (which spawns it in parallel) and the
-/// non-interactive `--crn-hash` GPU path.
+/// non-interactive `--crn` GPU path.
 pub(crate) async fn fetch_crn_list() -> Result<aleph_sdk::crns_list::CrnListResponse> {
     let raw = std::env::var("ALEPH_CRN_LIST_URL")
         .unwrap_or_else(|_| aleph_sdk::crns_list::DEFAULT_CRN_LIST_URL.to_string());
@@ -1450,7 +1450,7 @@ pub(crate) async fn fetch_crn_list() -> Result<aleph_sdk::crns_list::CrnListResp
         .map_err(|e| anyhow!("failed to fetch CRN list from {url}: {e}"))
 }
 
-/// Resolve the GPU device(s) for a node pinned via `--crn-hash` on the
+/// Resolve the GPU device(s) for a node pinned via `--crn` on the
 /// non-interactive path: fetch the CRN list and use the node's actual advertised
 /// GPU variant.
 async fn resolve_pinned_node_gpu_props(
@@ -3369,7 +3369,7 @@ mod tests {
             node.hash = "abc123".into();
             let list = aleph_sdk::crns_list::CrnListResponse { crns: vec![node] };
 
-            // --crn-hash matches the listed node -> its actual variant (2203);
+            // --crn matches the listed node -> its actual variant (2203);
             // hash comparison is case-insensitive.
             let props = pinned_node_gpu_props_from_list(
                 &list,

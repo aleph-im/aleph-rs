@@ -3,7 +3,7 @@
 //! Runs before the normal build/submit path and fills in any `InstanceCreateArgs`
 //! fields not already provided on the command line. Prompts, in order:
 //! image → size → node placement → SSH public key path. For node placement the
-//! user can let the scheduler pick a node automatically (leaving `crn_hash`
+//! user can let the scheduler pick a node automatically (leaving `crn`
 //! unset, like the non-interactive path) or pin to a specific CRN via
 //! `node_hash`. The instance name is a required positional argument and is
 //! never prompted for.
@@ -31,11 +31,11 @@ pub async fn resolve_interactive(
     owner_address: &Address,
 ) -> Result<()> {
     // Kick off the CRN list fetch in parallel with the early prompts, but only
-    // if a node isn't already pinned via `--crn-hash` (in which case the list is
+    // if a node isn't already pinned via `--crn` (in which case the list is
     // never needed). When the user later picks "Automatic" placement we drop the
     // result; that's the cost of overlapping the fetch with the image/size
     // prompts, since the placement choice isn't known until after them.
-    let crn_list_fut = args.crn_hash.is_none().then(spawn_crn_list_fetch);
+    let crn_list_fut = args.crn.is_none().then(spawn_crn_list_fetch);
 
     if args.image.is_none() {
         let vm_images = aggregates
@@ -63,14 +63,14 @@ pub async fn resolve_interactive(
         args.size = Some(prompt_size(aggregates).await?);
     }
 
-    // Node placement: let the scheduler pick automatically (leaving `crn_hash`
+    // Node placement: let the scheduler pick automatically (leaving `crn`
     // unset, like the non-interactive path), or pin to a specific CRN. If
-    // `--crn-hash` was already passed on the command line, honor it and skip.
-    if args.crn_hash.is_none() && prompt_pick_specific_crn()? {
-        // `crn_list_fut` is `Some` exactly when `crn_hash` was None, which is
+    // `--crn` was already passed on the command line, honor it and skip.
+    if args.crn.is_none() && prompt_pick_specific_crn()? {
+        // `crn_list_fut` is `Some` exactly when `crn` was None, which is
         // the branch we're in.
         let crn_list = crn_list_fut
-            .expect("CRN list fetch is spawned whenever crn_hash is None")
+            .expect("CRN list fetch is spawned whenever crn is None")
             .await
             .map_err(|e| anyhow!("background task error: {e}"))?
             .map_err(anyhow::Error::msg)?;
@@ -131,7 +131,7 @@ pub async fn resolve_interactive(
                 e
             )
         })?;
-        args.crn_hash = Some(chosen.hash.clone());
+        args.crn = Some(chosen.hash.clone());
     }
 
     // Only prompt for a key file when the user has no other key source. If
@@ -470,7 +470,7 @@ fn truncate(s: &str, max: usize) -> String {
 ///
 /// Returns `true` if the user wants to pin the instance to a specific CRN
 /// (triggering the CRN list/filter/select flow), or `false` to let the
-/// scheduler choose a node automatically (leaving `crn_hash` unset).
+/// scheduler choose a node automatically (leaving `crn` unset).
 fn prompt_pick_specific_crn() -> Result<bool> {
     let idx = Select::new()
         .with_prompt("Node placement")
