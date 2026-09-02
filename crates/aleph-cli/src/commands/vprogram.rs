@@ -1530,10 +1530,9 @@ pub(crate) enum MeasurementExpectation {
 /// measurement is among the ones pinned on-chain (or the explicit
 /// `--expected-measurement` override).
 ///
-/// Pure and I/O-free so it's directly unit-testable. `measurements` should
-/// be `content.verification.measurements` restricted to whatever platform
-/// the caller is targeting (currently always `sev_snp`, the only platform
-/// V-PROGRAM messages carry).
+/// Pure and I/O-free so it's directly unit-testable. Pass
+/// `content.verification.measurements` as-is: an entry for a platform this
+/// client cannot verify fails the resolution rather than being skipped.
 pub(crate) fn resolve_expected_measurement(
     measurements: &[LaunchMeasurement],
     override_hex: Option<&str>,
