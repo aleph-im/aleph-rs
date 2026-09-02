@@ -189,7 +189,7 @@ pub enum TeeError {
         expected: &'static str,
         got: &'static str,
     },
-    #[error("platform {platform} was declared with {registers} registers")]
+    #[error("platform {platform} cannot declare {registers} registers")]
     RegistersPlatformMismatch {
         platform: &'static str,
         registers: &'static str,
@@ -428,6 +428,17 @@ impl TeeMode {
             TeeMode::Tdx => "tdx",
         }
     }
+
+    /// The measurement platform this mode launches with; `None` for legacy
+    /// SEV, which predates launch measurements. Adding a mode forces an arm
+    /// here, keeping the mode/platform pairing compiler-checked.
+    pub fn platform(self) -> Option<TeePlatform> {
+        match self {
+            TeeMode::Sev => None,
+            TeeMode::SevSnp => Some(TeePlatform::SevSnp),
+            TeeMode::Tdx => Some(TeePlatform::Tdx),
+        }
+    }
 }
 
 /// Trusted Execution Environment properties.
@@ -502,13 +513,11 @@ impl TrustedExecutionEnvironment {
                     }
                     Some(m) => m,
                 };
-                // A measured TeeMode and its TeePlatform share a wire name
-                // ("sev_snp", "tdx"); this comparison relies on keeping that
-                // naming aligned when adding a platform.
+                let expected_platform = mode.platform().expect("measured modes have a platform");
                 for measurement in measurements {
-                    if measurement.platform.as_str() != mode_str {
+                    if measurement.platform != expected_platform {
                         return Err(TeeError::MeasurementPlatformMismatch {
-                            expected: mode_str,
+                            expected: expected_platform.as_str(),
                             got: measurement.platform.as_str(),
                         });
                     }
@@ -940,7 +949,7 @@ mod test {
             tdx_registers_json()
         );
         let err = serde_json::from_str::<LaunchMeasurement>(&json).unwrap_err();
-        assert!(err.to_string().contains("was declared with"), "{err}");
+        assert!(err.to_string().contains("cannot declare"), "{err}");
         let json = format!(r#"{{"platform": "tdx", "registers": {{"launch": "{SNP_DIGEST}"}}}}"#);
         assert!(serde_json::from_str::<LaunchMeasurement>(&json).is_err());
     }
