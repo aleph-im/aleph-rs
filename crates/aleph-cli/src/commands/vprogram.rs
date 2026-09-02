@@ -2632,6 +2632,28 @@ mod call_tests {
     }
 
     #[test]
+    fn resolve_expected_measurement_fails_closed_on_foreign_platform() {
+        // A register set this client cannot verify must error, never be
+        // skipped: skipping would silently narrow the accepted set.
+        // Unreachable through a valid message today (the schema restricts
+        // the V-PROGRAM backend to sev_snp), so pin the branch directly.
+        let r = "11".repeat(48);
+        let json = serde_json::json!({
+            "platform": "tdx",
+            "registers": {"mrtd": r, "rtmr1": r, "rtmr2": r, "mrconfigid": r},
+        });
+        let tdx: LaunchMeasurement = serde_json::from_value(json).expect("valid tdx measurement");
+        let measurements = vec![measurement(&"ab".repeat(48), Some("EPYC-v4")), tdx];
+
+        let err = resolve_expected_measurement(&measurements, None)
+            .expect_err("a tdx measurement must fail the resolution");
+        assert!(
+            err.to_string().contains("tdx measurement"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn resolve_expected_measurement_zero_measurements_errors() {
         let result = resolve_expected_measurement(&[], None);
 
