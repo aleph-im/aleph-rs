@@ -12,6 +12,8 @@ pub mod credit;
 pub mod credit_transfer;
 pub mod crn;
 pub mod crns_list;
+#[cfg(feature = "vprogram")]
+pub mod instance_runtime;
 pub mod ipfs;
 pub mod messages;
 pub mod progress;

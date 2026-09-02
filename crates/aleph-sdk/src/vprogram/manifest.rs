@@ -9,9 +9,14 @@ pub enum ManifestError {
     #[error("manifest is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error(
-        "unsupported manifest format {format:?} version {version}; expected {MANIFEST_FORMAT:?} version {MANIFEST_FORMAT_VERSION}"
+        "unsupported manifest format {format:?} version {version}; expected {expected_format:?} version {expected_version}"
     )]
-    UnsupportedFormat { format: String, version: u32 },
+    UnsupportedFormat {
+        format: String,
+        version: u32,
+        expected_format: String,
+        expected_version: u32,
+    },
     #[error("manifest platform must be sev_snp, got {0:?}")]
     UnsupportedPlatform(String),
     #[error("unsupported boot method {0:?}; v1 supports qemu-direct-kernel")]
@@ -26,6 +31,16 @@ pub enum ManifestError {
     BadPlatformRoothash,
     #[error("bundle.size is {0}; must be between 1 and {MAX_BUNDLE_SIZE} bytes")]
     BadBundleSize(u64),
+    #[error("bundle.sha256 must be 64 lowercase hex chars")]
+    BadBundleSha256,
+    #[error("bundle.members.{role} is not a safe relative path: {value:?}")]
+    UnsafeMemberPath { role: &'static str, value: String },
+    #[error("boot.cmdline_template has no {{owner}} slot")]
+    MissingOwnerSlot,
+    #[error(
+        "cmdline template contains a placeholder not recognized by aleph-instance-runtime/1: {{{0}}}"
+    )]
+    UnknownPlaceholder(String),
 }
 
 /// Upper bound on `bundle.size`. The tarball is downloaded into memory and
@@ -127,6 +142,8 @@ impl RuntimeManifest {
             return Err(ManifestError::UnsupportedFormat {
                 format: manifest.format,
                 version: manifest.format_version,
+                expected_format: MANIFEST_FORMAT.to_string(),
+                expected_version: MANIFEST_FORMAT_VERSION,
             });
         }
         if manifest.platform != "sev_snp" {
