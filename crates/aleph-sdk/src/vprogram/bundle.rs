@@ -1,10 +1,17 @@
-//! V-Program runtime bundle download, verification, and extraction.
+//! Runtime bundle download, verification, and extraction.
 //!
-//! A runtime bundle is a `.tar.gz` referenced by a [`RuntimeManifest`]'s
+//! A runtime bundle is a `.tar.gz` referenced by a runtime manifest's
 //! `bundle` field. This module fetches it by `bundle.ref`, the STORE message
 //! pinning the tarball (native storage or IPFS), with a local disk cache keyed
-//! by the manifest's declared sha256, verifies its hash and size, and extracts the OVMF firmware, kernel, and initrd members that the
-//! V-Program launch pipeline needs.
+//! by the manifest's declared sha256, verifies its hash and size, and extracts
+//! the OVMF firmware, kernel, and initrd members that the launch pipeline
+//! needs.
+//!
+//! `fetch_bundle_artifacts_from` and `BundleSource` are manifest-flavor
+//! independent: `fetch_bundle_artifacts` is the V-Program-specific wrapper
+//! that builds a `BundleSource` from a [`RuntimeManifest`], and
+//! `crate::instance_runtime::bundle` builds one from the instance runtime
+//! flavor's manifest instead.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +20,9 @@ use futures_util::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
 
 use crate::client::{AlephClient, AlephStorageClient};
-use crate::vprogram::manifest::{BundleMembers, RuntimeManifest};
+#[cfg(test)]
+use crate::vprogram::manifest::BundleMembers;
+use crate::vprogram::manifest::RuntimeManifest;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
@@ -53,6 +62,21 @@ pub struct BundleArtifacts {
     pub initrd: PathBuf,
 }
 
+/// The bundle fields a runtime manifest needs to describe, independent of
+/// which manifest flavor (vprogram, instance runtime) declares them: the
+/// message pinning the tarball, its declared hash and size, and the archive
+/// paths of the three members the launch pipeline extracts.
+#[derive(Debug, Clone)]
+pub struct BundleSource {
+    /// STORE message hash pinning the bundle tarball.
+    pub reference: String,
+    pub sha256: String,
+    pub size: u64,
+    pub ovmf: String,
+    pub kernel: String,
+    pub initrd: String,
+}
+
 /// Fetch, verify, and extract the runtime bundle referenced by `manifest`.
 ///
 /// Caches extracted artifacts under `cache_dir/<bundle.sha256>/`. If `ovmf`,
@@ -63,7 +87,28 @@ pub async fn fetch_bundle_artifacts(
     manifest: &RuntimeManifest,
     cache_dir: &Path,
 ) -> Result<BundleArtifacts, BundleError> {
-    let cache_key = bundle_cache_key(&manifest.bundle.sha256)?;
+    let source = BundleSource {
+        reference: manifest.bundle.reference.clone(),
+        sha256: manifest.bundle.sha256.clone(),
+        size: manifest.bundle.size,
+        ovmf: manifest.bundle.members.ovmf.clone(),
+        kernel: manifest.bundle.members.kernel.clone(),
+        initrd: manifest.bundle.members.initrd.clone(),
+    };
+    fetch_bundle_artifacts_from(client, &source, cache_dir).await
+}
+
+/// Fetch, verify, and extract the runtime bundle described by `source`.
+///
+/// Caches extracted artifacts under `cache_dir/<source.sha256>/`. If `ovmf`,
+/// `kernel`, and `initrd` already exist there, returns immediately without
+/// touching the network.
+pub async fn fetch_bundle_artifacts_from(
+    client: &AlephClient,
+    source: &BundleSource,
+    cache_dir: &Path,
+) -> Result<BundleArtifacts, BundleError> {
+    let cache_key = bundle_cache_key(&source.sha256)?;
     let bundle_dir = cache_dir.join(cache_key);
     let artifacts = BundleArtifacts {
         ovmf: bundle_dir.join("ovmf"),
@@ -75,15 +120,15 @@ pub async fn fetch_bundle_artifacts(
         return Ok(artifacts);
     }
 
-    // Download by `bundle.ref`, the STORE message pinning the tarball, not
-    // by `bundle.sha256`: the sha256 is only a valid storage path for
-    // native-storage uploads, and a bundle above the network's native size
-    // limit lives on IPFS under a CID (the mainnet aleph.compose/1 runtime,
-    // 297 MB). Resolving the message gives whichever file hash the node
-    // serves it under, the same way the CRN fetches it.
+    // Download by `source.reference`, the STORE message pinning the
+    // tarball, not by `source.sha256`: the sha256 is only a valid storage
+    // path for native-storage uploads, and a bundle above the network's
+    // native size limit lives on IPFS under a CID (the mainnet
+    // aleph.compose/1 runtime, 297 MB). Resolving the message gives
+    // whichever file hash the node serves it under, the same way the CRN
+    // fetches it.
     let bundle_ref =
-        manifest
-            .bundle
+        source
             .reference
             .parse()
             .map_err(|e: aleph_types::item_hash::ItemHashError| {
@@ -97,12 +142,18 @@ pub async fn fetch_bundle_artifacts(
     // size so a manifest/node disagreement fails at the cap instead of
     // after buffering an arbitrarily large response.
     let download = client.download_file_by_message_hash(&bundle_ref).await?;
-    let bytes = read_capped(download.into_stream(), manifest.bundle.size).await?;
+    let bytes = read_capped(download.into_stream(), source.size).await?;
 
-    verify_bundle_bytes(&bytes, &manifest.bundle.sha256, manifest.bundle.size)?;
+    verify_bundle_bytes(&bytes, &source.sha256, source.size)?;
 
     fs::create_dir_all(&bundle_dir)?;
-    extract_members(&bytes, &manifest.bundle.members, &bundle_dir)?;
+    extract_named_members(
+        &bytes,
+        &source.ovmf,
+        &source.kernel,
+        &source.initrd,
+        &bundle_dir,
+    )?;
 
     Ok(artifacts)
 }
@@ -209,24 +260,59 @@ fn verify_bundle_bytes(
 /// initrd at most a few hundred MiB).
 const MAX_MEMBER_SIZE: u64 = 1024 * 1024 * 1024;
 
+/// Test-only wrapper kept in the `BundleMembers` shape: exercises
+/// `extract_named_members_with_limit`, the shared primitive
+/// `fetch_bundle_artifacts_from` also calls, through the vprogram manifest's
+/// own member type so the existing extraction tests need no changes.
+#[cfg(test)]
 fn extract_members(bytes: &[u8], members: &BundleMembers, dir: &Path) -> Result<(), BundleError> {
     extract_members_with_limit(bytes, members, dir, MAX_MEMBER_SIZE)
 }
 
+#[cfg(test)]
 fn extract_members_with_limit(
     bytes: &[u8],
     members: &BundleMembers,
     dir: &Path,
     max_member_size: u64,
 ) -> Result<(), BundleError> {
+    extract_named_members_with_limit(
+        bytes,
+        &members.ovmf,
+        &members.kernel,
+        &members.initrd,
+        dir,
+        max_member_size,
+    )
+}
+
+/// Extract the `ovmf`, `kernel`, and `initrd` members at the given archive
+/// paths from the gzipped tar archive `bytes` into `dir`, named after their
+/// roles. See `extract_members` for the full extraction contract; this is
+/// the manifest-flavor-independent core it (and `fetch_bundle_artifacts_from`)
+/// delegate to.
+fn extract_named_members(
+    bytes: &[u8],
+    ovmf: &str,
+    kernel: &str,
+    initrd: &str,
+    dir: &Path,
+) -> Result<(), BundleError> {
+    extract_named_members_with_limit(bytes, ovmf, kernel, initrd, dir, MAX_MEMBER_SIZE)
+}
+
+fn extract_named_members_with_limit(
+    bytes: &[u8],
+    ovmf: &str,
+    kernel: &str,
+    initrd: &str,
+    dir: &Path,
+    max_member_size: u64,
+) -> Result<(), BundleError> {
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
 
-    let roles: [(&str, &'static str); 3] = [
-        (members.ovmf.as_str(), "ovmf"),
-        (members.kernel.as_str(), "kernel"),
-        (members.initrd.as_str(), "initrd"),
-    ];
+    let roles: [(&str, &'static str); 3] = [(ovmf, "ovmf"), (kernel, "kernel"), (initrd, "initrd")];
     let mut found = [false; 3];
 
     for entry in archive.entries()? {
