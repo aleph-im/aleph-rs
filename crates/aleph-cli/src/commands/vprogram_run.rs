@@ -6,16 +6,23 @@
 //! forward to that port reaches the workload through the same proxy path
 //! production uses.
 
-// consumed by handle_run (next task)
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aleph_sdk::client::AlephClient;
 use anyhow::{Result, bail};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
 
+use super::vprogram::{ATTEST_PORT, LocalBuild, RuntimeSource, prepare_local_build};
 use crate::cli::VProgramRunArgs;
+use crate::qemu::{Accel, LocalBootSpec, Qemu, QemuProcess};
+
+/// Printed before the boot so nobody mistakes a local run for a deployment.
+const HONESTY_LINE: &str = "local mode: no SEV-SNP, SeaBIOS instead of the bundle OVMF, -cpu max, \
+    user networking, plain HTTP; the launch measurement is not validated";
+/// How often the forwarded port is probed once the init markers are all in.
+const PROBE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Serial lines the guest init prints on the way up. Order differs between
 /// the exec and compose flavors, so completion is "all seen", not a sequence.
@@ -132,11 +139,171 @@ pub(crate) async fn probe_http(url: &str) -> bool {
 }
 
 pub async fn handle_run(
-    _aleph_client: &AlephClient,
-    _json: bool,
-    _args: VProgramRunArgs,
+    aleph_client: &AlephClient,
+    json: bool,
+    args: VProgramRunArgs,
 ) -> Result<()> {
-    bail!("vprogram run is not implemented yet")
+    // Preflight the hypervisor before any build or network work.
+    let qemu = Qemu::find()?;
+    let accel = Accel::detect();
+    if accel == Accel::Tcg {
+        eprintln!("warning: /dev/kvm is not usable; booting under TCG (software emulation, slow)");
+    }
+    // Clone rather than move: `args` is borrowed again by `boot_spec` below.
+    let source = match (args.runtime_manifest.clone(), args.bundle.clone()) {
+        (Some(manifest), Some(bundle)) => RuntimeSource::LocalFiles { manifest, bundle },
+        _ => RuntimeSource::Network(args.build.runtime.clone()),
+    };
+    let build = prepare_local_build(aleph_client, json, &args.build, source).await?;
+    let runtime_label = format!("{} {}", build.manifest.name, build.manifest.version);
+
+    let spec = boot_spec(&build, &args, accel);
+    if !json {
+        eprintln!("{HONESTY_LINE}");
+        eprintln!(
+            "Booting {} vcpu(s), {} MiB, forwarding 127.0.0.1:{} -> guest tcp/{}...",
+            spec.vcpus, spec.mem_mib, spec.host_port, spec.guest_port
+        );
+    }
+    let mut vm = QemuProcess::spawn(&qemu, &spec.argv())?;
+    let url = format!("http://127.0.0.1:{}/", args.port);
+    let deadline = Instant::now() + Duration::from_secs(args.timeout);
+    let outcome = wait_until_ready(&mut vm, &url, deadline, &runtime_label, args.timeout).await;
+
+    match outcome {
+        Err(e) => {
+            vm.shutdown().await?;
+            Err(e)
+        }
+        Ok(()) => {
+            report_ready(&build, &args, json);
+            if args.check {
+                vm.shutdown().await?;
+                return Ok(());
+            }
+            // Interactive: run until Ctrl-C (SIGINT reaches QEMU too) or the
+            // guest powers off. A guest that powers off on its own means the
+            // workload exited, which production treats as a failure.
+            let status = vm.wait().await?;
+            bail!("the VM powered off (workload exited; qemu {status})")
+        }
+    }
+}
+
+/// The QEMU invocation for this build: the bundle's kernel/initrd, the
+/// materialized cmdline, and the read-only disks in the guest device order
+/// production uses (platform pair, workload pair, then one pair per volume).
+fn boot_spec(build: &LocalBuild, args: &VProgramRunArgs, accel: Accel) -> LocalBootSpec {
+    let mut disks = vec![
+        build.artifacts.platform_rootfs.clone(),
+        build.artifacts.platform_hash_tree.clone(),
+        build.workload.data.clone(),
+        build.workload.hash_tree.clone(),
+    ];
+    for v in &build.volumes {
+        disks.push(v.data.clone());
+        disks.push(v.hash_tree.clone());
+    }
+    LocalBootSpec {
+        kernel: build.artifacts.kernel.clone(),
+        initrd: build.artifacts.initrd.clone(),
+        cmdline: build.cmdline.clone(),
+        disks,
+        vcpus: args.build.vcpus,
+        mem_mib: args.build.memory,
+        host_port: args.port,
+        guest_port: ATTEST_PORT,
+        internet: !args.no_internet,
+        accel,
+    }
+}
+
+/// Stream the serial console to stderr, watch the init markers, then probe
+/// the forwarded port until the guest's agent answers or `deadline` passes.
+async fn wait_until_ready(
+    vm: &mut QemuProcess,
+    url: &str,
+    deadline: Instant,
+    runtime_label: &str,
+    timeout_secs: u64,
+) -> Result<()> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    if let Some(stdout) = vm.take_stdout() {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("vm | {line}");
+                let _ = tx.send(line);
+            }
+        });
+    }
+    if let Some(stderr) = vm.take_stderr() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("qemu | {line}");
+            }
+        });
+    }
+    drop(tx);
+
+    let mut scanner = LineScanner::new();
+    let mut probing = false;
+    loop {
+        if Instant::now() >= deadline {
+            bail!(
+                "{}\n--- last serial lines ---\n{}",
+                scanner.timeout_diagnosis(runtime_label, ATTEST_PORT, timeout_secs),
+                scanner.tail().join("\n")
+            );
+        }
+        if let Some(status) = vm.try_wait()? {
+            bail!(
+                "qemu exited ({status}) before the guest was ready\n--- last serial lines ---\n{}",
+                scanner.tail().join("\n")
+            );
+        }
+        tokio::select! {
+            line = rx.recv() => match line {
+                Some(line) => match scanner.feed(&line) {
+                    ScanEvent::Fatal(line) => bail!("guest init failed closed: {line}"),
+                    ScanEvent::Complete => probing = true,
+                    ScanEvent::Continue => {}
+                },
+                None => {
+                    // Console closed: QEMU is exiting; the try_wait above
+                    // reports it on the next turn.
+                    tokio::time::sleep(PROBE_INTERVAL).await;
+                }
+            },
+            _ = tokio::time::sleep(PROBE_INTERVAL), if probing => {
+                if probe_http(url).await {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Announce the forwarded endpoint: a single JSON document on stdout with
+/// `--json`, otherwise a human line on stderr so stdout stays the guest's.
+fn report_ready(build: &LocalBuild, args: &VProgramRunArgs, json: bool) {
+    let url = format!("http://127.0.0.1:{}", args.port);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "ready",
+                "url": url,
+                "runtime": { "name": build.manifest.name, "version": build.manifest.version },
+            })
+        );
+    } else if args.check {
+        eprintln!("workload reachable at {url}");
+    } else {
+        eprintln!("workload reachable at {url} (Ctrl-C to stop)");
+    }
 }
 
 #[cfg(test)]

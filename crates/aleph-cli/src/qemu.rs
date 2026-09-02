@@ -11,9 +11,6 @@
 //! OVMF, `-cpu max` instead of the measured EPYC model, no SNP object, and
 //! SLIRP user networking with one host port forward instead of a tap.
 
-// consumed by commands::vprogram_run (next task)
-#![allow(dead_code)]
-
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

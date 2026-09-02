@@ -59,7 +59,7 @@ use crate::veritysetup::Veritysetup;
 /// Fixed RA-TLS attestation transport port advertised by the runtime manifest
 /// (`aleph.ra-tls`). A future task may resolve this dynamically from the
 /// manifest instead of hardcoding it here.
-const ATTEST_PORT: u16 = 8443;
+pub(crate) const ATTEST_PORT: u16 = 8443;
 
 /// A SEV-SNP launch measurement is a SHA-384 digest: 48 bytes, 96 hex chars.
 const SEV_SNP_MEASUREMENT_BYTES: usize = 48;
@@ -309,8 +309,6 @@ pub(crate) enum RuntimeSource {
     /// the network.
     Network(Option<ImageRef>),
     /// `--runtime-manifest FILE --bundle FILE`: both read from disk.
-    // Only `vprogram run` builds this variant, and it is still a stub.
-    #[allow(dead_code)]
     LocalFiles { manifest: PathBuf, bundle: PathBuf },
 }
 
@@ -632,6 +630,9 @@ pub(crate) async fn prepare_local_build(
 
 /// What `--runtime` resolved to. `contract` / `label` are `None` when the
 /// user pinned a raw manifest hash (nothing in the aggregate was consulted).
+/// For a local-file runtime (`--runtime-manifest`/`--bundle`) the `hash` is
+/// the bundle sha256, which is a valid native item hash, rather than the STORE
+/// message hash of a published manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedRuntime {
     pub hash: ItemHash,
