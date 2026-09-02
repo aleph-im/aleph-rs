@@ -11,6 +11,8 @@ pub mod instance;
 pub mod instance_backup;
 pub mod instance_interactive;
 pub mod instance_show;
+#[cfg(feature = "vprogram")]
+pub mod instance_snp;
 pub mod instance_ssh;
 pub mod instance_target;
 pub mod instance_wait;
