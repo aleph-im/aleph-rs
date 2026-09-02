@@ -147,6 +147,31 @@ pub async fn fetch_bundle_artifacts(
     Ok(artifacts)
 }
 
+/// Verify and extract a bundle tarball that is already on disk (an
+/// unpublished runtime built from an aleph-vm checkout), into the same
+/// cache layout `fetch_bundle_artifacts` uses, so a later fetch of the
+/// published bundle is a cache hit. `bundle.ref` is not consulted.
+///
+/// The whole tarball is read into memory, like the download path; the
+/// manifest's `bundle.size` bounds it the same way (`MAX_BUNDLE_SIZE`).
+pub fn import_bundle_file(
+    bundle_path: &Path,
+    manifest: &RuntimeManifest,
+    cache_dir: &Path,
+) -> Result<BundleArtifacts, BundleError> {
+    let cache_key = bundle_cache_key(&manifest.bundle.sha256)?;
+    let bundle_dir = cache_dir.join(cache_key);
+    let artifacts = BundleArtifacts::in_dir(&bundle_dir);
+    if artifacts.all_present() {
+        return Ok(artifacts);
+    }
+    let bytes = fs::read(bundle_path)?;
+    verify_bundle_bytes(&bytes, &manifest.bundle.sha256, manifest.bundle.size)?;
+    fs::create_dir_all(&bundle_dir)?;
+    extract_members(&bytes, &manifest.bundle.members, &bundle_dir)?;
+    Ok(artifacts)
+}
+
 /// Validates `sha256` as a well-formed 64-character lowercase hex digest
 /// before it is ever used as a filesystem path segment, and returns it
 /// unchanged as the cache directory key.
@@ -654,5 +679,56 @@ mod test {
             BundleError::MissingMember("ovmf")
         ));
         assert!(!dir.path().join("ovmf").exists());
+    }
+
+    /// Builds a five-member bundle on disk plus a manifest whose bundle
+    /// sha256/size match it, for the local-file import path.
+    fn local_bundle_fixture(dir: &Path) -> (PathBuf, RuntimeManifest) {
+        let bytes = make_test_bundle(&[
+            ("image/OVMF.fd", b"o"),
+            ("image/bzImage", b"k"),
+            ("image/initrd", b"i"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
+        ]);
+        let path = dir.join("snp-image.tar.gz");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_str(crate::vprogram::manifest::test::VALID_MANIFEST).unwrap();
+        json["bundle"]["sha256"] = serde_json::Value::String(hex::encode(Sha256::digest(&bytes)));
+        json["bundle"]["size"] = serde_json::Value::from(bytes.len() as u64);
+        json["bundle"]["ref"] = serde_json::Value::String("0".repeat(64));
+        let manifest = RuntimeManifest::parse(json.to_string().as_bytes()).unwrap();
+        (path, manifest)
+    }
+
+    #[test]
+    fn import_bundle_file_verifies_and_extracts_into_the_cache_layout() {
+        let work = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let (path, manifest) = local_bundle_fixture(work.path());
+        let artifacts = import_bundle_file(&path, &manifest, cache.path()).unwrap();
+        let expected_dir = cache.path().join(&manifest.bundle.sha256);
+        assert_eq!(
+            artifacts.platform_rootfs,
+            expected_dir.join("platform_rootfs")
+        );
+        assert!(artifacts.all_present());
+        assert_eq!(std::fs::read(&artifacts.platform_hash_tree).unwrap(), b"v");
+    }
+
+    #[test]
+    fn import_bundle_file_rejects_a_tarball_that_does_not_match_the_manifest() {
+        let work = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let (path, manifest) = local_bundle_fixture(work.path());
+        // Same size, different bytes: the size check passes, sha256 fails.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&path, &bytes).unwrap();
+        let err = import_bundle_file(&path, &manifest, cache.path()).unwrap_err();
+        assert!(matches!(err, BundleError::ChecksumMismatch { .. }), "{err}");
+        assert!(!cache.path().join(&manifest.bundle.sha256).exists());
     }
 }
