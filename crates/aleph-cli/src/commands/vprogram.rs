@@ -20,7 +20,7 @@ use aleph_sdk::crn::{ActiveVmNetworking, fetch_active_vms};
 use aleph_sdk::messages::{ForgetBuilder, StoreBuilder, VProgramBuilder};
 use aleph_sdk::scheduler::SchedulerClient;
 use aleph_sdk::verify::Hasher;
-use aleph_sdk::vprogram::bundle::fetch_bundle_artifacts;
+use aleph_sdk::vprogram::bundle::{BundleArtifacts, fetch_bundle_artifacts, import_bundle_file};
 use aleph_sdk::vprogram::cmdline::instantiate_cmdline;
 use aleph_sdk::vprogram::manifest::{RuntimeManifest, WorkloadSpec};
 use aleph_sdk::vprogram::measure::compute_measurements;
@@ -43,8 +43,8 @@ use url::Url;
 
 use crate::account::CliAccount;
 use crate::cli::{
-    ImageRef, PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs,
-    VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
+    ImageRef, PlatformRequirement, VProgramBuildArgs, VProgramCallArgs, VProgramCommand,
+    VProgramCreateArgs, VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
 };
 use crate::common::{
     confirm_action, render_upload_progress, resolve_account, resolve_address,
@@ -157,15 +157,232 @@ async fn handle_create(
     json: bool,
     args: VProgramCreateArgs,
 ) -> Result<()> {
-    // 0. Fail fast on local prerequisites before any network call.
-    let veritysetup = Veritysetup::find()?;
+    // Cheap deploy-side gates first, then the shared local build (tool
+    // gates, manifest, bundle, workload, verity, cmdline), all before any
+    // upload.
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
     check_debug_policy(args.policy, args.allow_debug)?;
-    if args.build.volumes.len() > MAX_VERIFIED_VOLUMES {
+    let dry_run = args.signing.dry_run;
+
+    // Resolve --crn up front so a typo or ambiguous fragment fails
+    // before any verity hashing or uploads. A full hash passes through
+    // without a scheduler round-trip.
+    let crn_hash = match args.crn.as_deref() {
+        Some(input) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            Some(super::instance_target::resolve_node_hash(&scheduler_url, input).await?)
+        }
+        None => None,
+    };
+
+    let build = prepare_local_build(
+        aleph_client,
+        json,
+        &args.build,
+        RuntimeSource::Network(args.build.runtime.clone()),
+    )
+    .await?;
+
+    // 4. Upload each data image + hash tree as STORE messages. Under
+    //    --dry-run, uploads are skipped entirely: the file hash stands in
+    //    for the STORE message hash so the pending message can still be
+    //    previewed without ever touching the network for the upload.
+    let owner = args
+        .on_behalf_of
+        .as_deref()
+        .map(resolve_address)
+        .transpose()?;
+    let workload_refs = upload_pair(
+        aleph_client,
+        &account,
+        owner.as_ref(),
+        json,
+        dry_run,
+        &build.workload,
+    )
+    .await?;
+    let mut volume_refs = Vec::new();
+    for v in &build.volumes {
+        volume_refs
+            .push(upload_pair(aleph_client, &account, owner.as_ref(), json, dry_run, v).await?);
+    }
+
+    // 5. Measurements. The cmdline was instantiated by the local build.
+    if !json {
+        eprintln!(
+            "Computing measurements ({} cpu model(s))...",
+            build.manifest.boot.cpu_models.len()
+        );
+    }
+    let measurements = compute_measurements(
+        &build.artifacts,
+        &build.cmdline,
+        args.build.vcpus,
+        &build.manifest.boot.cpu_models,
+    )?;
+
+    // 6. Assemble and publish.
+    let verification = serde_json::from_value::<TeeVerification>(serde_json::json!({
+        "backend": "sev_snp",
+        "policy": args.policy,
+        "measurements": measurements,
+    }))?;
+    let workload = serde_json::from_value::<VerifiedWorkload>(serde_json::json!({
+        "ref": workload_refs.data_message,
+        "hash_tree": workload_refs.tree_message,
+        "roothash": build.workload.root_hash,
+    }))?;
+    let mut volumes = Vec::with_capacity(volume_refs.len());
+    for (refs, verity) in volume_refs.iter().zip(build.volumes.iter()) {
+        volumes.push(serde_json::from_value::<VerifiedVolume>(
+            serde_json::json!({
+                "ref": refs.data_message,
+                "hash_tree": refs.tree_message,
+                "roothash": verity.root_hash,
+            }),
+        )?);
+    }
+
+    let wait = args.wait;
+    let mut builder =
+        VProgramBuilder::new(&account, build.runtime.hash.clone(), workload, verification)
+            .vcpus(args.build.vcpus)
+            .memory(MiB::from(u64::from(args.build.memory)))
+            .internet(!args.no_internet)
+            .volumes(volumes)
+            .metadata(std::collections::HashMap::from([(
+                "name".to_string(),
+                serde_json::json!(args.name),
+            )]));
+    if let Some(crn_hash) = crn_hash {
+        builder = builder.node_hash(crn_hash.to_string());
+    }
+    if let Some(channel) = args.channel {
+        builder = builder.channel(Channel::from(channel));
+    }
+    if let Some(owner) = owner {
+        builder = builder.on_behalf_of(owner);
+    }
+    let pending = builder.build()?;
+    let vm_id = pending.item_hash.clone();
+
+    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await?;
+
+    // The scheduler auto-dispatches V-Programs same as instances, so creation
+    // does not notify a CRN; with --wait we only poll until it is reachable.
+    // Skip on --dry-run (nothing was submitted).
+    if let Some(secs) = wait
+        && !dry_run
+    {
+        let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+        let wait_timeout = std::time::Duration::from_secs(secs);
+        let wait_started = std::time::Instant::now();
+        match crate::commands::instance_wait::wait_until_ready(&scheduler_url, &vm_id, wait_timeout)
+            .await?
+        {
+            crate::commands::instance_wait::WaitOutcome::Ready(_) => {
+                let scheduler = SchedulerClient::new(scheduler_url);
+                if !json {
+                    eprintln!("V-Program reachable; waiting for the attestation port mapping...");
+                }
+                let attested_endpoint = poll_attested_endpoint(
+                    || fetch_attested_endpoint(&scheduler, &vm_id),
+                    tokio::time::sleep,
+                    wait_timeout.saturating_sub(wait_started.elapsed()),
+                    crate::commands::instance_wait::WAIT_POLL_INTERVAL,
+                )
+                .await;
+                report_create_ready(&vm_id, attested_endpoint.as_ref(), json);
+            }
+            crate::commands::instance_wait::WaitOutcome::Timeout => {
+                report_create_timeout(&vm_id, json);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where the runtime manifest and its bundle come from.
+pub(crate) enum RuntimeSource {
+    /// `--runtime` (or the aggregate default): manifest and bundle come from
+    /// the network.
+    Network(Option<ImageRef>),
+    /// `--runtime-manifest FILE --bundle FILE`: both read from disk.
+    // Only `vprogram run` builds this variant, and it is still a stub.
+    #[allow(dead_code)]
+    LocalFiles { manifest: PathBuf, bundle: PathBuf },
+}
+
+/// Everything `create` and `run` produce locally before they diverge: the
+/// resolved runtime and its manifest, the bundle artifacts, the
+/// verity-formatted workload and volumes, and the instantiated cmdline.
+///
+/// The `_`-prefixed fields are lifetime guards rather than data: the
+/// compose-built ext4 image, its containing tempdir, and the verity scratch
+/// dir. Holding the `LocalBuild` is what keeps the files the other fields
+/// point at un-deleted.
+pub(crate) struct LocalBuild {
+    pub(crate) manifest: RuntimeManifest,
+    pub(crate) runtime: ResolvedRuntime,
+    pub(crate) artifacts: BundleArtifacts,
+    pub(crate) workload: VerityArtifact,
+    pub(crate) volumes: Vec<VerityArtifact>,
+    pub(crate) cmdline: String,
+    _built_workload: Option<tempfile::NamedTempFile>,
+    _built_workload_dir: Option<tempfile::TempDir>,
+    _verity_dir: tempfile::TempDir,
+}
+
+/// The contract gate `create` and `run` share: catalogue-resolved runtimes
+/// must declare the contract the aggregate lists them under; raw hashes and
+/// local files only pass the model-level gate.
+fn check_runtime_contract(
+    runtime: &ResolvedRuntime,
+    manifest: &RuntimeManifest,
+    compose: bool,
+) -> Result<()> {
+    match &runtime.contract {
+        // Catalogue-resolved: the manifest must implement exactly the
+        // contract the aggregate claims for it.
+        Some(contract) => check_contract_matches(contract, manifest.workload.as_ref()),
+        // Raw hash or local file: only the model-level gates apply.
+        None if compose => check_compose_contract(manifest.workload.as_ref()),
+        None => check_exec_contract(manifest.workload.as_ref()),
+    }
+}
+
+/// Cheap slot check right after the manifest is known: instantiate_cmdline
+/// only needs the template, the platform roothash, and how many volumes were
+/// passed, so a bad template fails here instead of after verity hashing and
+/// uploads. Placeholder roothashes are fine since only slot
+/// presence/absence is being checked; the real cmdline is built at the end.
+fn probe_cmdline_slots(manifest: &RuntimeManifest, volumes: usize) -> Result<()> {
+    instantiate_cmdline(
+        &manifest.boot.cmdline_template,
+        &manifest.boot.platform_roothash,
+        &"0".repeat(64),
+        &vec!["0".repeat(64); volumes],
+    )?;
+    Ok(())
+}
+
+/// The local half of a V-PROGRAM deployment, shared by `create` and `run`:
+/// local tool gates, runtime resolution (from the network or from files on
+/// disk), bundle materialization, workload build, dm-verity hashing and the
+/// instantiated kernel cmdline. Nothing here is published.
+pub(crate) async fn prepare_local_build(
+    aleph_client: &AlephClient,
+    json: bool,
+    build: &VProgramBuildArgs,
+    source: RuntimeSource,
+) -> Result<LocalBuild> {
+    // 0. Fail fast on local prerequisites before any network call.
+    let veritysetup = Veritysetup::find()?;
+    if build.volumes.len() > MAX_VERIFIED_VOLUMES {
         bail!("at most {MAX_VERIFIED_VOLUMES} --volume flags are supported");
     }
-    let compose_input = match (&args.build.workload, &args.build.compose) {
+    let compose_input = match (&build.workload, &build.compose) {
         (Some(path), None) => {
             if !path.exists() {
                 bail!("workload image not found: {}", path.display());
@@ -175,11 +392,11 @@ async fn handle_create(
         (None, Some(compose_path)) => {
             let text = std::fs::read_to_string(compose_path)
                 .with_context(|| format!("reading compose file {}", compose_path.display()))?;
-            let validated = compose::parse_and_validate(&text, args.build.volumes.len())?;
+            let validated = compose::parse_and_validate(&text, build.volumes.len())?;
             for w in &validated.warnings {
                 eprintln!("warning: {w}");
             }
-            let archives = parse_image_archives(&args.build.image_archives)?;
+            let archives = parse_image_archives(&build.image_archives)?;
             for path in archives.values() {
                 if !path.exists() {
                     bail!("image archive not found: {}", path.display());
@@ -199,89 +416,97 @@ async fn handle_create(
         }
         _ => unreachable!("clap enforces exactly one of --workload/--compose"),
     };
-    for path in &args.build.volumes {
+    for path in &build.volumes {
         if !path.exists() {
             bail!("volume image not found: {}", path.display());
         }
     }
-    let dry_run = args.signing.dry_run;
 
-    // Resolve --crn up front so a typo or ambiguous fragment fails
-    // before any verity hashing or uploads. A full hash passes through
-    // without a scheduler round-trip.
-    let crn_hash = match args.crn.as_deref() {
-        Some(input) => {
-            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
-            Some(super::instance_target::resolve_node_hash(&scheduler_url, input).await?)
-        }
-        None => None,
-    };
-
-    // 1. Runtime manifest: --runtime is a STORE message hash, a contract or
-    //    runtime name from the vm-images aggregate, or absent (the model's
-    //    current contract, then its default runtime). The aggregate is only
-    //    fetched when a hash is not given.
+    // 1. Runtime manifest: with `RuntimeSource::Network`, --runtime is a
+    //    STORE message hash, a contract or runtime name from the vm-images
+    //    aggregate, or absent (the model's current contract, then its
+    //    default runtime); the aggregate is only fetched when a hash is not
+    //    given. With `RuntimeSource::LocalFiles` nothing is resolved: the
+    //    manifest and the bundle are read from disk.
     let model = if compose_input.is_some() {
         VPROGRAM_MODEL_COMPOSE
     } else {
         VPROGRAM_MODEL_EXEC
     };
-    let vm_images = if matches!(args.build.runtime, Some(ImageRef::Hash(_))) {
-        VmImagesData::default()
-    } else {
-        CachingAggregateClient::new(aleph_client)
-            .get_vm_images_aggregate()
-            .await
-            .map_err(|e| {
-                anyhow!(
-                    "failed to fetch vm-images aggregate: {e}. \
-                     As a fallback, pass --runtime with the runtime manifest's item hash."
-                )
-            })?
-            .vm_images
+    let (runtime, manifest, artifacts) = match source {
+        RuntimeSource::Network(runtime_ref) => {
+            let vm_images = if matches!(runtime_ref, Some(ImageRef::Hash(_))) {
+                VmImagesData::default()
+            } else {
+                CachingAggregateClient::new(aleph_client)
+                    .get_vm_images_aggregate()
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "failed to fetch vm-images aggregate: {e}. \
+                             As a fallback, pass --runtime with the runtime manifest's item hash."
+                        )
+                    })?
+                    .vm_images
+            };
+            let runtime = resolve_vprogram_runtime(runtime_ref, model, &vm_images)?;
+            if !json {
+                eprintln!("Fetching runtime manifest {}...", runtime.hash);
+            }
+            let manifest_bytes = aleph_client
+                .download_file_by_message_hash(&runtime.hash)
+                .await?
+                .with_verification()
+                .bytes()
+                .await?;
+            let manifest = RuntimeManifest::parse(&manifest_bytes)?;
+            check_runtime_contract(&runtime, &manifest, compose_input.is_some())?;
+            if !json {
+                eprintln!("{}", runtime_identity_line(&runtime, &manifest));
+            }
+            probe_cmdline_slots(&manifest, build.volumes.len())?;
+
+            // 2. Bundle artifacts (cached locally by bundle sha256).
+            if !json {
+                eprintln!("Fetching runtime bundle...");
+            }
+            let cache_dir = ConfigStore::vprogram_bundle_cache_dir()?;
+            let artifacts = fetch_bundle_artifacts(aleph_client, &manifest, &cache_dir).await?;
+            (runtime, manifest, artifacts)
+        }
+        RuntimeSource::LocalFiles {
+            manifest: manifest_path,
+            bundle: bundle_path,
+        } => {
+            let manifest_bytes = std::fs::read(&manifest_path)
+                .with_context(|| format!("reading runtime manifest {}", manifest_path.display()))?;
+            let manifest = RuntimeManifest::parse(&manifest_bytes)?;
+            // The bundle sha256 is a valid native item hash and is the one
+            // identity a local, unpublished runtime has.
+            let runtime = ResolvedRuntime {
+                hash: manifest
+                    .bundle
+                    .sha256
+                    .parse()
+                    .map_err(|e: aleph_types::item_hash::ItemHashError| anyhow!("{e}"))?,
+                contract: None,
+                label: Some("local file".to_string()),
+            };
+            check_runtime_contract(&runtime, &manifest, compose_input.is_some())?;
+            if !json {
+                eprintln!("{}", runtime_identity_line(&runtime, &manifest));
+            }
+            probe_cmdline_slots(&manifest, build.volumes.len())?;
+
+            // 2. Bundle artifacts (cached locally by bundle sha256).
+            if !json {
+                eprintln!("Importing runtime bundle {}...", bundle_path.display());
+            }
+            let cache_dir = ConfigStore::vprogram_bundle_cache_dir()?;
+            let artifacts = import_bundle_file(&bundle_path, &manifest, &cache_dir)?;
+            (runtime, manifest, artifacts)
+        }
     };
-    let runtime = resolve_vprogram_runtime(args.build.runtime.clone(), model, &vm_images)?;
-    if !json {
-        eprintln!("Fetching runtime manifest {}...", runtime.hash);
-    }
-    let manifest_bytes = aleph_client
-        .download_file_by_message_hash(&runtime.hash)
-        .await?
-        .with_verification()
-        .bytes()
-        .await?;
-    let manifest = RuntimeManifest::parse(&manifest_bytes)?;
-
-    match &runtime.contract {
-        // Catalogue-resolved: the manifest must implement exactly the
-        // contract the aggregate claims for it.
-        Some(contract) => check_contract_matches(contract, manifest.workload.as_ref())?,
-        // Raw hash: only the model-level gates apply.
-        None if compose_input.is_some() => check_compose_contract(manifest.workload.as_ref())?,
-        None => check_exec_contract(manifest.workload.as_ref())?,
-    }
-    if !json {
-        eprintln!("{}", runtime_identity_line(&runtime, &manifest));
-    }
-
-    // Cheap slot check right after the manifest is known: instantiate_cmdline
-    // only needs the template, the platform roothash, and how many volumes
-    // were passed, so a bad template fails here instead of after verity
-    // hashing and uploads. Placeholder roothashes are fine since only slot
-    // presence/absence is being checked; the real cmdline is built at step 5.
-    instantiate_cmdline(
-        &manifest.boot.cmdline_template,
-        &manifest.boot.platform_roothash,
-        &"0".repeat(64),
-        &vec!["0".repeat(64); args.build.volumes.len()],
-    )?;
-
-    // 2. Bundle artifacts (cached locally by bundle sha256).
-    if !json {
-        eprintln!("Fetching runtime bundle...");
-    }
-    let cache_dir = ConfigStore::vprogram_bundle_cache_dir()?;
-    let artifacts = fetch_bundle_artifacts(aleph_client, &manifest, &cache_dir).await?;
 
     // Materialize the workload image: either the prebuilt path from
     // --workload, or (for --compose) pull/resolve/save every image not
@@ -292,17 +517,18 @@ async fn handle_create(
     // `_built_workload` (the compose-built ext4 image) and
     // `_built_workload_dir` (its containing tempdir) are `None` for
     // --workload, where the file is caller-owned. Both are bound by this
-    // `let`, in this function's scope, which is what keeps them alive - and
-    // their backing files un-deleted - until after `upload_pair` runs; a
-    // narrower scope (e.g. dropping them at the end of the match arm) would
-    // delete the image before it could be uploaded.
+    // `let` and then moved into the returned `LocalBuild`, which is what
+    // keeps them alive - and their backing files un-deleted - until the
+    // caller is done with the build; a narrower scope (e.g. dropping them at
+    // the end of the match arm) would delete the image before it could be
+    // uploaded or booted.
     let (workload_path, _built_workload, _built_workload_dir): (
         PathBuf,
         Option<tempfile::NamedTempFile>,
         Option<tempfile::TempDir>,
     ) = match compose_input {
         None => (
-            args.build.workload.clone().expect("clap: workload set"),
+            build.workload.clone().expect("clap: workload set"),
             None,
             None,
         ),
@@ -358,8 +584,8 @@ async fn handle_create(
     // 3. Verity-hash the workload and any extra volumes. Hash trees are
     //    build artifacts, not user files, so they go in a tempdir rather
     //    than next to a caller-owned --workload/--volume path. `verity_dir`
-    //    must outlive the uploads in step 4: it is bound here, in this
-    //    function's scope, for the same reason as `_built_workload_dir`.
+    //    must outlive the caller's uploads or boot: it is moved into the
+    //    returned `LocalBuild` for the same reason as `_built_workload_dir`.
     let verity_dir = tempfile::tempdir().context("creating verity scratch dir")?;
     let workload_verity = verity_format(
         &veritysetup,
@@ -369,7 +595,7 @@ async fn handle_create(
     )
     .await?;
     let mut volume_verities = Vec::new();
-    for (i, path) in args.build.volumes.iter().enumerate() {
+    for (i, path) in build.volumes.iter().enumerate() {
         volume_verities.push(
             verity_format(
                 &veritysetup,
@@ -381,31 +607,6 @@ async fn handle_create(
         );
     }
 
-    // 4. Upload each data image + hash tree as STORE messages. Under
-    //    --dry-run, uploads are skipped entirely: the file hash stands in
-    //    for the STORE message hash so the pending message can still be
-    //    previewed without ever touching the network for the upload.
-    let owner = args
-        .on_behalf_of
-        .as_deref()
-        .map(resolve_address)
-        .transpose()?;
-    let workload_refs = upload_pair(
-        aleph_client,
-        &account,
-        owner.as_ref(),
-        json,
-        dry_run,
-        &workload_verity,
-    )
-    .await?;
-    let mut volume_refs = Vec::new();
-    for v in &volume_verities {
-        volume_refs
-            .push(upload_pair(aleph_client, &account, owner.as_ref(), json, dry_run, v).await?);
-    }
-
-    // 5. Cmdline + measurements.
     let volume_roothashes: Vec<String> = volume_verities
         .iter()
         .map(|v| v.root_hash.clone())
@@ -416,97 +617,17 @@ async fn handle_create(
         &workload_verity.root_hash,
         &volume_roothashes,
     )?;
-    if !json {
-        eprintln!(
-            "Computing measurements ({} cpu model(s))...",
-            manifest.boot.cpu_models.len()
-        );
-    }
-    let measurements = compute_measurements(
-        &artifacts,
-        &cmdline,
-        args.build.vcpus,
-        &manifest.boot.cpu_models,
-    )?;
-
-    // 6. Assemble and publish.
-    let verification = serde_json::from_value::<TeeVerification>(serde_json::json!({
-        "backend": "sev_snp",
-        "policy": args.policy,
-        "measurements": measurements,
-    }))?;
-    let workload = serde_json::from_value::<VerifiedWorkload>(serde_json::json!({
-        "ref": workload_refs.data_message,
-        "hash_tree": workload_refs.tree_message,
-        "roothash": workload_verity.root_hash,
-    }))?;
-    let mut volumes = Vec::with_capacity(volume_refs.len());
-    for (refs, verity) in volume_refs.iter().zip(volume_verities.iter()) {
-        volumes.push(serde_json::from_value::<VerifiedVolume>(
-            serde_json::json!({
-                "ref": refs.data_message,
-                "hash_tree": refs.tree_message,
-                "roothash": verity.root_hash,
-            }),
-        )?);
-    }
-
-    let wait = args.wait;
-    let mut builder = VProgramBuilder::new(&account, runtime.hash, workload, verification)
-        .vcpus(args.build.vcpus)
-        .memory(MiB::from(u64::from(args.build.memory)))
-        .internet(!args.no_internet)
-        .volumes(volumes)
-        .metadata(std::collections::HashMap::from([(
-            "name".to_string(),
-            serde_json::json!(args.name),
-        )]));
-    if let Some(crn_hash) = crn_hash {
-        builder = builder.node_hash(crn_hash.to_string());
-    }
-    if let Some(channel) = args.channel {
-        builder = builder.channel(Channel::from(channel));
-    }
-    if let Some(owner) = owner {
-        builder = builder.on_behalf_of(owner);
-    }
-    let pending = builder.build()?;
-    let vm_id = pending.item_hash.clone();
-
-    submit_or_preview(aleph_client, ccn_url, &pending, dry_run, json).await?;
-
-    // The scheduler auto-dispatches V-Programs same as instances, so creation
-    // does not notify a CRN; with --wait we only poll until it is reachable.
-    // Skip on --dry-run (nothing was submitted).
-    if let Some(secs) = wait
-        && !dry_run
-    {
-        let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
-        let wait_timeout = std::time::Duration::from_secs(secs);
-        let wait_started = std::time::Instant::now();
-        match crate::commands::instance_wait::wait_until_ready(&scheduler_url, &vm_id, wait_timeout)
-            .await?
-        {
-            crate::commands::instance_wait::WaitOutcome::Ready(_) => {
-                let scheduler = SchedulerClient::new(scheduler_url);
-                if !json {
-                    eprintln!("V-Program reachable; waiting for the attestation port mapping...");
-                }
-                let attested_endpoint = poll_attested_endpoint(
-                    || fetch_attested_endpoint(&scheduler, &vm_id),
-                    tokio::time::sleep,
-                    wait_timeout.saturating_sub(wait_started.elapsed()),
-                    crate::commands::instance_wait::WAIT_POLL_INTERVAL,
-                )
-                .await;
-                report_create_ready(&vm_id, attested_endpoint.as_ref(), json);
-            }
-            crate::commands::instance_wait::WaitOutcome::Timeout => {
-                report_create_timeout(&vm_id, json);
-            }
-        }
-    }
-    Ok(())
+    Ok(LocalBuild {
+        manifest,
+        runtime,
+        artifacts,
+        workload: workload_verity,
+        volumes: volume_verities,
+        cmdline,
+        _built_workload,
+        _built_workload_dir,
+        _verity_dir: verity_dir,
+    })
 }
 
 /// What `--runtime` resolved to. `contract` / `label` are `None` when the
@@ -802,10 +923,10 @@ fn create_timeout_payload() -> serde_json::Value {
 
 /// A verity-formatted data image: the original image path, the generated
 /// hash tree path, and the dm-verity root hash printed by `veritysetup format`.
-struct VerityArtifact {
-    data: PathBuf,
-    hash_tree: PathBuf,
-    root_hash: String,
+pub(crate) struct VerityArtifact {
+    pub(crate) data: PathBuf,
+    pub(crate) hash_tree: PathBuf,
+    pub(crate) root_hash: String,
 }
 
 /// Run `veritysetup format` on `data`, writing the hash tree to `hash_tree`.
