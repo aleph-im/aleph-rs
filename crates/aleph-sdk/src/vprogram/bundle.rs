@@ -3,8 +3,9 @@
 //! A runtime bundle is a `.tar.gz` referenced by a [`RuntimeManifest`]'s
 //! `bundle` field. This module fetches it by `bundle.ref`, the STORE message
 //! pinning the tarball (native storage or IPFS), with a local disk cache keyed
-//! by the manifest's declared sha256, verifies its hash and size, and extracts the OVMF firmware, kernel, and initrd members that the
-//! V-Program launch pipeline needs.
+//! by the manifest's declared sha256, verifies its hash and size, and
+//! extracts the OVMF firmware, kernel, initrd, platform rootfs and its hash
+//! tree.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,18 +47,62 @@ pub enum BundleError {
 }
 
 /// Local filesystem paths of the runtime artifacts extracted from a bundle.
+///
+/// `ovmf`, `kernel`, `initrd` feed the launch measurement; `platform_rootfs`
+/// and `platform_hash_tree` are the guest's vda/vdb and are only needed to
+/// boot the runtime locally (`aleph vprogram run`). All five are extracted
+/// together: the tarball is fully downloaded whenever any member is
+/// missing, so a partial layout would save disk, not network.
 #[derive(Debug, Clone)]
 pub struct BundleArtifacts {
     pub ovmf: PathBuf,
     pub kernel: PathBuf,
     pub initrd: PathBuf,
+    pub platform_rootfs: PathBuf,
+    pub platform_hash_tree: PathBuf,
+}
+
+/// Cache file name per bundle role, in extraction order.
+const ROLES: [&str; 5] = [
+    "ovmf",
+    "kernel",
+    "initrd",
+    "platform_rootfs",
+    "platform_hash_tree",
+];
+
+impl BundleArtifacts {
+    /// The five member paths under `dir`, named after their roles.
+    pub fn in_dir(dir: &Path) -> Self {
+        Self {
+            ovmf: dir.join("ovmf"),
+            kernel: dir.join("kernel"),
+            initrd: dir.join("initrd"),
+            platform_rootfs: dir.join("platform_rootfs"),
+            platform_hash_tree: dir.join("platform_hash_tree"),
+        }
+    }
+
+    /// True when every member file exists (a cache hit). A directory written
+    /// by an older CLI holds only the first three and is not a hit.
+    pub fn all_present(&self) -> bool {
+        [
+            &self.ovmf,
+            &self.kernel,
+            &self.initrd,
+            &self.platform_rootfs,
+            &self.platform_hash_tree,
+        ]
+        .iter()
+        .all(|p| p.exists())
+    }
 }
 
 /// Fetch, verify, and extract the runtime bundle referenced by `manifest`.
 ///
-/// Caches extracted artifacts under `cache_dir/<bundle.sha256>/`. If `ovmf`,
-/// `kernel`, and `initrd` already exist there, returns immediately without
-/// touching the network.
+/// Caches extracted artifacts under `cache_dir/<bundle.sha256>/`. If all five
+/// members already exist there, returns immediately without touching the
+/// network.
 pub async fn fetch_bundle_artifacts(
     client: &AlephClient,
     manifest: &RuntimeManifest,
@@ -65,13 +110,8 @@ pub async fn fetch_bundle_artifacts(
 ) -> Result<BundleArtifacts, BundleError> {
     let cache_key = bundle_cache_key(&manifest.bundle.sha256)?;
     let bundle_dir = cache_dir.join(cache_key);
-    let artifacts = BundleArtifacts {
-        ovmf: bundle_dir.join("ovmf"),
-        kernel: bundle_dir.join("kernel"),
-        initrd: bundle_dir.join("initrd"),
-    };
-
-    if artifacts.ovmf.exists() && artifacts.kernel.exists() && artifacts.initrd.exists() {
+    let artifacts = BundleArtifacts::in_dir(&bundle_dir);
+    if artifacts.all_present() {
         return Ok(artifacts);
     }
 
@@ -193,8 +233,8 @@ fn verify_bundle_bytes(
     Ok(())
 }
 
-/// Extract the `ovmf`, `kernel`, and `initrd` members declared in `members`
-/// from the gzipped tar archive `bytes` into `dir`, named after their roles.
+/// Extract the five members declared in `members` from the gzipped tar
+/// archive `bytes` into `dir`, named after their roles.
 ///
 /// Every entry's path is checked for traversal (absolute paths or `..`
 /// components) before it is compared against the declared member paths;
@@ -222,12 +262,14 @@ fn extract_members_with_limit(
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
 
-    let roles: [(&str, &'static str); 3] = [
-        (members.ovmf.as_str(), "ovmf"),
-        (members.kernel.as_str(), "kernel"),
-        (members.initrd.as_str(), "initrd"),
+    let roles: [(&str, &'static str); 5] = [
+        (members.ovmf.as_str(), ROLES[0]),
+        (members.kernel.as_str(), ROLES[1]),
+        (members.initrd.as_str(), ROLES[2]),
+        (members.platform_rootfs.as_str(), ROLES[3]),
+        (members.platform_hash_tree.as_str(), ROLES[4]),
     ];
-    let mut found = [false; 3];
+    let mut found = [false; 5];
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -323,7 +365,7 @@ mod test {
         enc.finish().unwrap()
     }
 
-    /// Cache-hit fast path of the public entry point: when all three
+    /// Cache-hit fast path of the public entry point: when all five
     /// artifacts already sit under `cache_dir/<sha256>/`, no download is
     /// attempted (the client points at an unroutable host) and the returned
     /// paths are the cached ones.
@@ -335,7 +377,13 @@ mod test {
         let cache = tempfile::tempdir().unwrap();
         let bundle_dir = cache.path().join(&manifest.bundle.sha256);
         std::fs::create_dir_all(&bundle_dir).unwrap();
-        for role in ["ovmf", "kernel", "initrd"] {
+        for role in [
+            "ovmf",
+            "kernel",
+            "initrd",
+            "platform_rootfs",
+            "platform_hash_tree",
+        ] {
             std::fs::write(bundle_dir.join(role), role).unwrap();
         }
         let client =
@@ -346,6 +394,37 @@ mod test {
         assert_eq!(artifacts.ovmf, bundle_dir.join("ovmf"));
         assert_eq!(artifacts.kernel, bundle_dir.join("kernel"));
         assert_eq!(artifacts.initrd, bundle_dir.join("initrd"));
+        assert_eq!(
+            artifacts.platform_rootfs,
+            bundle_dir.join("platform_rootfs")
+        );
+        assert_eq!(
+            artifacts.platform_hash_tree,
+            bundle_dir.join("platform_hash_tree")
+        );
+    }
+
+    /// A cache dir written by an older CLI holds only ovmf/kernel/initrd.
+    /// It must NOT count as a hit: the boot path needs the rootfs and its
+    /// hash tree, so the bundle is fetched again (here: fails at download,
+    /// which proves the fast path was skipped).
+    #[tokio::test]
+    async fn fetch_bundle_artifacts_refetches_a_three_member_legacy_cache() {
+        let manifest =
+            RuntimeManifest::parse(crate::vprogram::manifest::test::VALID_MANIFEST.as_bytes())
+                .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let bundle_dir = cache.path().join(&manifest.bundle.sha256);
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        for role in ["ovmf", "kernel", "initrd"] {
+            std::fs::write(bundle_dir.join(role), role).unwrap();
+        }
+        let client =
+            crate::client::AlephClient::new(url::Url::parse("http://test.invalid").unwrap());
+        let err = fetch_bundle_artifacts(&client, &manifest, cache.path())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BundleError::Download(_)), "{err}");
     }
 
     fn test_members() -> BundleMembers {
@@ -472,11 +551,21 @@ mod test {
             ("image/OVMF.fd", b"o"),
             ("image/bzImage", b"k"),
             ("image/initrd", b"i"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
         ]);
         extract_members(&bytes, &test_members(), dir.path()).unwrap();
         assert_eq!(std::fs::read(dir.path().join("ovmf")).unwrap(), b"o");
         assert_eq!(std::fs::read(dir.path().join("kernel")).unwrap(), b"k");
         assert_eq!(std::fs::read(dir.path().join("initrd")).unwrap(), b"i");
+        assert_eq!(
+            std::fs::read(dir.path().join("platform_rootfs")).unwrap(),
+            b"r"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("platform_hash_tree")).unwrap(),
+            b"v"
+        );
     }
 
     #[test]
@@ -496,13 +585,15 @@ mod test {
 
     #[test]
     fn extract_stops_after_the_last_member() {
-        // A traversal entry *after* the three members must never be seen:
+        // A traversal entry *after* the five members must never be seen:
         // with the early exit it is not iterated, so extraction succeeds.
         let dir = tempfile::tempdir().unwrap();
         let bytes = make_test_bundle(&[
             ("image/OVMF.fd", b"ovmf"),
             ("image/bzImage", b"kernel"),
             ("image/initrd", b"initrd"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
             ("../escape", b"never read"),
         ]);
         extract_members(&bytes, &test_members(), dir.path()).unwrap();
@@ -514,6 +605,8 @@ mod test {
             ("image/OVMF.fd", b"ovmf"),
             ("image/bzImage", b"kernel"),
             ("image/initrd", b"initrd"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
         ]);
         assert!(matches!(
             extract_members(&bytes, &test_members(), dir.path()).unwrap_err(),
@@ -528,6 +621,8 @@ mod test {
             ("image/OVMF.fd", b"ovmf"),
             ("image/bzImage", b"a kernel that is larger than the limit"),
             ("image/initrd", b"initrd"),
+            ("image/rootfs.ext4", b"r"),
+            ("image/rootfs.ext4.verity", b"v"),
         ]);
         let err = extract_members_with_limit(&bytes, &test_members(), dir.path(), 16).unwrap_err();
         assert!(
