@@ -1748,6 +1748,17 @@ pick a CRN from a list, pass `-i` / `--interactive`.
 Volumes can be added with `--persistent-volume`, `--ephemeral-volume`, or \
 `--immutable-volume` (each can be repeated).
 
+For a confidential instance, pass --confidential (sev-snp by default; --tee \
+sev selects the deprecated legacy backend) with --image, or use \
+--encrypt-rootfs <PATH> to LUKS-encrypt a local plain image and upload it \
+instead of --image. The --encrypt-rootfs image must be plain ext4 with an \
+executable /sbin/init: the guest's measured init chroots into it and execs \
+that init, which must stay in the foreground (one that daemonizes exits the \
+chroot, and the guest agent powers the VM off). Bake any SSH keys into the \
+image yourself, since the encrypted rootfs is opaque to the CRN. The CRN \
+never sees the LUKS passphrase: it is injected after attestation, over the \
+guest's attested TLS channel, with `aleph instance unlock`.
+
 Examples:
   aleph instance create web --image ubuntu26 --size 1vcpu-2gb \\
                             --ssh-pubkey-file ~/.ssh/id_ed25519.pub
@@ -1758,6 +1769,9 @@ Examples:
   aleph instance create db --image ubuntu26 --size 4vcpu-8gb \\
       --persistent-volume name=data,mount=/data,size=100GB \\
       --ssh-pubkey-file ~/.ssh/id_ed25519.pub
+
+  aleph instance create web3-node --encrypt-rootfs ./plain.ext4 \\
+      --confidential --crn <snp-crn>
 
   aleph instance create -i web   # interactive prompts for everything else")]
     Create(InstanceCreateArgs),
@@ -1892,6 +1906,45 @@ Examples:
     Confidential(ConfidentialCommand),
     /// Attest an SNP instance: verify its RA-TLS certificate chain and launch measurement.
     #[cfg(feature = "vprogram")]
+    #[command(long_about = "\
+Verify that an SNP instance is genuine, without sending it anything.
+
+Resolves the guest's attested (RA-TLS) endpoint (from --url, or via the
+scheduler + CRN discovery used by `instance show`), connects, and checks
+the AMD-signed attestation report carried in its TLS server certificate.
+\"Genuine\" means ALL of the following hold; any failure aborts before the
+result is printed:
+  - certificate chain: AMD ARK -> ASK -> VCEK (fetched for the reporting
+    chip), validity and revocation, and the report's ECDSA signature
+  - TLS key binding: the signed report_data commits to the certificate's
+    public key, so the report cannot be replayed under another key; this
+    is what ties \"genuine\" to the live connection, not just to some past
+    boot
+  - fresh nonce: a second report bound to a nonce generated for this call
+    proves the guest is live now, not a replay of an old key
+  - launch measurement: matches the instance message's pinned
+    measurement(s), or --expected-measurement
+  - guest policy: matches the message's pinned SNP guest policy (no
+    silent downgrade to e.g. a debug-enabled launch; a debug-enabled
+    policy prints a warning)
+  - TCB floor: the launch TCB meets the network floor for the chip
+    (raise with --min-tcb, lower only with --accept-outdated-tcb)
+  - platform posture, only if --require-platform is given
+
+This command is read-only: it makes no application-level request to the
+guest and injects nothing. Use `aleph instance unlock` to attest and then
+inject the LUKS passphrase, or `aleph vprogram call` to attest and then
+make an HTTP request.
+
+Output: on success, prints \"Instance is genuine\" plus the measurement,
+policy, launch/reported TCB, chip, and platform posture; --json prints the
+same as one document instead.
+
+Examples:
+  aleph instance attest a41fb91c3e68
+  aleph instance attest a41fb91c3e68 --json
+  aleph instance attest a41fb91c3e68 --crn 9f3e...
+  aleph instance attest a41fb91c3e68 --min-tcb snp=30")]
     Attest(InstanceAttestArgs),
     /// Attest an SNP instance, then unlock its encrypted rootfs (inject the LUKS passphrase).
     #[cfg(feature = "vprogram")]
@@ -1994,7 +2047,9 @@ pub enum TeeFlavor {
     /// instance runtime (`--runtime`).
     #[value(name = "sev-snp")]
     SevSnp,
-    /// Legacy AMD SEV (no SNP). Deprecated, kept for existing deployments.
+    /// Deprecated legacy AMD SEV (no SNP): no measured launch, no remote
+    /// attestation. Kept for existing deployments; new confidential
+    /// instances use sev-snp.
     #[value(name = "sev")]
     Sev,
 }
@@ -2015,7 +2070,8 @@ pub struct InstanceCreateArgs {
     pub image: Option<ImageRef>,
 
     /// TEE flavor for --confidential: sev-snp (default) or sev (deprecated
-    /// legacy SEV, kept for existing deployments).
+    /// legacy AMD SEV, kept for existing deployments; new confidential
+    /// instances use sev-snp).
     #[arg(long, value_enum, default_value = "sev-snp")]
     pub tee: TeeFlavor,
 
