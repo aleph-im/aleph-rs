@@ -23,4 +23,6 @@ pub mod sync;
 pub mod token;
 #[cfg(feature = "vprogram")]
 pub mod vprogram;
+#[cfg(feature = "vprogram")]
+pub mod vprogram_run;
 pub mod website;

@@ -81,6 +81,8 @@ mod test {
             ovmf: "/nonexistent/ovmf".into(),
             kernel: "/nonexistent/kernel".into(),
             initrd: "/nonexistent/initrd".into(),
+            platform_rootfs: "/nonexistent/platform_rootfs".into(),
+            platform_hash_tree: "/nonexistent/platform_hash_tree".into(),
         };
         let err = compute_measurements(&artifacts, "console=ttyS0", 1, &["EPYC-v5000".into()])
             .unwrap_err();
@@ -124,6 +126,8 @@ mod test {
             ovmf: dir.join("ovmf"),
             kernel: dir.join("kernel"),
             initrd: dir.join("initrd"),
+            platform_rootfs: dir.join("platform_rootfs"),
+            platform_hash_tree: dir.join("platform_hash_tree"),
         };
         let cmdline = "console=ttyS0 root=/dev/mapper/verity-root ro roothash=cb121a317be7dc7969dd633ca9b6c3718ffe9ea6715b64e0e35a871d484b56b8";
         let m = compute_measurements(&artifacts, cmdline, 1, &["EPYC-v4".into()]).unwrap();

@@ -30,7 +30,7 @@ memsizes = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["process", "io-util"] }
 tokio-util = { workspace = true }
 url = { workspace = true }
 directories = { workspace = true }
@@ -117,4 +117,12 @@ path = "src/main.rs"
 # subcommand.
 [[test]]
 name = "vprogram_compose_cli"
+required-features = ["vprogram"]
+
+[[test]]
+name = "vprogram_run_cli"
+required-features = ["vprogram"]
+
+[[test]]
+name = "vprogram_run_e2e"
 required-features = ["vprogram"]

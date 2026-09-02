@@ -3131,6 +3131,37 @@ pub enum VProgramCommand {
     /// endpoint that proxies to 127.0.0.1:8080, so the runtime manifest must
     /// declare workload.contract: "aleph.compose/1".
     Create(Box<VProgramCreateArgs>),
+    /// Boot a V-PROGRAM locally in plain QEMU (no SEV-SNP) before publishing it.
+    #[command(long_about = "\
+Boot a V-PROGRAM locally in plain QEMU (no SEV-SNP) before publishing it.
+
+Builds the workload exactly like `create` (compose or prebuilt ext4, dm-verity
+hash trees, the runtime manifest's measured cmdline), then boots the runtime
+bundle's kernel, initrd, platform rootfs and the workload in QEMU with the
+`aleph_local=1` cmdline token. In that mode the guest's attest agent serves
+plain HTTP on its usual port and proxies to the workload as in production, so
+the forwarded port on 127.0.0.1 answers what the attested endpoint would.
+
+What it proves: the runtime boots, both dm-verity chains open with the
+roothashes the CLI computed, verified volumes bind in order, the workload's
+own init starts (its console output is streamed to stderr), and the workload
+answers HTTP through the agent.
+
+What it does NOT prove: the SEV-SNP launch measurement, the firmware
+(SeaBIOS is used instead of the bundle's OVMF), the CPU model, TLS and
+attestation, or the production tap network. Nothing is uploaded or signed.
+
+Needs qemu-system-x86_64 on PATH and, for a usable boot time, /dev/kvm. The
+runtime must be built from aleph-vm dev-2.1 or newer (older runtimes ignore
+the token and never expose a port).
+
+Examples:
+  aleph vprogram run --compose docker-compose.yml
+  aleph vprogram run --workload workload.ext4 --volume data.ext4 --port 9000
+  aleph vprogram run --compose docker-compose.yml --check --json
+  aleph vprogram run --compose docker-compose.yml \\
+      --runtime-manifest out/manifest.json --bundle out/snp-image.tar.gz")]
+    Run(Box<VProgramRunArgs>),
     /// Show a published V-PROGRAM message plus its CRN's live status.
     ///
     /// Fetches the message (pinned measurements, runtime/workload refs) and,
@@ -3239,13 +3270,11 @@ pub struct VProgramDeleteArgs {
     pub signing: SigningArgs,
 }
 
+/// Flags that shape the workload and runtime, shared by `vprogram create`
+/// (which publishes the result) and `vprogram run` (which boots it locally).
 #[cfg(feature = "vprogram")]
 #[derive(Debug, Args)]
-pub struct VProgramCreateArgs {
-    /// V-Program name (stored as metadata.name, shown by `aleph vprogram list`).
-    #[arg(value_name = "NAME")]
-    pub name: String,
-
+pub struct VProgramBuildArgs {
     /// Path to the prebuilt workload ext4 image. Exactly one of --workload
     /// and --compose is required.
     #[arg(long, required_unless_present = "compose", conflicts_with = "compose")]
@@ -3285,12 +3314,23 @@ pub struct VProgramCreateArgs {
     pub volumes: Vec<PathBuf>,
 
     /// Number of virtual CPUs.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     pub vcpus: u32,
 
     /// Memory in MiB.
-    #[arg(long, default_value_t = 2048)]
+    #[arg(long, default_value_t = 2048, value_parser = clap::value_parser!(u32).range(1..))]
     pub memory: u32,
+}
+
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Args)]
+pub struct VProgramCreateArgs {
+    /// V-Program name (stored as metadata.name, shown by `aleph vprogram list`).
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    #[command(flatten)]
+    pub build: VProgramBuildArgs,
 
     /// Disable guest internet access (enabled by default).
     #[arg(long)]
@@ -3331,6 +3371,53 @@ pub struct VProgramCreateArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Args)]
+pub struct VProgramRunArgs {
+    #[command(flatten)]
+    pub build: VProgramBuildArgs,
+
+    /// Runtime manifest JSON file of an UNPUBLISHED runtime (as written by
+    /// aleph-vm's scripts/vprogram_bundle.py manifest). Requires --bundle;
+    /// replaces --runtime. bundle.ref is ignored.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "bundle",
+        conflicts_with = "runtime"
+    )]
+    pub runtime_manifest: Option<PathBuf>,
+
+    /// Runtime bundle tarball (snp-image.tar.gz) matching --runtime-manifest.
+    /// Verified against the manifest's sha256 and size, then cached like a
+    /// downloaded bundle.
+    #[arg(long, value_name = "FILE", requires = "runtime_manifest")]
+    pub bundle: Option<PathBuf>,
+
+    /// Host port on 127.0.0.1 forwarded to the guest's agent port.
+    #[arg(long, default_value_t = 8080)]
+    pub port: u16,
+
+    /// Cut the guest's outbound internet (the port forward keeps working).
+    #[arg(long)]
+    pub no_internet: bool,
+
+    /// Seconds to wait, from QEMU start, for the guest's agent to answer.
+    #[arg(
+        long,
+        default_value_t = 180,
+        value_name = "SECS",
+        value_parser = clap::value_parser!(u64).range(1..=86400)
+    )]
+    pub timeout: u64,
+
+    /// Non-interactive: exit 0 as soon as the agent answers, then power the
+    /// VM off. Without it the VM keeps running until Ctrl-C; a workload that
+    /// exits on its own is reported as a failure, as it would be in production.
+    #[arg(long)]
+    pub check: bool,
 }
 
 #[cfg(feature = "vprogram")]
@@ -4517,11 +4604,11 @@ mod vprogram_create_args_tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(args.vcpus, 1);
-        assert_eq!(args.memory, 2048);
+        assert_eq!(args.build.vcpus, 1);
+        assert_eq!(args.build.memory, 2048);
         assert!(!args.no_internet);
         assert_eq!(args.policy, 0x30000);
-        assert!(args.volumes.is_empty());
+        assert!(args.build.volumes.is_empty());
     }
 
     #[test]
@@ -4553,7 +4640,7 @@ mod vprogram_create_args_tests {
             panic!("wrong variant");
         };
         assert_eq!(args.policy, 0x30001);
-        assert_eq!(args.volumes.len(), 2);
+        assert_eq!(args.build.volumes.len(), 2);
         assert!(args.no_internet);
         assert_eq!(args.crn.unwrap(), "ab".repeat(32));
     }
@@ -4841,8 +4928,8 @@ mod vprogram_create_args_tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(args.compose, Some(PathBuf::from("f.yml")));
-        assert_eq!(args.image_archives.len(), 2);
+        assert_eq!(args.build.compose, Some(PathBuf::from("f.yml")));
+        assert_eq!(args.build.image_archives.len(), 2);
     }
 }
 

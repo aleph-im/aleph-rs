@@ -371,8 +371,9 @@ impl ConfigStore {
     }
 
     /// Returns the per-user directory where extracted V-Program runtime
-    /// bundle artifacts (`ovmf`, `kernel`, `initrd`) are cached, keyed by the
-    /// bundle's declared sha256. See
+    /// bundle artifacts (`ovmf`, `kernel`, `initrd`, `platform_rootfs`,
+    /// `platform_hash_tree`) are cached, keyed by the bundle's declared
+    /// sha256. See
     /// `aleph_sdk::vprogram::bundle::fetch_bundle_artifacts`.
     #[cfg(feature = "vprogram")]
     pub fn vprogram_bundle_cache_dir() -> Result<std::path::PathBuf, ConfigError> {

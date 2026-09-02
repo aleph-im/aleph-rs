@@ -15,6 +15,8 @@ mod container;
 #[cfg(feature = "vprogram")]
 mod mkfs;
 mod program;
+#[cfg(feature = "vprogram")]
+mod qemu;
 mod sevctl;
 #[cfg(feature = "vprogram")]
 mod veritysetup;
