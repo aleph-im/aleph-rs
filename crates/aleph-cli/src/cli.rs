@@ -1748,6 +1748,17 @@ pick a CRN from a list, pass `-i` / `--interactive`.
 Volumes can be added with `--persistent-volume`, `--ephemeral-volume`, or \
 `--immutable-volume` (each can be repeated).
 
+For a confidential instance, pass --confidential (sev-snp by default; --tee \
+sev selects the deprecated legacy backend) with --image, or use \
+--encrypt-rootfs <PATH> to LUKS-encrypt a local plain image and upload it \
+instead of --image. The --encrypt-rootfs image must be plain ext4 with an \
+executable /sbin/init: the guest's measured init chroots into it and execs \
+that init, which must stay in the foreground (one that daemonizes exits the \
+chroot, and the guest agent powers the VM off). Bake any SSH keys into the \
+image yourself, since the encrypted rootfs is opaque to the CRN. The CRN \
+never sees the LUKS passphrase: it is injected after attestation, over the \
+guest's attested TLS channel, with `aleph instance unlock`.
+
 Examples:
   aleph instance create web --image ubuntu26 --size 1vcpu-2gb \\
                             --ssh-pubkey-file ~/.ssh/id_ed25519.pub
@@ -1758,6 +1769,9 @@ Examples:
   aleph instance create db --image ubuntu26 --size 4vcpu-8gb \\
       --persistent-volume name=data,mount=/data,size=100GB \\
       --ssh-pubkey-file ~/.ssh/id_ed25519.pub
+
+  aleph instance create web3-node --encrypt-rootfs ./plain.ext4 \\
+      --confidential --crn <snp-crn>
 
   aleph instance create -i web   # interactive prompts for everything else")]
     Create(InstanceCreateArgs),
@@ -1890,6 +1904,70 @@ Examples:
     /// Confidential VM workflow (init session, validate measurement, inject secret).
     #[command(subcommand)]
     Confidential(ConfidentialCommand),
+    /// Attest an SNP instance: verify its RA-TLS certificate chain and launch measurement.
+    #[cfg(feature = "vprogram")]
+    #[command(long_about = "\
+Verify that an SNP instance is genuine, without sending it anything.
+
+Resolves the guest's attested (RA-TLS) endpoint (from --url, or via the
+scheduler + CRN discovery used by `instance show`), connects, and checks
+the AMD-signed attestation report carried in its TLS server certificate.
+\"Genuine\" means ALL of the following hold; any failure aborts before the
+result is printed:
+  - certificate chain: AMD ARK -> ASK -> VCEK (fetched for the reporting
+    chip), validity and revocation, and the report's ECDSA signature
+  - TLS key binding: the signed report_data commits to the certificate's
+    public key, so the report cannot be replayed under another key; this
+    is what ties \"genuine\" to the live connection, not just to some past
+    boot
+  - fresh nonce: a second report bound to a nonce generated for this call
+    proves the guest is live now, not a replay of an old key
+  - launch measurement: matches the instance message's pinned
+    measurement(s), or --expected-measurement
+  - guest policy: matches the message's pinned SNP guest policy (no
+    silent downgrade to e.g. a debug-enabled launch; a debug-enabled
+    policy prints a warning)
+  - TCB floor: the launch TCB meets the network floor for the chip
+    (raise with --min-tcb, lower only with --accept-outdated-tcb)
+  - platform posture, only if --require-platform is given
+
+This command is read-only: it makes no application-level request to the
+guest and injects nothing. Use `aleph instance unlock` to attest and then
+inject the LUKS passphrase, or `aleph vprogram call` to attest and then
+make an HTTP request.
+
+Output: on success, prints \"Instance is genuine\" plus the measurement,
+policy, launch/reported TCB, chip, and platform posture; --json prints the
+same as one document instead.
+
+Examples:
+  aleph instance attest a41fb91c3e68
+  aleph instance attest a41fb91c3e68 --json
+  aleph instance attest a41fb91c3e68 --crn 9f3e...
+  aleph instance attest a41fb91c3e68 --min-tcb snp=30")]
+    Attest(InstanceAttestArgs),
+    /// Attest an SNP instance, then unlock its encrypted rootfs (inject the LUKS passphrase).
+    #[cfg(feature = "vprogram")]
+    #[command(long_about = "\
+Attest an SNP instance, then inject its LUKS passphrase (and any extra
+secrets) over the same attested RA-TLS channel.
+
+Only the key that signed the INSTANCE message may unlock it (for an
+--on-behalf-of deployment that is the delegate that created it, not the
+owner): the request is signed with the resolved account and rejected by
+the guest agent otherwise.
+
+The passphrase is always sourced via --passphrase-file, else
+$ALEPH_LUKS_PASSPHRASE, else an interactive prompt; passing
+`--secret luks_passphrase=...` is rejected; use --passphrase-file or the
+environment variable instead. --secret may still be repeated for any other
+KEY=VALUE the guest's cloud-init or provisioning expects.
+
+Injection is gated on that signing key and overwriting: re-running unlock is the normal
+recovery after the CRN rebooted the VM (its attested TLS key rotates on
+every boot, so a stale signed request is rejected) or after a mistyped
+passphrase.")]
+    Unlock(InstanceUnlockArgs),
 }
 
 #[derive(Args)]
@@ -1958,9 +2036,23 @@ pub struct InstancePriceArgs {
     #[arg(long, conflicts_with = "gpu")]
     pub list_gpus: bool,
 
-    /// Use confidential VM pricing (AMD SEV).
+    /// Use confidential VM pricing (SEV-SNP and legacy SEV share the tier).
     #[arg(long)]
     pub confidential: bool,
+}
+
+/// TEE flavor for `--confidential` instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TeeFlavor {
+    /// AMD SEV-SNP: measured launch, remote attestation, an SNP-aware
+    /// instance runtime (`--runtime`).
+    #[value(name = "sev-snp")]
+    SevSnp,
+    /// Deprecated legacy AMD SEV (no SNP): no measured launch, no remote
+    /// attestation. Kept for existing deployments; new confidential
+    /// instances use sev-snp.
+    #[value(name = "sev")]
+    Sev,
 }
 
 #[derive(Args)]
@@ -1974,9 +2066,54 @@ pub struct InstanceCreateArgs {
     #[arg(
         long,
         value_parser = parse_image_ref,
-        required_unless_present = "interactive"
+        required_unless_present_any = ["interactive", "encrypt_rootfs"]
     )]
     pub image: Option<ImageRef>,
+
+    /// TEE flavor for --confidential: sev-snp (default) or sev (deprecated
+    /// legacy AMD SEV, kept for existing deployments; new confidential
+    /// instances use sev-snp).
+    #[arg(long, value_enum, default_value = "sev-snp")]
+    pub tee: TeeFlavor,
+
+    /// Instance runtime manifest for SNP: preset name or item hash. Defaults
+    /// to `defaults.instance_runtime` from the vm-images aggregate.
+    #[arg(long, value_parser = parse_image_ref)]
+    pub runtime: Option<ImageRef>,
+
+    /// SEV-SNP 64-bit guest policy override (accepts 0x-prefixed hex or a
+    /// decimal integer). Only used with --tee sev-snp; defaults to 0x30000
+    /// (no-debug, SMT allowed, reserved bit 17 set).
+    #[arg(long, value_parser = parse_u64_maybe_hex)]
+    pub policy: Option<u64>,
+
+    /// Allow the DEBUG bit (19) in the guest policy. The host can then
+    /// decrypt guest memory via the firmware debug API, so the deployment
+    /// is NOT confidential. This flag is required to create an SNP
+    /// instance with a debug-enabled policy.
+    #[arg(long)]
+    pub allow_debug: bool,
+
+    /// Encrypt the rootfs from a local plain ext4 image instead of --image.
+    /// The image must contain an executable `/sbin/init` (run chrooted, in
+    /// the foreground) and any SSH keys baked in, since the encrypted rootfs
+    /// is opaque to the CRN. The encryption steps (losetup, cryptsetup)
+    /// need root; when not run as root they escalate individually via sudo,
+    /// keeping the keystore, signing, and upload under your own user.
+    #[arg(long, conflicts_with = "image")]
+    pub encrypt_rootfs: Option<PathBuf>,
+
+    /// Size of the encrypted rootfs, in MiB (e.g. 20480). Only used with
+    /// --encrypt-rootfs.
+    #[arg(long)]
+    pub rootfs_size_mib: Option<u64>,
+
+    /// Read the LUKS passphrase for --encrypt-rootfs from this file (trims
+    /// one trailing newline). Without it, falls back to the
+    /// ALEPH_LUKS_PASSPHRASE environment variable, then a hidden interactive
+    /// prompt on a terminal, erroring if none of the three is available.
+    #[arg(long)]
+    pub passphrase_file: Option<PathBuf>,
 
     /// Disk size (e.g. 20GB, 1024MB, 1TiB). Required unless --size is used.
     #[arg(long, value_parser = parse_size_to_mib)]
@@ -2024,7 +2161,8 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub immutable_volume: Option<Vec<String>>,
 
-    /// Launch a confidential VM (AMD SEV).
+    /// Launch a confidential VM (AMD SEV-SNP by default; --tee sev selects
+    /// the deprecated legacy SEV flow).
     #[arg(long)]
     pub confidential: bool,
 
@@ -2073,6 +2211,51 @@ pub struct InstanceCreateArgs {
 
     #[command(flatten)]
     pub signing: SigningArgs,
+}
+
+#[cfg(feature = "vprogram")]
+#[derive(Args)]
+pub struct InstanceAttestArgs {
+    /// Instance item hash or unique fragment.
+    #[arg(value_name = "VM_ID")]
+    pub vm_id: String,
+    /// CRN override: node hash, fragment, or raw URL (see `instance ssh --crn`).
+    #[arg(long)]
+    pub crn: Option<String>,
+    /// Attested endpoint URL override (skips scheduler discovery).
+    #[arg(long)]
+    pub url: Option<Url>,
+    /// Expected launch measurement override (96 hex chars).
+    #[arg(long)]
+    pub expected_measurement: Option<String>,
+    /// AMD product line of the CRN's silicon.
+    #[arg(long, value_parser = parse_amd_product, default_value = "Genoa")]
+    pub amd_product: aleph_sdk::attest::AmdProduct,
+    /// TCB floor override (see `vprogram call --min-tcb`).
+    #[arg(long)]
+    pub min_tcb: Option<aleph_sdk::attest::TcbFloorOverride>,
+    /// Accept a TCB below the network floor.
+    #[arg(long)]
+    pub accept_outdated_tcb: bool,
+    /// Required platform posture (repeatable; see `vprogram call --require-platform`).
+    #[arg(long, value_delimiter = ',')]
+    pub require_platform: Vec<PlatformRequirement>,
+}
+
+#[cfg(feature = "vprogram")]
+#[derive(Args)]
+pub struct InstanceUnlockArgs {
+    #[command(flatten)]
+    pub attest: InstanceAttestArgs,
+    /// Read the LUKS passphrase from this file (else $ALEPH_LUKS_PASSPHRASE, else prompt).
+    #[arg(long)]
+    pub passphrase_file: Option<PathBuf>,
+    /// Additional secret KEY=VALUE to inject (repeatable). `luks_passphrase` is
+    /// always rejected here: use --passphrase-file or $ALEPH_LUKS_PASSPHRASE instead.
+    #[arg(long = "secret")]
+    pub secrets: Vec<String>,
+    #[command(flatten)]
+    pub identity: IdentityArgs,
 }
 
 #[derive(Subcommand)]
@@ -3457,14 +3640,27 @@ fn parse_amd_product(s: &str) -> Result<aleph_sdk::attest::AmdProduct, String> {
 
 /// Clap value parser for `--policy`: accepts a decimal integer or a
 /// `0x`-prefixed hex string (matching how SEV-SNP guest policies are usually
-/// quoted, e.g. `0x30000`).
-#[cfg(feature = "vprogram")]
+/// quoted, e.g. `0x30000`). Not gated behind `vprogram`: `instance create
+/// --policy` uses it unconditionally (the `vprogram create --policy` flag
+/// also uses it, in gated code).
 pub fn parse_u64_maybe_hex(s: &str) -> Result<u64, String> {
     let parsed = match s.strip_prefix("0x") {
         Some(hex) => u64::from_str_radix(hex, 16),
         None => s.parse(),
     };
     parsed.map_err(|e| format!("invalid policy value {s:?}: {e}"))
+}
+
+#[cfg(test)]
+mod parse_u64_maybe_hex_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_hex_and_decimal_and_rejects_garbage() {
+        assert_eq!(parse_u64_maybe_hex("0x30000").unwrap(), 0x30000);
+        assert_eq!(parse_u64_maybe_hex("196608").unwrap(), 0x30000);
+        assert!(parse_u64_maybe_hex("not-a-number").is_err());
+    }
 }
 
 #[cfg(test)]
@@ -4111,17 +4307,66 @@ mod instance_create_args_tests {
     use super::*;
 
     fn parse_create(extra: &[&str]) -> InstanceCreateArgs {
+        try_parse_create(extra).expect("clap parse")
+    }
+
+    fn try_parse_create(extra: &[&str]) -> Result<InstanceCreateArgs, clap::Error> {
         let mut argv = vec![
             "aleph", "instance", "create", "my-vm", "--image", "debian12",
         ];
         argv.extend_from_slice(extra);
-        let cli = Cli::try_parse_from(argv).expect("clap parse");
+        let cli = Cli::try_parse_from(argv)?;
         match cli.command {
             Commands::Instance {
                 command: InstanceCommand::Create(args),
-            } => args,
+            } => Ok(args),
             _ => panic!("expected instance create"),
         }
+    }
+
+    #[test]
+    fn instance_create_tee_defaults_to_sev_snp() {
+        let args = parse_create(&["--disk-size", "20GB", "--confidential"]);
+        assert_eq!(args.tee, TeeFlavor::SevSnp);
+    }
+
+    #[test]
+    fn instance_create_tee_sev_is_accepted() {
+        let args = parse_create(&["--disk-size", "20GB", "--confidential", "--tee", "sev"]);
+        assert_eq!(args.tee, TeeFlavor::Sev);
+    }
+
+    #[test]
+    fn policy_defaults_to_none_and_accepts_hex_or_decimal() {
+        let args = parse_create(&["--disk-size", "20GB", "--confidential"]);
+        assert_eq!(args.policy, None);
+
+        let args = parse_create(&[
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--policy",
+            "0x30000",
+        ]);
+        assert_eq!(args.policy, Some(0x30000));
+
+        let args = parse_create(&[
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--policy",
+            "196608",
+        ]);
+        assert_eq!(args.policy, Some(196608));
+    }
+
+    #[test]
+    fn encrypt_rootfs_conflicts_with_image() {
+        // parse_create already bakes in `--image debian12`, so adding
+        // --encrypt-rootfs on top must be rejected as a conflict.
+        assert!(
+            try_parse_create(&["--encrypt-rootfs", "/tmp/x.ext4", "--disk-size", "20GB",]).is_err()
+        );
     }
 
     #[test]
@@ -4223,6 +4468,84 @@ mod instance_delete_args_tests {
             }
             _ => panic!("expected instance delete"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "vprogram"))]
+mod instance_attest_unlock_args_tests {
+    use super::*;
+
+    fn parse_unlock(extra: &[&str]) -> InstanceUnlockArgs {
+        let mut argv = vec!["aleph", "instance", "unlock"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv).expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command: InstanceCommand::Unlock(args),
+            } => args,
+            _ => panic!("expected instance unlock"),
+        }
+    }
+
+    fn parse_attest(extra: &[&str]) -> InstanceAttestArgs {
+        let mut argv = vec!["aleph", "instance", "attest"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv).expect("clap parse");
+        match cli.command {
+            Commands::Instance {
+                command: InstanceCommand::Attest(args),
+            } => args,
+            _ => panic!("expected instance attest"),
+        }
+    }
+
+    #[test]
+    fn instance_attest_require_platform_accepts_comma_separated_values() {
+        let args = parse_attest(&["deadbeef", "--require-platform", "smt-off,tsme,alias-check"]);
+        assert_eq!(
+            args.require_platform,
+            vec![
+                PlatformRequirement::SmtOff,
+                PlatformRequirement::Tsme,
+                PlatformRequirement::AliasCheck,
+            ]
+        );
+
+        // Repeating the flag still works alongside the comma form.
+        let args = parse_attest(&[
+            "deadbeef",
+            "--require-platform",
+            "smt-off",
+            "--require-platform",
+            "tsme",
+        ]);
+        assert_eq!(
+            args.require_platform,
+            vec![PlatformRequirement::SmtOff, PlatformRequirement::Tsme]
+        );
+    }
+
+    #[test]
+    fn instance_unlock_parses_secrets_and_flags() {
+        let args = parse_unlock(&[
+            "deadbeef",
+            "--passphrase-file",
+            "/tmp/p",
+            "--secret",
+            "a=1",
+            "--secret",
+            "b=2",
+        ]);
+        assert_eq!(args.attest.vm_id, "deadbeef");
+        assert_eq!(
+            args.passphrase_file.as_deref(),
+            Some(std::path::Path::new("/tmp/p"))
+        );
+        assert_eq!(args.secrets, vec!["a=1".to_string(), "b=2".to_string()]);
+        assert_eq!(
+            args.attest.amd_product,
+            aleph_sdk::attest::AmdProduct::Genoa
+        );
     }
 }
 

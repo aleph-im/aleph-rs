@@ -3,23 +3,20 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::attest_common::{self, MeasurementExpectation};
 use super::instance::{InstanceRow, format_item_hash_short, format_node_short};
 use super::instance_target::{VmKind, pick_unique_match};
 use aleph_sdk::aggregate_models::vm_images::{
     VPROGRAM_CONTRACT_COMPOSE, VPROGRAM_MODEL_COMPOSE, VPROGRAM_MODEL_EXEC, VmImagesData,
 };
-use aleph_sdk::attest::{
-    MeasurementPin, PlatformPolicy, PlatformPosture, PolicyPin, attested_request,
-};
+use aleph_sdk::attest::{MeasurementPin, PlatformPosture, PolicyPin, attested_request};
 use aleph_sdk::caching_aggregate_client::CachingAggregateClient;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
-    hash_file,
 };
-use aleph_sdk::crn::{ActiveVmNetworking, fetch_active_vms};
-use aleph_sdk::messages::{ForgetBuilder, StoreBuilder, VProgramBuilder};
+use aleph_sdk::crn::ActiveVmNetworking;
+use aleph_sdk::messages::{ForgetBuilder, VProgramBuilder};
 use aleph_sdk::scheduler::SchedulerClient;
-use aleph_sdk::verify::Hasher;
 use aleph_sdk::vprogram::bundle::fetch_bundle_artifacts;
 use aleph_sdk::vprogram::cmdline::instantiate_cmdline;
 use aleph_sdk::vprogram::manifest::{RuntimeManifest, WorkloadSpec};
@@ -29,12 +26,11 @@ use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
-use aleph_types::message::execution::base::Payment;
-use aleph_types::message::execution::environment::{
-    LaunchMeasurement, SevSnpRegisters, validate_snp_policy,
-};
+#[cfg(test)]
+use aleph_types::message::execution::environment::SevSnpRegisters;
+use aleph_types::message::execution::environment::validate_snp_policy;
 use aleph_types::message::{
-    MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType, StorageEngine, TeeVerification,
+    MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType, TeeVerification,
     VerifiableProgramContent, VerifiedVolume, VerifiedWorkload,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -42,13 +38,14 @@ use memsizes::MiB;
 use url::Url;
 
 use crate::account::CliAccount;
+#[cfg(test)]
+use crate::cli::PlatformRequirement;
 use crate::cli::{
-    ImageRef, PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs,
-    VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
+    ImageRef, VProgramCallArgs, VProgramCommand, VProgramCreateArgs, VProgramDeleteArgs,
+    VProgramListArgs, VProgramShowArgs,
 };
 use crate::common::{
-    confirm_action, render_upload_progress, resolve_account, resolve_address,
-    resolve_address_or_active, submit_or_preview,
+    confirm_action, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview,
 };
 use crate::compose;
 use crate::config::store::ConfigStore;
@@ -60,9 +57,6 @@ use crate::veritysetup::Veritysetup;
 /// (`aleph.ra-tls`). A future task may resolve this dynamically from the
 /// manifest instead of hardcoding it here.
 const ATTEST_PORT: u16 = 8443;
-
-/// A SEV-SNP launch measurement is a SHA-384 digest: 48 bytes, 96 hex chars.
-const SEV_SNP_MEASUREMENT_BYTES: usize = 48;
 
 pub async fn dispatch(
     aleph_client: &AlephClient,
@@ -158,7 +152,7 @@ async fn handle_create(
     let veritysetup = Veritysetup::find()?;
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
-    check_debug_policy(args.policy, args.allow_debug)?;
+    attest_common::check_debug_policy(args.policy, args.allow_debug)?;
     if args.volumes.len() > MAX_VERIFIED_VOLUMES {
         bail!("at most {MAX_VERIFIED_VOLUMES} --volume flags are supported");
     }
@@ -485,8 +479,8 @@ async fn handle_create(
                 if !json {
                     eprintln!("V-Program reachable; waiting for the attestation port mapping...");
                 }
-                let attested_endpoint = poll_attested_endpoint(
-                    || fetch_attested_endpoint(&scheduler, &vm_id),
+                let attested_endpoint = attest_common::poll_attested_endpoint(
+                    || attest_common::fetch_attested_endpoint(&scheduler, &vm_id, ATTEST_PORT),
                     tokio::time::sleep,
                     wait_timeout.saturating_sub(wait_started.elapsed()),
                     crate::commands::instance_wait::WAIT_POLL_INTERVAL,
@@ -705,46 +699,6 @@ pub(crate) fn check_archives_do_not_cover_digest_images(
     Ok(())
 }
 
-/// One sample of the VM's attested endpoint via the scheduler + CRN.
-async fn fetch_attested_endpoint(scheduler: &SchedulerClient, vm_id: &ItemHash) -> Option<Url> {
-    let net = fetch_live_networking(scheduler, vm_id).await?;
-    resolve_attested_endpoint(&net, ATTEST_PORT)
-}
-
-/// Poll `fetch` until it yields an attested endpoint, or until `timeout`
-/// elapses (always sampling at least once).
-///
-/// The CRN maps the attestation port to a host port only after the guest
-/// finishes booting, which for a SEV-SNP V-Program (runtime bundle download
-/// and measured boot) comes well after the scheduler/networking readiness
-/// that `--wait` observes first; a single sample taken right at readiness
-/// would nearly always miss the mapping. Generic over `fetch` and `sleep`,
-/// mirroring `instance_wait::poll_until_ready`, so tests drive it without a
-/// network or a clock.
-async fn poll_attested_endpoint<F, Fut, S, SFut>(
-    mut fetch: F,
-    mut sleep: S,
-    timeout: std::time::Duration,
-    poll_interval: std::time::Duration,
-) -> Option<Url>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Option<Url>>,
-    S: FnMut(std::time::Duration) -> SFut,
-    SFut: std::future::Future<Output = ()>,
-{
-    let start = std::time::Instant::now();
-    loop {
-        if let Some(endpoint) = fetch().await {
-            return Some(endpoint);
-        }
-        if start.elapsed() >= timeout {
-            return None;
-        }
-        sleep(poll_interval).await;
-    }
-}
-
 /// Report a successful `--wait` to the user: the V-Program is reachable and
 /// (usually) its attestation port is mapped. Human output goes to stderr,
 /// mirroring `instance create --wait`'s `report_ready`; `--json` merges the
@@ -838,64 +792,18 @@ async fn upload_pair(
     v: &VerityArtifact,
 ) -> Result<UploadedPair> {
     Ok(UploadedPair {
-        data_message: upload_file(client, account, owner, &v.data, json, dry_run).await?,
-        tree_message: upload_file(client, account, owner, &v.hash_tree, json, dry_run).await?,
+        data_message: super::upload::upload_file(client, account, owner, &v.data, json, dry_run)
+            .await?,
+        tree_message: super::upload::upload_file(
+            client,
+            account,
+            owner,
+            &v.hash_tree,
+            json,
+            dry_run,
+        )
+        .await?,
     })
-}
-
-/// Upload one file as a STORE message on the native storage engine (default
-/// payment) and return the STORE message item hash - which is what
-/// `VerifiedWorkload`/`VerifiedVolume`'s `ref` and `hash_tree` fields carry.
-///
-/// Under `dry_run`, the network upload is skipped entirely: the file's own
-/// content hash is returned as a stand-in for the STORE message hash, since
-/// no STORE message is ever built or sent in that mode.
-async fn upload_file(
-    client: &AlephClient,
-    account: &CliAccount,
-    owner: Option<&Address>,
-    path: &Path,
-    json: bool,
-    dry_run: bool,
-) -> Result<ItemHash> {
-    if !json {
-        eprintln!("Hashing {}...", path.display());
-    }
-    let file_hash = hash_file(path, Hasher::for_storage()).await?;
-    if !json {
-        eprintln!("  File hash: {file_hash}");
-    }
-
-    if dry_run {
-        return Ok(file_hash);
-    }
-
-    // V-Programs are credit-only; without an explicit payment type the store
-    // defaults to hold on the CCN, which rejects token-less wallets with 402.
-    let mut builder =
-        StoreBuilder::new(account, file_hash, StorageEngine::Storage).payment(Payment::credits());
-    if let Some(owner) = owner {
-        builder = builder.on_behalf_of(owner.clone());
-    }
-    let pending = builder.build()?;
-
-    if !json {
-        eprintln!("Uploading {}...", path.display());
-    }
-    let on_tick: fn(u64, u64) = if json {
-        |_, _| {}
-    } else {
-        render_upload_progress
-    };
-    let upload = client
-        .upload_file_to_storage_with_progress(path, Some(&pending), true, on_tick)
-        .await;
-    if !json {
-        eprintln!();
-    }
-    upload?;
-
-    Ok(pending.item_hash)
 }
 
 // ---------------------------------------------------------------------
@@ -1277,58 +1185,6 @@ async fn resolve_vprogram_id(scheduler: &SchedulerClient, input: &str) -> Result
     pick_unique_match(input, matches, VmKind::VProgram).map(|(hash, _)| hash)
 }
 
-/// Best-effort live-CRN lookup: resolves the scheduler placement for
-/// `item_hash`, then the CRN's active-VM networking for it. Returns `None`
-/// (never an error) whenever the VM isn't placed yet or any hop along the
-/// way is unreachable - `render_show` treats that as "not running" and
-/// shows only the message-side fields, mirroring how `instance show`
-/// degrades when the scheduler/CRN is unreachable.
-async fn fetch_live_networking(
-    scheduler: &SchedulerClient,
-    item_hash: &ItemHash,
-) -> Option<ActiveVmNetworking> {
-    let entry = match scheduler.get_vm(item_hash).await {
-        Ok(Some(entry)) => entry,
-        Ok(None) => return None,
-        Err(e) => {
-            eprintln!("warning: scheduler unreachable, live status unavailable: {e}");
-            return None;
-        }
-    };
-    let node_hash = entry.allocated_node?;
-    let node = match scheduler.get_node(&node_hash).await {
-        Ok(Some(node)) => node,
-        Ok(None) => {
-            eprintln!(
-                "warning: scheduler has no record of node {node_hash}; live status unavailable"
-            );
-            return None;
-        }
-        Err(e) => {
-            eprintln!("warning: scheduler unreachable for node {node_hash}: {e}");
-            return None;
-        }
-    };
-    let Some(addr) = node.address.as_deref() else {
-        eprintln!(
-            "warning: scheduler reports no address for node {node_hash}; live status unavailable"
-        );
-        return None;
-    };
-    let crn_url = match crate::common::parse_crn_address(addr, &node_hash.to_string()) {
-        Some(url) => url,
-        None => return None,
-    };
-    let http = reqwest::Client::new();
-    match fetch_active_vms(&http, &crn_url).await {
-        Ok(list) => list.0.get(item_hash).and_then(|vm| vm.networking.clone()),
-        Err(e) => {
-            eprintln!("warning: CRN {crn_url} unreachable, live status unavailable: {e}");
-            None
-        }
-    }
-}
-
 async fn handle_show(
     aleph_client: &AlephClient,
     scheduler_url: Url,
@@ -1350,7 +1206,7 @@ async fn handle_show(
         .cloned()
         .collect();
     let (net, sizes) = tokio::join!(
-        fetch_live_networking(&scheduler, &item_hash),
+        attest_common::fetch_live_networking(&scheduler, &item_hash),
         fetch_artifact_sizes(aleph_client, &artifact_refs),
     );
     let attested_endpoint = net
@@ -1518,192 +1374,6 @@ fn format_list_text(rows: &[InstanceRow]) -> String {
 // `aleph vprogram call <hash> <path>`
 // ---------------------------------------------------------------------
 
-/// The expected launch measurement(s) an attested call must match, resolved
-/// by [`resolve_expected_measurement`].
-///
-/// - `Pin`: a single digest, known before the TLS handshake. Passed straight
-///   into `attested_request`'s `expected_measurement`, so a mismatch fails
-///   the handshake itself.
-/// - `MemberOf`: more than one digest is pinned on the message (a
-///   mixed-CPU-model fleet where different nodes measure differently).
-///   Nothing can be pinned at handshake time since it isn't known in advance
-///   which one the guest will present, so the handshake pins nothing and the
-///   caller must check the verified measurement against this set
-///   *after* `attested_request` returns - before trusting the response body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MeasurementExpectation {
-    Pin(SevSnpRegisters),
-    MemberOf(Vec<SevSnpRegisters>),
-}
-
-/// Resolve which measurement(s) an attested call must match, per the
-/// security invariant: the call is only trusted if the verified report's
-/// measurement is among the ones pinned on-chain (or the explicit
-/// `--expected-measurement` override).
-///
-/// Pure and I/O-free so it's directly unit-testable. Pass
-/// `content.verification.measurements` as-is: an entry for a platform this
-/// client cannot verify fails the resolution rather than being skipped.
-pub(crate) fn resolve_expected_measurement(
-    measurements: &[LaunchMeasurement],
-    override_hex: Option<&str>,
-) -> Result<MeasurementExpectation> {
-    if let Some(hex_str) = override_hex {
-        let bytes = hex::decode(hex_str)
-            .with_context(|| format!("--expected-measurement is not valid hex: {hex_str:?}"))?;
-        // A SEV-SNP launch measurement is a 48-byte SHA-384 digest; anything
-        // else can never match a real report, so fail here with a clear
-        // message instead of a cryptic measurement mismatch at call time.
-        if bytes.len() != SEV_SNP_MEASUREMENT_BYTES {
-            bail!(
-                "--expected-measurement must be {} hex characters (a {}-byte SEV-SNP launch \
-                 measurement), got {}",
-                SEV_SNP_MEASUREMENT_BYTES * 2,
-                SEV_SNP_MEASUREMENT_BYTES,
-                hex_str.len()
-            );
-        }
-        // Re-encode so the pin compares structurally against the lowercase
-        // hex the SDK derives from the signed report.
-        return Ok(MeasurementExpectation::Pin(SevSnpRegisters {
-            launch: hex::encode(bytes),
-        }));
-    }
-
-    // The message's registers are the pin, same type both sides. An entry
-    // this client cannot check (another platform's register set) fails
-    // closed rather than being skipped, since skipping would narrow the
-    // accepted set silently. Unreachable through a valid message today: the
-    // schema restricts the V-PROGRAM backend to sev_snp.
-    let snp_registers: Vec<SevSnpRegisters> = measurements
-        .iter()
-        .map(|m| {
-            m.registers.as_sev_snp().cloned().ok_or_else(|| {
-                anyhow!(
-                    "the message pins a {} measurement, which this client cannot verify",
-                    m.platform.as_str()
-                )
-            })
-        })
-        .collect::<Result<_>>()?;
-
-    match snp_registers.len() {
-        0 => bail!(
-            "V-Program message pins no launch measurements; cannot verify attestation without \
-             --expected-measurement"
-        ),
-        1 => Ok(MeasurementExpectation::Pin(
-            snp_registers.into_iter().next().expect("len checked"),
-        )),
-        _ => Ok(MeasurementExpectation::MemberOf(snp_registers)),
-    }
-}
-
-/// True if `policy` has the SEV-SNP DEBUG bit (19) set: the host may then
-/// decrypt guest memory via the firmware debug API, so the deployment is
-/// not confidential in any meaningful sense.
-pub(crate) fn policy_debug_allowed(policy: u64) -> bool {
-    const SNP_POLICY_DEBUG_BIT: u64 = 1 << 19;
-    policy & SNP_POLICY_DEBUG_BIT != 0
-}
-
-/// Reject a DEBUG-enabled policy unless the caller explicitly acknowledged
-/// it with `--allow-debug`. When the DEBUG bit is set and acknowledged, emit
-/// a loud warning so the operator knows the deployment is not confidential.
-///
-/// Extracted from `handle_create` so the guard logic is unit-testable without
-/// a network client.
-pub(crate) fn check_debug_policy(policy: u64, allow_debug: bool) -> Result<()> {
-    if !policy_debug_allowed(policy) {
-        return Ok(());
-    }
-    if !allow_debug {
-        bail!(
-            "--policy {:#x} has the SEV-SNP DEBUG bit (19) set: the host will be able to \
-             decrypt guest memory, so this deployment will NOT be confidential. \
-             Pass --allow-debug to acknowledge and publish anyway",
-            policy
-        );
-    }
-    eprintln!(
-        "warning: --policy {:#x} has the SEV-SNP DEBUG bit (19) set: the host will be \
-         able to decrypt guest memory, so this deployment will NOT be confidential",
-        policy
-    );
-    Ok(())
-}
-
-/// Pure: fold an override patch onto every silicon line's floor of the
-/// network policy, gating any lowering behind `accept_outdated`. The
-/// lowering gate fires if the patch lowers ANY line's floor (a `--min-tcb`
-/// between the Zen4c and classic floors still weakens the classic gate,
-/// and the silicon line is only known once a report is in hand). I/O-free
-/// so it is directly unit-testable.
-pub(crate) fn resolve_effective_floor(
-    network: &aleph_sdk::attest::TcbFloorPolicy,
-    override_patch: Option<&aleph_sdk::attest::TcbFloorOverride>,
-    accept_outdated: bool,
-) -> Result<aleph_sdk::attest::TcbFloorPolicy> {
-    let Some(patch) = override_patch else {
-        return Ok(*network);
-    };
-    let (eff_default, mut lowered) = patch.apply_to(&network.default);
-    let eff_x_variant = network.x_variant.as_ref().map(|floor| {
-        let (eff, lowered_x) = patch.apply_to(floor);
-        lowered.extend(lowered_x);
-        eff
-    });
-    let eff_zen4c = network.zen4c.as_ref().map(|floor| {
-        let (eff, lowered_zen4c) = patch.apply_to(floor);
-        lowered.extend(lowered_zen4c);
-        eff
-    });
-    lowered.sort();
-    lowered.dedup();
-    if !lowered.is_empty() {
-        if !accept_outdated {
-            bail!(
-                "--min-tcb lowers {lowered:?} below the network floor; \
-                 pass --accept-outdated-tcb to accept the risk"
-            );
-        }
-        eprintln!(
-            "warning: accepting a TCB below the network floor for {lowered:?}: the node \
-             runs known-outdated firmware, so the guest may be exposed"
-        );
-    }
-    Ok(aleph_sdk::attest::TcbFloorPolicy {
-        default: eff_default,
-        x_variant: eff_x_variant,
-        zen4c: eff_zen4c,
-    })
-}
-
-/// Resolve the network floor policy (per-family builtin baselines raised by
-/// the settings aggregate), then apply the override. Aggregate failure falls
-/// back to the baselines with a warning.
-async fn resolve_tcb_floor(
-    aleph_client: &AlephClient,
-    product: aleph_sdk::attest::AmdProduct,
-    override_patch: Option<&aleph_sdk::attest::TcbFloorOverride>,
-    accept_outdated: bool,
-) -> Result<aleph_sdk::attest::TcbFloorPolicy> {
-    let baseline = aleph_sdk::attest::builtin_baseline_policy(product);
-    let network = match aleph_client.get_settings_aggregate().await {
-        Ok(agg) => match agg.settings.snp_min_tcb.floor_for(product) {
-            Some(f) => baseline.raise_to(&f),
-            None => baseline,
-        },
-        Err(e) => {
-            eprintln!(
-                "warning: could not fetch the network TCB floor ({e}); using the built-in baseline"
-            );
-            baseline
-        }
-    };
-    resolve_effective_floor(&network, override_patch, accept_outdated)
-}
-
 /// Parse a curl-style `-H "Key: Value"` header into `(name, value)`. Accepts
 /// both `"Key: Value"` and `"Key:Value"` (splits on the first colon, trims
 /// surrounding whitespace off both sides).
@@ -1789,23 +1459,6 @@ fn check_fresh_consistency(
         );
     }
     Ok(())
-}
-
-/// Build the SDK's [`PlatformPolicy`] from the `--require-platform` values.
-/// An empty list is [`PlatformPolicy::NONE`]: posture is surfaced, never
-/// gated (the current fleet fails every bit, so requiring is opt-in).
-fn platform_policy_from(requirements: &[PlatformRequirement]) -> PlatformPolicy {
-    let mut policy = PlatformPolicy::NONE;
-    for requirement in requirements {
-        match requirement {
-            PlatformRequirement::SmtOff => policy.require_smt_disabled = true,
-            PlatformRequirement::Tsme => policy.require_tsme = true,
-            PlatformRequirement::RaplOff => policy.require_rapl_disabled = true,
-            PlatformRequirement::CiphertextHiding => policy.require_ciphertext_hiding = true,
-            PlatformRequirement::AliasCheck => policy.require_alias_check = true,
-        }
-    }
-    policy
 }
 
 /// Render a [`PlatformPosture`] as the one-line text form used in the meta
@@ -1974,7 +1627,7 @@ async fn handle_call(
         );
     };
 
-    let expected = resolve_expected_measurement(
+    let expected = attest_common::resolve_expected_measurement(
         &content.verification.measurements,
         args.expected_measurement.as_deref(),
     )?;
@@ -1982,7 +1635,7 @@ async fn handle_call(
     let base_url = match &args.url {
         Some(url) => url.clone(),
         None => {
-            let net = fetch_live_networking(&scheduler()?, &item_hash)
+            let net = attest_common::fetch_live_networking(&scheduler()?, &item_hash)
                 .await
                 .ok_or_else(|| {
                     anyhow!(
@@ -2016,9 +1669,9 @@ async fn handle_call(
         MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
     };
     let policy_pin = PolicyPin::Exact(content.verification.policy);
-    let platform_policy = platform_policy_from(&args.require_platform);
+    let platform_policy = attest_common::platform_policy_from(&args.require_platform);
 
-    let min_tcb = resolve_tcb_floor(
+    let min_tcb = attest_common::resolve_tcb_floor(
         aleph_client,
         args.amd_product,
         args.min_tcb.as_ref(),
@@ -2109,7 +1762,7 @@ async fn handle_call(
             response.policy
         );
     }
-    if policy_debug_allowed(response.policy) {
+    if attest_common::policy_debug_allowed(response.policy) {
         eprintln!(
             "warning: this V-Program's guest policy ({:#x}) allows debugging: the host \
              can decrypt guest memory, so the response is not confidential",
@@ -2152,62 +1805,6 @@ async fn handle_call(
     }
     println!("{out}");
     Ok(())
-}
-
-#[cfg(test)]
-mod wait_endpoint_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn resolves_once_the_mapping_appears() {
-        let calls = AtomicUsize::new(0);
-        let url = Url::parse("https://203.0.113.5:24101/").unwrap();
-
-        let got = poll_attested_endpoint(
-            || {
-                let n = calls.fetch_add(1, Ordering::SeqCst);
-                let url = url.clone();
-                async move { (n >= 2).then_some(url) }
-            },
-            |_| async {},
-            Duration::from_secs(60),
-            Duration::from_secs(5),
-        )
-        .await;
-
-        assert_eq!(got, Some(url));
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn samples_at_least_once_then_gives_up_at_the_deadline() {
-        let calls = AtomicUsize::new(0);
-        let sleeps = AtomicUsize::new(0);
-
-        let got = poll_attested_endpoint(
-            || {
-                calls.fetch_add(1, Ordering::SeqCst);
-                async { None }
-            },
-            |_| {
-                sleeps.fetch_add(1, Ordering::SeqCst);
-                async {}
-            },
-            Duration::ZERO,
-            Duration::from_secs(5),
-        )
-        .await;
-
-        assert_eq!(got, None);
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "an exhausted budget still samples once"
-        );
-        assert_eq!(sleeps.load(Ordering::SeqCst), 0);
-    }
 }
 
 #[cfg(test)]
@@ -2562,126 +2159,7 @@ mod show_tests {
 #[cfg(test)]
 mod call_tests {
     use super::*;
-    use aleph_sdk::attest::{
-        AttestedResponse, FreshAttestation, TcbFloor, TcbFloorOverride, TcbFloorPolicy,
-    };
-
-    fn measurement(digest: &str, vcpu_type: Option<&str>) -> LaunchMeasurement {
-        let json = serde_json::json!({
-            "platform": "sev_snp",
-            "registers": {"launch": digest},
-            "vcpu_type": vcpu_type,
-        });
-        serde_json::from_value(json).expect("valid measurement fixture")
-    }
-
-    #[test]
-    fn resolve_expected_measurement_rejects_wrong_length_override() {
-        let err = resolve_expected_measurement(&[], Some("ab"))
-            .expect_err("a 1-byte override must be rejected");
-        assert!(
-            err.to_string().contains("96 hex characters"),
-            "error should state the expected length, got: {err}"
-        );
-    }
-
-    /// Registers pinning `launch` as given, the shape the resolver now
-    /// yields and the SDK derives.
-    fn regs(launch: &str) -> SevSnpRegisters {
-        SevSnpRegisters {
-            launch: launch.to_string(),
-        }
-    }
-
-    #[test]
-    fn resolve_expected_measurement_accepts_a_full_length_override() {
-        let digest = "cd".repeat(48);
-        let expected = resolve_expected_measurement(&[], Some(&digest)).unwrap();
-        assert_eq!(expected, MeasurementExpectation::Pin(regs(&digest)));
-    }
-
-    #[test]
-    fn resolve_expected_measurement_pins_the_single_measurement() {
-        let digest = "ab".repeat(48);
-        let measurements = vec![measurement(&digest, Some("EPYC-v4"))];
-
-        let expected = resolve_expected_measurement(&measurements, None).unwrap();
-
-        assert_eq!(expected, MeasurementExpectation::Pin(regs(&digest)));
-    }
-
-    #[test]
-    fn resolve_expected_measurement_override_takes_precedence() {
-        let digest = "ab".repeat(48);
-        let override_digest = "cd".repeat(48);
-        let measurements = vec![measurement(&digest, Some("EPYC-v4"))];
-
-        let expected = resolve_expected_measurement(&measurements, Some(&override_digest)).unwrap();
-
-        assert_eq!(
-            expected,
-            MeasurementExpectation::Pin(regs(&override_digest))
-        );
-    }
-
-    #[test]
-    fn resolve_expected_measurement_multiple_yields_member_of_set() {
-        let digest_a = "ab".repeat(48);
-        let digest_b = "cd".repeat(48);
-        let measurements = vec![
-            measurement(&digest_a, Some("EPYC-v4")),
-            measurement(&digest_b, Some("EPYC-Genoa")),
-        ];
-
-        let expected = resolve_expected_measurement(&measurements, None).unwrap();
-
-        assert_eq!(
-            expected,
-            MeasurementExpectation::MemberOf(vec![regs(&digest_a), regs(&digest_b)])
-        );
-    }
-
-    #[test]
-    fn resolve_expected_measurement_fails_closed_on_foreign_platform() {
-        // A register set this client cannot verify must error, never be
-        // skipped: skipping would silently narrow the accepted set.
-        // Unreachable through a valid message today (the schema restricts
-        // the V-PROGRAM backend to sev_snp), so pin the branch directly.
-        let r = "11".repeat(48);
-        let json = serde_json::json!({
-            "platform": "tdx",
-            "registers": {"mrtd": r, "rtmr1": r, "rtmr2": r, "mrconfigid": r},
-        });
-        let tdx: LaunchMeasurement = serde_json::from_value(json).expect("valid tdx measurement");
-        let measurements = vec![measurement(&"ab".repeat(48), Some("EPYC-v4")), tdx];
-
-        let err = resolve_expected_measurement(&measurements, None)
-            .expect_err("a tdx measurement must fail the resolution");
-        assert!(
-            err.to_string().contains("tdx measurement"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn resolve_expected_measurement_zero_measurements_errors() {
-        let result = resolve_expected_measurement(&[], None);
-
-        assert!(
-            result.is_err(),
-            "a message pinning no measurements must fail closed without --expected-measurement"
-        );
-    }
-
-    #[test]
-    fn resolve_expected_measurement_bad_override_hex_errors() {
-        let digest = "ab".repeat(48);
-        let measurements = vec![measurement(&digest, Some("EPYC-v4"))];
-
-        let result = resolve_expected_measurement(&measurements, Some("not-hex"));
-
-        assert!(result.is_err());
-    }
+    use aleph_sdk::attest::{AttestedResponse, FreshAttestation, TcbFloor, TcbFloorPolicy};
 
     #[test]
     fn parse_header_splits_on_colon_and_trims() {
@@ -2754,19 +2232,6 @@ mod call_tests {
     }
 
     #[test]
-    fn platform_requirements_build_the_policy() {
-        let policy = platform_policy_from(&[
-            PlatformRequirement::RaplOff,
-            PlatformRequirement::AliasCheck,
-        ]);
-        assert!(policy.require_rapl_disabled);
-        assert!(policy.require_alias_check);
-        assert!(!policy.require_smt_disabled);
-        assert!(!policy.require_tsme);
-        assert!(!policy.require_ciphertext_hiding);
-    }
-
-    #[test]
     fn render_call_result_reports_platform_posture_in_json() {
         let response = dummy_response(&"ab".repeat(48), b"x");
         let (out, _) = render_call_result(
@@ -2808,14 +2273,6 @@ mod call_tests {
         );
     }
 
-    #[test]
-    fn policy_debug_allowed_detects_the_snp_debug_bit() {
-        // 0x30000 is the recommended default: SMT allowed, no debug.
-        assert!(!policy_debug_allowed(0x30000));
-        // Bit 19 set: the host may decrypt guest memory.
-        assert!(policy_debug_allowed(0x30000 | (1 << 19)));
-    }
-
     fn dummy_floor() -> TcbFloor {
         TcbFloor {
             fmc: None,
@@ -2824,31 +2281,6 @@ mod call_tests {
             snp: 21,
             microcode: 84,
         }
-    }
-
-    #[test]
-    fn check_debug_policy_accepts_non_debug_policy() {
-        assert!(check_debug_policy(0x30000, false).is_ok());
-        // allow_debug is irrelevant when the DEBUG bit is not set.
-        assert!(check_debug_policy(0x30000, true).is_ok());
-    }
-
-    #[test]
-    fn check_debug_policy_rejects_debug_without_allow_debug() {
-        // 0xa0000 = bit 17 (reserved) | bit 19 (DEBUG): a valid policy that
-        // passes validate_snp_policy but has the DEBUG bit set.
-        let err = check_debug_policy(0xa0000, false).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("DEBUG bit (19) set") && msg.contains("--allow-debug"),
-            "expected a DEBUG rejection mentioning --allow-debug, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn check_debug_policy_accepts_debug_with_allow_debug() {
-        // The --allow-debug ack clears the gate; the warning goes to stderr.
-        assert!(check_debug_policy(0xa0000, true).is_ok());
     }
 
     #[test]
@@ -2988,48 +2420,6 @@ mod call_tests {
                 microcode: 28,
             }),
         }
-    }
-
-    #[test]
-    fn no_override_yields_the_network_floor() {
-        assert_eq!(resolve_effective_floor(&net(), None, false).unwrap(), net());
-    }
-
-    #[test]
-    fn raising_override_needs_no_acknowledgement() {
-        let o: TcbFloorOverride = "snp=30".parse().unwrap();
-        let eff = resolve_effective_floor(&net(), Some(&o), false).unwrap();
-        // The raise lands on every family floor.
-        assert_eq!(eff.default.snp, 30);
-        assert_eq!(eff.zen4c.unwrap().snp, 30);
-    }
-
-    #[test]
-    fn lowering_override_without_ack_is_rejected() {
-        let o: TcbFloorOverride = "snp=9".parse().unwrap();
-        assert!(resolve_effective_floor(&net(), Some(&o), false).is_err());
-    }
-
-    #[test]
-    fn lowering_override_with_ack_is_accepted() {
-        let o: TcbFloorOverride = "snp=9".parse().unwrap();
-        let eff = resolve_effective_floor(&net(), Some(&o), true).unwrap();
-        assert_eq!(eff.default.snp, 9);
-        assert_eq!(eff.zen4c.unwrap().snp, 9);
-    }
-
-    #[test]
-    fn lowering_only_the_zen4c_floor_still_needs_the_ack() {
-        // microcode=50 sits between the zen4c floor (28, raised) and the
-        // classic floor (84, lowered): the gate fires because the silicon
-        // family is unknown until a report is in hand, so ANY family's
-        // weakened floor needs the explicit acknowledgement.
-        let o: TcbFloorOverride = "microcode=50".parse().unwrap();
-        assert!(resolve_effective_floor(&net(), Some(&o), false).is_err());
-        let eff = resolve_effective_floor(&net(), Some(&o), true).unwrap();
-        assert_eq!(eff.default.microcode, 50);
-        assert_eq!(eff.x_variant.unwrap().microcode, 50);
-        assert_eq!(eff.zen4c.unwrap().microcode, 50);
     }
 
     #[test]

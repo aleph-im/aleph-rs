@@ -1,5 +1,7 @@
 pub mod account;
 pub mod aggregate;
+#[cfg(feature = "vprogram")]
+pub mod attest_common;
 pub mod authorization;
 pub mod confidential;
 pub mod config;
@@ -11,6 +13,8 @@ pub mod instance;
 pub mod instance_backup;
 pub mod instance_interactive;
 pub mod instance_show;
+#[cfg(feature = "vprogram")]
+pub mod instance_snp;
 pub mod instance_ssh;
 pub mod instance_target;
 pub mod instance_wait;
@@ -21,6 +25,7 @@ pub mod post;
 pub mod program;
 pub mod sync;
 pub mod token;
+pub mod upload;
 #[cfg(feature = "vprogram")]
 pub mod vprogram;
 pub mod website;

@@ -1,6 +1,6 @@
 use crate::cli::{
     ImageRef, InstanceCommand, InstanceCreateArgs, InstanceDeleteArgs, InstanceListArgs,
-    InstancePriceArgs, parse_size_to_mib,
+    InstancePriceArgs, TeeFlavor, parse_size_to_mib,
 };
 use crate::common::{
     confirm_action, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview,
@@ -599,6 +599,18 @@ pub async fn handle_instance_command(
             let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
             super::confidential::dispatch(scheduler_url, json, sub).await?;
         }
+        #[cfg(feature = "vprogram")]
+        InstanceCommand::Attest(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            super::instance_snp::handle_instance_attest(aleph_client, &scheduler_url, json, &args)
+                .await?;
+        }
+        #[cfg(feature = "vprogram")]
+        InstanceCommand::Unlock(args) => {
+            let scheduler_url = crate::common::resolve_scheduler_url(network_override)?;
+            super::instance_snp::handle_instance_unlock(aleph_client, &scheduler_url, json, &args)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -926,6 +938,38 @@ pub(crate) fn resolve_image_refs(
     })
 }
 
+/// Client-side rejections for the confidential SNP `instance create` path
+/// that need no network access: GPU+SNP exclusion, `--confidential-firmware`
+/// (SEV-only) exclusion, the signing account's EVM shape (the sender is the
+/// unlock authority the cmdline binds), and the DEBUG-policy gate. Pure:
+/// does no network I/O, so it must run before any privileged operation (the
+/// LUKS encryption in the create handler) or paid operation (uploading the
+/// encrypted rootfs spends STORE credits). The sender check here is an
+/// eager, redundant gate: `instantiate_instance_cmdline` still re-validates
+/// the unlock authority later in the normal flow.
+#[cfg(feature = "vprogram")]
+pub(crate) fn snp_create_guards(
+    gpu_requested: bool,
+    confidential_firmware_set: bool,
+    owner_address: &str,
+    policy: u64,
+    allow_debug: bool,
+) -> anyhow::Result<()> {
+    if gpu_requested {
+        bail!("confidential SNP and GPU pricing tiers cannot be combined");
+    }
+    if confidential_firmware_set {
+        bail!(
+            "--confidential-firmware is a SEV-only flag; SNP runtimes carry \
+             their own firmware"
+        );
+    }
+    aleph_sdk::instance_runtime::cmdline::normalize_evm_owner(owner_address)
+        .map_err(|e| anyhow!("{e}"))?;
+    super::attest_common::check_debug_policy(policy, allow_debug)?;
+    Ok(())
+}
+
 /// Resolve `--runtime` (program create) against an in-memory `VmImagesData`.
 /// Pure: does no network I/O. `None` triggers the `defaults.runtime` fallback.
 pub(crate) fn resolve_runtime_ref(
@@ -965,6 +1009,10 @@ async fn handle_instance_create(
         Some(owner) => resolve_address(owner)?,
         None => account.address().clone(),
     };
+    // Captured before `args.on_behalf_of` is moved out (below, when building
+    // the message's `on_behalf_of` field); the SNP branch needs it too.
+    #[cfg(feature = "vprogram")]
+    let on_behalf_of_is_set = args.on_behalf_of.is_some();
 
     // The pricing and settings aggregates are fetched from several places below
     // (the interactive picker, the CRN filter, GPU sizing). Wrap the client so
@@ -1122,13 +1170,102 @@ async fn handle_instance_create(
     let disk_size = PersistentVolumeSize::try_from(disk_size_mib)
         .map_err(|e| anyhow!("invalid disk size: {e}"))?;
 
-    let image_ref = args
-        .image
-        .clone()
-        .context("--image is required (or use -i)")?;
+    // `--tee` selects the confidential flavor; it only matters when
+    // `--confidential` is set. SNP carries its own firmware in the instance
+    // runtime bundle (no `--confidential-firmware` resolution) and always
+    // needs the vm-images aggregate (to resolve `--runtime`, even when
+    // `--image` was given as a raw hash); legacy SEV keeps its exact prior
+    // behavior, firmware resolution included.
+    let snp_confidential = args.confidential && args.tee == TeeFlavor::SevSnp;
+    let legacy_sev_confidential = args.confidential && args.tee == TeeFlavor::Sev;
+
+    // Client-side SNP rejections that need no network access run here, ahead
+    // of the image_ref/encrypt match and the vm-images aggregate fetch below,
+    // so they fire before any privileged operation (the LUKS encryption
+    // below needs root) or paid operation (uploading the encrypted rootfs
+    // spends STORE credits). The sender check is an eager, redundant gate:
+    // `instantiate_instance_cmdline` still re-validates the unlock authority
+    // later in the normal flow.
+    #[cfg(feature = "vprogram")]
+    if snp_confidential {
+        let policy = args
+            .policy
+            .unwrap_or(super::instance_snp::SNP_DEFAULT_POLICY);
+        snp_create_guards(
+            gpu_requested,
+            args.confidential_firmware.is_some(),
+            &account.address().to_string(),
+            policy,
+            args.allow_debug,
+        )?;
+    }
+
+    let image_ref = match args.image.clone() {
+        Some(img) => img,
+        // Local LUKS encryption + upload only makes sense for the measured
+        // SNP path: the CRN needs the runtime bundle's unlock protocol to
+        // hand over the passphrase, which legacy SEV (and plain, non-TEE
+        // instances) have no counterpart for.
+        #[cfg(feature = "vprogram")]
+        None if snp_confidential && args.encrypt_rootfs.is_some() => {
+            let plain_rootfs = args
+                .encrypt_rootfs
+                .clone()
+                .expect("guard above checked encrypt_rootfs.is_some()");
+            let passphrase = super::instance_snp::read_passphrase(args.passphrase_file.as_deref())?;
+
+            let tmp_dir = tempfile::tempdir()
+                .context("failed to create a temp dir for the encrypted rootfs")?;
+            let encrypted_path = tmp_dir.path().join("rootfs.luks");
+            crate::luks::encrypt_rootfs(
+                &plain_rootfs,
+                &encrypted_path,
+                args.rootfs_size_mib,
+                &passphrase,
+            )
+            .await?;
+
+            // Upload before anything else that could fail: printing the hash
+            // now means a later failure (e.g. a bad --runtime) leaves the
+            // upload discoverable instead of orphaned and anonymous.
+            let on_behalf_of_addr = on_behalf_of_is_set.then_some(&owner_address);
+            let hash = super::upload::upload_file(
+                aleph_client,
+                &account,
+                on_behalf_of_addr,
+                &encrypted_path,
+                json,
+                dry_run,
+            )
+            .await?;
+            eprintln!("Uploaded encrypted rootfs: {hash}");
+
+            ImageRef::Hash(hash)
+        }
+        #[cfg(not(feature = "vprogram"))]
+        None if snp_confidential && args.encrypt_rootfs.is_some() => {
+            bail!(
+                "--encrypt-rootfs requires the 'vprogram' cargo feature (enabled by \
+                 default); rebuild with it enabled, or pass --image with a pre-built \
+                 (already encrypted) rootfs hash instead"
+            );
+        }
+        None if args.encrypt_rootfs.is_some() => {
+            bail!(
+                "--encrypt-rootfs requires --confidential --tee sev-snp (the default TEE \
+                 flavor): the CRN needs the SNP runtime bundle's attested unlock protocol \
+                 to receive the passphrase. --tee sev (legacy) and non-confidential \
+                 instances are not supported; pass --image with a pre-built rootfs hash \
+                 instead."
+            );
+        }
+        None => bail!("--image is required (or use -i)"),
+    };
 
     let needs_aggregate = matches!(image_ref, ImageRef::Preset(_))
-        || (args.confidential && !matches!(args.confidential_firmware, Some(ImageRef::Hash(_))));
+        || (legacy_sev_confidential
+            && !matches!(args.confidential_firmware, Some(ImageRef::Hash(_))))
+        || snp_confidential;
 
     let vm_images = if needs_aggregate {
         aggregates
@@ -1147,7 +1284,7 @@ async fn handle_instance_create(
 
     let resolved = resolve_image_refs(
         image_ref,
-        args.confidential,
+        legacy_sev_confidential,
         args.confidential_firmware.clone(),
         &vm_images,
     )?;
@@ -1173,20 +1310,58 @@ async fn handle_instance_create(
     metadata.insert("name".to_string(), serde_json::json!(args.name));
     builder = builder.metadata(metadata);
 
-    // Confidential VM
+    // Confidential VM: `--tee` picks the flavor. `TeeFlavor::Sev` is the
+    // legacy path (kept byte-identical); `TeeFlavor::SevSnp` (the default)
+    // is the new measured, attestable path assembled in `instance_snp`.
     if args.confidential {
-        let firmware = resolved
-            .confidential_firmware
-            .clone()
-            .expect("resolver guarantees Some when confidential is true");
-        builder = builder.trusted_execution(TrustedExecutionEnvironment {
-            firmware: Some(firmware),
-            policy: 0x1, // NoDebug
-            mode: None,
-            runtime: None,
-            measurements: None,
-            attestation_port: None,
-        });
+        match args.tee {
+            TeeFlavor::Sev => {
+                let firmware = resolved
+                    .confidential_firmware
+                    .clone()
+                    .expect("resolver guarantees Some when confidential is true");
+                builder = builder.trusted_execution(TrustedExecutionEnvironment {
+                    firmware: Some(firmware),
+                    policy: 0x1, // NoDebug
+                    mode: None,
+                    runtime: None,
+                    measurements: None,
+                    attestation_port: None,
+                });
+            }
+            #[cfg(feature = "vprogram")]
+            TeeFlavor::SevSnp => {
+                // GPU+SNP, --confidential-firmware+SNP and the sender shape
+                // are already rejected above, before any privileged or paid
+                // operation.
+                let owner = super::instance_snp::snp_unlock_authority(account.address());
+                let runtime_ref = super::instance_snp::resolve_instance_runtime_ref(
+                    args.runtime.clone(),
+                    &vm_images,
+                )?;
+                let policy = args
+                    .policy
+                    .unwrap_or(super::instance_snp::SNP_DEFAULT_POLICY);
+                let cache_dir = crate::config::store::ConfigStore::instance_runtime_cache_dir()?;
+                let (tee, _manifest) = super::instance_snp::build_snp_trusted_execution(
+                    aleph_client,
+                    &runtime_ref,
+                    &owner,
+                    vcpus,
+                    policy,
+                    &cache_dir,
+                )
+                .await?;
+                builder = builder.trusted_execution(tee);
+            }
+            #[cfg(not(feature = "vprogram"))]
+            TeeFlavor::SevSnp => {
+                bail!(
+                    "confidential SNP instances require the 'vprogram' cargo feature \
+                     (enabled by default); rebuild with it enabled, or pass --tee sev"
+                );
+            }
+        }
     }
 
     // GPU requirements were resolved above (`gpu_props` is Some iff a GPU was
@@ -1832,6 +2007,77 @@ async fn handle_instance_delete(
 mod tests {
     use super::*;
     use crate::cli::parse_size_to_mib;
+
+    #[cfg(feature = "vprogram")]
+    const VALID_EVM_OWNER: &str = "0x1111111111111111111111111111111111111111";
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_accepts_a_clean_request() {
+        assert!(snp_create_guards(false, false, VALID_EVM_OWNER, 0x30000, false).is_ok());
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_rejects_gpu_plus_snp() {
+        let err = snp_create_guards(true, false, VALID_EVM_OWNER, 0x30000, false).unwrap_err();
+        assert!(
+            err.to_string().contains("GPU"),
+            "expected a GPU+SNP rejection, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_rejects_confidential_firmware() {
+        let err = snp_create_guards(false, true, VALID_EVM_OWNER, 0x30000, false).unwrap_err();
+        assert!(
+            err.to_string().contains("--confidential-firmware"),
+            "expected a --confidential-firmware rejection, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_rejects_a_non_evm_owner() {
+        let err = snp_create_guards(false, false, "not-an-address", 0x30000, false).unwrap_err();
+        assert!(
+            err.to_string().contains("EVM owner"),
+            "expected a non-EVM-owner rejection, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_rejects_debug_policy_without_allow_debug() {
+        // 0x30000 | DEBUG bit (19).
+        let err = snp_create_guards(false, false, VALID_EVM_OWNER, 0x30000 | (1 << 19), false)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("--allow-debug"),
+            "expected a DEBUG-policy rejection, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_accepts_debug_policy_with_allow_debug() {
+        assert!(
+            snp_create_guards(false, false, VALID_EVM_OWNER, 0x30000 | (1 << 19), true).is_ok()
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_checks_gpu_before_firmware_and_owner() {
+        // All three would fail; the GPU rejection must be the one that fires,
+        // matching the create handler's declared check order.
+        let err = snp_create_guards(true, true, "not-an-address", 0x30000, false).unwrap_err();
+        assert!(
+            err.to_string().contains("GPU"),
+            "expected the GPU+SNP rejection to fire first, got: {err}"
+        );
+    }
 
     #[test]
     fn compute_unit_summary_describes_the_unit() {
