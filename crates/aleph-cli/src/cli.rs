@@ -1952,9 +1952,10 @@ Examples:
 Attest an SNP instance, then inject its LUKS passphrase (and any extra
 secrets) over the same attested RA-TLS channel.
 
-Only the instance owner (its `content.address`, i.e. the `--on-behalf-of`
-beneficiary when one was used at create) may unlock it: the request is
-signed with the resolved account and rejected by the guest agent otherwise.
+Only the key that signed the INSTANCE message may unlock it (for an
+--on-behalf-of deployment that is the delegate that created it, not the
+owner): the request is signed with the resolved account and rejected by
+the guest agent otherwise.
 
 The passphrase is always sourced via --passphrase-file, else
 $ALEPH_LUKS_PASSPHRASE, else an interactive prompt; passing
@@ -1962,7 +1963,7 @@ $ALEPH_LUKS_PASSPHRASE, else an interactive prompt; passing
 environment variable instead. --secret may still be repeated for any other
 KEY=VALUE the guest's cloud-init or provisioning expects.
 
-Injection is owner-gated and overwriting: re-running unlock is the normal
+Injection is gated on that signing key and overwriting: re-running unlock is the normal
 recovery after the CRN rebooted the VM (its attested TLS key rotates on
 every boot, so a stale signed request is rejected) or after a mistyped
 passphrase.")]

@@ -72,12 +72,16 @@ pub(crate) fn resolve_instance_runtime_ref(
     }
 }
 
-/// The address whose lowercase form goes into the instance runtime cmdline:
-/// the resolved `--on-behalf-of` owner when set, else the signer's own
-/// account address. Returns the raw string; normalization (lowercasing and
-/// EVM validation) happens in `instantiate_instance_cmdline`.
-pub(crate) fn snp_owner(on_behalf_of: Option<&Address>, account_address: &Address) -> String {
-    on_behalf_of.unwrap_or(account_address).to_string()
+/// The address whose lowercase form goes into the instance runtime cmdline's
+/// unlock-authority slot: always the signer's own account address, the same
+/// key that will sign `instance unlock`. `--on-behalf-of` deliberately does
+/// NOT change it: the owner key of a delegated deployment (typically a
+/// browser wallet) is not available to the CLI, so binding it would make the
+/// instance permanently un-unlockable; the CCN already enforced the owner's
+/// authorization of this signer. Returns the raw string; normalization
+/// (lowercasing and EVM validation) happens in `instantiate_instance_cmdline`.
+pub(crate) fn snp_unlock_authority(account_address: &Address) -> String {
+    account_address.to_string()
 }
 
 /// Source the LUKS passphrase for `--encrypt-rootfs`.
@@ -182,19 +186,20 @@ pub(crate) const INSTANCE_ATTEST_PORT: u16 = 8443;
 
 /// The result of a successful `instance attest`: the verified fresh
 /// attestation evidence, the endpoint it was gathered from, the instance
-/// message's content and owner (`content.address`, i.e. the message's
-/// `Message::owner()`; `instance unlock` compares it against the signing
-/// account before touching a secret), and which measurement(s) were pinned
-/// for the call.
+/// message's content and unlock authority (the message's sender, the key
+/// that signed the deployment; `instance unlock` compares it against the
+/// signing account before touching a secret), and which measurement(s) were
+/// pinned for the call.
 pub(crate) struct AttestOutcome {
     pub fresh: FreshAttestation,
     pub endpoint: Url,
     pub content: InstanceContent,
-    /// The instance's owner address (`content.address`): the
-    /// `--on-behalf-of` beneficiary when one was used at create, else the
-    /// creator's own address. Captured from the message alongside `content`
-    /// since `InstanceContent` itself carries no address field.
-    pub owner: Address,
+    /// The instance's unlock authority: the message sender, i.e. the key
+    /// that signed the INSTANCE message and whose address the CRN measured
+    /// into the cmdline's unlock slot. For an `--on-behalf-of` deployment
+    /// this is the delegate, not `content.address`. Captured from the
+    /// message envelope since `InstanceContent` itself carries no sender.
+    pub unlock_authority: Address,
     pub expectation: MeasurementExpectation,
 }
 
@@ -267,7 +272,7 @@ pub(crate) async fn run_instance_attest(
             bail!("instance {item_hash} was rejected by the network")
         }
     };
-    let owner = message.owner().clone();
+    let unlock_authority = message.sender().clone();
     let MessageContentEnum::Instance(content) = message.content().clone() else {
         bail!(
             "item {item_hash} is not an INSTANCE message (got {:?})",
@@ -362,7 +367,7 @@ pub(crate) async fn run_instance_attest(
         fresh,
         endpoint,
         content,
-        owner,
+        unlock_authority,
         expectation,
     })
 }
@@ -542,18 +547,23 @@ pub(crate) fn collect_secrets(
     Ok(secrets)
 }
 
-/// Reject an unlock request whose signing account is not the instance
-/// owner (the message's `content.address`). Case-insensitive, since EVM
-/// addresses are conventionally compared without regard to checksum casing.
-/// Named after the wire field in the error so a mismatch is traceable back
-/// to the on-chain message.
-pub(crate) fn check_owner_account(owner: &str, account_address: &Address) -> Result<()> {
-    if owner.eq_ignore_ascii_case(account_address.as_str()) {
+/// Reject an unlock request whose signing account is not the instance's
+/// unlock authority (the message's sender, the key that signed the
+/// deployment and whose address the CRN measured into the cmdline's unlock
+/// slot). Case-insensitive, since EVM addresses are conventionally compared
+/// without regard to checksum casing. Named after the wire field in the
+/// error so a mismatch is traceable back to the on-chain message.
+pub(crate) fn check_unlock_account(
+    unlock_authority: &str,
+    account_address: &Address,
+) -> Result<()> {
+    if unlock_authority.eq_ignore_ascii_case(account_address.as_str()) {
         return Ok(());
     }
     bail!(
-        "signing account {account_address} does not match the instance owner {owner} \
-         (content.address): only the owner may unlock this instance"
+        "signing account {account_address} does not match the key that signed the \
+         deployment ({unlock_authority}, the message sender): only that key may \
+         unlock this instance"
     );
 }
 
@@ -690,8 +700,8 @@ pub(crate) async fn handle_instance_unlock(
 
     let outcome = run_instance_attest(aleph_client, scheduler_url, &args.attest).await?;
 
-    let owner = outcome.owner.as_str().to_lowercase();
-    check_owner_account(&owner, account.address())?;
+    let unlock_authority = outcome.unlock_authority.as_str().to_lowercase();
+    check_unlock_account(&unlock_authority, account.address())?;
 
     let passphrase = read_passphrase(args.passphrase_file.as_deref())?;
     let secrets = collect_secrets(Some(passphrase), &args.secrets)?;
@@ -811,16 +821,11 @@ mod tests {
     }
 
     #[test]
-    fn on_behalf_of_is_the_owner() {
+    fn the_signer_is_the_unlock_authority() {
+        // Delegation does not change the unlock slot: the create handler
+        // always binds the signing account (see snp_unlock_authority's doc).
         let mine = Address::from("0x1111111111111111111111111111111111111a".to_string());
-        let other = Address::from("0x2222222222222222222222222222222222222b".to_string());
-
-        let got = snp_owner(Some(&other), &mine);
-        assert_eq!(got, other.to_string());
-
-        // No delegation: falls back to the signer's own address.
-        let got = snp_owner(None, &mine);
-        assert_eq!(got, mine.to_string());
+        assert_eq!(snp_unlock_authority(&mine), mine.to_string());
     }
 
     #[test]
@@ -1023,31 +1028,31 @@ mod tests {
     }
 
     #[test]
-    fn owner_account_mismatch_is_named() {
-        let owner = Address::from("0x1111111111111111111111111111111111111a".to_string());
+    fn unlock_account_mismatch_is_named() {
+        let authority = Address::from("0x1111111111111111111111111111111111111a".to_string());
         let signer = Address::from("0x2222222222222222222222222222222222222b".to_string());
-        let err = check_owner_account(owner.as_str(), &signer)
+        let err = check_unlock_account(authority.as_str(), &signer)
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains(owner.as_str()),
-            "error must name the owner: {err}"
+            err.contains(authority.as_str()),
+            "error must name the unlock authority: {err}"
         );
         assert!(
             err.contains(signer.as_str()),
             "error must name the signing account: {err}"
         );
         assert!(
-            err.contains("content.address"),
-            "error must name content.address: {err}"
+            err.contains("message sender"),
+            "error must name the message sender: {err}"
         );
     }
 
     #[test]
-    fn owner_account_match_is_case_insensitive() {
-        let owner = Address::from("0xAAAA111111111111111111111111111111111a".to_string());
+    fn unlock_account_match_is_case_insensitive() {
+        let authority = Address::from("0xAAAA111111111111111111111111111111111a".to_string());
         let signer = Address::from("0xaaaa111111111111111111111111111111111A".to_string());
-        assert!(check_owner_account(owner.as_str(), &signer).is_ok());
+        assert!(check_unlock_account(authority.as_str(), &signer).is_ok());
     }
 
     #[test]

@@ -940,12 +940,13 @@ pub(crate) fn resolve_image_refs(
 
 /// Client-side rejections for the confidential SNP `instance create` path
 /// that need no network access: GPU+SNP exclusion, `--confidential-firmware`
-/// (SEV-only) exclusion, the owner's EVM shape, and the DEBUG-policy gate.
-/// Pure: does no network I/O, so it must run before any privileged operation
-/// (the LUKS encryption in the create handler needs root) or paid operation
-/// (uploading the encrypted rootfs spends STORE credits). The owner check
-/// here is an eager, redundant gate: `instantiate_instance_cmdline` still
-/// re-validates the owner later in the normal flow.
+/// (SEV-only) exclusion, the signing account's EVM shape (the sender is the
+/// unlock authority the cmdline binds), and the DEBUG-policy gate. Pure:
+/// does no network I/O, so it must run before any privileged operation (the
+/// LUKS encryption in the create handler) or paid operation (uploading the
+/// encrypted rootfs spends STORE credits). The sender check here is an
+/// eager, redundant gate: `instantiate_instance_cmdline` still re-validates
+/// the unlock authority later in the normal flow.
 #[cfg(feature = "vprogram")]
 pub(crate) fn snp_create_guards(
     gpu_requested: bool,
@@ -1182,9 +1183,9 @@ async fn handle_instance_create(
     // of the image_ref/encrypt match and the vm-images aggregate fetch below,
     // so they fire before any privileged operation (the LUKS encryption
     // below needs root) or paid operation (uploading the encrypted rootfs
-    // spends STORE credits). The owner check is an eager, redundant gate:
-    // `instantiate_instance_cmdline` still re-validates the owner later in
-    // the normal flow.
+    // spends STORE credits). The sender check is an eager, redundant gate:
+    // `instantiate_instance_cmdline` still re-validates the unlock authority
+    // later in the normal flow.
     #[cfg(feature = "vprogram")]
     if snp_confidential {
         let policy = args
@@ -1193,7 +1194,7 @@ async fn handle_instance_create(
         snp_create_guards(
             gpu_requested,
             args.confidential_firmware.is_some(),
-            &owner_address.to_string(),
+            &account.address().to_string(),
             policy,
             args.allow_debug,
         )?;
@@ -1330,11 +1331,10 @@ async fn handle_instance_create(
             }
             #[cfg(feature = "vprogram")]
             TeeFlavor::SevSnp => {
-                // GPU+SNP, --confidential-firmware+SNP and the owner shape are
-                // already rejected above, before any privileged or paid
+                // GPU+SNP, --confidential-firmware+SNP and the sender shape
+                // are already rejected above, before any privileged or paid
                 // operation.
-                let on_behalf_of_addr = on_behalf_of_is_set.then_some(&owner_address);
-                let owner = super::instance_snp::snp_owner(on_behalf_of_addr, account.address());
+                let owner = super::instance_snp::snp_unlock_authority(account.address());
                 let runtime_ref = super::instance_snp::resolve_instance_runtime_ref(
                     args.runtime.clone(),
                     &vm_images,
