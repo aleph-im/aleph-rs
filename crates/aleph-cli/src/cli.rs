@@ -3311,6 +3311,12 @@ pub struct VProgramCreateArgs {
     #[arg(long = "volume-ref", value_name = "PATH=ITEM_HASH", value_parser = parse_volume_ref)]
     pub volume_refs: Vec<(PathBuf, ItemHash)>,
 
+    /// Storage engine for the artifacts this command uploads. When unset,
+    /// each artifact uses `storage` up to 100 MiB and `ipfs` above that,
+    /// matching `aleph file upload`.
+    #[arg(long, value_enum)]
+    pub storage_engine: Option<StorageEngineCli>,
+
     /// Number of virtual CPUs.
     #[arg(long, default_value_t = 1)]
     pub vcpus: u32,
