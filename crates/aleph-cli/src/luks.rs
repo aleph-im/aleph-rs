@@ -6,10 +6,15 @@
 //! `vprogram` feature: it has no attestation dependency, it is plain CLI
 //! infrastructure for building an encrypted disk image locally.
 //!
-//! The privileged path (loop devices, device-mapper, `cryptsetup`) only runs
-//! as root and is not exercised by the test suite; only the pure planning
-//! logic (`luks_plan`) is unit tested. See `encrypt_rootfs` for the full
-//! command sequence.
+//! Loop devices and device-mapper are privileged, but the CLI process itself
+//! must stay unprivileged: the keystore lives in the user's session keyring
+//! (Secret Service over the session D-Bus, unreachable from a root shell),
+//! and signing and uploading should not run as root either. So only the
+//! individual commands that need root (`losetup`, `cryptsetup`, the `dd`
+//! copy, `e2fsck`/`resize2fs` on the mapped device) are escalated, through
+//! `sudo` when the CLI is not already root ([`PrivRunner`]). The privileged
+//! path is not exercised by the test suite; only the pure planning logic
+//! (`luks_plan`) and the sudo command assembly are unit tested.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -20,8 +25,68 @@ use tokio::process::Command;
 
 const MIB: u64 = 1024 * 1024;
 
-const ROOT_REQUIRED_MSG: &str = "encrypting a rootfs needs root (cryptsetup + device-mapper): \
-re-run with sudo, or pre-encrypt with cryptsetup and pass --image";
+const SUDO_REQUIRED_MSG: &str = "encrypting a rootfs needs root for its cryptsetup + device-mapper \
+steps, and no sudo was found to escalate them: install sudo, run as root, or pre-encrypt with \
+cryptsetup and pass --image";
+
+/// Runs the privileged commands of the encryption sequence: directly when
+/// the CLI is already root, through `sudo <command>` otherwise. Escalating
+/// per-command keeps the CLI process itself unprivileged, so the session
+/// keyring, signing, and the upload all run as the invoking user.
+pub(crate) struct PrivRunner {
+    sudo: Option<PathBuf>,
+}
+
+impl PrivRunner {
+    /// Detect the privilege mode. As root, commands run directly. Otherwise
+    /// `sudo` must be on PATH, and its credential cache is primed with
+    /// `sudo -v` right away, so any password prompt happens here, at a clean
+    /// point, rather than in the middle of a command that has the LUKS
+    /// passphrase piped to its stdin.
+    #[cfg(unix)]
+    pub(crate) async fn detect() -> Result<Self> {
+        if unsafe { libc::geteuid() } == 0 {
+            return Ok(Self { sudo: None });
+        }
+        let Ok(sudo) = which::which("sudo") else {
+            bail!(SUDO_REQUIRED_MSG);
+        };
+        eprintln!(
+            "Not running as root: the privileged encryption steps (losetup, cryptsetup, \
+             dd, resize2fs) will run via sudo."
+        );
+        let status = Command::new(&sudo)
+            .arg("-v")
+            .status()
+            .await
+            .context("failed to invoke sudo -v")?;
+        if !status.success() {
+            bail!("sudo -v failed: could not obtain the privileges the encryption steps need");
+        }
+        Ok(Self { sudo: Some(sudo) })
+    }
+
+    /// Non-Unix platforms have no loop devices or device-mapper (and no
+    /// sudo), so this path always refuses.
+    #[cfg(not(unix))]
+    pub(crate) async fn detect() -> Result<Self> {
+        bail!(SUDO_REQUIRED_MSG)
+    }
+
+    /// A `Command` for `program`, escalated through sudo when not root.
+    /// `program` may be a bare name for standard tools (`dd`, `e2fsck`);
+    /// under sudo those resolve via sudo's own secure PATH.
+    fn cmd(&self, program: &Path) -> Command {
+        match &self.sudo {
+            None => Command::new(program),
+            Some(sudo) => {
+                let mut cmd = Command::new(sudo);
+                cmd.arg(program);
+                cmd
+            }
+        }
+    }
+}
 
 /// Wrap the plain ext4 image at `plain` into a new LUKS2 container at `out`.
 ///
@@ -31,17 +96,18 @@ re-run with sudo, or pre-encrypt with cryptsetup and pass --image";
 /// container; it is passed to `cryptsetup` over stdin, never as an argv
 /// argument, so it never appears in the process table.
 ///
-/// Requires root (loop devices and device-mapper are privileged) and the
-/// `cryptsetup` and `losetup` binaries on PATH. The loop device attached
-/// during this call, and the `aleph-luks-<pid>` device-mapper entry it opens,
-/// are torn down before returning on every exit path, success or failure.
+/// Needs the `cryptsetup` and `losetup` binaries on PATH, and root for the
+/// privileged steps: when the CLI is not root itself they run via `sudo`
+/// (see [`PrivRunner`]). The loop device attached during this call, and the
+/// `aleph-luks-<pid>` device-mapper entry it opens, are torn down before
+/// returning on every exit path, success or failure.
 pub async fn encrypt_rootfs(
     plain: &Path,
     out: &Path,
     size_mib: Option<u64>,
     passphrase: &str,
 ) -> Result<()> {
-    require_root()?;
+    let runner = PrivRunner::detect().await?;
 
     let plain_size = tokio::fs::metadata(plain)
         .await
@@ -61,11 +127,18 @@ pub async fn encrypt_rootfs(
             .with_context(|| format!("failed to size {} to {planned_mib} MiB", out.display()))?;
     }
 
-    let loop_dev = losetup_attach(&losetup, out).await?;
+    let loop_dev = losetup_attach(&runner, &losetup, out).await?;
     let mapper_name = format!("aleph-luks-{}", std::process::id());
 
-    let fill_result =
-        fill_luks_container(&cryptsetup, &loop_dev, &mapper_name, plain, passphrase).await;
+    let fill_result = fill_luks_container(
+        &runner,
+        &cryptsetup,
+        &loop_dev,
+        &mapper_name,
+        plain,
+        passphrase,
+    )
+    .await;
 
     // Cleanup runs unconditionally so the loop device and the device-mapper
     // entry never outlive this call, whether `fill_luks_container` above
@@ -74,10 +147,10 @@ pub async fn encrypt_rootfs(
     // to attempt even when `luksOpen` never ran or failed: it just reports
     // "not active" and fails, which we log and otherwise ignore, so it never
     // shadows the real error from `fill_result`.
-    if let Err(e) = cryptsetup_luks_close(&cryptsetup, &mapper_name).await {
+    if let Err(e) = cryptsetup_luks_close(&runner, &cryptsetup, &mapper_name).await {
         eprintln!("warning: {e}");
     }
-    if let Err(e) = losetup_detach(&losetup, &loop_dev).await {
+    if let Err(e) = losetup_detach(&runner, &losetup, &loop_dev).await {
         eprintln!("warning: {e}");
     }
 
@@ -90,17 +163,18 @@ pub async fn encrypt_rootfs(
 /// function so `encrypt_rootfs` can capture this step's result and still run
 /// loop/mapper cleanup unconditionally afterward.
 async fn fill_luks_container(
+    runner: &PrivRunner,
     cryptsetup: &Path,
     loop_dev: &str,
     mapper_name: &str,
     plain: &Path,
     passphrase: &str,
 ) -> Result<()> {
-    cryptsetup_luks_format(cryptsetup, loop_dev, passphrase).await?;
-    cryptsetup_luks_open(cryptsetup, loop_dev, mapper_name, passphrase).await?;
+    cryptsetup_luks_format(runner, cryptsetup, loop_dev, passphrase).await?;
+    cryptsetup_luks_open(runner, cryptsetup, loop_dev, mapper_name, passphrase).await?;
     let mapper_path = format!("/dev/mapper/{mapper_name}");
-    copy_plain_image(plain, &mapper_path).await?;
-    check_and_resize_filesystem(&mapper_path).await?;
+    copy_plain_image(runner, plain, &mapper_path).await?;
+    check_and_resize_filesystem(runner, &mapper_path).await?;
     Ok(())
 }
 
@@ -117,25 +191,6 @@ pub(crate) fn luks_plan(plain_size_bytes: u64, size_mib: Option<u64>) -> Result<
         Some(explicit) => Ok(explicit),
         None => Ok(plain_mib + 64),
     }
-}
-
-/// Check the effective UID is 0. Loop devices and device-mapper both require
-/// root, and failing fast with an actionable message beats letting the first
-/// `losetup`/`cryptsetup` call fail obscurely partway through.
-#[cfg(unix)]
-pub(crate) fn require_root() -> Result<()> {
-    if unsafe { libc::geteuid() } == 0 {
-        Ok(())
-    } else {
-        bail!(ROOT_REQUIRED_MSG)
-    }
-}
-
-/// Non-Unix platforms have no notion of a root EUID (and no loop devices or
-/// device-mapper either), so this path always refuses.
-#[cfg(not(unix))]
-pub(crate) fn require_root() -> Result<()> {
-    bail!(ROOT_REQUIRED_MSG)
 }
 
 /// Locate `bin` on PATH. `install_hint` names the package to install,
@@ -175,7 +230,10 @@ async fn run_checked(cmd: &mut Command, description: &str) -> Result<()> {
 /// Run `cmd` with `stdin_data` written to its stdin (no trailing newline)
 /// and then closed, so the child sees EOF after the data. Used for the two
 /// `cryptsetup` steps that take the passphrase over stdin instead of argv,
-/// so it never shows up in the process table.
+/// so it never shows up in the process table. Safe under sudo escalation
+/// too: sudo prompts on the controlling tty, not stdin, so the piped
+/// passphrase is never mistaken for a sudo password (and `PrivRunner::detect`
+/// primes the credential cache up front anyway).
 async fn run_with_stdin(cmd: &mut Command, stdin_data: &str, description: &str) -> Result<()> {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -209,8 +267,8 @@ async fn run_with_stdin(cmd: &mut Command, stdin_data: &str, description: &str) 
     Ok(())
 }
 
-async fn losetup_attach(losetup: &Path, image: &Path) -> Result<String> {
-    let mut cmd = Command::new(losetup);
+async fn losetup_attach(runner: &PrivRunner, losetup: &Path, image: &Path) -> Result<String> {
+    let mut cmd = runner.cmd(losetup);
     cmd.arg("--find").arg("--show").arg(image);
     let loop_dev = run_capturing_stdout(&mut cmd, "losetup --find --show").await?;
     if loop_dev.is_empty() {
@@ -219,14 +277,19 @@ async fn losetup_attach(losetup: &Path, image: &Path) -> Result<String> {
     Ok(loop_dev)
 }
 
-async fn losetup_detach(losetup: &Path, loop_dev: &str) -> Result<()> {
-    let mut cmd = Command::new(losetup);
+async fn losetup_detach(runner: &PrivRunner, losetup: &Path, loop_dev: &str) -> Result<()> {
+    let mut cmd = runner.cmd(losetup);
     cmd.arg("-d").arg(loop_dev);
     run_checked(&mut cmd, "losetup -d").await
 }
 
-async fn cryptsetup_luks_format(cryptsetup: &Path, loop_dev: &str, passphrase: &str) -> Result<()> {
-    let mut cmd = Command::new(cryptsetup);
+async fn cryptsetup_luks_format(
+    runner: &PrivRunner,
+    cryptsetup: &Path,
+    loop_dev: &str,
+    passphrase: &str,
+) -> Result<()> {
+    let mut cmd = runner.cmd(cryptsetup);
     cmd.arg("luksFormat")
         .arg("--type")
         .arg("luks2")
@@ -237,24 +300,29 @@ async fn cryptsetup_luks_format(cryptsetup: &Path, loop_dev: &str, passphrase: &
 }
 
 async fn cryptsetup_luks_open(
+    runner: &PrivRunner,
     cryptsetup: &Path,
     loop_dev: &str,
     mapper_name: &str,
     passphrase: &str,
 ) -> Result<()> {
-    let mut cmd = Command::new(cryptsetup);
+    let mut cmd = runner.cmd(cryptsetup);
     cmd.arg("luksOpen").arg(loop_dev).arg(mapper_name).arg("-");
     run_with_stdin(&mut cmd, passphrase, "cryptsetup luksOpen").await
 }
 
-async fn cryptsetup_luks_close(cryptsetup: &Path, mapper_name: &str) -> Result<()> {
-    let mut cmd = Command::new(cryptsetup);
+async fn cryptsetup_luks_close(
+    runner: &PrivRunner,
+    cryptsetup: &Path,
+    mapper_name: &str,
+) -> Result<()> {
+    let mut cmd = runner.cmd(cryptsetup);
     cmd.arg("luksClose").arg(mapper_name);
     run_checked(&mut cmd, "cryptsetup luksClose").await
 }
 
-async fn copy_plain_image(plain: &Path, mapper_path: &str) -> Result<()> {
-    let mut cmd = Command::new("dd");
+async fn copy_plain_image(runner: &PrivRunner, plain: &Path, mapper_path: &str) -> Result<()> {
+    let mut cmd = runner.cmd(Path::new("dd"));
     cmd.arg(format!("if={}", plain.display()))
         .arg(format!("of={mapper_path}"))
         .arg("bs=4M")
@@ -266,8 +334,8 @@ async fn copy_plain_image(plain: &Path, mapper_path: &str) -> Result<()> {
 /// container. `e2fsck` exit codes 1 (errors corrected) and 2 (errors
 /// corrected, reboot advised) are expected and harmless on a freshly copied
 /// loop image; only 4+ (uncorrected errors or worse) is a real failure.
-async fn check_and_resize_filesystem(mapper_path: &str) -> Result<()> {
-    let mut fsck = Command::new("e2fsck");
+async fn check_and_resize_filesystem(runner: &PrivRunner, mapper_path: &str) -> Result<()> {
+    let mut fsck = runner.cmd(Path::new("e2fsck"));
     fsck.arg("-fp").arg(mapper_path);
     let output = fsck.output().await.context("failed to invoke e2fsck")?;
     let code = output.status.code().unwrap_or(-1);
@@ -278,7 +346,7 @@ async fn check_and_resize_filesystem(mapper_path: &str) -> Result<()> {
         );
     }
 
-    let mut resize = Command::new("resize2fs");
+    let mut resize = runner.cmd(Path::new("resize2fs"));
     resize.arg(mapper_path);
     run_checked(&mut resize, "resize2fs").await
 }
@@ -300,5 +368,23 @@ mod tests {
     #[test]
     fn plan_rejects_a_size_smaller_than_the_plain_image() {
         assert!(luks_plan(10 * 1024 * 1024 * 1024, Some(1024)).is_err());
+    }
+
+    #[test]
+    fn direct_mode_runs_the_program_itself() {
+        let runner = PrivRunner { sudo: None };
+        let cmd = runner.cmd(Path::new("/sbin/cryptsetup"));
+        assert_eq!(cmd.as_std().get_program(), "/sbin/cryptsetup");
+    }
+
+    #[test]
+    fn sudo_mode_prefixes_the_program_with_sudo() {
+        let runner = PrivRunner {
+            sudo: Some(PathBuf::from("/usr/bin/sudo")),
+        };
+        let cmd = runner.cmd(Path::new("/sbin/cryptsetup"));
+        assert_eq!(cmd.as_std().get_program(), "/usr/bin/sudo");
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(args, ["/sbin/cryptsetup"]);
     }
 }

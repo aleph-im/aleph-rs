@@ -2096,7 +2096,9 @@ pub struct InstanceCreateArgs {
     /// Encrypt the rootfs from a local plain ext4 image instead of --image.
     /// The image must contain an executable `/sbin/init` (run chrooted, in
     /// the foreground) and any SSH keys baked in, since the encrypted rootfs
-    /// is opaque to the CRN.
+    /// is opaque to the CRN. The encryption steps (losetup, cryptsetup)
+    /// need root; when not run as root they escalate individually via sudo,
+    /// keeping the keystore, signing, and upload under your own user.
     #[arg(long, conflicts_with = "image")]
     pub encrypt_rootfs: Option<PathBuf>,
 
