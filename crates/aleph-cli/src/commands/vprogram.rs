@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::file::select_default_engine;
 use super::instance::{InstanceRow, format_item_hash_short, format_node_short};
 use super::instance_target::{VmKind, pick_unique_match};
 use aleph_sdk::aggregate_models::vm_images::{
@@ -43,8 +44,8 @@ use url::Url;
 
 use crate::account::CliAccount;
 use crate::cli::{
-    ImageRef, PlatformRequirement, VProgramCallArgs, VProgramCommand, VProgramCreateArgs,
-    VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
+    ImageRef, PlatformRequirement, StorageEngineCli, VProgramCallArgs, VProgramCommand,
+    VProgramCreateArgs, VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
 };
 use crate::common::{
     confirm_action, render_upload_progress, resolve_account, resolve_address,
@@ -201,6 +202,7 @@ async fn handle_create(
             bail!("volume image not found: {}", path.display());
         }
     }
+    let volume_refs_by_path = index_volume_refs(&args.volume_refs, &args.volumes)?;
     let dry_run = args.signing.dry_run;
 
     // Resolve --crn up front so a typo or ambiguous fragment fails
@@ -393,13 +395,27 @@ async fn handle_create(
         owner.as_ref(),
         json,
         dry_run,
+        args.storage_engine,
+        None,
         &workload_verity,
     )
     .await?;
     let mut volume_refs = Vec::new();
     for v in &volume_verities {
-        volume_refs
-            .push(upload_pair(aleph_client, &account, owner.as_ref(), json, dry_run, v).await?);
+        let published = volume_refs_by_path.get(v.data.as_path()).copied();
+        volume_refs.push(
+            upload_pair(
+                aleph_client,
+                &account,
+                owner.as_ref(),
+                json,
+                dry_run,
+                args.storage_engine,
+                published,
+                v,
+            )
+            .await?,
+        );
     }
 
     // 5. Cmdline + measurements.
@@ -829,22 +845,143 @@ struct UploadedPair {
     tree_message: ItemHash,
 }
 
+///
+/// `published` names an existing STORE message for the data image, skipping
+/// its upload. The hash tree is always uploaded: `veritysetup format` picks a
+/// random salt per run, so its bytes are fresh every time and cannot have been
+/// published in advance.
+#[allow(clippy::too_many_arguments)]
 async fn upload_pair(
     client: &AlephClient,
     account: &CliAccount,
     owner: Option<&Address>,
     json: bool,
     dry_run: bool,
+    engine: Option<StorageEngineCli>,
+    published: Option<&ItemHash>,
     v: &VerityArtifact,
 ) -> Result<UploadedPair> {
+    let data_message = match published {
+        Some(store_ref) => {
+            verify_published_ref(client, &v.data, store_ref, json).await?;
+            store_ref.clone()
+        }
+        None => upload_file(client, account, owner, &v.data, json, dry_run, engine).await?,
+    };
     Ok(UploadedPair {
-        data_message: upload_file(client, account, owner, &v.data, json, dry_run).await?,
-        tree_message: upload_file(client, account, owner, &v.hash_tree, json, dry_run).await?,
+        data_message,
+        tree_message: upload_file(client, account, owner, &v.hash_tree, json, dry_run, engine)
+            .await?,
     })
 }
 
-/// Upload one file as a STORE message on the native storage engine (default
-/// payment) and return the STORE message item hash - which is what
+/// The engine one artifact is uploaded on: `--storage-engine` when given,
+/// otherwise size-selected exactly as `aleph file upload` does, since native
+/// storage rejects anything past its limit.
+async fn resolve_engine(path: &Path, override_: Option<StorageEngineCli>) -> Result<StorageEngine> {
+    match override_ {
+        Some(StorageEngineCli::Storage) => Ok(StorageEngine::Storage),
+        Some(StorageEngineCli::Ipfs) => Ok(StorageEngine::Ipfs),
+        None => {
+            let meta = tokio::fs::metadata(path)
+                .await
+                .with_context(|| format!("stat {}", path.display()))?;
+            Ok(select_default_engine(meta.len()))
+        }
+    }
+}
+
+/// Map each `--volume-ref` onto the `--volume` path it names.
+///
+/// A ref only says where an already-listed volume's bytes are; it never adds a
+/// volume, so a path that was not passed with `--volume` is a mistake worth
+/// reporting rather than silently ignoring. Repeating a path is fine: identical
+/// bytes hash identically, so one STORE message serves every slot using it.
+fn index_volume_refs<'a>(
+    refs: &'a [(PathBuf, ItemHash)],
+    volumes: &[PathBuf],
+) -> Result<BTreeMap<&'a Path, &'a ItemHash>> {
+    let mut by_path = BTreeMap::new();
+    for (path, hash) in refs {
+        if !volumes.contains(path) {
+            bail!(
+                "--volume-ref {} does not match any --volume path; add --volume {} \
+                 (a ref marks a listed volume as already published, it does not add one)",
+                path.display(),
+                path.display()
+            );
+        }
+        if let Some(previous) = by_path.insert(path.as_path(), hash)
+            && previous != hash
+        {
+            bail!(
+                "conflicting --volume-ref entries for {}: {previous} and {hash}",
+                path.display()
+            );
+        }
+    }
+    Ok(by_path)
+}
+
+/// Confirm that `path` holds exactly the bytes the STORE message `store_ref`
+/// publishes, so a ref can never point at content other than the one the
+/// launch measurement covers.
+///
+/// The referenced message's `item_type` selects the hasher: a `storage` ref is
+/// compared as a native SHA-256 hash and an `ipfs` ref as a CIDv0.
+async fn verify_published_ref(
+    client: &AlephClient,
+    path: &Path,
+    store_ref: &ItemHash,
+    json: bool,
+) -> Result<()> {
+    let message = match client
+        .get_message(store_ref)
+        .await
+        .with_context(|| format!("failed to fetch STORE message {store_ref}"))?
+    {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Removed { .. } => bail!("STORE message {store_ref} has been removed"),
+        MessageWithStatus::Pending { .. } => bail!(
+            "STORE message {store_ref} is still pending; try again once the network has processed it"
+        ),
+        MessageWithStatus::Forgotten { .. } => {
+            bail!("STORE message {store_ref} has been forgotten; its file is no longer served")
+        }
+        MessageWithStatus::Rejected { .. } => {
+            bail!("STORE message {store_ref} was rejected by the network")
+        }
+    };
+    let MessageContentEnum::Store(store) = &message.content.content else {
+        bail!(
+            "item {store_ref} is not a STORE message (got {:?})",
+            message.message_type
+        );
+    };
+
+    let published = store.file_hash();
+    if !json {
+        eprintln!("Verifying {} against {store_ref}...", path.display());
+    }
+    let hasher = match published {
+        ItemHash::Native(_) => Hasher::for_storage(),
+        ItemHash::Ipfs(_) => Hasher::for_ipfs(),
+    };
+    let local = hash_file(path, hasher).await?;
+    if local != published {
+        bail!(
+            "{} does not match STORE message {store_ref}: the message publishes {published}, \
+             the local file hashes to {local}. A ref must name the same bytes the launch \
+             measurement covers.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Upload one file as a STORE message (default payment) and return the STORE
+/// message item hash - which is what
 /// `VerifiedWorkload`/`VerifiedVolume`'s `ref` and `hash_tree` fields carry.
 ///
 /// Under `dry_run`, the network upload is skipped entirely: the file's own
@@ -857,11 +994,22 @@ async fn upload_file(
     path: &Path,
     json: bool,
     dry_run: bool,
+    engine: Option<StorageEngineCli>,
 ) -> Result<ItemHash> {
+    let engine = resolve_engine(path, engine).await?;
     if !json {
-        eprintln!("Hashing {}...", path.display());
+        // The engine decides where the artifact is served from at launch, so
+        // it is reported rather than silently chosen.
+        let name = match engine {
+            StorageEngine::Storage => "native storage",
+            StorageEngine::Ipfs => "ipfs",
+        };
+        eprintln!("Hashing {} ({name})...", path.display());
     }
-    let file_hash = hash_file(path, Hasher::for_storage()).await?;
+    let file_hash = match engine {
+        StorageEngine::Storage => hash_file(path, Hasher::for_storage()).await?,
+        StorageEngine::Ipfs => hash_file(path, Hasher::for_ipfs()).await?,
+    };
     if !json {
         eprintln!("  File hash: {file_hash}");
     }
@@ -872,8 +1020,7 @@ async fn upload_file(
 
     // V-Programs are credit-only; without an explicit payment type the store
     // defaults to hold on the CCN, which rejects token-less wallets with 402.
-    let mut builder =
-        StoreBuilder::new(account, file_hash, StorageEngine::Storage).payment(Payment::credits());
+    let mut builder = StoreBuilder::new(account, file_hash, engine).payment(Payment::credits());
     if let Some(owner) = owner {
         builder = builder.on_behalf_of(owner.clone());
     }
@@ -887,9 +1034,18 @@ async fn upload_file(
     } else {
         render_upload_progress
     };
-    let upload = client
-        .upload_file_to_storage_with_progress(path, Some(&pending), true, on_tick)
-        .await;
+    let upload = match engine {
+        StorageEngine::Storage => {
+            client
+                .upload_file_to_storage_with_progress(path, Some(&pending), true, on_tick)
+                .await
+        }
+        StorageEngine::Ipfs => {
+            client
+                .upload_file_to_ipfs_with_progress(path, Some(&pending), true, on_tick)
+                .await
+        }
+    };
     if !json {
         eprintln!();
     }
@@ -3447,5 +3603,293 @@ mod compose_wiring_tests {
     fn check_archives_do_not_cover_digest_images_accepts_tagged_keys() {
         let archives = BTreeMap::from([("nginx:1.27".to_string(), PathBuf::from("./a.tar"))]);
         check_archives_do_not_cover_digest_images(&archives).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod volume_ref_tests {
+    use super::*;
+    use aleph_sdk::verify::compute_cid;
+    use sha2::{Digest, Sha256};
+    use wiremock::matchers::{method, path as path_matcher};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn hash(s: &str) -> ItemHash {
+        s.parse().unwrap()
+    }
+
+    fn native_hash(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn a_ref_is_matched_to_its_volume_path() {
+        let refs = vec![(PathBuf::from("w.ext4"), hash(&"a".repeat(64)))];
+        let volumes = vec![PathBuf::from("data.ext4"), PathBuf::from("w.ext4")];
+
+        let by_path = index_volume_refs(&refs, &volumes).unwrap();
+        assert_eq!(by_path.get(Path::new("w.ext4")), Some(&&refs[0].1));
+        assert!(
+            !by_path.contains_key(Path::new("data.ext4")),
+            "an unreferenced volume is still uploaded"
+        );
+    }
+
+    #[test]
+    fn a_ref_naming_no_declared_volume_is_rejected() {
+        let refs = vec![(PathBuf::from("typo.ext4"), hash(&"a".repeat(64)))];
+        let volumes = vec![PathBuf::from("weights.ext4")];
+
+        let err = index_volume_refs(&refs, &volumes).unwrap_err();
+        assert!(
+            err.to_string().contains("typo.ext4"),
+            "a ref that adds no volume must be reported, not ignored: {err}"
+        );
+    }
+
+    #[test]
+    fn one_ref_covers_a_path_used_for_several_volumes() {
+        // Identical bytes hash identically, so one STORE message is correct
+        // for every slot using the path.
+        let refs = vec![(PathBuf::from("w.ext4"), hash(&"a".repeat(64)))];
+        let volumes = vec![PathBuf::from("w.ext4"), PathBuf::from("w.ext4")];
+
+        let by_path = index_volume_refs(&refs, &volumes).unwrap();
+        assert_eq!(by_path.get(Path::new("w.ext4")), Some(&&refs[0].1));
+    }
+
+    #[test]
+    fn conflicting_refs_for_one_path_are_rejected() {
+        let refs = vec![
+            (PathBuf::from("w.ext4"), hash(&"a".repeat(64))),
+            (PathBuf::from("w.ext4"), hash(&"b".repeat(64))),
+        ];
+        let volumes = vec![PathBuf::from("w.ext4")];
+
+        let err = index_volume_refs(&refs, &volumes).unwrap_err();
+        assert!(err.to_string().contains("conflicting"), "{err}");
+    }
+
+    #[test]
+    fn refs_do_not_change_volume_order() {
+        // Slot order comes from --volume alone, so a ref cannot permute it.
+        let volumes = vec![
+            PathBuf::from("a.ext4"),
+            PathBuf::from("b.ext4"),
+            PathBuf::from("c.ext4"),
+        ];
+        let refs = vec![(PathBuf::from("b.ext4"), hash(&"a".repeat(64)))];
+
+        let by_path = index_volume_refs(&refs, &volumes).unwrap();
+        let sources: Vec<bool> = volumes
+            .iter()
+            .map(|p| by_path.contains_key(p.as_path()))
+            .collect();
+        assert_eq!(sources, vec![false, true, false]);
+    }
+
+    // --- engine selection ---
+
+    #[tokio::test]
+    async fn a_volume_over_the_native_limit_goes_to_ipfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("weights.ext4");
+        let file = std::fs::File::create(&big).unwrap();
+        // Sparse: 100 MiB + 1 byte, the first size native storage rejects.
+        file.set_len(100 * 1024 * 1024 + 1).unwrap();
+
+        assert_eq!(
+            resolve_engine(&big, None).await.unwrap(),
+            StorageEngine::Ipfs
+        );
+    }
+
+    #[tokio::test]
+    async fn a_volume_at_the_native_limit_stays_on_native_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let at_limit = dir.path().join("weights.ext4");
+        let file = std::fs::File::create(&at_limit).unwrap();
+        file.set_len(100 * 1024 * 1024).unwrap();
+
+        assert_eq!(
+            resolve_engine(&at_limit, None).await.unwrap(),
+            StorageEngine::Storage
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_engine_wins_over_the_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.ext4");
+        std::fs::write(&small, b"tiny").unwrap();
+
+        assert_eq!(
+            resolve_engine(&small, Some(StorageEngineCli::Ipfs))
+                .await
+                .unwrap(),
+            StorageEngine::Ipfs
+        );
+        // Forced never stats, so it answers for a path that does not exist.
+        assert_eq!(
+            resolve_engine(Path::new("/nonexistent"), Some(StorageEngineCli::Storage))
+                .await
+                .unwrap(),
+            StorageEngine::Storage
+        );
+    }
+
+    // --- verification against the published STORE message ---
+
+    fn store_body(message_hash: &str, item_type: &str, item_hash: &str) -> String {
+        let content = serde_json::json!({
+            "address": "0x238224C744F4b90b4494516e074D2676ECfC6803",
+            "time": 1761047957.7483068_f64,
+            "item_type": item_type,
+            "item_hash": item_hash,
+        });
+        serde_json::json!({
+            "status": "processed",
+            "message": {
+                "sender": "0x238224C744F4b90b4494516e074D2676ECfC6803",
+                "chain": "ETH",
+                "signature": null,
+                "type": "STORE",
+                "item_type": "inline",
+                "item_content": serde_json::to_string(&content).unwrap(),
+                "item_hash": message_hash,
+                "time": 1761047957.74837_f64,
+                "channel": "TEST",
+                "content": content,
+                "confirmations": [],
+            }
+        })
+        .to_string()
+    }
+
+    async fn mock_store(message_hash: &str, item_type: &str, item_hash: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_matcher(format!("/api/v0/messages/{message_hash}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(store_body(message_hash, item_type, item_hash))
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn write(dir: &tempfile::TempDir, bytes: &[u8]) -> PathBuf {
+        let p = dir.path().join("weights.ext4");
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    fn client(server: &MockServer) -> AlephClient {
+        AlephClient::new(Url::parse(&server.uri()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn accepts_a_native_ref_publishing_the_local_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(&dir, b"weights");
+        let msg = "a".repeat(64);
+        let server = mock_store(&msg, "storage", &native_hash(b"weights")).await;
+
+        verify_published_ref(&client(&server), &file, &hash(&msg), true)
+            .await
+            .expect("matching bytes are accepted");
+    }
+
+    #[tokio::test]
+    async fn accepts_an_ipfs_ref_using_the_cid_hasher() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(&dir, b"weights");
+        let msg = "b".repeat(64);
+        // A native SHA-256 comparison would reject these bytes; only the CIDv0
+        // hasher the `ipfs` item_type selects can match.
+        let server = mock_store(&msg, "ipfs", &compute_cid(b"weights").to_string()).await;
+
+        verify_published_ref(&client(&server), &file, &hash(&msg), true)
+            .await
+            .expect("matching bytes are accepted");
+    }
+
+    #[tokio::test]
+    async fn rejects_a_ref_publishing_other_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(&dir, b"local bytes");
+        let msg = "c".repeat(64);
+        let server = mock_store(&msg, "storage", &native_hash(b"published bytes")).await;
+
+        let err = verify_published_ref(&client(&server), &file, &hash(&msg), true)
+            .await
+            .expect_err("a ref naming other bytes must not be publishable");
+        assert!(
+            err.to_string().contains(&native_hash(b"published bytes")),
+            "error should name the published hash: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_hasher_follows_the_messages_item_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(&dir, b"weights");
+        let msg = "d".repeat(64);
+        // Declares `ipfs`, so the CID hasher is used; the native hash of the
+        // same bytes must not satisfy it.
+        let server = mock_store(&msg, "ipfs", &native_hash(b"weights")).await;
+
+        assert!(
+            verify_published_ref(&client(&server), &file, &hash(&msg), true)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_a_ref_that_is_not_a_store_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(&dir, b"weights");
+        let msg = "e".repeat(64);
+        let server = MockServer::start().await;
+        let content = serde_json::json!({
+            "address": "0x238224C744F4b90b4494516e074D2676ECfC6803",
+            "time": 1761047957.7483068_f64,
+            "type": "test",
+            "content": {},
+        });
+        let body = serde_json::json!({
+            "status": "processed",
+            "message": {
+                "sender": "0x238224C744F4b90b4494516e074D2676ECfC6803",
+                "chain": "ETH",
+                "signature": null,
+                "type": "POST",
+                "item_type": "inline",
+                "item_content": serde_json::to_string(&content).unwrap(),
+                "item_hash": msg,
+                "time": 1761047957.74837_f64,
+                "channel": "TEST",
+                "content": content,
+                "confirmations": [],
+            }
+        })
+        .to_string();
+        Mock::given(method("GET"))
+            .and(path_matcher(format!("/api/v0/messages/{msg}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = verify_published_ref(&client(&server), &file, &hash(&msg), true)
+            .await
+            .expect_err("a non-STORE ref must be refused");
+        assert!(err.to_string().contains("not a STORE"), "{err}");
     }
 }

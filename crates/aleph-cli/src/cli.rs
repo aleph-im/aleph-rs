@@ -3240,6 +3240,24 @@ pub struct VProgramDeleteArgs {
 }
 
 #[cfg(feature = "vprogram")]
+/// Parse a `--volume-ref` value: `PATH=ITEM_HASH`.
+///
+/// Split on the last `=` so paths containing one stay usable; an item hash
+/// never contains `=`.
+fn parse_volume_ref(s: &str) -> Result<(PathBuf, ItemHash), String> {
+    let (path, hash) = s
+        .rsplit_once('=')
+        .ok_or_else(|| format!("expected PATH=ITEM_HASH, got '{s}'"))?;
+    if path.is_empty() {
+        return Err(format!("missing path before '=' in '{s}'"));
+    }
+    let item_hash = hash
+        .parse::<ItemHash>()
+        .map_err(|e| format!("invalid item hash '{hash}': {e}"))?;
+    Ok((PathBuf::from(path), item_hash))
+}
+
+#[cfg(feature = "vprogram")]
 #[derive(Debug, Args)]
 pub struct VProgramCreateArgs {
     /// V-Program name (stored as metadata.name, shown by `aleph vprogram list`).
@@ -3283,6 +3301,21 @@ pub struct VProgramCreateArgs {
     /// `volumes: ["/volumes/<index>:<target>:ro"]`.
     #[arg(long = "volume")]
     pub volumes: Vec<PathBuf>,
+
+    /// Skip the upload for a `--volume` image that is already published, as
+    /// PATH=ITEM_HASH where ITEM_HASH is its STORE message. PATH must also be
+    /// listed with --volume: this flag only says where the bytes already are,
+    /// it does not add a volume. The local file is still required and still
+    /// dm-verity-hashed (its root hash is measured), and its content hash
+    /// must match the referenced message or create refuses. Repeatable.
+    #[arg(long = "volume-ref", value_name = "PATH=ITEM_HASH", value_parser = parse_volume_ref)]
+    pub volume_refs: Vec<(PathBuf, ItemHash)>,
+
+    /// Storage engine for the artifacts this command uploads. When unset,
+    /// each artifact uses `storage` up to 100 MiB and `ipfs` above that,
+    /// matching `aleph file upload`.
+    #[arg(long, value_enum)]
+    pub storage_engine: Option<StorageEngineCli>,
 
     /// Number of virtual CPUs.
     #[arg(long, default_value_t = 1)]

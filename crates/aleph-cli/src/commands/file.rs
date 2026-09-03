@@ -33,7 +33,7 @@ const MAX_NATIVE_STORAGE_SIZE: u64 = 100 * 1024 * 1024;
 
 /// Pick the storage engine for a single-file upload when the user did not pass
 /// `--storage-engine`: native storage up to the CCN limit, IPFS beyond it.
-fn select_default_engine(size: u64) -> StorageEngine {
+pub(crate) fn select_default_engine(size: u64) -> StorageEngine {
     if size > MAX_NATIVE_STORAGE_SIZE {
         StorageEngine::Ipfs
     } else {
