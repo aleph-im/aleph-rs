@@ -3270,8 +3270,6 @@ pub struct VProgramDeleteArgs {
     pub signing: SigningArgs,
 }
 
-/// Flags that shape the workload and runtime, shared by `vprogram create`
-/// (which publishes the result) and `vprogram run` (which boots it locally).
 #[cfg(feature = "vprogram")]
 /// Parse a `--volume-ref` value: `PATH=ITEM_HASH`.
 ///
@@ -3290,6 +3288,8 @@ fn parse_volume_ref(s: &str) -> Result<(PathBuf, ItemHash), String> {
     Ok((PathBuf::from(path), item_hash))
 }
 
+/// Flags that shape the workload and runtime, shared by `vprogram create`
+/// (which publishes the result) and `vprogram run` (which boots it locally).
 #[cfg(feature = "vprogram")]
 #[derive(Debug, Args)]
 pub struct VProgramBuildArgs {

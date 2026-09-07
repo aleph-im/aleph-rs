@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use aleph_sdk::client::AlephClient;
 use aleph_sdk::vprogram::bundle::BundleArtifacts;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -156,7 +156,7 @@ impl LineScanner {
             .zip(self.seen.iter())
             .find(|&(_, &seen)| !seen)
             .map(|(m, _)| *m)
-            .unwrap_or("");
+            .expect("an incomplete scan has a marker it has not seen");
         format!("guest never printed {missing:?} within {timeout_secs}s")
     }
 
@@ -229,13 +229,48 @@ pub async fn handle_run(
                 vm.shutdown().await?;
                 return Ok(());
             }
-            // Interactive: run until Ctrl-C (SIGINT reaches QEMU too) or the
-            // guest powers off. A guest that powers off on its own means the
-            // workload exited, which production treats as a failure.
-            let status = vm.wait().await?;
-            bail!("the VM powered off (workload exited; qemu {status})")
+            run_until_stopped(vm, json).await
         }
     }
+}
+
+/// Interactive tail of a run: block until Ctrl-C or until the guest powers
+/// off. A terminal Ctrl-C reaches QEMU as well (same process group) and QEMU
+/// exits 0 on it, exactly as it does when the guest powers itself off, so the
+/// exit status cannot tell the two apart: listen for Ctrl-C here and let it
+/// win the race. A guest that powers off on its own means the workload
+/// exited, which production treats as a failure.
+async fn run_until_stopped(mut vm: QemuProcess, json: bool) -> Result<()> {
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let status = tokio::select! {
+        biased;
+        res = &mut ctrl_c => {
+            res.context("installing the Ctrl-C handler")?;
+            None
+        }
+        status = vm.wait() => Some(status?),
+    };
+    let Some(status) = status else {
+        return stop_on_ctrl_c(vm, json).await;
+    };
+    // QEMU can die from the same Ctrl-C a beat before our handler is woken:
+    // give the signal a moment to land before blaming the workload.
+    if tokio::time::timeout(Duration::from_millis(200), &mut ctrl_c)
+        .await
+        .is_ok()
+    {
+        return stop_on_ctrl_c(vm, json).await;
+    }
+    bail!("the VM powered off (workload exited; qemu {status})")
+}
+
+async fn stop_on_ctrl_c(vm: QemuProcess, json: bool) -> Result<()> {
+    if !json {
+        eprintln!("stopping (Ctrl-C)");
+    }
+    vm.shutdown().await.context("stopping qemu")?;
+    Ok(())
 }
 
 /// The QEMU invocation for this build: the bundle's kernel/initrd, the
