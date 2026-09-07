@@ -1,7 +1,7 @@
 //! `aleph vprogram run`: boot a V-PROGRAM locally in plain QEMU.
 //!
 //! The guest side of this contract lives in aleph-vm `nix/init-common.sh`
-//! (`start_attest_agent`): with the `aleph_local=1` cmdline token the
+//! (`start_attest_agent`): with the `aleph_insecure_unattested=1` cmdline token the
 //! attest agent serves plain HTTP on its usual port, so a SLIRP port
 //! forward to that port reaches the workload through the same proxy path
 //! production uses.
@@ -23,7 +23,7 @@ use crate::cli::VProgramRunArgs;
 use crate::qemu::{Accel, LocalBootSpec, Qemu, QemuProcess};
 
 /// Printed before the boot so nobody mistakes a local run for a deployment.
-const HONESTY_LINE: &str = "local mode: no SEV-SNP, SeaBIOS instead of the bundle OVMF, -cpu max, \
+const HONESTY_LINE: &str = "unattested mode: no SEV-SNP, SeaBIOS instead of the bundle OVMF, -cpu max, \
     user networking, plain HTTP; the launch measurement is not validated";
 /// How often the forwarded port is probed once the init markers are all in.
 const PROBE_INTERVAL: Duration = Duration::from_millis(500);
@@ -34,40 +34,40 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// the exec and compose flavors, so completion is "all seen", not a sequence.
 const MARKER_VERITY_ROOT: &str = "init: mounting /dev/mapper/verity-root";
 const MARKER_VERITY_WORKLOAD: &str = "init: mounting /dev/mapper/verity-workload";
-const MARKER_LOCAL_MODE: &str = "init: LOCAL MODE:";
+const MARKER_UNATTESTED: &str = "init: INSECURE UNATTESTED MODE:";
 const MARKER_INIT_START: &str = "init: starting /sbin/init";
 const MARKERS: [&str; 4] = [
     MARKER_VERITY_ROOT,
     MARKER_VERITY_WORKLOAD,
-    MARKER_LOCAL_MODE,
+    MARKER_UNATTESTED,
     MARKER_INIT_START,
 ];
 /// Indices into [`MARKERS`], i.e. into `LineScanner::seen`. A unit test pins
 /// each to its marker so reordering `MARKERS` cannot silently point the
-/// local-mode diagnosis at another marker.
-const IDX_LOCAL_MODE: usize = 2;
+/// unattested-mode diagnosis at another marker.
+const IDX_UNATTESTED: usize = 2;
 const IDX_INIT_START: usize = 3;
-/// Seen when the firewall is up: with this but no LOCAL MODE line the
-/// runtime predates local mode (its init ignores the token).
+/// Seen when the firewall is up: with this but no UNATTESTED MODE line the
+/// runtime predates unattested mode (its init ignores the token).
 const MARKER_FIREWALL: &str = "init: firewall active";
 const FATAL_PREFIX: &str = "init: FATAL:";
 const TAIL_LINES: usize = 40;
 /// How many further serial lines after [`MARKER_INIT_START`] are allowed to go
-/// by before a missing LOCAL MODE line is called conclusive. Both inits print
+/// by before a missing UNATTESTED MODE line is called conclusive. Both inits print
 /// it either before the /sbin/init line or immediately after it, so a handful
 /// of lines of slack is enough while leaving room for interleaved kernel
 /// output.
-const LOCAL_MODE_GRACE_LINES: usize = 5;
+const UNATTESTED_GRACE_LINES: usize = 5;
 
 pub(crate) enum ScanEvent {
     /// A fail-closed line from init; the VM is powering off.
     Fatal(String),
     /// Every marker has been seen; start probing the forwarded port.
     Complete,
-    /// The init got far enough that it would have announced local mode, and
-    /// did not: this runtime predates the `aleph_local` token. Reported at
+    /// The init got far enough that it would have announced unattested mode, and
+    /// did not: this runtime predates the `aleph_insecure_unattested` token. Reported at
     /// once instead of after the full timeout.
-    NoLocalMode,
+    NoUnattestedMode,
     Continue,
 }
 
@@ -76,8 +76,8 @@ pub(crate) struct LineScanner {
     saw_firewall: bool,
     /// Lines fed since [`MARKER_INIT_START`] was seen, `None` until then.
     since_init_start: Option<usize>,
-    /// [`ScanEvent::NoLocalMode`] is emitted once, not on every later line.
-    reported_no_local_mode: bool,
+    /// [`ScanEvent::NoUnattestedMode`] is emitted once, not on every later line.
+    reported_no_unattested_mode: bool,
     tail: VecDeque<String>,
 }
 
@@ -87,7 +87,7 @@ impl LineScanner {
             seen: [false; 4],
             saw_firewall: false,
             since_init_start: None,
-            reported_no_local_mode: false,
+            reported_no_unattested_mode: false,
             tail: VecDeque::with_capacity(TAIL_LINES),
         }
     }
@@ -118,15 +118,15 @@ impl LineScanner {
             None if self.seen[IDX_INIT_START] => Some(0),
             None => None,
         };
-        if !self.reported_no_local_mode
-            && !self.seen[IDX_LOCAL_MODE]
+        if !self.reported_no_unattested_mode
+            && !self.seen[IDX_UNATTESTED]
             && self.saw_firewall
             && self
                 .since_init_start
-                .is_some_and(|n| n >= LOCAL_MODE_GRACE_LINES)
+                .is_some_and(|n| n >= UNATTESTED_GRACE_LINES)
         {
-            self.reported_no_local_mode = true;
-            return ScanEvent::NoLocalMode;
+            self.reported_no_unattested_mode = true;
+            return ScanEvent::NoUnattestedMode;
         }
         ScanEvent::Continue
     }
@@ -145,10 +145,10 @@ impl LineScanner {
         if self.complete() {
             return format!("agent did not answer on tcp/{guest_port} within {timeout_secs}s");
         }
-        if self.saw_firewall && !self.seen[IDX_LOCAL_MODE] {
+        if self.saw_firewall && !self.seen[IDX_UNATTESTED] {
             return format!(
-                "runtime {runtime} predates local mode (no aleph_local support in its init); \
-                 rebuild it from aleph-vm dev-2.1 or newer"
+                "runtime {runtime} predates unattested mode (no aleph_insecure_unattested support in \
+                 its init); rebuild it from an aleph-vm that includes PR #1188"
             );
         }
         let missing = MARKERS
@@ -345,7 +345,7 @@ async fn wait_until_ready(
                         ScanEvent::Complete => probing = true,
                         // The init is past the point where it would have said
                         // so: give the diagnosis the deadline would have, now.
-                        ScanEvent::NoLocalMode => bail!(
+                        ScanEvent::NoUnattestedMode => bail!(
                             "{}\n--- last serial lines ---\n{}",
                             scanner.timeout_diagnosis(runtime_label, ATTEST_PORT, timeout_secs),
                             scanner.tail().join("\n")
@@ -394,28 +394,28 @@ mod tests {
 
     const ROOT: &str = "init: mounting /dev/mapper/verity-root";
     const WORKLOAD: &str = "init: mounting /dev/mapper/verity-workload";
-    const LOCAL: &str =
-        "init: LOCAL MODE: attest agent serving plain HTTP without a TEE; tcp/8443 is unattested";
+    const UNATTESTED: &str =
+        "init: INSECURE UNATTESTED MODE: attest agent serving plain HTTP without a TEE on tcp/8443";
     const START: &str = "init: starting /sbin/init from /mnt/workload";
     const FIREWALL: &str =
         "init: firewall active (drop inbound except tcp/8443, loopback, and ND/PMTU icmpv6)";
 
     #[test]
     fn marker_indices_point_at_their_markers() {
-        assert_eq!(MARKERS[IDX_LOCAL_MODE], MARKER_LOCAL_MODE);
+        assert_eq!(MARKERS[IDX_UNATTESTED], MARKER_UNATTESTED);
         assert_eq!(MARKERS[IDX_INIT_START], MARKER_INIT_START);
     }
 
     #[test]
     fn markers_complete_in_any_order() {
-        // init.sh prints LOCAL MODE before the /sbin/init line, init-compose.sh
+        // init.sh prints UNATTESTED MODE before the /sbin/init line, init-compose.sh
         // after it; the scanner must not care.
         let mut s = LineScanner::new();
         assert!(matches!(s.feed(ROOT), ScanEvent::Continue));
         assert!(matches!(s.feed(WORKLOAD), ScanEvent::Continue));
         assert!(matches!(s.feed(START), ScanEvent::Continue));
         assert!(!s.complete());
-        assert!(matches!(s.feed(LOCAL), ScanEvent::Complete));
+        assert!(matches!(s.feed(UNATTESTED), ScanEvent::Complete));
         assert!(s.complete());
     }
 
@@ -433,49 +433,49 @@ mod tests {
     }
 
     #[test]
-    fn timeout_without_local_mode_blames_the_runtime_age() {
+    fn timeout_without_unattested_mode_blames_the_runtime_age() {
         let mut s = LineScanner::new();
         s.feed(ROOT);
         s.feed(WORKLOAD);
         s.feed(FIREWALL);
         s.feed(START);
         let msg = s.timeout_diagnosis("aleph-snp-attest 2026.07.08", 8443, 180);
-        assert!(msg.contains("predates local mode"), "{msg}");
+        assert!(msg.contains("predates unattested mode"), "{msg}");
         assert!(msg.contains("aleph-snp-attest 2026.07.08"), "{msg}");
     }
 
     /// The init printed the firewall line and started /sbin/init without ever
-    /// announcing local mode: it never will, so say so now instead of sitting
+    /// announcing unattested mode: it never will, so say so now instead of sitting
     /// out the whole timeout.
     #[test]
-    fn a_missing_local_mode_line_is_called_once_the_init_has_moved_on() {
+    fn a_missing_unattested_mode_line_is_called_once_the_init_has_moved_on() {
         let mut s = LineScanner::new();
         s.feed(ROOT);
         s.feed(WORKLOAD);
         s.feed(FIREWALL);
         assert!(matches!(s.feed(START), ScanEvent::Continue));
-        for i in 0..(LOCAL_MODE_GRACE_LINES - 1) {
+        for i in 0..(UNATTESTED_GRACE_LINES - 1) {
             assert!(matches!(s.feed(&format!("noise {i}")), ScanEvent::Continue));
         }
         assert!(matches!(
             s.feed("one line too many"),
-            ScanEvent::NoLocalMode
+            ScanEvent::NoUnattestedMode
         ));
         // Reported once, not again on every later line.
         assert!(matches!(s.feed("more noise"), ScanEvent::Continue));
     }
 
     #[test]
-    fn a_local_mode_line_inside_the_grace_window_suppresses_the_verdict() {
+    fn an_unattested_mode_line_inside_the_grace_window_suppresses_the_verdict() {
         let mut s = LineScanner::new();
         s.feed(ROOT);
         s.feed(WORKLOAD);
         s.feed(FIREWALL);
         s.feed(START);
         s.feed("noise 0");
-        // init-compose.sh prints LOCAL MODE just after the /sbin/init line.
-        assert!(matches!(s.feed(LOCAL), ScanEvent::Complete));
-        for i in 0..(LOCAL_MODE_GRACE_LINES + 5) {
+        // init-compose.sh prints UNATTESTED MODE just after the /sbin/init line.
+        assert!(matches!(s.feed(UNATTESTED), ScanEvent::Complete));
+        for i in 0..(UNATTESTED_GRACE_LINES + 5) {
             assert!(matches!(s.feed(&format!("noise {i}")), ScanEvent::Continue));
         }
     }

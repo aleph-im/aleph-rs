@@ -15,7 +15,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use aleph_sdk::vprogram::manifest::LOCAL_MODE_TOKEN;
+use aleph_sdk::vprogram::manifest::UNATTESTED_TOKEN;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -125,7 +125,7 @@ impl LocalBootSpec {
         argv.push("-initrd".into());
         argv.push(self.initrd.clone().into_os_string());
         argv.push("-append".into());
-        argv.push(format!("{} {LOCAL_MODE_TOKEN}", self.cmdline).into());
+        argv.push(format!("{} {UNATTESTED_TOKEN}", self.cmdline).into());
         for disk in &self.disks {
             argv.push("-drive".into());
             argv.push(
@@ -257,7 +257,7 @@ mod tests {
                 "-initrd",
                 "/c/initrd",
                 "-append",
-                "console=ttyS0 root=/dev/mapper/verity-root ro roothash=aa workload_roothash=bb aleph_local=1",
+                "console=ttyS0 root=/dev/mapper/verity-root ro roothash=aa workload_roothash=bb aleph_insecure_unattested=1",
                 "-drive",
                 "file=/c/platform_rootfs,format=raw,if=virtio,readonly=on",
                 "-drive",

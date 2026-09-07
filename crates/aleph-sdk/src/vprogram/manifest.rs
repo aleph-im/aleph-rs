@@ -27,7 +27,7 @@ pub enum ManifestError {
     #[error("bundle.size is {0}; must be between 1 and {MAX_BUNDLE_SIZE} bytes")]
     BadBundleSize(u64),
     #[error(
-        "boot.cmdline_template carries the reserved local-mode token {0:?}; only `aleph vprogram run` may append it"
+        "boot.cmdline_template carries the reserved unattested-mode token {0:?}; only `aleph vprogram run` may append it"
     )]
     ReservedCmdlineToken(String),
 }
@@ -39,20 +39,22 @@ pub enum ManifestError {
 /// `fetch_bundle_artifacts` into a multi-gigabyte allocation.
 pub const MAX_BUNDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Kernel cmdline token that switches the guest init into local
-/// (non-confidential) test mode. Appended by `aleph vprogram run` after the
+/// Kernel cmdline token that switches the guest init into unattested
+/// (non-confidential) test mode: the attest agent serves plain HTTP with no
+/// TEE and no attested identity, so nothing about the guest is verifiable
+/// from outside. dm-verity is unaffected. Appended by `aleph vprogram run` after the
 /// template is materialized; never part of a template.
-pub const LOCAL_MODE_TOKEN: &str = "aleph_local=1";
+pub const UNATTESTED_TOKEN: &str = "aleph_insecure_unattested=1";
 
 /// The reserved token's key: any cmdline token equal to it or starting with
 /// `<key>=` is rejected in templates.
-const LOCAL_MODE_TOKEN_KEY: &str = "aleph_local";
+const UNATTESTED_TOKEN_KEY: &str = "aleph_insecure_unattested";
 
 fn reserved_cmdline_token(template: &str) -> Option<&str> {
     template.split_whitespace().find(|token| {
-        *token == LOCAL_MODE_TOKEN_KEY
+        *token == UNATTESTED_TOKEN_KEY
             || token
-                .strip_prefix(LOCAL_MODE_TOKEN_KEY)
+                .strip_prefix(UNATTESTED_TOKEN_KEY)
                 .is_some_and(|rest| rest.starts_with('='))
     })
 }
@@ -175,7 +177,7 @@ impl RuntimeManifest {
         if !is_lowercase_hex_64(&manifest.boot.platform_roothash) {
             return Err(ManifestError::BadPlatformRoothash);
         }
-        // Defense in depth for local mode: the token flips the guest into an
+        // Defense in depth for unattested mode: the token flips the guest into an
         // unattested plain-HTTP mode, so no template may carry it. Only the
         // local runner appends it, after materialization.
         if let Some(token) = reserved_cmdline_token(&manifest.boot.cmdline_template) {
@@ -333,12 +335,12 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn template_with_the_local_mode_token_is_rejected() {
+    fn template_with_the_unattested_token_is_rejected() {
         for template in [
-            "console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash} aleph_local=1",
-            "aleph_local=1 console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash}",
-            "console=ttyS0 aleph_local roothash={platform_roothash} workload_roothash={workload_roothash}",
-            "console=ttyS0 aleph_local=0 roothash={platform_roothash} workload_roothash={workload_roothash}",
+            "console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash} aleph_insecure_unattested=1",
+            "aleph_insecure_unattested=1 console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash}",
+            "console=ttyS0 aleph_insecure_unattested roothash={platform_roothash} workload_roothash={workload_roothash}",
+            "console=ttyS0 aleph_insecure_unattested=0 roothash={platform_roothash} workload_roothash={workload_roothash}",
         ] {
             let err = RuntimeManifest::parse(&manifest_with_template(template)).unwrap_err();
             assert!(
@@ -350,7 +352,7 @@ pub(crate) mod test {
 
     #[test]
     fn template_with_a_similar_but_different_token_is_accepted() {
-        let template = "console=ttyS0 aleph_local_x=1 roothash={platform_roothash} workload_roothash={workload_roothash}";
+        let template = "console=ttyS0 aleph_insecure_unattested_x=1 roothash={platform_roothash} workload_roothash={workload_roothash}";
         RuntimeManifest::parse(&manifest_with_template(template)).unwrap();
     }
 

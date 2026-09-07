@@ -3138,7 +3138,7 @@ Boot a V-PROGRAM locally in plain QEMU (no SEV-SNP) before publishing it.
 Builds the workload exactly like `create` (compose or prebuilt ext4, dm-verity
 hash trees, the runtime manifest's measured cmdline), then boots the runtime
 bundle's kernel, initrd, platform rootfs and the workload in QEMU with the
-`aleph_local=1` cmdline token. In that mode the guest's attest agent serves
+`aleph_insecure_unattested=1` cmdline token. In that mode the guest's attest agent serves
 plain HTTP on its usual port and proxies to the workload as in production, so
 the forwarded port on 127.0.0.1 answers what the attested endpoint would.
 
@@ -3152,8 +3152,8 @@ What it does NOT prove: the SEV-SNP launch measurement, the firmware
 attestation, or the production tap network. Nothing is uploaded or signed.
 
 Needs qemu-system-x86_64 on PATH and, for a usable boot time, /dev/kvm. The
-runtime must be built from aleph-vm dev-2.1 or newer (older runtimes ignore
-the token and never expose a port).
+runtime must be built from an aleph-vm that includes unattested mode (PR
+#1188 or newer; older runtimes ignore the token and never expose a port).
 
 Examples:
   aleph vprogram run --compose docker-compose.yml
