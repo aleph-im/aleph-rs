@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn timeout_after_all_markers_blames_the_agent() {
         let mut s = LineScanner::new();
-        for l in [ROOT, WORKLOAD, LOCAL, START] {
+        for l in [ROOT, WORKLOAD, UNATTESTED, START] {
             s.feed(l);
         }
         let msg = s.timeout_diagnosis("x", 8443, 180);
