@@ -1,6 +1,6 @@
 //! Real boot of a V-PROGRAM under plain QEMU through `aleph vprogram run
 //! --check`. Local tool, not a CI gate: needs qemu-system-x86_64, KVM for a
-//! sane boot time, a runtime built from aleph-vm dev-2.1 or newer, and a
+//! sane boot time, a runtime built from an aleph-vm that includes PR #1188, and a
 //! workload. Skipped unless every variable below is set:
 //!
 //!   ALEPH_VPROGRAM_E2E=1
@@ -50,7 +50,10 @@ fn run_check_boots_and_reaches_the_plain_agent() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
-    assert!(stderr.contains("init: LOCAL MODE:"), "{stderr}");
+    assert!(
+        stderr.contains("init: INSECURE UNATTESTED MODE:"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains(&format!("workload reachable at http://127.0.0.1:{port}")),
         "{stderr}"
