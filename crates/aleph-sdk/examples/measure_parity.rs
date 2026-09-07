@@ -12,6 +12,10 @@ fn main() {
         ovmf: dir.join("OVMF.fd"),
         kernel: dir.join("bzImage"),
         initrd: dir.join("initrd"),
+        // Unused by compute_measurements: this example only needs the
+        // launch-measurement members.
+        platform_rootfs: dir.join("rootfs.ext4"),
+        platform_hash_tree: dir.join("rootfs.ext4.verity"),
     };
     let m = aleph_sdk::vprogram::measure::compute_measurements(
         &artifacts,
