@@ -234,7 +234,7 @@ pub(crate) fn measurement_is_expected(
 /// Resolve the instance's message, verify it declares `sev_snp`, discover
 /// its attested endpoint, and run a fresh-nonce RA-TLS challenge against the
 /// pinned measurement, guest policy, and TCB floor. Never sends a secret:
-/// `instance unlock` (Task 12) builds the owner-authenticated injection on
+/// `instance unlock` builds the owner-authenticated injection on
 /// top of the returned [`AttestOutcome`].
 ///
 /// `--crn` is honored the same way `instance ssh` honors it (via

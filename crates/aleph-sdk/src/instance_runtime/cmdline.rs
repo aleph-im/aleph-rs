@@ -56,18 +56,15 @@ pub fn instantiate_instance_cmdline(
     // Replace the {owner} placeholder
     let out = template.replace("{owner}", &normalized_owner);
 
-    // Check for any remaining placeholders
+    // Check for any remaining placeholders: report the brace-to-brace span,
+    // or everything after an unmatched `{`.
     if let Some(start) = out.find('{') {
-        if let Some(relative_end) = out[start..].find('}') {
-            let end = start + relative_end;
-            return Err(InstanceCmdlineError::UnresolvedPlaceholder(
-                out[start + 1..end].to_string(),
-            ));
-        } else {
-            return Err(InstanceCmdlineError::UnresolvedPlaceholder(
-                out[start + 1..].to_string(),
-            ));
-        }
+        let end = out[start..]
+            .find('}')
+            .map_or(out.len(), |relative_end| start + relative_end);
+        return Err(InstanceCmdlineError::UnresolvedPlaceholder(
+            out[start + 1..end].to_string(),
+        ));
     }
 
     Ok(out)

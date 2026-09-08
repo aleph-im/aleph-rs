@@ -341,9 +341,10 @@ async fn copy_plain_image(runner: &PrivRunner, plain: &Path, mapper_path: &str) 
 }
 
 /// `e2fsck -fp` the mapped block device, then `resize2fs` it to fill the
-/// container. `e2fsck` exit codes 1 (errors corrected) and 2 (errors
-/// corrected, reboot advised) are expected and harmless on a freshly copied
-/// loop image; only 4+ (uncorrected errors or worse) is a real failure.
+/// container. `e2fsck`'s exit status is a bit mask: 1 (errors corrected)
+/// and 2 (errors corrected, reboot advised) are expected and harmless on a
+/// freshly copied loop image, and 3 is both at once; anything with bit 4 or
+/// higher set (uncorrected errors or worse) is a real failure.
 async fn check_and_resize_filesystem(runner: &PrivRunner, mapper_path: &str) -> Result<()> {
     let mut fsck = runner.cmd(Path::new("e2fsck"));
     fsck.arg("-fp").arg(mapper_path);
