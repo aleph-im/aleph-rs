@@ -664,11 +664,14 @@ pub(crate) fn check_unlock_account(
 /// last line of defense: a missing prefix would silently mismatch the
 /// agent's own EIP-191 recovery.
 fn ensure_0x_prefixed(hex: &str) -> String {
-    if hex.starts_with("0x") || hex.starts_with("0X") {
-        hex.to_string()
-    } else {
-        format!("0x{hex}")
-    }
+    // The agent strips "0x" case-sensitively, so an uppercase "0X" (which no
+    // current signer emits) is folded to the spelling it accepts rather
+    // than passed through to a confusing signature-mismatch rejection.
+    let digits = hex
+        .strip_prefix("0x")
+        .or_else(|| hex.strip_prefix("0X"))
+        .unwrap_or(hex);
+    format!("0x{digits}")
 }
 
 /// Print the `instance unlock` result: the injected secret names, which
@@ -1236,8 +1239,10 @@ mod tests {
     }
 
     #[test]
-    fn ensure_0x_prefixed_adds_missing_prefix_only() {
+    fn ensure_0x_prefixed_adds_missing_prefix_and_folds_uppercase() {
         assert_eq!(ensure_0x_prefixed("abcd"), "0xabcd");
         assert_eq!(ensure_0x_prefixed("0xabcd"), "0xabcd");
+        // The agent's strip_prefix("0x") would reject "0X..." outright.
+        assert_eq!(ensure_0x_prefixed("0Xabcd"), "0xabcd");
     }
 }
