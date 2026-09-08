@@ -271,10 +271,18 @@ async fn run_with_stdin(cmd: &mut Command, stdin_data: &str, description: &str) 
             .stdin
             .take()
             .expect("stdin was configured as piped above");
-        stdin
-            .write_all(stdin_data.as_bytes())
-            .await
-            .with_context(|| format!("failed to write to {description} stdin"))?;
+        // A child that exits before draining its stdin (busy device, a
+        // mapper name already in use) closes the pipe, and this write then
+        // fails with EPIPE (Rust ignores SIGPIPE). That failure is only a
+        // symptom: fall through to the wait below so the error names the
+        // child's exit code and stderr instead of "failed to write stdin".
+        match stdin.write_all(stdin_data.as_bytes()).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to write to {description} stdin"));
+            }
+        }
         // `stdin` drops here, closing the pipe so the child sees EOF instead
         // of blocking for more input.
     }
@@ -423,6 +431,22 @@ mod tests {
             err.to_string().contains("--disk-size"),
             "expected a disk-size rejection, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_child_that_exits_without_reading_stdin_reports_its_own_error() {
+        // The child never reads stdin and exits 3 with a message; whether
+        // the passphrase write hits EPIPE or lands in the pipe buffer first
+        // is a race, and the reported error must be the child's either way.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo 'Device already exists' >&2; exit 3"]);
+        let err = run_with_stdin(&mut cmd, "cryptsetup luksOpen", "hunter2")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exit code 3"), "got: {err}");
+        assert!(err.contains("Device already exists"), "got: {err}");
+        assert!(!err.contains("stdin"), "got: {err}");
     }
 
     #[test]
