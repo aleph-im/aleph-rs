@@ -178,15 +178,25 @@ async fn fill_luks_container(
     Ok(())
 }
 
+/// Space the LUKS2 header and its default data offset take off the top of
+/// the container (cryptsetup's default `--offset` puts the data at 16 MiB),
+/// so the mapped device is that much smaller than the image.
+pub(crate) const LUKS2_HEADER_MIB: u64 = 16;
+
 /// Plan the output LUKS2 image size in MiB: `size_mib` if given, else the
 /// plain image size (rounded up to whole MiB) plus 64 MiB of slack for the
-/// LUKS2 header and filesystem growth. Errors if an explicit `size_mib` is
-/// smaller than the plain image, since the plain rootfs would not fit.
+/// LUKS2 header and filesystem growth. Errors if an explicit `size_mib`
+/// leaves less than [`LUKS2_HEADER_MIB`] on top of the plain image: the
+/// mapped device would be smaller than the plain rootfs and the copy would
+/// only fail (ENOSPC) after the privileged format and open already ran.
 pub(crate) fn luks_plan(plain_size_bytes: u64, size_mib: Option<u64>) -> Result<u64> {
     let plain_mib = plain_size_bytes.div_ceil(MIB);
+    let minimum = plain_mib + LUKS2_HEADER_MIB;
     match size_mib {
-        Some(explicit) if explicit < plain_mib => bail!(
-            "requested LUKS image size ({explicit} MiB) is smaller than the plain rootfs image ({plain_mib} MiB)"
+        Some(explicit) if explicit < minimum => bail!(
+            "requested LUKS image size ({explicit} MiB) is too small for the plain rootfs \
+             image ({plain_mib} MiB) plus the LUKS2 header ({LUKS2_HEADER_MIB} MiB); \
+             pass at least {minimum}"
         ),
         Some(explicit) => Ok(explicit),
         None => Ok(plain_mib + 64),
@@ -368,6 +378,24 @@ mod tests {
     #[test]
     fn plan_rejects_a_size_smaller_than_the_plain_image() {
         assert!(luks_plan(10 * 1024 * 1024 * 1024, Some(1024)).is_err());
+    }
+
+    #[test]
+    fn plan_rejects_a_size_that_leaves_no_room_for_the_luks2_header() {
+        // Exactly the plain size cannot work: the LUKS2 header takes its
+        // 16 MiB off the top and the dd copy would hit ENOSPC after the
+        // privileged format+open already ran.
+        let plain = 1024 * 1024 * 1024;
+        let err = luks_plan(plain, Some(1024)).unwrap_err();
+        assert!(
+            err.to_string().contains("LUKS2 header"),
+            "expected a header-headroom rejection, got: {err}"
+        );
+        assert!(luks_plan(plain, Some(1024 + LUKS2_HEADER_MIB - 1)).is_err());
+        assert_eq!(
+            luks_plan(plain, Some(1024 + LUKS2_HEADER_MIB)).unwrap(),
+            1024 + LUKS2_HEADER_MIB
+        );
     }
 
     #[test]

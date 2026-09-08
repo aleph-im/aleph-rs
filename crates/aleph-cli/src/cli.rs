@@ -2103,8 +2103,9 @@ pub struct InstanceCreateArgs {
     #[arg(long, conflicts_with = "image")]
     pub encrypt_rootfs: Option<PathBuf>,
 
-    /// Size of the encrypted rootfs, in MiB (e.g. 20480). Only used with
-    /// --encrypt-rootfs.
+    /// Size of the encrypted rootfs, in MiB (e.g. 20480). Must leave at
+    /// least 16 MiB above the plain image for the LUKS2 header; defaults to
+    /// the plain image size plus 64 MiB. Only used with --encrypt-rootfs.
     #[arg(long)]
     pub rootfs_size_mib: Option<u64>,
 
