@@ -1288,7 +1288,10 @@ async fn handle_instance_create(
             let planned_mib = crate::luks::luks_plan(plain_size, args.rootfs_size_mib)?;
             crate::luks::check_rootfs_fits_disk(planned_mib, disk_size_mib)?;
 
-            let passphrase = super::instance_snp::read_passphrase(args.passphrase_file.as_deref())?;
+            let passphrase = super::instance_snp::read_passphrase(
+                args.passphrase_file.as_deref(),
+                super::instance_snp::PassphraseUse::NewVolume,
+            )?;
 
             let tmp_dir = tempfile::tempdir()
                 .context("failed to create a temp dir for the encrypted rootfs")?;

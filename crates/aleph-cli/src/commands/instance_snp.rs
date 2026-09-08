@@ -124,6 +124,20 @@ pub(crate) fn validate_passphrase(passphrase: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the passphrase is for, which decides how the interactive prompt
+/// behaves. File and environment sources are read the same way either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassphraseUse {
+    /// `instance create --encrypt-rootfs`: a brand-new key. The prompt asks
+    /// twice, since a typo here can never be corrected: the encrypted rootfs
+    /// is uploaded and paid for, and there is no re-keying path, only
+    /// re-encrypt and re-create.
+    NewVolume,
+    /// `instance unlock`: checked against an existing volume by the guest,
+    /// so a typo just fails and the owner re-runs unlock. One prompt.
+    ExistingVolume,
+}
+
 /// Source the LUKS passphrase for `--encrypt-rootfs` and `instance unlock`.
 ///
 /// Precedence: `passphrase_file` when given (trimming exactly one trailing
@@ -131,12 +145,15 @@ pub(crate) fn validate_passphrase(passphrase: &str) -> Result<()> {
 /// text editor produces), then the `ALEPH_LUKS_PASSPHRASE` environment
 /// variable, then a hidden interactive prompt on the controlling terminal
 /// (the same `rpassword` helper `account/password.rs` uses for account
-/// passwords, a single prompt rather than the double-entry new-password
-/// flow). Errors, naming all three sources, when none is available
-/// (typically: no terminal attached, e.g. in CI or a script). Whatever the
-/// source, the result passes [`validate_passphrase`], so create and unlock
-/// accept exactly the same strings.
-pub(crate) fn read_passphrase(passphrase_file: Option<&Path>) -> Result<String> {
+/// passwords; see [`PassphraseUse`] for when it asks twice). Errors, naming
+/// all three sources, when none is available (typically: no terminal
+/// attached, e.g. in CI or a script). Whatever the source, the result passes
+/// [`validate_passphrase`], so create and unlock accept exactly the same
+/// strings.
+pub(crate) fn read_passphrase(
+    passphrase_file: Option<&Path>,
+    purpose: PassphraseUse,
+) -> Result<String> {
     let passphrase = if let Some(path) = passphrase_file {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read passphrase file {}", path.display()))?;
@@ -148,14 +165,25 @@ pub(crate) fn read_passphrase(passphrase_file: Option<&Path>) -> Result<String> 
     } else if let Ok(p) = std::env::var(LUKS_PASSPHRASE_ENV_VAR) {
         p
     } else {
-        match rpassword::prompt_password("LUKS passphrase: ") {
-            Ok(p) => p,
-            Err(_) => bail!(
-                "no LUKS passphrase source available: pass --passphrase-file, set the \
-                 {LUKS_PASSPHRASE_ENV_VAR} environment variable, or run interactively on a \
-                 terminal"
-            ),
+        let prompt = |label: &str| {
+            rpassword::prompt_password(label).map_err(|_| {
+                anyhow!(
+                    "no LUKS passphrase source available: pass --passphrase-file, set the \
+                     {LUKS_PASSPHRASE_ENV_VAR} environment variable, or run interactively on \
+                     a terminal"
+                )
+            })
+        };
+        let first = prompt("LUKS passphrase: ")?;
+        if purpose == PassphraseUse::NewVolume {
+            // Validate before asking again, so a rejected first entry does
+            // not cost the user a pointless confirmation.
+            validate_passphrase(&first)?;
+            if prompt("Confirm LUKS passphrase: ")? != first {
+                bail!("LUKS passphrases do not match");
+            }
         }
+        first
     };
     validate_passphrase(&passphrase)?;
     Ok(passphrase)
@@ -767,7 +795,10 @@ pub(crate) async fn handle_instance_unlock(
     let unlock_authority = outcome.unlock_authority.as_str().to_lowercase();
     check_unlock_account(&unlock_authority, account.address())?;
 
-    let passphrase = read_passphrase(args.passphrase_file.as_deref())?;
+    let passphrase = read_passphrase(
+        args.passphrase_file.as_deref(),
+        PassphraseUse::ExistingVolume,
+    )?;
     let secrets = collect_secrets(Some(passphrase), &args.secrets)?;
 
     let payload = inject_secret_payload(
@@ -890,7 +921,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("pass");
         std::fs::write(&p, "hunter2\n").unwrap();
-        assert_eq!(read_passphrase(Some(&p)).unwrap(), "hunter2");
+        assert_eq!(
+            read_passphrase(Some(&p), PassphraseUse::NewVolume).unwrap(),
+            "hunter2"
+        );
     }
 
     #[test]
@@ -900,7 +934,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("pass");
         std::fs::write(&p, "hunter2\r\n").unwrap();
-        assert_eq!(read_passphrase(Some(&p)).unwrap(), "hunter2");
+        assert_eq!(
+            read_passphrase(Some(&p), PassphraseUse::NewVolume).unwrap(),
+            "hunter2"
+        );
     }
 
     #[test]
@@ -912,7 +949,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("pass");
         std::fs::write(&p, "hunter2\n\n").unwrap();
-        let err = read_passphrase(Some(&p)).unwrap_err();
+        let err = read_passphrase(Some(&p), PassphraseUse::NewVolume).unwrap_err();
         assert!(
             err.to_string().contains("control character"),
             "expected a control-character rejection, got: {err}"
@@ -925,21 +962,23 @@ mod tests {
         let p = dir.path().join("pass");
         std::fs::write(&p, "\n").unwrap();
         assert!(
-            read_passphrase(Some(&p))
+            read_passphrase(Some(&p), PassphraseUse::NewVolume)
                 .unwrap_err()
                 .to_string()
                 .contains("empty")
         );
 
         std::fs::write(&p, "x".repeat(MAX_PASSPHRASE_BYTES + 1)).unwrap();
-        let err = read_passphrase(Some(&p)).unwrap_err();
+        let err = read_passphrase(Some(&p), PassphraseUse::NewVolume).unwrap_err();
         assert!(
             err.to_string().contains("longer than"),
             "expected a length rejection, got: {err}"
         );
         std::fs::write(&p, "x".repeat(MAX_PASSPHRASE_BYTES)).unwrap();
         assert_eq!(
-            read_passphrase(Some(&p)).unwrap().len(),
+            read_passphrase(Some(&p), PassphraseUse::NewVolume)
+                .unwrap()
+                .len(),
             MAX_PASSPHRASE_BYTES
         );
     }
@@ -974,7 +1013,7 @@ mod tests {
         unsafe {
             std::env::set_var(LUKS_PASSPHRASE_ENV_VAR, "s3cr3t-from-env");
         }
-        let result = read_passphrase(None);
+        let result = read_passphrase(None, PassphraseUse::NewVolume);
         unsafe {
             std::env::remove_var(LUKS_PASSPHRASE_ENV_VAR);
         }
@@ -988,7 +1027,7 @@ mod tests {
         unsafe {
             std::env::set_var(LUKS_PASSPHRASE_ENV_VAR, "with\nnewline");
         }
-        let result = read_passphrase(None);
+        let result = read_passphrase(None, PassphraseUse::NewVolume);
         unsafe {
             std::env::remove_var(LUKS_PASSPHRASE_ENV_VAR);
         }
@@ -1005,7 +1044,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("pass");
         std::fs::write(&p, "from-file-wins\n").unwrap();
-        let result = read_passphrase(Some(&p));
+        let result = read_passphrase(Some(&p), PassphraseUse::NewVolume);
         unsafe {
             std::env::remove_var(LUKS_PASSPHRASE_ENV_VAR);
         }
