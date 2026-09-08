@@ -152,6 +152,13 @@ pub enum AttestError {
     FreshMeasurementMismatch { expected: String, got: String },
     #[error("fresh attestation policy mismatch: expected {expected:#x}, got {got:#x}")]
     FreshPolicyMismatch { expected: u64, got: u64 },
+    /// The guest agent's `/confidential/inject-secret` endpoint returned a
+    /// non-2xx status. The agent's 4xx bodies name the specific rejection
+    /// (most notably a stale-key signature after the guest rebooted between
+    /// the caller's `fresh_attestation` call and this request), so the body
+    /// text is preserved here rather than discarded.
+    #[error("secret injection rejected: HTTP {status}: {body}")]
+    InjectRejected { status: u16, body: String },
 }
 
 /// Encode an AttestationReport as a DER-encoded OctetString.

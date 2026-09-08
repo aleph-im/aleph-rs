@@ -37,7 +37,7 @@ pub async fn resolve_interactive(
     // prompts, since the placement choice isn't known until after them.
     let crn_list_fut = args.crn.is_none().then(spawn_crn_list_fetch);
 
-    if args.image.is_none() {
+    if needs_image_prompt(args.image.is_some(), args.encrypt_rootfs.is_some()) {
         let vm_images = aggregates
             .get_vm_images_aggregate()
             .await
@@ -605,9 +605,26 @@ fn expand_tilde(s: &str) -> String {
     s.to_string()
 }
 
+/// Whether the picker must ask for a rootfs image: only when none was given
+/// and `--encrypt-rootfs` is not supplying it. A prompted image would set
+/// `args.image`, and the create handler treats a set image as "nothing to
+/// encrypt", silently skipping the LUKS wrap the user asked for. Pure.
+pub(crate) fn needs_image_prompt(image_given: bool, encrypt_rootfs_given: bool) -> bool {
+    !image_given && !encrypt_rootfs_given
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypt_rootfs_supplies_the_image_so_the_picker_must_not_ask() {
+        assert!(needs_image_prompt(false, false));
+        assert!(!needs_image_prompt(true, false));
+        assert!(!needs_image_prompt(false, true));
+        // --image and --encrypt-rootfs conflict at parse time; never prompt.
+        assert!(!needs_image_prompt(true, true));
+    }
 
     #[test]
     fn truncate_short_string_unchanged() {

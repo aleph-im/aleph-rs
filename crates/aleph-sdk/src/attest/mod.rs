@@ -15,12 +15,15 @@
 //! updating the deployed guest agent.
 //!
 pub mod certs;
+pub mod inject;
+pub mod owner_auth;
 pub mod platform;
 pub mod ratls;
 pub mod tcb;
 pub mod verify;
 pub mod x509;
 
+pub use inject::{InjectSecretEnvelope, InjectSecretResponse, post_secrets};
 pub use platform::{PlatformPolicy, PlatformPosture};
 pub use ratls::{
     AttestedResponse, FreshAttestation, MeasurementPin, PolicyPin, attested_request,
