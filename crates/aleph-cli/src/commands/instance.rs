@@ -1272,6 +1272,22 @@ async fn handle_instance_create(
                 .encrypt_rootfs
                 .clone()
                 .expect("guard above checked encrypt_rootfs.is_some()");
+
+            // The encrypted image's size is known from the plain file alone,
+            // so check it against --disk-size here, before the passphrase
+            // prompt, the sudo prompt and the paid upload.
+            let plain_size = tokio::fs::metadata(&plain_rootfs)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to stat plain rootfs image {}",
+                        plain_rootfs.display()
+                    )
+                })?
+                .len();
+            let planned_mib = crate::luks::luks_plan(plain_size, args.rootfs_size_mib)?;
+            crate::luks::check_rootfs_fits_disk(planned_mib, disk_size_mib)?;
+
             let passphrase = super::instance_snp::read_passphrase(args.passphrase_file.as_deref())?;
 
             let tmp_dir = tempfile::tempdir()

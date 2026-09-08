@@ -203,6 +203,21 @@ pub(crate) fn luks_plan(plain_size_bytes: u64, size_mib: Option<u64>) -> Result<
     }
 }
 
+/// The instance's `--disk-size` must hold the whole encrypted image: the CRN
+/// builds the boot disk as a qcow2 overlay of exactly `disk_size_mib` on top
+/// of the uploaded image, so a smaller disk truncates the LUKS container and
+/// the guest fails at launch, after the upload was paid for. Pure: no I/O.
+pub(crate) fn check_rootfs_fits_disk(planned_mib: u64, disk_size_mib: u64) -> Result<()> {
+    if planned_mib > disk_size_mib {
+        bail!(
+            "--disk-size ({disk_size_mib} MiB) is smaller than the encrypted rootfs image \
+             ({planned_mib} MiB); raise --disk-size (or --size) to at least {planned_mib}, \
+             or shrink the image with --rootfs-size-mib"
+        );
+    }
+    Ok(())
+}
+
 /// Locate `bin` on PATH. `install_hint` names the package to install,
 /// mirroring the error style used by `veritysetup.rs` and `sevctl.rs`.
 fn find_on_path(bin: &str, install_hint: &str) -> Result<PathBuf> {
@@ -396,6 +411,17 @@ mod tests {
         assert_eq!(
             luks_plan(plain, Some(1024 + LUKS2_HEADER_MIB)).unwrap(),
             1024 + LUKS2_HEADER_MIB
+        );
+    }
+
+    #[test]
+    fn encrypted_image_must_fit_the_instance_disk() {
+        assert!(check_rootfs_fits_disk(1024 + 64, 20480).is_ok());
+        assert!(check_rootfs_fits_disk(20480, 20480).is_ok());
+        let err = check_rootfs_fits_disk(20480 + 1, 20480).unwrap_err();
+        assert!(
+            err.to_string().contains("--disk-size"),
+            "expected a disk-size rejection, got: {err}"
         );
     }
 
