@@ -941,7 +941,9 @@ pub(crate) fn resolve_image_refs(
 /// Client-side rejections for the confidential SNP `instance create` path
 /// that need no network access: GPU+SNP exclusion, `--confidential-firmware`
 /// (SEV-only) exclusion, the signing account's EVM shape (the sender is the
-/// unlock authority the cmdline binds), and the DEBUG-policy gate. Pure:
+/// unlock authority the cmdline binds), the policy's schema validity
+/// (reserved bit 17, the same check the network applies), and the
+/// DEBUG-policy gate. Pure:
 /// does no network I/O, so it must run before any privileged operation (the
 /// LUKS encryption in the create handler) or paid operation (uploading the
 /// encrypted rootfs spends STORE credits). The sender check here is an
@@ -966,6 +968,10 @@ pub(crate) fn snp_create_guards(
     }
     aleph_sdk::instance_runtime::cmdline::normalize_evm_owner(owner_address)
         .map_err(|e| anyhow!("{e}"))?;
+    // The schema re-checks this at build time, but that runs after the
+    // encrypted rootfs was uploaded and paid for; `vprogram create` applies
+    // the same eager check.
+    aleph_types::message::execution::environment::validate_snp_policy(policy)?;
     super::attest_common::check_debug_policy(policy, allow_debug)?;
     Ok(())
 }
@@ -2057,6 +2063,19 @@ mod tests {
         assert!(
             err.to_string().contains("--allow-debug"),
             "expected a DEBUG-policy rejection, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_rejects_an_invalid_policy_before_any_paid_step() {
+        // 0x1 lacks reserved bit 17: the network schema rejects it, but only
+        // at message build time, after --encrypt-rootfs has already paid for
+        // the upload. The guard must catch it first.
+        let err = snp_create_guards(false, false, VALID_EVM_OWNER, 0x1, false).unwrap_err();
+        assert!(
+            err.to_string().contains("bit 17"),
+            "expected a reserved-bit policy rejection, got: {err}"
         );
     }
 
