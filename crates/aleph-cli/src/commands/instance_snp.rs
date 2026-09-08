@@ -178,11 +178,22 @@ pub(crate) async fn build_snp_trusted_execution(
 // `aleph instance attest <vm-id>`
 // ---------------------------------------------------------------------
 
-/// Fixed RA-TLS attestation transport port for SNP instance runtimes. Kept
-/// as its own constant (rather than reusing `vprogram::ATTEST_PORT`) so
-/// `instance attest`/`instance unlock` do not depend on the `vprogram`
-/// module's private internals; both name the same runtime convention today.
+/// Default RA-TLS attestation transport port for SNP instance runtimes, the
+/// runtime bundle's own convention. Kept as its own constant (rather than
+/// reusing `vprogram::ATTEST_PORT`) so `instance attest`/`instance unlock`
+/// do not depend on the `vprogram` module's private internals; both name the
+/// same runtime convention today.
 pub(crate) const INSTANCE_ATTEST_PORT: u16 = 8443;
+
+/// The guest port the instance's attestation agent listens on: the
+/// message's `attestation_port` when it carries one, else the runtime
+/// default. This CLI never sets the field on create, but the schema allows
+/// it and another client may, so discovery must dial what the message says
+/// rather than assume the default. Pure: no I/O.
+pub(crate) fn instance_attest_port(tee: &TrustedExecutionEnvironment) -> u16 {
+    tee.attestation_port
+        .map_or(INSTANCE_ATTEST_PORT, std::num::NonZeroU16::get)
+}
 
 /// The result of a successful `instance attest`: the verified fresh
 /// attestation evidence, the endpoint it was gathered from, the instance
@@ -282,6 +293,7 @@ pub(crate) async fn run_instance_attest(
 
     let tee = check_snp_instance(&content)?;
     let policy = tee.policy;
+    let attest_port = instance_attest_port(tee);
     let measurements = tee.measurements.as_deref().unwrap_or(&[]);
     let expectation = attest_common::resolve_expected_measurement(
         measurements,
@@ -298,11 +310,11 @@ pub(crate) async fn run_instance_attest(
             net.0
                 .get(&item_hash)
                 .and_then(|vm| vm.networking.clone())
-                .and_then(|n| resolve_attested_endpoint(&n, INSTANCE_ATTEST_PORT))
+                .and_then(|n| resolve_attested_endpoint(&n, attest_port))
                 .ok_or_else(|| {
                     anyhow!(
                         "instance {item_hash} is running on CRN {crn_url} but its attestation \
-                         port ({INSTANCE_ATTEST_PORT}) is not yet mapped; try again shortly, or \
+                         port ({attest_port}) is not yet mapped; try again shortly, or \
                          pass --url to bypass discovery"
                     )
                 })?
@@ -973,6 +985,21 @@ mod tests {
             err.contains("not an SNP confidential instance"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn attest_port_honors_the_message_and_falls_back_to_the_runtime_default() {
+        let mut tee = TrustedExecutionEnvironment {
+            firmware: None,
+            policy: 0x30000,
+            mode: Some(TeeMode::SevSnp),
+            runtime: Some("cc".repeat(32).parse().unwrap()),
+            measurements: Some(vec![]),
+            attestation_port: None,
+        };
+        assert_eq!(instance_attest_port(&tee), INSTANCE_ATTEST_PORT);
+        tee.attestation_port = Some(std::num::NonZeroU16::new(9443).unwrap());
+        assert_eq!(instance_attest_port(&tee), 9443);
     }
 
     #[test]
