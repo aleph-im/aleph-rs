@@ -2073,25 +2073,25 @@ pub struct InstanceCreateArgs {
     /// TEE flavor for --confidential: sev-snp (default) or sev (deprecated
     /// legacy AMD SEV, kept for existing deployments; new confidential
     /// instances use sev-snp).
-    #[arg(long, value_enum, default_value = "sev-snp")]
+    #[arg(long, value_enum, default_value = "sev-snp", requires = "confidential")]
     pub tee: TeeFlavor,
 
     /// Instance runtime manifest for SNP: preset name or item hash. Defaults
     /// to `defaults.instance_runtime` from the vm-images aggregate.
-    #[arg(long, value_parser = parse_image_ref)]
+    #[arg(long, value_parser = parse_image_ref, requires = "confidential")]
     pub runtime: Option<ImageRef>,
 
     /// SEV-SNP 64-bit guest policy override (accepts 0x-prefixed hex or a
     /// decimal integer). Only used with --tee sev-snp; defaults to 0x30000
     /// (no-debug, SMT allowed, reserved bit 17 set).
-    #[arg(long, value_parser = parse_u64_maybe_hex)]
+    #[arg(long, value_parser = parse_u64_maybe_hex, requires = "confidential")]
     pub policy: Option<u64>,
 
     /// Allow the DEBUG bit (19) in the guest policy. The host can then
     /// decrypt guest memory via the firmware debug API, so the deployment
     /// is NOT confidential. This flag is required to create an SNP
     /// instance with a debug-enabled policy.
-    #[arg(long)]
+    #[arg(long, requires = "confidential")]
     pub allow_debug: bool,
 
     /// Encrypt the rootfs from a local plain ext4 image instead of --image.
@@ -2106,14 +2106,19 @@ pub struct InstanceCreateArgs {
     /// Size of the encrypted rootfs, in MiB (e.g. 20480). Must leave at
     /// least 16 MiB above the plain image for the LUKS2 header; defaults to
     /// the plain image size plus 64 MiB. Only used with --encrypt-rootfs.
-    #[arg(long)]
+    // `conflicts_with = "image"` is load-bearing alongside `requires`: clap
+    // waives a `requires` target that conflicts with a present arg, so with
+    // `--image` given, `requires = "encrypt_rootfs"` alone would let this
+    // flag through silently.
+    #[arg(long, requires = "encrypt_rootfs", conflicts_with = "image")]
     pub rootfs_size_mib: Option<u64>,
 
     /// Read the LUKS passphrase for --encrypt-rootfs from this file (trims
     /// one trailing newline). Without it, falls back to the
     /// ALEPH_LUKS_PASSPHRASE environment variable, then a hidden interactive
     /// prompt on a terminal, erroring if none of the three is available.
-    #[arg(long)]
+    // See `rootfs_size_mib` for why `conflicts_with = "image"` is needed.
+    #[arg(long, requires = "encrypt_rootfs", conflicts_with = "image")]
     pub passphrase_file: Option<PathBuf>,
 
     /// Disk size (e.g. 20GB, 1024MB, 1TiB). Required unless --size is used.
@@ -4392,6 +4397,91 @@ mod instance_create_args_tests {
             "196608",
         ]);
         assert_eq!(args.policy, Some(196608));
+    }
+
+    #[test]
+    fn snp_only_flags_require_confidential() {
+        // Silently ignoring these was the failure mode; each must be a
+        // parse error on its own without --confidential.
+        for flags in [
+            &["--tee", "sev"][..],
+            &["--tee", "sev-snp"][..],
+            &["--policy", "0x30000"][..],
+            &["--runtime", "snp-1.0"][..],
+            &["--allow-debug"][..],
+        ] {
+            let mut argv = vec!["--disk-size", "20GB"];
+            argv.extend_from_slice(flags);
+            assert!(
+                try_parse_create(&argv).is_err(),
+                "{flags:?} must require --confidential"
+            );
+        }
+        // The default --tee value is not an explicit use: a plain create
+        // still parses.
+        let args = parse_create(&["--disk-size", "20GB"]);
+        assert_eq!(args.tee, TeeFlavor::SevSnp);
+        assert!(!args.confidential);
+    }
+
+    #[test]
+    fn luks_only_flags_require_encrypt_rootfs() {
+        for flags in [
+            &["--rootfs-size-mib", "20480"][..],
+            &["--passphrase-file", "/tmp/p"][..],
+        ] {
+            // With --image (baked into parse_create): clap waives a
+            // `requires` target that conflicts with a present arg, so this
+            // case is what `conflicts_with = "image"` on the flag covers.
+            let mut argv = vec!["--disk-size", "20GB", "--confidential"];
+            argv.extend_from_slice(flags);
+            assert!(
+                try_parse_create(&argv).is_err(),
+                "{flags:?} must be rejected next to --image"
+            );
+
+            // Without --image and without --encrypt-rootfs: the plain
+            // `requires` case (--interactive satisfies --image's own
+            // requirement).
+            let mut argv = vec![
+                "aleph",
+                "instance",
+                "create",
+                "my-vm",
+                "--interactive",
+                "--confidential",
+            ];
+            argv.extend_from_slice(flags);
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "{flags:?} must require --encrypt-rootfs"
+            );
+        }
+
+        // The intended combination still parses.
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "instance",
+            "create",
+            "my-vm",
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--encrypt-rootfs",
+            "/tmp/plain.ext4",
+            "--rootfs-size-mib",
+            "20480",
+            "--passphrase-file",
+            "/tmp/p",
+        ])
+        .expect("clap parse");
+        let Commands::Instance {
+            command: InstanceCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("expected instance create");
+        };
+        assert_eq!(args.rootfs_size_mib, Some(20480));
     }
 
     #[test]
