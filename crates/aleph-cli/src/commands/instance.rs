@@ -1206,6 +1206,60 @@ async fn handle_instance_create(
         )?;
     }
 
+    // The vm-images aggregate resolves an image preset, legacy SEV firmware
+    // given as a preset, and (always) the SNP instance runtime.
+    let needs_aggregate = matches!(args.image, Some(ImageRef::Preset(_)))
+        || (legacy_sev_confidential
+            && !matches!(args.confidential_firmware, Some(ImageRef::Hash(_))))
+        || snp_confidential;
+
+    let vm_images = if needs_aggregate {
+        aggregates
+            .get_vm_images_aggregate()
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "failed to fetch vm-images aggregate: {e}. \
+                     As a fallback, pass --image with a raw item hash or IPFS CID."
+                )
+            })?
+            .vm_images
+    } else {
+        VmImagesData::default()
+    };
+
+    // SNP: resolve the runtime and compute the launch measurements before
+    // the encrypt-and-upload step below. None of this costs credits or
+    // needs root, so a mistyped --runtime, an unreachable manifest, or a
+    // measurement failure surfaces before the sudo prompt and before any
+    // STORE credits are spent on the encrypted rootfs. The measurement does
+    // not depend on the rootfs (only the runtime bundle, the owner and the
+    // vCPU count), so nothing here needs the upload's result.
+    #[cfg(feature = "vprogram")]
+    let snp_tee = if snp_confidential {
+        // GPU+SNP, --confidential-firmware+SNP, the sender shape and the
+        // policy are already rejected above.
+        let owner = super::instance_snp::snp_unlock_authority(account.address());
+        let runtime_ref =
+            super::instance_snp::resolve_instance_runtime_ref(args.runtime.clone(), &vm_images)?;
+        let policy = args
+            .policy
+            .unwrap_or(super::instance_snp::SNP_DEFAULT_POLICY);
+        let cache_dir = crate::config::store::ConfigStore::instance_runtime_cache_dir()?;
+        let (tee, _manifest) = super::instance_snp::build_snp_trusted_execution(
+            aleph_client,
+            &runtime_ref,
+            &owner,
+            vcpus,
+            policy,
+            &cache_dir,
+        )
+        .await?;
+        Some(tee)
+    } else {
+        None
+    };
+
     let image_ref = match args.image.clone() {
         Some(img) => img,
         // Local LUKS encryption + upload only makes sense for the measured
@@ -1231,9 +1285,10 @@ async fn handle_instance_create(
             )
             .await?;
 
-            // Upload before anything else that could fail: printing the hash
-            // now means a later failure (e.g. a bad --runtime) leaves the
-            // upload discoverable instead of orphaned and anonymous.
+            // The runtime and measurements were resolved above, so what can
+            // still fail after this upload is cheap (message build, submit).
+            // The hash is printed regardless, so even then the upload stays
+            // discoverable instead of orphaned and anonymous.
             let on_behalf_of_addr = on_behalf_of_is_set.then_some(&owner_address);
             let hash = super::upload::upload_file(
                 aleph_client,
@@ -1267,26 +1322,6 @@ async fn handle_instance_create(
             );
         }
         None => bail!("--image is required (or use -i)"),
-    };
-
-    let needs_aggregate = matches!(image_ref, ImageRef::Preset(_))
-        || (legacy_sev_confidential
-            && !matches!(args.confidential_firmware, Some(ImageRef::Hash(_))))
-        || snp_confidential;
-
-    let vm_images = if needs_aggregate {
-        aggregates
-            .get_vm_images_aggregate()
-            .await
-            .map_err(|e| {
-                anyhow!(
-                    "failed to fetch vm-images aggregate: {e}. \
-                     As a fallback, pass --image with a raw item hash or IPFS CID."
-                )
-            })?
-            .vm_images
-    } else {
-        VmImagesData::default()
     };
 
     let resolved = resolve_image_refs(
@@ -1338,27 +1373,9 @@ async fn handle_instance_create(
             }
             #[cfg(feature = "vprogram")]
             TeeFlavor::SevSnp => {
-                // GPU+SNP, --confidential-firmware+SNP and the sender shape
-                // are already rejected above, before any privileged or paid
-                // operation.
-                let owner = super::instance_snp::snp_unlock_authority(account.address());
-                let runtime_ref = super::instance_snp::resolve_instance_runtime_ref(
-                    args.runtime.clone(),
-                    &vm_images,
-                )?;
-                let policy = args
-                    .policy
-                    .unwrap_or(super::instance_snp::SNP_DEFAULT_POLICY);
-                let cache_dir = crate::config::store::ConfigStore::instance_runtime_cache_dir()?;
-                let (tee, _manifest) = super::instance_snp::build_snp_trusted_execution(
-                    aleph_client,
-                    &runtime_ref,
-                    &owner,
-                    vcpus,
-                    policy,
-                    &cache_dir,
-                )
-                .await?;
+                // Built above, ahead of the encrypt-and-upload step;
+                // `snp_confidential` is exactly this arm's condition.
+                let tee = snp_tee.expect("snp_tee is Some whenever --confidential --tee sev-snp");
                 builder = builder.trusted_execution(tee);
             }
             #[cfg(not(feature = "vprogram"))]
