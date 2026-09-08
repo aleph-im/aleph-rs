@@ -84,36 +84,81 @@ pub(crate) fn snp_unlock_authority(account_address: &Address) -> String {
     account_address.to_string()
 }
 
-/// Source the LUKS passphrase for `--encrypt-rootfs`.
+/// Longest LUKS passphrase accepted, in bytes: cryptsetup's own limit for a
+/// passphrase typed at its prompt, so a passphrase that works here also
+/// works if the owner ever opens the volume by hand (recovery on their own
+/// machine). Both automated consumers read more than this, so the cap is
+/// about keeping the passphrase portable, not about them.
+pub(crate) const MAX_PASSPHRASE_BYTES: usize = 512;
+
+/// The contract both cryptsetup consumers of the passphrase must agree on.
+///
+/// `instance create` feeds the bytes to `cryptsetup luksFormat ... -` as a
+/// key file on stdin, which is read whole (newlines included); the guest's
+/// init feeds the injected file to `cryptsetup luksOpen` on plain stdin,
+/// which stops at the first newline. A passphrase containing a newline
+/// would therefore format fine and never unlock. Rejecting every control
+/// character (newline, carriage return, tab, NUL, escape sequences) keeps
+/// the two readers byte-identical, and rules out the invisible `\r` a CRLF
+/// editor could leave behind. Empty is rejected because the guest treats an
+/// empty secret file as "not injected yet" and keeps waiting. Pure: no I/O.
+pub(crate) fn validate_passphrase(passphrase: &str) -> Result<()> {
+    if passphrase.is_empty() {
+        bail!("the LUKS passphrase is empty");
+    }
+    if passphrase.len() > MAX_PASSPHRASE_BYTES {
+        bail!(
+            "the LUKS passphrase is longer than {MAX_PASSPHRASE_BYTES} bytes ({} bytes), \
+             cryptsetup's own passphrase limit",
+            passphrase.len()
+        );
+    }
+    if let Some(c) = passphrase.chars().find(|c| c.is_control()) {
+        bail!(
+            "the LUKS passphrase contains a control character ({c:?}): the guest reads the \
+             passphrase up to the first newline, so such a passphrase could never unlock \
+             the volume. Use printable characters only (a file passphrase may end in one \
+             newline, which is trimmed)"
+        );
+    }
+    Ok(())
+}
+
+/// Source the LUKS passphrase for `--encrypt-rootfs` and `instance unlock`.
 ///
 /// Precedence: `passphrase_file` when given (trimming exactly one trailing
-/// `\n`, matching what `echo "$pass" > file` or a text editor produces),
-/// then the `ALEPH_LUKS_PASSPHRASE` environment variable, then a hidden
-/// interactive prompt on the controlling terminal (the same `rpassword`
-/// helper `account/password.rs` uses for account passwords, a single prompt
-/// rather than the double-entry new-password flow). Errors, naming all three
-/// sources, when none is available (typically: no terminal attached, e.g. in
-/// CI or a script).
+/// line ending, `\n` or `\r\n`, matching what `echo "$pass" > file` or a
+/// text editor produces), then the `ALEPH_LUKS_PASSPHRASE` environment
+/// variable, then a hidden interactive prompt on the controlling terminal
+/// (the same `rpassword` helper `account/password.rs` uses for account
+/// passwords, a single prompt rather than the double-entry new-password
+/// flow). Errors, naming all three sources, when none is available
+/// (typically: no terminal attached, e.g. in CI or a script). Whatever the
+/// source, the result passes [`validate_passphrase`], so create and unlock
+/// accept exactly the same strings.
 pub(crate) fn read_passphrase(passphrase_file: Option<&Path>) -> Result<String> {
-    if let Some(path) = passphrase_file {
+    let passphrase = if let Some(path) = passphrase_file {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read passphrase file {}", path.display()))?;
-        let trimmed = contents.strip_suffix('\n').unwrap_or(&contents);
-        return Ok(trimmed.to_string());
-    }
-
-    if let Ok(p) = std::env::var(LUKS_PASSPHRASE_ENV_VAR) {
-        return Ok(p);
-    }
-
-    match rpassword::prompt_password("LUKS passphrase: ") {
-        Ok(p) => Ok(p),
-        Err(_) => bail!(
-            "no LUKS passphrase source available: pass --passphrase-file, set the \
-             {LUKS_PASSPHRASE_ENV_VAR} environment variable, or run interactively on a \
-             terminal"
-        ),
-    }
+        let trimmed = contents
+            .strip_suffix("\r\n")
+            .or_else(|| contents.strip_suffix('\n'))
+            .unwrap_or(&contents);
+        trimmed.to_string()
+    } else if let Ok(p) = std::env::var(LUKS_PASSPHRASE_ENV_VAR) {
+        p
+    } else {
+        match rpassword::prompt_password("LUKS passphrase: ") {
+            Ok(p) => p,
+            Err(_) => bail!(
+                "no LUKS passphrase source available: pass --passphrase-file, set the \
+                 {LUKS_PASSPHRASE_ENV_VAR} environment variable, or run interactively on a \
+                 terminal"
+            ),
+        }
+    };
+    validate_passphrase(&passphrase)?;
+    Ok(passphrase)
 }
 
 /// Assemble a `sev_snp` `TrustedExecutionEnvironment` from a launch
@@ -849,11 +894,66 @@ mod tests {
     }
 
     #[test]
-    fn passphrase_file_trims_only_the_one_trailing_newline() {
+    fn passphrase_file_trims_a_crlf_line_ending_too() {
+        // A file saved with Windows line endings must not smuggle a '\r'
+        // into the passphrase the user sees in their editor.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pass");
+        std::fs::write(&p, "hunter2\r\n").unwrap();
+        assert_eq!(read_passphrase(Some(&p)).unwrap(), "hunter2");
+    }
+
+    #[test]
+    fn passphrase_file_with_an_embedded_newline_is_rejected() {
+        // Only one trailing line ending is trimmed; what remains would be
+        // read whole by the create-side cryptsetup (key file mode) but only
+        // up to the first newline by the guest (stdin mode), so the volume
+        // could never be unlocked. Reject rather than let the two diverge.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("pass");
         std::fs::write(&p, "hunter2\n\n").unwrap();
-        assert_eq!(read_passphrase(Some(&p)).unwrap(), "hunter2\n");
+        let err = read_passphrase(Some(&p)).unwrap_err();
+        assert!(
+            err.to_string().contains("control character"),
+            "expected a control-character rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_and_oversized_passphrases_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pass");
+        std::fs::write(&p, "\n").unwrap();
+        assert!(
+            read_passphrase(Some(&p))
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
+
+        std::fs::write(&p, "x".repeat(MAX_PASSPHRASE_BYTES + 1)).unwrap();
+        let err = read_passphrase(Some(&p)).unwrap_err();
+        assert!(
+            err.to_string().contains("longer than"),
+            "expected a length rejection, got: {err}"
+        );
+        std::fs::write(&p, "x".repeat(MAX_PASSPHRASE_BYTES)).unwrap();
+        assert_eq!(
+            read_passphrase(Some(&p)).unwrap().len(),
+            MAX_PASSPHRASE_BYTES
+        );
+    }
+
+    #[test]
+    fn validate_passphrase_rejects_every_control_character() {
+        assert!(validate_passphrase("hunter2").is_ok());
+        assert!(validate_passphrase("correct horse battery staple").is_ok());
+        for bad in ["a\nb", "a\rb", "a\tb", "a\x00b", "\x1b[0m"] {
+            assert!(
+                validate_passphrase(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 
     /// Guards every test in this module that touches `LUKS_PASSPHRASE_ENV_VAR`.
@@ -879,6 +979,20 @@ mod tests {
             std::env::remove_var(LUKS_PASSPHRASE_ENV_VAR);
         }
         assert_eq!(result.unwrap(), "s3cr3t-from-env");
+    }
+
+    #[test]
+    fn passphrase_env_var_is_validated_too() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: see `passphrase_env_var_used_when_no_file_given`.
+        unsafe {
+            std::env::set_var(LUKS_PASSPHRASE_ENV_VAR, "with\nnewline");
+        }
+        let result = read_passphrase(None);
+        unsafe {
+            std::env::remove_var(LUKS_PASSPHRASE_ENV_VAR);
+        }
+        assert!(result.is_err());
     }
 
     #[test]

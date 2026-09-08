@@ -2114,9 +2114,11 @@ pub struct InstanceCreateArgs {
     pub rootfs_size_mib: Option<u64>,
 
     /// Read the LUKS passphrase for --encrypt-rootfs from this file (trims
-    /// one trailing newline). Without it, falls back to the
+    /// one trailing newline, LF or CRLF). Without it, falls back to the
     /// ALEPH_LUKS_PASSPHRASE environment variable, then a hidden interactive
     /// prompt on a terminal, erroring if none of the three is available.
+    /// The passphrase must be 1-512 printable characters (no newlines or
+    /// other control characters).
     // See `rootfs_size_mib` for why `conflicts_with = "image"` is needed.
     #[arg(long, requires = "encrypt_rootfs", conflicts_with = "image")]
     pub passphrase_file: Option<PathBuf>,
