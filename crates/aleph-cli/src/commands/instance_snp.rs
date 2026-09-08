@@ -212,6 +212,12 @@ pub(crate) struct AttestOutcome {
     /// message envelope since `InstanceContent` itself carries no sender.
     pub unlock_authority: Address,
     pub expectation: MeasurementExpectation,
+    /// The TCB floor the fresh attestation was verified against (network
+    /// settings aggregate, `--min-tcb`, `--accept-outdated-tcb` already
+    /// folded in). `instance unlock` pins its injection exchange to this
+    /// same floor rather than resolving it again, so the two exchanges
+    /// cannot diverge and the settings aggregate is fetched once.
+    pub min_tcb: aleph_sdk::attest::TcbFloorPolicy,
 }
 
 /// Reject anything that isn't a `sev_snp` confidential instance, naming the
@@ -381,6 +387,7 @@ pub(crate) async fn run_instance_attest(
         content,
         unlock_authority,
         expectation,
+        min_tcb,
     })
 }
 
@@ -746,13 +753,6 @@ pub(crate) async fn handle_instance_unlock(
     let measurement_pin = MeasurementPin::Exact(&outcome.fresh.registers);
     let policy_pin = PolicyPin::Exact(outcome.fresh.policy);
     let platform_policy = attest_common::platform_policy_from(&args.attest.require_platform);
-    let min_tcb = attest_common::resolve_tcb_floor(
-        aleph_client,
-        args.attest.amd_product,
-        args.attest.min_tcb.as_ref(),
-        args.attest.accept_outdated_tcb,
-    )
-    .await?;
 
     let (response, attested) = match post_secrets(
         &outcome.endpoint,
@@ -760,7 +760,7 @@ pub(crate) async fn handle_instance_unlock(
         measurement_pin,
         policy_pin,
         args.attest.amd_product,
-        &min_tcb,
+        &outcome.min_tcb,
         &platform_policy,
     )
     .await
