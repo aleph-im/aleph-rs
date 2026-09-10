@@ -19,12 +19,12 @@ use aleph_types::message::{
     AggregateContent, AggregateKey, Authorization, CodeContent, DataContent, Export, ForgetContent,
     FunctionRuntime, InstanceContent, MessageType, PostContent, ProgramContent,
 };
-use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
 #[cfg(feature = "vprogram")]
 use aleph_types::message::{
-    TeeVerification, VerifiableProgramContent, VerifiableProgramEnvironment,
-    VerifiableProgramRuntime, VerifiedVolume, VerifiedWorkload,
+    ConfidentialGpuRequirement, TeeVerification, VerifiableProgramContent,
+    VerifiableProgramEnvironment, VerifiableProgramRuntime, VerifiedVolume, VerifiedWorkload,
 };
+use aleph_types::message::{RawFileRef, StorageBackend, StorageEngine, StoreContent};
 use memsizes::MiB;
 #[cfg(feature = "vprogram")]
 use serde::Deserialize;
@@ -823,6 +823,8 @@ pub struct VProgramBuilder<'a, A: Account> {
     verification: TeeVerification,
     // Extra verity-bound volumes
     volumes: Vec<VerifiedVolume>,
+    // Confidential GPUs, a family and a count
+    gpu: Option<ConfidentialGpuRequirement>,
     // Environment
     internet: bool,
     // Resources
@@ -849,6 +851,7 @@ impl<'a, A: Account> VProgramBuilder<'a, A> {
             workload,
             verification,
             volumes: vec![],
+            gpu: None,
             internet: true,
             vcpus: 1,
             memory: MiB::from(2048),
@@ -881,6 +884,14 @@ impl<'a, A: Account> VProgramBuilder<'a, A> {
 
     pub fn volumes(mut self, volumes: Vec<VerifiedVolume>) -> Self {
         self.volumes = volumes;
+        self
+    }
+
+    /// Attach confidential GPUs: a family and a count, resolved to concrete
+    /// cards by the CRN. The runtime bundle must be a GPU flavor; the CRN
+    /// refuses the create otherwise.
+    pub fn gpu(mut self, gpu: ConfidentialGpuRequirement) -> Self {
+        self.gpu = Some(gpu);
         self
     }
 
@@ -944,6 +955,7 @@ impl<'a, A: Account> VProgramBuilder<'a, A> {
             workload: self.workload,
             verification: self.verification,
             volumes: self.volumes,
+            gpu: self.gpu,
         };
         let value = serde_json::to_value(&content)?;
         // Struct-literal construction bypasses the parse-time validators; a serde
@@ -1696,5 +1708,46 @@ mod tests {
         assert_eq!(content["allow_amend"], false);
         // exactly one volumes key, and it is the verified-volume list
         assert_eq!(pending.item_content.matches("\"volumes\"").count(), 1);
+        // no GPU asked for, no gpu key on the wire
+        assert!(content.get("gpu").is_none());
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn vprogram_builder_carries_the_confidential_gpu_requirement() {
+        let account = TestAccount::new();
+        let workload = serde_json::from_value::<VerifiedWorkload>(serde_json::json!({
+            "ref": "beef".repeat(16), "hash_tree": "feed".repeat(16), "roothash": "cd".repeat(32),
+        }))
+        .unwrap();
+        let verification = serde_json::from_value::<TeeVerification>(serde_json::json!({
+            "backend": "sev_snp",
+            "measurements": [{"platform": "sev_snp", "registers": {"launch": "ab".repeat(48)}}],
+        }))
+        .unwrap();
+        let gpu = serde_json::from_value::<ConfidentialGpuRequirement>(serde_json::json!({
+            "vendor": "nvidia", "arch": "blackwell", "count": 1, "models": ["10de:2b85"], "mode": "cc",
+        }))
+        .unwrap();
+        let pending = VProgramBuilder::new(
+            &account,
+            "cafe".repeat(16).parse().unwrap(),
+            workload,
+            verification,
+        )
+        .gpu(gpu)
+        .build()
+        .unwrap();
+        let content: serde_json::Value = serde_json::from_str(&pending.item_content).unwrap();
+        assert_eq!(
+            content["gpu"],
+            serde_json::json!({
+                "vendor": "nvidia", "arch": "blackwell", "count": 1, "models": ["10de:2b85"], "mode": "cc",
+            })
+        );
+        // the signed content parses back as a GPU V-Program
+        let parsed: aleph_types::message::VerifiableProgramContent =
+            serde_json::from_str(&pending.item_content).unwrap();
+        assert_eq!(parsed.gpu.as_ref().map(|g| g.count), Some(1));
     }
 }
