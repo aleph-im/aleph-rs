@@ -308,7 +308,49 @@ impl CrnClient {
         &self.http_client
     }
 
+    /// Start a VM its owner stopped.
+    ///
+    /// Calls the authenticated `/control/machine/{ref}/start` route, falling
+    /// back to the legacy `/control/allocation/notify` push on 404 for CRNs
+    /// that predate aleph-vm 2.1.
     pub async fn start_instance(&self, vm_id: &ItemHash) -> Result<AllocationResponse, CrnError> {
+        let path = format!("/control/machine/{vm_id}/start");
+        let url = self.crn_url.join(&path).expect("valid path");
+        let headers = self.auth_headers("POST", &path);
+
+        let mut request = self.http_client.post(url);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
+        }
+
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        if status == 404 {
+            return self.start_instance_allocation(vm_id).await;
+        }
+        match status {
+            200 => Ok(AllocationResponse {
+                success: true,
+                successful: true,
+                failing: Vec::new(),
+                errors: HashMap::new(),
+            }),
+            402 => {
+                let body = response.text().await?;
+                Err(CrnError::PaymentRequired(body))
+            }
+            _ => {
+                let body = response.text().await?;
+                Err(CrnError::Api { status, body })
+            }
+        }
+    }
+
+    /// Start a VM through the legacy `/control/allocation/notify` push.
+    pub async fn start_instance_allocation(
+        &self,
+        vm_id: &ItemHash,
+    ) -> Result<AllocationResponse, CrnError> {
         let url = self
             .crn_url
             .join("/control/allocation/notify")
