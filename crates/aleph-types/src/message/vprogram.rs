@@ -20,6 +20,125 @@ pub const MAX_VERIFIED_VOLUMES: usize = 8;
 /// aleph-message's MAX_RUNTIME_COMMENT_LENGTH.
 pub const MAX_RUNTIME_COMMENT_LENGTH: usize = 1024;
 
+/// Ceiling of NVIDIA's multi-GPU passthrough CC mode (Blackwell HGX: 1, 2, 4
+/// or 8 cards per confidential VM over encrypted NVLink). Each CRN enforces
+/// the smaller limit its own cards validate.
+pub const MAX_CONFIDENTIAL_GPUS: u8 = 8;
+
+/// Upper bound on the `models` narrowing list of a confidential GPU
+/// requirement, matching aleph-message's MAX_CONFIDENTIAL_GPU_MODELS.
+pub const MAX_CONFIDENTIAL_GPU_MODELS: usize = 16;
+
+/// GPUs to attach in confidential-computing mode: a family and a count.
+///
+/// Names a kind of card, never a concrete device: the CRN resolves the
+/// requirement against the cards it probed in CC mode. The architecture is
+/// what the client verifies from the GPU attestation itself (the device
+/// certificate chain encodes it), so security never depends on the message
+/// naming an exact model; `models` only narrows placement and pricing.
+/// Driver and VBIOS pins live in the runtime manifest, properties of the
+/// measured runtime. All cards share one architecture because that is the
+/// only multi-GPU configuration NVIDIA supports inside a confidential VM.
+///
+/// Deserializing validates every field, so a value of this type is always
+/// well formed: vendor `nvidia`, arch `hopper` or `blackwell`, `count` in
+/// `1..=MAX_CONFIDENTIAL_GPUS`, `models` (when present) a non-empty list of
+/// at most `MAX_CONFIDENTIAL_GPU_MODELS` unique lowercase `vvvv:dddd` PCI
+/// ids, mode `cc`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawConfidentialGpuRequirement")]
+pub struct ConfidentialGpuRequirement {
+    /// GPU vendor with a confidential-computing mode.
+    pub vendor: String,
+    /// Architecture family every attached card must belong to.
+    pub arch: String,
+    /// Number of cards to attach, all of the same architecture.
+    pub count: u8,
+    /// Optional narrowing to specific card kinds, as lowercase PCI
+    /// vendor:device ids (e.g. `10de:2b85`); absent means any card of the
+    /// architecture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    /// Confidential mode. Required even though `cc` is the only value: the
+    /// CCN compares a dump of the parsed content to the signed item_content,
+    /// so a defaulted field would reject every hand-built content that omits
+    /// it. Spelling it out also lets a weaker multi-GPU mode (Hopper's PPCIe,
+    /// which leaves GPU-to-GPU links in the clear) join later as an explicit
+    /// opt-in.
+    pub mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfidentialGpuRequirement {
+    vendor: String,
+    arch: String,
+    count: u8,
+    #[serde(default)]
+    models: Option<Vec<String>>,
+    mode: String,
+}
+
+/// Lowercase PCI `vvvv:dddd` id, the form the settings aggregate's
+/// compatible_gpus and the CRN's inventory both use.
+fn is_pci_device_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 9
+        && bytes[4] == b':'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+impl TryFrom<RawConfidentialGpuRequirement> for ConfidentialGpuRequirement {
+    type Error = VProgramError;
+
+    fn try_from(raw: RawConfidentialGpuRequirement) -> Result<Self, Self::Error> {
+        if raw.vendor != "nvidia" {
+            return Err(VProgramError::UnsupportedGpuVendor(raw.vendor));
+        }
+        if !matches!(raw.arch.as_str(), "hopper" | "blackwell") {
+            return Err(VProgramError::UnsupportedGpuArch(raw.arch));
+        }
+        if raw.count == 0 || raw.count > MAX_CONFIDENTIAL_GPUS {
+            return Err(VProgramError::BadGpuCount(raw.count));
+        }
+        if let Some(models) = &raw.models {
+            if models.is_empty() {
+                return Err(VProgramError::BadGpuModels("the list is empty".into()));
+            }
+            if models.len() > MAX_CONFIDENTIAL_GPU_MODELS {
+                return Err(VProgramError::BadGpuModels(format!(
+                    "{} entries, at most {MAX_CONFIDENTIAL_GPU_MODELS} allowed",
+                    models.len()
+                )));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for id in models {
+                if !is_pci_device_id(id) {
+                    return Err(VProgramError::BadGpuModels(format!(
+                        "{id:?} is not a lowercase PCI vendor:device id"
+                    )));
+                }
+                if !seen.insert(id) {
+                    return Err(VProgramError::BadGpuModels(format!("{id} is listed twice")));
+                }
+            }
+        }
+        if raw.mode != "cc" {
+            return Err(VProgramError::UnsupportedGpuMode(raw.mode));
+        }
+        Ok(Self {
+            vendor: raw.vendor,
+            arch: raw.arch,
+            count: raw.count,
+            models: raw.models,
+            mode: raw.mode,
+        })
+    }
+}
+
 fn deserialize_comment<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -217,6 +336,21 @@ pub enum VProgramError {
          input inside an attested VM"
     )]
     UnverifiedVolumes,
+    #[error("confidential GPU vendor {0:?} is not supported: only nvidia has a confidential mode")]
+    UnsupportedGpuVendor(String),
+    #[error("confidential GPU architecture {0:?} is not supported: expected hopper or blackwell")]
+    UnsupportedGpuArch(String),
+    #[error("confidential GPU count must be between 1 and {MAX_CONFIDENTIAL_GPUS}, got {0}")]
+    BadGpuCount(u8),
+    #[error("confidential GPU models: {0}")]
+    BadGpuModels(String),
+    #[error("confidential GPU mode {0:?} is not supported: only cc is defined")]
+    UnsupportedGpuMode(String),
+    #[error(
+        "requirements.gpu is not supported for V-Programs: an attested VM only takes GPUs in \
+         confidential-computing mode; declare the cards in gpu instead"
+    )]
+    PlainGpuRequirements,
 }
 
 /// Message content for scheduling a verifiable program (V-Program): an
@@ -252,6 +386,10 @@ pub struct VerifiableProgramContent {
     /// verity-bound volumes are allowed: unverified extra volumes would be
     /// attacker-controllable input inside an attested VM.
     pub volumes: Vec<VerifiedVolume>,
+    /// GPUs to attach in confidential-computing mode, as a family and a
+    /// count. Absent for a V-Program without GPUs; the inherited
+    /// `requirements.gpu` is not used by V-Programs.
+    pub gpu: Option<ConfidentialGpuRequirement>,
 }
 
 impl VerifiableProgramContent {
@@ -286,6 +424,9 @@ impl Serialize for VerifiableProgramContent {
         map.serialize_entry("workload", &self.workload)?;
         map.serialize_entry("verification", &self.verification)?;
         map.serialize_entry("volumes", &self.volumes)?;
+        if let Some(gpu) = &self.gpu {
+            map.serialize_entry("gpu", gpu)?;
+        }
         map.end()
     }
 }
@@ -300,6 +441,8 @@ struct RawVerifiableProgramContent {
     verification: TeeVerification,
     #[serde(default)]
     volumes: Vec<VerifiedVolume>,
+    #[serde(default)]
+    gpu: Option<ConfidentialGpuRequirement>,
 }
 
 impl TryFrom<RawVerifiableProgramContent> for VerifiableProgramContent {
@@ -334,6 +477,18 @@ impl TryFrom<RawVerifiableProgramContent> for VerifiableProgramContent {
         if !raw.base.volumes.is_empty() {
             return Err(VProgramError::UnverifiedVolumes);
         }
+        // The inherited plain passthrough list would let a scheduler place
+        // the VM on an ordinary GPU host and the CRN attach an unattested
+        // card; only the confidential `gpu` block names GPUs here.
+        if raw
+            .base
+            .requirements
+            .as_ref()
+            .and_then(|r| r.gpu.as_ref())
+            .is_some_and(|gpus| !gpus.is_empty())
+        {
+            return Err(VProgramError::PlainGpuRequirements);
+        }
         Ok(Self {
             base: raw.base,
             environment: raw.environment,
@@ -341,6 +496,7 @@ impl TryFrom<RawVerifiableProgramContent> for VerifiableProgramContent {
             workload: raw.workload,
             verification: raw.verification,
             volumes: raw.volumes,
+            gpu: raw.gpu,
         })
     }
 }
@@ -510,6 +666,12 @@ mod test {
     }
 
     fn vprogram_content_json_with(payment: &str, volumes: &str) -> String {
+        vprogram_content_json_full(payment, volumes, "")
+    }
+
+    /// `gpu_member` is spliced in verbatim as a trailing member, e.g.
+    /// `, "gpu": {...}`; empty for a V-Program without GPUs.
+    fn vprogram_content_json_full(payment: &str, volumes: &str, gpu_member: &str) -> String {
         format!(
             r#"{{
                 "address": "0x9319Ad3B7A8E0eE24f2E639c40D8eD124C5520Ba",
@@ -531,10 +693,152 @@ mod test {
                         {{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}, "vcpu_type": "EPYC-v4"}}
                     ]
                 }},
-                "volumes": {volumes}
+                "volumes": {volumes}{gpu_member}
             }}"#,
             roothash = "cd".repeat(32),
         )
+    }
+
+    fn vprogram_content_json_gpu(gpu: &str) -> String {
+        vprogram_content_json_full(r#"{"type": "credit"}"#, "[]", &format!(", \"gpu\": {gpu}"))
+    }
+
+    #[test]
+    fn test_vprogram_without_gpu_parses_and_serializes_without_the_key() {
+        let content: VerifiableProgramContent =
+            serde_json::from_str(&vprogram_content_json(r#"{"type": "credit"}"#)).unwrap();
+        assert!(content.gpu.is_none());
+        let out = serde_json::to_string(&content).unwrap();
+        assert!(
+            !out.contains("\"gpu\""),
+            "absent stays absent on the wire: {out}"
+        );
+    }
+
+    #[test]
+    fn test_vprogram_gpu_family_round_trips() {
+        let json = vprogram_content_json_gpu(
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1, "mode": "cc"}"#,
+        );
+        let content: VerifiableProgramContent = serde_json::from_str(&json).unwrap();
+        let gpu = content.gpu.as_ref().unwrap();
+        assert_eq!(gpu.vendor, "nvidia");
+        assert_eq!(gpu.arch, "blackwell");
+        assert_eq!(gpu.count, 1);
+        assert!(gpu.models.is_none());
+        assert_eq!(gpu.mode, "cc");
+        let out = serde_json::to_string(&content).unwrap();
+        assert!(
+            out.ends_with(
+                r#","gpu":{"vendor":"nvidia","arch":"blackwell","count":1,"mode":"cc"}}"#
+            ),
+            "gpu is the last member and carries no models key: {out}"
+        );
+        let roundtripped: VerifiableProgramContent = serde_json::from_str(&out).unwrap();
+        assert_eq!(roundtripped, content);
+    }
+
+    #[test]
+    fn test_vprogram_gpu_models_narrow_and_round_trip() {
+        let json = vprogram_content_json_gpu(
+            r#"{"vendor": "nvidia", "arch": "hopper", "count": 8,
+                "models": ["10de:2331", "10de:2321"], "mode": "cc"}"#,
+        );
+        let content: VerifiableProgramContent = serde_json::from_str(&json).unwrap();
+        let gpu = content.gpu.as_ref().unwrap();
+        assert_eq!(gpu.count, MAX_CONFIDENTIAL_GPUS);
+        assert_eq!(
+            gpu.models.as_deref(),
+            Some(&["10de:2331".to_string(), "10de:2321".to_string()][..])
+        );
+        let out = serde_json::to_string(&content).unwrap();
+        assert!(
+            out.contains(r#""models":["10de:2331","10de:2321"]"#),
+            "{out}"
+        );
+        let roundtripped: VerifiableProgramContent = serde_json::from_str(&out).unwrap();
+        assert_eq!(roundtripped, content);
+    }
+
+    #[test]
+    fn test_vprogram_rejects_malformed_confidential_gpu() {
+        let sixteen_plus_one = (0..=MAX_CONFIDENTIAL_GPU_MODELS)
+            .map(|i| format!("\"10de:{i:04x}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let too_many_models = format!(
+            r#"{{"vendor": "nvidia", "arch": "hopper", "count": 1, "models": [{sixteen_plus_one}], "mode": "cc"}}"#
+        );
+        for bad in [
+            r#"{"vendor": "amd", "arch": "blackwell", "count": 1, "mode": "cc"}"#,
+            r#"{"vendor": "NVIDIA", "arch": "blackwell", "count": 1, "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "ampere", "count": 1, "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "Blackwell", "count": 1, "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 0, "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 9, "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": -1, "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": "1", "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1.0, "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1, "models": [], "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1, "models": ["10DE:2B85"], "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1, "models": ["2b85"], "mode": "cc"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1, "models": ["10de:2b85", "10de:2b85"], "mode": "cc"}"#,
+            too_many_models.as_str(),
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1, "mode": "ppcie"}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1}"#,
+            r#"{"vendor": "nvidia", "arch": "blackwell", "count": 1, "mode": "cc", "pci_host": "06:00.0"}"#,
+            r#"{"vendor": "nvidia", "count": 1, "mode": "cc"}"#,
+            r#"null"#,
+        ] {
+            let json = vprogram_content_json_gpu(bad);
+            let parsed = serde_json::from_str::<VerifiableProgramContent>(&json);
+            if bad == "null" {
+                // an explicit null is the same as an absent key, like the Python Optional
+                assert!(parsed.unwrap().gpu.is_none());
+            } else {
+                assert!(parsed.is_err(), "must reject gpu {bad}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_vprogram_rejects_plain_gpu_requirements() {
+        let plain = r#""requirements": {"gpu": [{"vendor": "nvidia", "device_name": "RTX 4090",
+            "device_class": "0300", "device_id": "10de:2684"}]}"#;
+        let json = vprogram_content_json(r#"{"type": "credit"}"#).replace(
+            "\"allow_amend\": false",
+            &format!("\"allow_amend\": false, {plain}"),
+        );
+        let err = serde_json::from_str::<VerifiableProgramContent>(&json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("requirements.gpu is not supported"),
+            "{err}"
+        );
+
+        // an empty list is as good as none, matching the Python model
+        let json = vprogram_content_json(r#"{"type": "credit"}"#).replace(
+            "\"allow_amend\": false",
+            "\"allow_amend\": false, \"requirements\": {\"gpu\": []}",
+        );
+        assert!(serde_json::from_str::<VerifiableProgramContent>(&json).is_ok());
+    }
+
+    #[test]
+    fn test_confidential_gpu_requirement_errors_name_the_offence() {
+        let err = serde_json::from_str::<ConfidentialGpuRequirement>(
+            r#"{"vendor": "nvidia", "arch": "hopper", "count": 12, "mode": "cc"}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("between 1 and 8, got 12"), "{err}");
+        let err = serde_json::from_str::<ConfidentialGpuRequirement>(
+            r#"{"vendor": "nvidia", "arch": "hopper", "count": 1, "models": ["10de:2331", "10de:2331"], "mode": "cc"}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("10de:2331 is listed twice"),
+            "{err}"
+        );
     }
 
     #[test]
