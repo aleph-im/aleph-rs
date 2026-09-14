@@ -308,11 +308,13 @@ impl CrnClient {
         &self.http_client
     }
 
-    /// Start a VM its owner stopped.
+    /// Start a VM that its owner stopped.
     ///
     /// Calls the authenticated `/control/machine/{ref}/start` route, falling
     /// back to the legacy `/control/allocation/notify` push on 404 for CRNs
-    /// that predate aleph-vm 2.1.
+    /// that predate aleph-vm 2.1. A 404 from a 2.1 CRN ("VM not on this
+    /// node") triggers the same fallback, so [`CrnError::VmNotFound`]
+    /// intentionally never surfaces from this method.
     pub async fn start_instance(&self, vm_id: &ItemHash) -> Result<AllocationResponse, CrnError> {
         let path = format!("/control/machine/{vm_id}/start");
         let url = self.crn_url.join(&path).expect("valid path");
@@ -329,6 +331,8 @@ impl CrnClient {
             return self.start_instance_allocation(vm_id).await;
         }
         match status {
+            // aleph-vm #1245 answers exactly 200 for success ("started" and
+            // "already running" alike); everything else is an error status.
             200 => Ok(AllocationResponse {
                 success: true,
                 successful: true,
@@ -339,6 +343,7 @@ impl CrnClient {
                 let body = response.text().await?;
                 Err(CrnError::PaymentRequired(body))
             }
+            403 => Err(CrnError::Unauthorized(response.text().await?)),
             _ => {
                 let body = response.text().await?;
                 Err(CrnError::Api { status, body })
@@ -1481,6 +1486,138 @@ mod tests {
         let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
         let result = client.get_backup(&vm.parse().unwrap()).await.unwrap();
         assert!(matches!(result, BackupStatus::NotFound));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn start_instance_returns_success_on_200() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/start")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let result = client.start_instance(&vm.parse().unwrap()).await.unwrap();
+        assert!(result.success);
+        assert!(result.successful);
+        assert!(result.failing.is_empty());
+        assert!(result.errors.is_empty());
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn start_instance_maps_402_to_payment_required() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/start")))
+            .respond_with(ResponseTemplate::new(402))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let err = client
+            .start_instance(&vm.parse().unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CrnError::PaymentRequired(_)));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn start_instance_maps_403_to_unauthorized() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/start")))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string("Unauthorized sender"),
+            )
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let err = client
+            .start_instance(&vm.parse().unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CrnError::Unauthorized(body) if body == "Unauthorized sender"));
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn start_instance_falls_back_to_notify_on_404() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        Mock::given(method("POST"))
+            .and(path(format!("/control/machine/{vm}/start")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/control/allocation/notify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "successful": true,
+                "failing": [],
+                "errors": {},
+            })))
+            // Panics on drop if the fallback never hit the notify path.
+            .expect(1)
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let result = client.start_instance(&vm.parse().unwrap()).await.unwrap();
+        assert!(result.success);
+        assert!(result.successful);
+    }
+
+    #[cfg(feature = "account-evm")]
+    #[tokio::test]
+    async fn start_instance_allocation_parses_notify_response() {
+        use aleph_types::account::EvmAccount;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
+        let vm_hash: ItemHash = vm.parse().unwrap();
+        Mock::given(method("POST"))
+            .and(path("/control/allocation/notify"))
+            .and(body_json(serde_json::json!({ "instance": vm })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "successful": true,
+                "failing": [],
+                "errors": {},
+            })))
+            .mount(&server)
+            .await;
+        let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
+        let client = CrnClient::new(&account, Url::parse(&server.uri()).unwrap()).unwrap();
+        let result = client.start_instance_allocation(&vm_hash).await.unwrap();
+        assert!(result.success);
+        assert!(result.successful);
     }
 
     #[cfg(feature = "account-evm")]
