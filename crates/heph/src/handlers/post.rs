@@ -399,11 +399,11 @@ mod tests {
         time: f64,
         recipient: &str,
         amount: u64,
-        expiration_unix: Option<i64>,
+        expiration_ms: Option<i64>,
     ) -> IncomingMessage {
         let account = EvmAccount::new(Chain::Ethereum, key).unwrap();
         let sender = account.address().as_str().to_string();
-        let exp_field = match expiration_unix {
+        let exp_field = match expiration_ms {
             Some(e) => format!(r#","expiration":{e}"#),
             None => String::new(),
         };
@@ -449,7 +449,7 @@ mod tests {
             1_700_000_100.0,
             recipient,
             1_500,
-            Some(1_798_761_599), // 2026-12-31T23:59:59Z
+            Some(1_798_761_599_000), // 2026-12-31T23:59:59Z, epoch ms
         );
         let item_hash = msg.item_hash.to_string();
 

@@ -283,7 +283,7 @@ mod tests {
 
         let content = json!({
             "transfer": { "credits": [
-                { "address": "0xrecipient", "amount": 1500, "expiration": 1798761599 }
+                { "address": "0xrecipient", "amount": 1500, "expiration": 1798761599000_i64 }
             ]}
         });
 
