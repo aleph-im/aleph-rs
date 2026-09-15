@@ -527,6 +527,9 @@ async fn handle_transfer(
     if account.address() == &recipient {
         return Err(CreditTransferError::SelfTransfer(recipient).into());
     }
+    if let Some(exp) = args.expiration {
+        reject_past_expiration(exp, Utc::now())?;
+    }
 
     let pending = build_transfer_message(&account, &content)?;
 
@@ -551,6 +554,18 @@ fn build_transfer_message<A: Account>(
     Ok(MessageBuilder::new(account, MessageType::Post, envelope)
         .channel(channel!(CREDIT_CHANNEL))
         .build()?)
+}
+
+/// The CCN applies a past expiration as-is: the sender is debited and the
+/// recipient's lot is born expired, so the credits are simply destroyed.
+fn reject_past_expiration(expiration: DateTime<Utc>, now: DateTime<Utc>) -> Result<()> {
+    if expiration <= now {
+        anyhow::bail!(
+            "expiration {} is not in the future; the transferred credits would be lost",
+            expiration.to_rfc3339()
+        );
+    }
+    Ok(())
 }
 
 fn print_transfer_summary(
@@ -828,6 +843,18 @@ mod tests {
                 .get("expiration")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn transfer_rejects_expiration_not_in_the_future() {
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let past = now - chrono::Duration::seconds(1);
+        let err = reject_past_expiration(past, now).unwrap_err();
+        assert!(err.to_string().contains("not in the future"), "got: {err}");
+        assert!(reject_past_expiration(now, now).is_err());
+        let future = now + chrono::Duration::seconds(1);
+        assert!(reject_past_expiration(future, now).is_ok());
     }
 
     #[test]

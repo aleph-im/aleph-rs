@@ -21,9 +21,11 @@ pub const CREDIT_CHANNEL: &str = "ALEPH_CREDIT";
 pub struct CreditTransferEntry {
     pub address: AlephAddress,
     pub amount: u64,
+    /// Epoch milliseconds on the wire: pyaleph divides this by 1000, so a
+    /// seconds value would land in January 1970 and destroy the credits.
     #[serde(
         default,
-        with = "chrono::serde::ts_seconds_option",
+        with = "chrono::serde::ts_milliseconds_option",
         skip_serializing_if = "Option::is_none"
     )]
     pub expiration: Option<DateTime<Utc>>,
@@ -74,7 +76,7 @@ impl CreditTransferContent {
                 return Err(CreditTransferError::EmptyAddress);
             }
             if let Some(exp) = entry.expiration
-                && exp.timestamp() < 0
+                && exp.timestamp_millis() < 0
             {
                 return Err(CreditTransferError::NegativeExpiration(exp));
             }
@@ -111,11 +113,31 @@ mod tests {
         let json = serde_json::to_value(&content).unwrap();
         assert_eq!(json["transfer"]["credits"][0]["address"], "0xrecipient");
         assert_eq!(json["transfer"]["credits"][0]["amount"], 1500);
-        assert_eq!(json["transfer"]["credits"][0]["expiration"], dt.timestamp());
+        // pyaleph reads `expiration` as epoch milliseconds; pin the wire
+        // value so the unit can never silently drift back to seconds.
+        assert_eq!(
+            json["transfer"]["credits"][0]["expiration"],
+            1_798_761_599_000_i64
+        );
 
         let back: CreditTransferContent = serde_json::from_value(json).unwrap();
         assert_eq!(back.transfer.credits[0].amount, 1500);
         assert_eq!(back.transfer.credits[0].expiration, Some(dt));
+    }
+
+    #[test]
+    fn credit_transfer_entry_reads_pyaleph_millisecond_fixture() {
+        // Same literal as pyaleph's tests/db/test_credit_balances.py.
+        let json = serde_json::json!({
+            "address": "0xrecipient",
+            "amount": 1,
+            "expiration": 1_700_000_000_000_i64,
+        });
+        let entry: CreditTransferEntry = serde_json::from_value(json).unwrap();
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2023, 11, 14, 22, 13, 20)
+            .unwrap();
+        assert_eq!(entry.expiration, Some(expected));
     }
 
     #[test]
