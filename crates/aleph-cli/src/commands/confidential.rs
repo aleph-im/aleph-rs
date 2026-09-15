@@ -219,10 +219,11 @@ async fn handle_launch(scheduler_url: Url, json: bool, args: ConfidentialLaunchA
     })?;
     let (vm_id, crn_url) = resolve_target(&scheduler_url, vm_id_input, args.crn.as_deref()).await?;
 
-    // 2. Allocate on the CRN (the "start" step in Python parlance).
+    // 2. Allocate on the CRN (the "start" step in Python parlance). Initial
+    //    allocation, not a restart: the legacy notify push.
     let account = resolve_account(&args.identity)?;
     let crn = CrnClient::new(&account, crn_url.clone())?;
-    crn.start_instance(&vm_id)
+    crn.start_instance_allocation(&vm_id)
         .await
         .context("CRN failed to start the VM")?;
 
