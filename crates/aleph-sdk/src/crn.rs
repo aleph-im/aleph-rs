@@ -1545,9 +1545,7 @@ mod tests {
         let vm = "5a586d6f59f6c2e6862f155204626dcf01a6ec1107e7aba67063cd48ffe41d99";
         Mock::given(method("POST"))
             .and(path(format!("/control/machine/{vm}/start")))
-            .respond_with(
-                ResponseTemplate::new(403).set_body_string("Unauthorized sender"),
-            )
+            .respond_with(ResponseTemplate::new(403).set_body_string("Unauthorized sender"))
             .mount(&server)
             .await;
         let account = EvmAccount::new(Chain::Ethereum, &[1u8; 32]).unwrap();
