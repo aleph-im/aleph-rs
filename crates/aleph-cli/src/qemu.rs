@@ -158,20 +158,38 @@ fn qemu_option_value(path: &Path) -> String {
 }
 
 /// A running QEMU. `kill_on_drop` guarantees no error path leaks the VM;
-/// `shutdown` is the polite path (SIGTERM, then SIGKILL after 5 s).
+/// `shutdown` is the polite path (SIGTERM, then SIGKILL after 5 s). On Linux
+/// the child also asks the kernel for SIGTERM when its parent dies, which
+/// covers the exits `Drop` never sees (a signal that kills the CLI outright,
+/// `process::exit`).
 pub struct QemuProcess {
     child: tokio::process::Child,
 }
 
 impl QemuProcess {
     pub fn spawn(qemu: &Qemu, argv: &[OsString]) -> Result<Self, QemuError> {
-        let child = tokio::process::Command::new(&qemu.path)
+        let mut command = tokio::process::Command::new(&qemu.path);
+        command
             .args(argv)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        #[cfg(target_os = "linux")]
+        // SAFETY: runs in the forked child before exec; prctl(2) is
+        // async-signal-safe and touches no memory of this process.
+        unsafe {
+            command.pre_exec(|| {
+                // The death signal is tied to the thread that forked, not the
+                // process; tokio's worker threads live until the runtime
+                // shuts down, which only happens as the process exits.
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn()?;
         Ok(Self { child })
     }
 
