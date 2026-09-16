@@ -41,6 +41,10 @@ pub enum ManifestError {
         "cmdline template contains a placeholder not recognized by aleph-instance-runtime/1: {{{0}}}"
     )]
     UnknownPlaceholder(String),
+    #[error(
+        "boot.cmdline_template carries the reserved unattested-mode token {0:?}; only `aleph vprogram run` may append it"
+    )]
+    ReservedCmdlineToken(String),
 }
 
 /// Upper bound on `bundle.size`. The tarball is downloaded into memory and
@@ -49,6 +53,32 @@ pub enum ManifestError {
 /// can use anyway. Bounding it here keeps a hostile manifest from steering
 /// `fetch_bundle_artifacts` into a multi-gigabyte allocation.
 pub const MAX_BUNDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Kernel cmdline token that switches the guest init into unattested
+/// (non-confidential) test mode: the attest agent serves plain HTTP with no
+/// TEE and no attested identity, so nothing about the guest is verifiable
+/// from outside. dm-verity is unaffected. Appended by `aleph vprogram run` after the
+/// template is materialized; never part of a template.
+pub const UNATTESTED_TOKEN: &str = "aleph_insecure_unattested=1";
+
+/// The reserved token's key: any cmdline token equal to it or starting with
+/// `<key>=` is rejected in templates.
+const UNATTESTED_TOKEN_KEY: &str = "aleph_insecure_unattested";
+
+fn reserved_cmdline_token(template: &str) -> Option<&str> {
+    // Quotes split too: the kernel accepts `"key=value"` and the guest matches
+    // the token against the raw /proc/cmdline, where a quote is a word
+    // boundary, so a quoted token would activate unattested mode just the
+    // same.
+    template
+        .split(|c: char| c.is_whitespace() || c == '"')
+        .find(|token| {
+            *token == UNATTESTED_TOKEN_KEY
+                || token
+                    .strip_prefix(UNATTESTED_TOKEN_KEY)
+                    .is_some_and(|rest| rest.starts_with('='))
+        })
+}
 
 /// Contract the runtime imposes on the workload volume's contents, e.g.
 /// "aleph.compose/1". Absent means: opaque ext4, runtime-defined.
@@ -169,6 +199,12 @@ impl RuntimeManifest {
         }
         if !is_lowercase_hex_64(&manifest.boot.platform_roothash) {
             return Err(ManifestError::BadPlatformRoothash);
+        }
+        // Defense in depth for unattested mode: the token flips the guest into an
+        // unattested plain-HTTP mode, so no template may carry it. Only the
+        // local runner appends it, after materialization.
+        if let Some(token) = reserved_cmdline_token(&manifest.boot.cmdline_template) {
+            return Err(ManifestError::ReservedCmdlineToken(token.to_string()));
         }
         // `bundle.size` is the download cap: zero can never match a real
         // tarball, and an absurd value would let the manifest dictate how
@@ -313,6 +349,36 @@ pub(crate) mod test {
             m.boot.cmdline_template,
             "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash} workload_roothash={workload_roothash}"
         );
+    }
+
+    fn manifest_with_template(template: &str) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_str(VALID_MANIFEST).unwrap();
+        json["boot"]["cmdline_template"] = serde_json::Value::String(template.to_string());
+        json.to_string().into_bytes()
+    }
+
+    #[test]
+    fn template_with_the_unattested_token_is_rejected() {
+        for template in [
+            "console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash} aleph_insecure_unattested=1",
+            "aleph_insecure_unattested=1 console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash}",
+            "console=ttyS0 aleph_insecure_unattested roothash={platform_roothash} workload_roothash={workload_roothash}",
+            "console=ttyS0 aleph_insecure_unattested=0 roothash={platform_roothash} workload_roothash={workload_roothash}",
+            r#"console=ttyS0 "aleph_insecure_unattested=1" roothash={platform_roothash} workload_roothash={workload_roothash}"#,
+            r#"console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash} extra="x aleph_insecure_unattested=1""#,
+        ] {
+            let err = RuntimeManifest::parse(&manifest_with_template(template)).unwrap_err();
+            assert!(
+                matches!(err, ManifestError::ReservedCmdlineToken(_)),
+                "{template}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_with_a_similar_but_different_token_is_accepted() {
+        let template = "console=ttyS0 aleph_insecure_unattested_x=1 roothash={platform_roothash} workload_roothash={workload_roothash}";
+        RuntimeManifest::parse(&manifest_with_template(template)).unwrap();
     }
 
     #[test]

@@ -29,4 +29,6 @@ pub mod token;
 pub mod upload;
 #[cfg(feature = "vprogram")]
 pub mod vprogram;
+#[cfg(feature = "vprogram")]
+pub mod vprogram_run;
 pub mod website;

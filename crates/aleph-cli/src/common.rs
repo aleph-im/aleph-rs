@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aleph_sdk::client::{AlephMessageClient, MessageError, MessageWithStatus};
@@ -7,6 +8,14 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::pending::PendingMessage;
 use anyhow::{Result, anyhow, bail};
 use url::Url;
+
+/// Set by a command that has registered its own SIGINT listener and wants
+/// Ctrl-C to run a graceful shutdown (stop a child VM, then exit 0). While
+/// set, the process-wide handler in `main.rs` only restores the terminal and
+/// returns, instead of re-raising SIGINT and killing the process before the
+/// listener's task can run. Set it only after the listener is registered, or
+/// a Ctrl-C landing in between is swallowed by nobody.
+pub static GRACEFUL_SIGINT: AtomicBool = AtomicBool::new(false);
 
 /// Current Unix time as fractional seconds, matching the float `updated_at`
 /// field used across the dashboard's aggregates (`websites`, `domains`, ...).
