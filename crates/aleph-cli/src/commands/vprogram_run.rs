@@ -166,7 +166,7 @@ impl LineScanner {
 }
 
 /// The probe client: short timeout so a hung connection cannot outlive a
-/// tick, and no redirect following since any response at all is the signal.
+/// tick, and no redirect following since the status line is all the probe reads.
 fn probe_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
@@ -174,11 +174,20 @@ fn probe_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
-/// True once ANY HTTP response comes back. A bare TCP connect is not
-/// evidence: SLIRP accepts the host-side connection itself and only then
-/// tries the guest, closing without a byte when nothing listens there yet.
+/// True once an HTTP response comes back that is not the agent saying the
+/// workload is absent. A bare TCP connect is not evidence: SLIRP accepts the
+/// host-side connection itself and only then tries the guest, closing without
+/// a byte when nothing listens there yet. Nor is every response: the guest
+/// agent starts before the workload (a compose stack loads its images for
+/// tens of seconds after the agent binds) and answers 502 Bad Gateway with
+/// `{"error":"upstream unreachable"}` until the workload listens, so a 502
+/// means "agent up, workload not yet".
 pub(crate) async fn probe_http(client: &reqwest::Client, url: &str) -> bool {
-    client.get(url).send().await.is_ok()
+    client
+        .get(url)
+        .send()
+        .await
+        .is_ok_and(|resp| resp.status() != reqwest::StatusCode::BAD_GATEWAY)
 }
 
 pub async fn handle_run(
@@ -586,20 +595,26 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn probe_http_accepts_any_http_response_and_rejects_a_bare_close() {
+    /// A one-shot listener answering `response` to whatever it reads.
+    fn answer_once(response: &'static [u8]) -> u16 {
         use std::io::{Read, Write};
-        let client = probe_client().unwrap();
-        // A listener that answers a 404: ready.
-        let ok = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let ok_port = ok.local_addr().unwrap().port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            if let Ok((mut s, _)) = ok.accept() {
+            if let Ok((mut s, _)) = listener.accept() {
                 let mut buf = [0u8; 1024];
                 let _ = s.read(&mut buf);
-                let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                let _ = s.write_all(response);
             }
         });
+        port
+    }
+
+    #[tokio::test]
+    async fn probe_http_accepts_a_workload_response_and_rejects_a_bare_close() {
+        let client = probe_client().unwrap();
+        // A listener that answers a 404: the workload is there, ready.
+        let ok_port = answer_once(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
         assert!(probe_http(&client, &format!("http://127.0.0.1:{ok_port}/")).await);
 
         // A listener that accepts and closes without a byte (what SLIRP does
@@ -612,5 +627,16 @@ mod tests {
             }
         });
         assert!(!probe_http(&client, &format!("http://127.0.0.1:{closer_port}/")).await);
+    }
+
+    #[tokio::test]
+    async fn probe_http_keeps_waiting_on_the_agents_upstream_unreachable_502() {
+        let client = probe_client().unwrap();
+        // What aleph-attest-agent answers while the workload is not listening
+        // yet: the agent is up, the workload is not, so not ready.
+        let port = answer_once(
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n{\"error\":\"upstream unreachable\"}",
+        );
+        assert!(!probe_http(&client, &format!("http://127.0.0.1:{port}/")).await);
     }
 }
