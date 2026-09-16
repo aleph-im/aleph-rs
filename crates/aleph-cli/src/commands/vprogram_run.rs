@@ -62,7 +62,8 @@ const UNATTESTED_GRACE_LINES: usize = 5;
 pub(crate) enum ScanEvent {
     /// A fail-closed line from init; the VM is powering off.
     Fatal(String),
-    /// Every marker has been seen; start probing the forwarded port.
+    /// Every marker has been seen: the guest booted. `--check` starts probing
+    /// the forwarded port here; an interactive run is done waiting.
     Complete,
     /// The init got far enough that it would have announced unattested mode, and
     /// did not: this runtime predates the `aleph_insecure_unattested` token. Reported at
@@ -222,8 +223,29 @@ pub async fn handle_run(
     }
     let mut vm = QemuProcess::spawn(&qemu, &spec.argv())?;
     let url = format!("http://127.0.0.1:{}/", args.port);
-    let deadline = Instant::now() + Duration::from_secs(args.timeout);
-    let outcome = wait_until_ready(&mut vm, &url, deadline, &runtime_label, args.timeout).await;
+    // --check wants a verdict, so it probes the workload against a deadline.
+    // An interactive run is watched by a person who sees the workload come up
+    // on the console: it only waits for the guest to boot, sends no HTTP
+    // request of its own (each one the agent proxies is logged in the guest
+    // as an error until the workload listens), and has no deadline; Ctrl-C
+    // is the timeout.
+    let (readiness, deadline) = if args.check {
+        (
+            Readiness::WorkloadAnswers,
+            Some(Instant::now() + Duration::from_secs(args.timeout)),
+        )
+    } else {
+        (Readiness::GuestBooted, None)
+    };
+    let outcome = wait_until_ready(
+        &mut vm,
+        &url,
+        readiness,
+        deadline,
+        &runtime_label,
+        args.timeout,
+    )
+    .await;
 
     match outcome {
         Err(e) => {
@@ -329,12 +351,25 @@ fn disk_order(
     disks
 }
 
-/// Stream the serial console to stderr, watch the init markers, then probe
-/// the forwarded port until the guest's agent answers or `deadline` passes.
+/// What [`wait_until_ready`] waits for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    /// Every init marker has been seen: the guest booted and the forward is
+    /// live. No HTTP request is sent to the guest.
+    GuestBooted,
+    /// The guest's agent answered a probe through the forward with something
+    /// other than "workload absent" (see [`probe_http`]).
+    WorkloadAnswers,
+}
+
+/// Stream the serial console to stderr and watch the init markers until
+/// `readiness` is met or `deadline` (if any) passes. The init diagnoses
+/// (fail-closed line, runtime predating unattested mode) fire in either mode.
 async fn wait_until_ready(
     vm: &mut QemuProcess,
     url: &str,
-    deadline: Instant,
+    readiness: Readiness,
+    deadline: Option<Instant>,
     runtime_label: &str,
     timeout_secs: u64,
 ) -> Result<()> {
@@ -374,7 +409,7 @@ async fn wait_until_ready(
     // replayed back-to-back as a burst of probes.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             bail!(
                 "{}\n--- last serial lines ---\n{}",
                 scanner.timeout_diagnosis(runtime_label, ATTEST_PORT, timeout_secs),
@@ -394,7 +429,10 @@ async fn wait_until_ready(
                     let event = scanner.feed(&line);
                     match event {
                         ScanEvent::Fatal(line) => bail!("guest init failed closed: {line}"),
-                        ScanEvent::Complete => probing = true,
+                        ScanEvent::Complete => match readiness {
+                            Readiness::GuestBooted => return Ok(()),
+                            Readiness::WorkloadAnswers => probing = true,
+                        },
                         // The init is past the point where it would have said
                         // so: give the diagnosis the deadline would have, now.
                         ScanEvent::NoUnattestedMode => bail!(
@@ -422,13 +460,15 @@ async fn wait_until_ready(
 
 /// Announce the forwarded endpoint: a single JSON document on stdout with
 /// `--json`, otherwise a human line on stderr so stdout stays the guest's.
+/// `--check` reports the workload as reachable (it answered a probe); an
+/// interactive run only reports the guest as booted, since it never asks.
 fn report_ready(build: &LocalBuild, args: &VProgramRunArgs, json: bool) {
     let url = format!("http://127.0.0.1:{}", args.port);
     if json {
         println!(
             "{}",
             serde_json::json!({
-                "status": "ready",
+                "status": if args.check { "ready" } else { "booted" },
                 "url": url,
                 "runtime": { "name": build.manifest.name, "version": build.manifest.version },
             })
@@ -436,7 +476,7 @@ fn report_ready(build: &LocalBuild, args: &VProgramRunArgs, json: bool) {
     } else if args.check {
         eprintln!("workload reachable at {url}");
     } else {
-        eprintln!("workload reachable at {url} (Ctrl-C to stop)");
+        eprintln!("guest booted; forwarding {url} to the workload (Ctrl-C to stop)");
     }
 }
 

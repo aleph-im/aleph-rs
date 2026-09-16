@@ -3336,8 +3336,10 @@ the forwarded port on 127.0.0.1 answers what the attested endpoint would.
 
 What it proves: the runtime boots, both dm-verity chains open with the
 roothashes the CLI computed, verified volumes bind in order, the workload's
-own init starts (its console output is streamed to stderr), and the workload
-answers HTTP through the agent.
+own init starts (its console output is streamed to stderr), and, with
+--check, the workload answers HTTP through the agent. An interactive run
+sends no request of its own: the forward is live once the guest has booted
+and the console shows the workload coming up.
 
 What it does NOT prove: the SEV-SNP launch measurement, the firmware
 (SeaBIOS is used instead of the bundle's OVMF), the CPU model, TLS and
@@ -3629,7 +3631,9 @@ pub struct VProgramRunArgs {
     #[arg(long)]
     pub no_internet: bool,
 
-    /// Seconds to wait, from QEMU start, for the guest's agent to answer.
+    /// With --check: seconds to wait, from QEMU start, for the workload to
+    /// answer through the guest's agent. An interactive run has no deadline;
+    /// Ctrl-C stops it.
     #[arg(
         long,
         default_value_t = 180,
@@ -3638,9 +3642,11 @@ pub struct VProgramRunArgs {
     )]
     pub timeout: u64,
 
-    /// Non-interactive: exit 0 as soon as the agent answers, then power the
-    /// VM off. Without it the VM keeps running until Ctrl-C; a workload that
-    /// exits on its own is reported as a failure, as it would be in production.
+    /// Non-interactive: probe the forwarded port and exit 0 as soon as the
+    /// workload answers through the agent, then power the VM off. Without it
+    /// the VM keeps running until Ctrl-C and nothing is probed; a workload
+    /// that exits on its own is reported as a failure, as it would be in
+    /// production.
     #[arg(long)]
     pub check: bool,
 }
