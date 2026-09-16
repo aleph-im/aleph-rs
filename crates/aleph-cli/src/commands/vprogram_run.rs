@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use aleph_sdk::client::AlephClient;
@@ -20,6 +21,7 @@ use super::vprogram::{
     ATTEST_PORT, LocalBuild, RuntimeSource, VerityArtifact, prepare_local_build,
 };
 use crate::cli::VProgramRunArgs;
+use crate::common::GRACEFUL_SIGINT;
 use crate::qemu::{Accel, LocalBootSpec, Qemu, QemuProcess};
 
 /// Printed before the boot so nobody mistakes a local run for a deployment.
@@ -271,23 +273,29 @@ pub async fn handle_run(
 /// exit status cannot tell the two apart: listen for Ctrl-C here and let it
 /// win the race. A guest that powers off on its own means the workload
 /// exited, which production treats as a failure.
+///
+/// The CLI's process-wide SIGINT handler (`main.rs`) normally restores the
+/// terminal and re-raises the signal, which would kill this process before
+/// the listener below is ever polled. It stands down while
+/// [`GRACEFUL_SIGINT`] is set, so the flag is raised here, after the
+/// listener is registered and before anything waits on it: a Ctrl-C between
+/// the two would otherwise be dropped by both. Until this point a Ctrl-C
+/// (during the boot wait) still ends the process the usual way, with QEMU
+/// taking the terminal's SIGINT itself.
 async fn run_until_stopped(mut vm: QemuProcess, json: bool) -> Result<()> {
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
+    let mut interrupt = interrupt_listener().context("installing the Ctrl-C handler")?;
+    GRACEFUL_SIGINT.store(true, Ordering::SeqCst);
     let status = tokio::select! {
         biased;
-        res = &mut ctrl_c => {
-            res.context("installing the Ctrl-C handler")?;
-            None
-        }
+        _ = interrupt.recv() => None,
         status = vm.wait() => Some(status?),
     };
     let Some(status) = status else {
         return stop_on_ctrl_c(vm, json).await;
     };
-    // QEMU can die from the same Ctrl-C a beat before our handler is woken:
+    // QEMU can die from the same Ctrl-C a beat before our listener is woken:
     // give the signal a moment to land before blaming the workload.
-    if tokio::time::timeout(Duration::from_millis(200), &mut ctrl_c)
+    if tokio::time::timeout(Duration::from_millis(200), interrupt.recv())
         .await
         .is_ok()
     {
@@ -296,8 +304,26 @@ async fn run_until_stopped(mut vm: QemuProcess, json: bool) -> Result<()> {
     bail!("the VM powered off (workload exited; qemu {status})")
 }
 
+/// A SIGINT listener whose registration happens in this call, not on first
+/// poll (`tokio::signal::ctrl_c()` registers lazily), so the caller can hand
+/// Ctrl-C over from the process-wide handler without a gap.
+#[cfg(unix)]
+fn interrupt_listener() -> std::io::Result<tokio::signal::unix::Signal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+}
+
+#[cfg(windows)]
+fn interrupt_listener() -> std::io::Result<tokio::signal::windows::CtrlC> {
+    tokio::signal::windows::ctrl_c()
+}
+
 async fn stop_on_ctrl_c(vm: QemuProcess, json: bool) -> Result<()> {
-    if !json {
+    // The terminal has echoed "^C" without a newline; end that line so the
+    // shell's next prompt starts at column 0 (the process-wide handler
+    // normally gets this for free by dying of SIGINT).
+    if json {
+        eprintln!();
+    } else {
         eprintln!("stopping (Ctrl-C)");
     }
     vm.shutdown().await.context("stopping qemu")?;

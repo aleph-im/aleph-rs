@@ -49,6 +49,12 @@ fn install_terminal_restore_handler() {
                 libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, t);
             }
         }
+        // A command that owns Ctrl-C (a graceful stop of a child process)
+        // has registered its own listener, which the signal already woke:
+        // leave the process to it.
+        if common::GRACEFUL_SIGINT.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         // Die by re-raised SIGINT rather than exit(130): bash only prints a
         // newline to compensate for the kernel's "^C" echo when the child is
         // killed by SIGINT. After a normal exit the next prompt starts
