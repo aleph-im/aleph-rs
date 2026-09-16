@@ -3624,7 +3624,7 @@ pub struct VProgramRunArgs {
     pub bundle: Option<PathBuf>,
 
     /// Host port on 127.0.0.1 forwarded to the guest's agent port.
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, default_value_t = 8080, value_parser = clap::value_parser!(u16).range(1..=65535))]
     pub port: u16,
 
     /// Cut the guest's outbound internet (the port forward keeps working).
