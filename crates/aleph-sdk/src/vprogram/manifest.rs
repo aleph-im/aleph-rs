@@ -66,12 +66,18 @@ pub const UNATTESTED_TOKEN: &str = "aleph_insecure_unattested=1";
 const UNATTESTED_TOKEN_KEY: &str = "aleph_insecure_unattested";
 
 fn reserved_cmdline_token(template: &str) -> Option<&str> {
-    template.split_whitespace().find(|token| {
-        *token == UNATTESTED_TOKEN_KEY
-            || token
-                .strip_prefix(UNATTESTED_TOKEN_KEY)
-                .is_some_and(|rest| rest.starts_with('='))
-    })
+    // Quotes split too: the kernel accepts `"key=value"` and the guest matches
+    // the token against the raw /proc/cmdline, where a quote is a word
+    // boundary, so a quoted token would activate unattested mode just the
+    // same.
+    template
+        .split(|c: char| c.is_whitespace() || c == '"')
+        .find(|token| {
+            *token == UNATTESTED_TOKEN_KEY
+                || token
+                    .strip_prefix(UNATTESTED_TOKEN_KEY)
+                    .is_some_and(|rest| rest.starts_with('='))
+        })
 }
 
 /// Contract the runtime imposes on the workload volume's contents, e.g.
@@ -358,6 +364,8 @@ pub(crate) mod test {
             "aleph_insecure_unattested=1 console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash}",
             "console=ttyS0 aleph_insecure_unattested roothash={platform_roothash} workload_roothash={workload_roothash}",
             "console=ttyS0 aleph_insecure_unattested=0 roothash={platform_roothash} workload_roothash={workload_roothash}",
+            r#"console=ttyS0 "aleph_insecure_unattested=1" roothash={platform_roothash} workload_roothash={workload_roothash}"#,
+            r#"console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash} extra="x aleph_insecure_unattested=1""#,
         ] {
             let err = RuntimeManifest::parse(&manifest_with_template(template)).unwrap_err();
             assert!(

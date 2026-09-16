@@ -184,7 +184,9 @@ fn probe_client() -> reqwest::Result<reqwest::Client> {
 /// agent starts before the workload (a compose stack loads its images for
 /// tens of seconds after the agent binds) and answers 502 Bad Gateway with
 /// `{"error":"upstream unreachable"}` until the workload listens, so a 502
-/// means "agent up, workload not yet".
+/// means "agent up, workload not yet". That is the whole contract: 502 is
+/// the only status the agent produces on its own for a proxied path; every
+/// other status is relayed from the workload, i.e. the workload answered.
 pub(crate) async fn probe_http(client: &reqwest::Client, url: &str) -> bool {
     client
         .get(url)
