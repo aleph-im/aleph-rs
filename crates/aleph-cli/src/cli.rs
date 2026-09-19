@@ -5571,6 +5571,17 @@ mod vprogram_create_args_tests {
             serde_json::json!({"vendor": "nvidia", "arch": "hopper", "count": 1, "mode": "cc"})
         );
     }
+
+    #[test]
+    fn gpu_requirement_blackwell_serializes_expected_arch_string() {
+        // Pins GpuArch::Blackwell -> "blackwell" so the private CLI enum
+        // cannot silently drift from the strings aleph-types accepts.
+        let gpu = gpu_requirement(Some((GpuArch::Blackwell, 2)), &[])
+            .unwrap()
+            .unwrap();
+        let value = serde_json::to_value(&gpu).unwrap();
+        assert_eq!(value["arch"], serde_json::json!("blackwell"));
+    }
 }
 
 #[cfg(all(test, feature = "vprogram"))]

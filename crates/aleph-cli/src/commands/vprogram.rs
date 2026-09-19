@@ -160,6 +160,7 @@ async fn handle_create(
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
     attest_common::check_debug_policy(args.policy, args.allow_debug)?;
+    let gpu = gpu_requirement(args.gpu, &args.gpu_models).context("invalid --gpu")?;
     let dry_run = args.signing.dry_run;
     let volume_refs_by_path = index_volume_refs(&args.volume_refs, &args.build.volumes)?;
 
@@ -267,7 +268,7 @@ async fn handle_create(
                 "name".to_string(),
                 serde_json::json!(args.name),
             )]));
-    if let Some(gpu) = gpu_requirement(args.gpu, &args.gpu_models).context("invalid --gpu")? {
+    if let Some(gpu) = gpu {
         builder = builder.gpu(gpu);
     }
     if let Some(crn_hash) = crn_hash {
