@@ -9,7 +9,9 @@ use super::instance_target::{VmKind, pick_unique_match};
 use aleph_sdk::aggregate_models::vm_images::{
     VPROGRAM_CONTRACT_COMPOSE, VPROGRAM_MODEL_COMPOSE, VPROGRAM_MODEL_EXEC, VmImagesData,
 };
-use aleph_sdk::attest::{MeasurementPin, PlatformPosture, PolicyPin, attested_request};
+use aleph_sdk::attest::{
+    MeasurementPin, NvidiaFloor, PlatformPosture, PolicyPin, attested_request,
+};
 use aleph_sdk::caching_aggregate_client::CachingAggregateClient;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
@@ -1820,6 +1822,7 @@ pub(crate) fn render_call_result(
     response: &aleph_sdk::attest::AttestedResponse,
     min_tcb: &aleph_sdk::attest::TcbFloorPolicy,
     freshness: Freshness,
+    gpu: Option<&GpuCallInfo>,
     json: bool,
     verbose: bool,
 ) -> (String, Option<String>) {
@@ -1829,7 +1832,7 @@ pub(crate) fn render_call_result(
         });
         // No validity flag: `attested_request` only ever returns a response
         // whose attestation verified, so the measurement is the evidence.
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "registers": response.registers,
             "policy": format!("{:#x}", response.policy),
             "effective_tcb_floor": tcb_floor_json(min_tcb.for_silicon(response.cpuid_family, response.cpuid_model, response.cpuid_stepping)),
@@ -1868,6 +1871,15 @@ pub(crate) fn render_call_result(
                 Freshness::Skipped => "skipped",
             },
         });
+        if let Some(gpu) = gpu {
+            out["gpu"] = serde_json::json!({
+                "arch": gpu.arch,
+                "count": gpu.count,
+                "models": gpu.models,
+                "driver_version": gpu.driver_version,
+                "floor": gpu.floor,
+            });
+        }
         (
             serde_json::to_string_pretty(&out).expect("call result always serializes"),
             None,
@@ -1878,6 +1890,12 @@ pub(crate) fn render_call_result(
             attestation_verdict_line(freshness),
             response.status
         );
+        if let Some(gpu) = gpu {
+            meta.push_str(&format!(
+                "\nGPU: {} x{} driver={} (floor {})",
+                gpu.arch, gpu.count, gpu.driver_version, gpu.floor
+            ));
+        }
         if verbose {
             meta.push_str(&format!(
                 "\nmeasurement: {}\npolicy: {:#x}\nlaunch TCB: {}\nplatform: {}",
@@ -1898,6 +1916,85 @@ pub(crate) fn render_call_result(
             Some(meta),
         )
     }
+}
+
+/// GPU evidence surfaced by `render_call_result` when the V-Program requires
+/// confidential GPUs: the message's requirement, the runtime manifest's
+/// driver version, and the floor it was checked against.
+#[derive(Debug, Clone)]
+pub(crate) struct GpuCallInfo {
+    arch: String,
+    count: u8,
+    models: Option<Vec<String>>,
+    driver_version: String,
+    floor: String,
+}
+
+/// Pure: apply --min-gpu-driver / --accept-outdated-gpu-driver onto the
+/// network NVIDIA driver floor. Mirrors
+/// `attest_common::resolve_effective_floor` for the SEV-SNP TCB floor: a
+/// raise needs no acknowledgement, a lowering does.
+fn apply_gpu_driver_override(
+    network: &NvidiaFloor,
+    min_gpu_driver: Option<&str>,
+    accept_outdated: bool,
+) -> Result<NvidiaFloor> {
+    let Some(min_driver) = min_gpu_driver else {
+        return Ok(network.clone());
+    };
+    let driver = min_driver
+        .parse()
+        .map_err(|e| anyhow!("--min-gpu-driver: {e}"))?;
+    if driver < network.min_driver {
+        if !accept_outdated {
+            bail!(
+                "--min-gpu-driver {min_driver} lowers the NVIDIA driver floor below the \
+                 network floor ({}); pass --accept-outdated-gpu-driver to accept the risk",
+                network.min_driver
+            );
+        }
+        eprintln!(
+            "warning: accepting an NVIDIA driver floor below the network floor ({}): the \
+             workload's runtime may run known-vulnerable driver code",
+            network.min_driver
+        );
+    }
+    Ok(NvidiaFloor {
+        min_driver: driver,
+        accepted_archs: network.accepted_archs.clone(),
+    })
+}
+
+/// Resolve the network NVIDIA driver floor (builtin baseline raised by the
+/// settings aggregate, falling back to the baseline with a warning on fetch
+/// or parse error), then apply the CLI override.
+async fn resolve_gpu_floor(
+    aleph_client: &AlephClient,
+    min_gpu_driver: Option<&str>,
+    accept_outdated: bool,
+) -> Result<NvidiaFloor> {
+    let baseline = NvidiaFloor::builtin_baseline();
+    let network = match aleph_client.get_settings_aggregate().await {
+        Ok(agg) => match agg.settings.nvidia_cc_min.floor() {
+            Some(Ok(f)) => baseline.raise_to(&f),
+            Some(Err(e)) => {
+                eprintln!(
+                    "warning: could not parse the network NVIDIA driver floor ({e}); using \
+                     the built-in baseline"
+                );
+                baseline
+            }
+            None => baseline,
+        },
+        Err(e) => {
+            eprintln!(
+                "warning: could not fetch the network NVIDIA driver floor ({e}); using the \
+                 built-in baseline"
+            );
+            baseline
+        }
+    };
+    apply_gpu_driver_override(&network, min_gpu_driver, accept_outdated)
 }
 
 async fn handle_call(
@@ -1974,6 +2071,42 @@ async fn handle_call(
         args.accept_outdated_tcb,
     )
     .await?;
+
+    // NVIDIA driver floor: only relevant when the V-Program requires a GPU.
+    // Fetches the runtime manifest the same way `create` does and checks its
+    // pinned driver version before any request reaches the workload.
+    let gpu_info = match &content.gpu {
+        Some(gpu) => {
+            let manifest_bytes = aleph_client
+                .download_file_by_message_hash(&content.runtime.reference)
+                .await?
+                .with_verification()
+                .bytes()
+                .await?;
+            let manifest = RuntimeManifest::parse(&manifest_bytes)?;
+            let gpu_spec = manifest.gpu.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "V-Program {item_hash} requires a GPU but its runtime manifest declares no \
+                     gpu block"
+                )
+            })?;
+            let gpu_floor = resolve_gpu_floor(
+                aleph_client,
+                args.min_gpu_driver.as_deref(),
+                args.accept_outdated_gpu_driver,
+            )
+            .await?;
+            gpu_floor.check(&gpu_spec.driver_version, &gpu.arch)?;
+            Some(GpuCallInfo {
+                arch: gpu.arch.clone(),
+                count: gpu.count,
+                models: gpu.models.clone(),
+                driver_version: gpu_spec.driver_version.clone(),
+                floor: gpu_floor.min_driver.to_string(),
+            })
+        }
+        None => None,
+    };
 
     // Fresh-nonce liveness challenge (G4a): runs first and fails closed. No
     // response is trusted or surfaced unless this challenge and the served-key
@@ -2095,7 +2228,14 @@ async fn handle_call(
     // Posture is what --require-platform gates on, so it is worth showing
     // whenever the user asked for a requirement, verbose or not.
     let verbose = args.verbose || !args.require_platform.is_empty();
-    let (out, meta) = render_call_result(&response, &min_tcb, freshness, json, verbose);
+    let (out, meta) = render_call_result(
+        &response,
+        &min_tcb,
+        freshness,
+        gpu_info.as_ref(),
+        json,
+        verbose,
+    );
     if let Some(meta) = meta {
         eprintln!("{meta}");
     }
@@ -2594,6 +2734,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
+            None,
             true,
             false,
         );
@@ -2617,6 +2758,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
+            None,
             false,
             true,
         );
@@ -2647,6 +2789,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
+            None,
             true,
             false,
         );
@@ -2691,6 +2834,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
+            None,
             true,
             false,
         );
@@ -2707,6 +2851,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
+            None,
             false,
             false,
         );
@@ -2731,6 +2876,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
+            None,
             false,
             true,
         );
@@ -2788,7 +2934,8 @@ mod call_tests {
         response.cpuid_model = Some(0xA1);
         response.cpuid_stepping = Some(2);
 
-        let (out, _meta) = render_call_result(&response, &net(), Freshness::Verified, true, false);
+        let (out, _meta) =
+            render_call_result(&response, &net(), Freshness::Verified, None, true, false);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["effective_tcb_floor"]["microcode"], serde_json::json!(28));
@@ -2804,6 +2951,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
+            None,
             true,
             false,
         );
@@ -2814,6 +2962,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Skipped,
+            None,
             true,
             false,
         );
@@ -2828,6 +2977,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Verified,
+            None,
             false,
             false,
         );
@@ -2838,6 +2988,7 @@ mod call_tests {
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
             Freshness::Skipped,
+            None,
             false,
             false,
         );
@@ -2876,6 +3027,125 @@ mod call_tests {
         let mut wrong_policy = fresh;
         wrong_policy.policy ^= 1;
         assert!(check_fresh_consistency(&wrong_policy, &response).is_err());
+    }
+
+    fn gpu_call_info() -> GpuCallInfo {
+        GpuCallInfo {
+            arch: "hopper".to_string(),
+            count: 2,
+            models: Some(vec!["10de:2331".to_string()]),
+            driver_version: "595.71.05".to_string(),
+            floor: "580.0.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn render_call_result_includes_gpu_in_json_when_present() {
+        let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
+        let (out, _) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            Some(&gpu_call_info()),
+            true,
+            false,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(
+            v["gpu"],
+            serde_json::json!({
+                "arch": "hopper",
+                "count": 2,
+                "models": ["10de:2331"],
+                "driver_version": "595.71.05",
+                "floor": "580.0.0",
+            })
+        );
+    }
+
+    #[test]
+    fn render_call_result_omits_gpu_in_json_when_absent() {
+        let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
+        let (out, _) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            None,
+            true,
+            false,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        assert!(v.get("gpu").is_none());
+    }
+
+    #[test]
+    fn render_call_result_adds_a_gpu_text_line_when_present() {
+        let response = dummy_response(&"ab".repeat(48), b"55");
+        let (_, meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            Some(&gpu_call_info()),
+            false,
+            false,
+        );
+        let meta = meta.unwrap();
+        assert!(
+            meta.contains("\nGPU: hopper x2 driver=595.71.05 (floor 580.0.0)"),
+            "{meta}"
+        );
+    }
+
+    #[test]
+    fn render_call_result_has_no_gpu_text_line_when_absent() {
+        let response = dummy_response(&"ab".repeat(48), b"55");
+        let (_, meta) = render_call_result(
+            &response,
+            &TcbFloorPolicy::uniform(dummy_floor()),
+            Freshness::Verified,
+            None,
+            false,
+            false,
+        );
+        let meta = meta.unwrap();
+        assert!(!meta.contains("GPU:"), "{meta}");
+    }
+
+    fn gpu_network() -> NvidiaFloor {
+        NvidiaFloor {
+            min_driver: "590.0".parse().unwrap(),
+            accepted_archs: vec!["hopper".to_string(), "blackwell".to_string()],
+        }
+    }
+
+    #[test]
+    fn gpu_driver_override_none_yields_the_network_floor() {
+        let eff = apply_gpu_driver_override(&gpu_network(), None, false).unwrap();
+        assert_eq!(eff, gpu_network());
+    }
+
+    #[test]
+    fn gpu_driver_override_raising_needs_no_acknowledgement() {
+        let eff = apply_gpu_driver_override(&gpu_network(), Some("600.0"), false).unwrap();
+        assert_eq!(eff.min_driver, "600.0".parse().unwrap());
+        assert_eq!(eff.accepted_archs, gpu_network().accepted_archs);
+    }
+
+    #[test]
+    fn gpu_driver_override_lowering_without_ack_is_rejected() {
+        let err = apply_gpu_driver_override(&gpu_network(), Some("580.0"), false).unwrap_err();
+        assert!(err.to_string().contains("--accept-outdated-gpu-driver"));
+    }
+
+    #[test]
+    fn gpu_driver_override_lowering_with_ack_is_accepted() {
+        let eff = apply_gpu_driver_override(&gpu_network(), Some("580.0"), true).unwrap();
+        assert_eq!(eff.min_driver, "580.0".parse().unwrap());
+    }
+
+    #[test]
+    fn gpu_driver_override_rejects_an_unparsable_version() {
+        assert!(apply_gpu_driver_override(&gpu_network(), Some("not-a-version"), false).is_err());
     }
 }
 

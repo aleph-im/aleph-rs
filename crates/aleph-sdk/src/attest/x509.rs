@@ -159,6 +159,17 @@ pub enum AttestError {
     /// text is preserved here rather than discarded.
     #[error("secret injection rejected: HTTP {status}: {body}")]
     InjectRejected { status: u16, body: String },
+    /// The runtime manifest's `gpu.driver_version` is below the required
+    /// NVIDIA driver floor.
+    #[error("NVIDIA driver below the required floor: required >= {floor}, got {got}")]
+    GpuDriverBelowFloor { floor: String, got: String },
+    /// The message's GPU architecture is not one the floor accepts.
+    #[error("NVIDIA GPU architecture {0:?} is not accepted")]
+    GpuArchNotAccepted(String),
+    /// The runtime manifest's `gpu.driver_version` does not parse as a
+    /// driver version.
+    #[error("NVIDIA driver version {0:?} does not parse")]
+    GpuDriverUnparsable(String),
 }
 
 /// Encode an AttestationReport as a DER-encoded OctetString.

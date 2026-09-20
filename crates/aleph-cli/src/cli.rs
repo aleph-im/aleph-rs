@@ -3805,6 +3805,18 @@ pub struct VProgramCallArgs {
     #[arg(long)]
     pub accept_outdated_tcb: bool,
 
+    /// Raise (or, with --accept-outdated-gpu-driver, lower) the minimum
+    /// NVIDIA confidential-GPU driver version, e.g. `590.10`. Only checked
+    /// for V-Programs that require a GPU.
+    #[arg(long)]
+    pub min_gpu_driver: Option<String>,
+
+    /// Acknowledge accepting an NVIDIA driver floor below the network floor
+    /// (required when --min-gpu-driver lowers it). The workload's runtime
+    /// may then run known-vulnerable driver code.
+    #[arg(long)]
+    pub accept_outdated_gpu_driver: bool,
+
     /// Skip the fresh-nonce liveness challenge and accept the (timeless)
     /// certificate attestation alone. The certificate checks still apply,
     /// but a key stolen from a past instance would not be detected.
@@ -5702,5 +5714,43 @@ mod vprogram_call_args_tests {
             panic!("wrong variant");
         };
         assert!(args.allow_stale_attestation);
+    }
+
+    #[test]
+    fn vprogram_call_gpu_driver_flags_default_off() {
+        let hash = "a".repeat(64);
+        let cli = Cli::try_parse_from(["aleph", "vprogram", "call", &hash, "/fib/10"]).unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert!(args.min_gpu_driver.is_none());
+        assert!(!args.accept_outdated_gpu_driver);
+    }
+
+    #[test]
+    fn vprogram_call_parses_gpu_driver_flags() {
+        let hash = "a".repeat(64);
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "call",
+            &hash,
+            "/fib/10",
+            "--min-gpu-driver",
+            "590.10",
+            "--accept-outdated-gpu-driver",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.min_gpu_driver.as_deref(), Some("590.10"));
+        assert!(args.accept_outdated_gpu_driver);
     }
 }
