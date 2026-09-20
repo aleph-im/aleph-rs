@@ -214,7 +214,9 @@ pub async fn handle_run(
             unreachable!("clap: --runtime-manifest and --bundle require each other")
         }
     };
-    let build = prepare_local_build(aleph_client, json, &args.build, source).await?;
+    // No GPU: a local run has no message and passes no device through, so a
+    // GPU runtime is refused by the cmdline slot check.
+    let build = prepare_local_build(aleph_client, json, &args.build, source, None).await?;
     let runtime_label = format!("{} {}", build.manifest.name, build.manifest.version);
 
     let spec = boot_spec(&build, &args, accel)?;

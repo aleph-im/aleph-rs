@@ -29,5 +29,5 @@ pub use vprogram::{
     ConfidentialGpuRequirement, MAX_CONFIDENTIAL_GPU_MODELS, MAX_CONFIDENTIAL_GPUS,
     MAX_VERIFIED_VOLUMES, TeeVerification, VProgramError, VerifiableProgramContent,
     VerifiableProgramEnvironment, VerifiableProgramRuntime, VerifiedVolume, VerifiedWorkload,
-    VerityRoothash,
+    VerityRoothash, is_pci_device_id,
 };

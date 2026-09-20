@@ -180,6 +180,7 @@ async fn handle_create(
         json,
         &args.build,
         RuntimeSource::Network(args.build.runtime.clone()),
+        gpu.as_ref(),
     )
     .await?;
 
@@ -367,16 +368,23 @@ fn check_runtime_contract(
 }
 
 /// Cheap slot check right after the manifest is known: instantiate_cmdline
-/// only needs the template, the platform roothash, and how many volumes were
-/// passed, so a bad template fails here instead of after verity hashing and
+/// only needs the template, the platform roothash, how many volumes were
+/// passed and the GPU requirement, so a bad template or a GPU request the
+/// runtime cannot serve fails here instead of after verity hashing and
 /// uploads. Placeholder roothashes are fine since only slot
 /// presence/absence is being checked; the real cmdline is built at the end.
-fn probe_cmdline_slots(manifest: &RuntimeManifest, volumes: usize) -> Result<()> {
+fn probe_cmdline_slots(
+    manifest: &RuntimeManifest,
+    volumes: usize,
+    gpu: Option<&ConfidentialGpuRequirement>,
+) -> Result<()> {
     instantiate_cmdline(
         &manifest.boot.cmdline_template,
         &manifest.boot.platform_roothash,
         &"0".repeat(64),
         &vec!["0".repeat(64); volumes],
+        gpu,
+        manifest.gpu.as_ref(),
     )?;
     Ok(())
 }
@@ -390,6 +398,7 @@ pub(crate) async fn prepare_local_build(
     json: bool,
     build: &VProgramBuildArgs,
     source: RuntimeSource,
+    gpu: Option<&ConfidentialGpuRequirement>,
 ) -> Result<LocalBuild> {
     // 0. Fail fast on local prerequisites before any network call.
     let veritysetup = Veritysetup::find()?;
@@ -478,7 +487,7 @@ pub(crate) async fn prepare_local_build(
             if !json {
                 eprintln!("{}", runtime_identity_line(&runtime, &manifest));
             }
-            probe_cmdline_slots(&manifest, build.volumes.len())?;
+            probe_cmdline_slots(&manifest, build.volumes.len(), gpu)?;
 
             // 2. Bundle artifacts (cached locally by bundle sha256).
             if !json {
@@ -516,7 +525,7 @@ pub(crate) async fn prepare_local_build(
             if !json {
                 eprintln!("{}", runtime_identity_line(&runtime, &manifest));
             }
-            probe_cmdline_slots(&manifest, build.volumes.len())?;
+            probe_cmdline_slots(&manifest, build.volumes.len(), gpu)?;
 
             // 2. Bundle artifacts (cached locally by bundle sha256).
             if !json {
@@ -636,6 +645,8 @@ pub(crate) async fn prepare_local_build(
         &manifest.boot.platform_roothash,
         &workload_verity.root_hash,
         &volume_roothashes,
+        gpu,
+        manifest.gpu.as_ref(),
     )?;
     Ok(LocalBuild {
         manifest,
