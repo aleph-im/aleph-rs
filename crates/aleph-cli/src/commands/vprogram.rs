@@ -1878,6 +1878,7 @@ pub(crate) fn render_call_result(
                 "models": gpu.models,
                 "driver_version": gpu.driver_version,
                 "floor": gpu.floor,
+                "enforced_by": "measured_guest",
             });
         }
         (
@@ -1892,8 +1893,15 @@ pub(crate) fn render_call_result(
         );
         if let Some(gpu) = gpu {
             meta.push_str(&format!(
-                "\nGPU: {} x{} driver={} (floor {})",
-                gpu.arch, gpu.count, gpu.driver_version, gpu.floor
+                "\nGPU requirement (enforced by the measured guest): {} x{}",
+                gpu.arch, gpu.count
+            ));
+            if let Some(models) = &gpu.models {
+                meta.push_str(&format!(", models {}", models.join(", ")));
+            }
+            meta.push_str(&format!(
+                "\nGPU driver: {} (floor {})",
+                gpu.driver_version, gpu.floor
             ));
         }
         if verbose {
@@ -1918,9 +1926,10 @@ pub(crate) fn render_call_result(
     }
 }
 
-/// GPU evidence surfaced by `render_call_result` when the V-Program requires
-/// confidential GPUs: the message's requirement, the runtime manifest's
-/// driver version, and the floor it was checked against.
+/// GPU info surfaced by `render_call_result` when the V-Program requires
+/// confidential GPUs: the message's requirement (enforced by the measured
+/// guest, not verified by this client), the runtime manifest's driver
+/// version, and the floor it was checked against.
 #[derive(Debug, Clone)]
 pub(crate) struct GpuCallInfo {
     arch: String,
@@ -3059,6 +3068,7 @@ mod call_tests {
                 "models": ["10de:2331"],
                 "driver_version": "595.71.05",
                 "floor": "580.0.0",
+                "enforced_by": "measured_guest",
             })
         );
     }
@@ -3091,7 +3101,13 @@ mod call_tests {
         );
         let meta = meta.unwrap();
         assert!(
-            meta.contains("\nGPU: hopper x2 driver=595.71.05 (floor 580.0.0)"),
+            meta.contains(
+                "\nGPU requirement (enforced by the measured guest): hopper x2, models 10de:2331"
+            ),
+            "{meta}"
+        );
+        assert!(
+            meta.contains("\nGPU driver: 595.71.05 (floor 580.0.0)"),
             "{meta}"
         );
     }
@@ -3108,7 +3124,7 @@ mod call_tests {
             false,
         );
         let meta = meta.unwrap();
-        assert!(!meta.contains("GPU:"), "{meta}");
+        assert!(!meta.contains("GPU"), "{meta}");
     }
 
     fn gpu_network() -> NvidiaFloor {
