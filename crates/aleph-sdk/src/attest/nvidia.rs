@@ -3,6 +3,11 @@
 //! `gpu.driver_version` before a `vprogram call` talks to a GPU workload;
 //! an outdated driver can leak plaintext across the PCIe link even inside
 //! an otherwise-verified SEV-SNP guest.
+//!
+//! The floor starts at [`NvidiaFloor::builtin_baseline`], is raised by the
+//! network's `nvidia_cc_min` settings aggregate key, and can be overridden
+//! again by the caller (`--min-gpu-driver`, with `--accept-outdated-gpu-driver`
+//! required to lower it below the network floor).
 
 use std::cmp::Ordering;
 use std::fmt;

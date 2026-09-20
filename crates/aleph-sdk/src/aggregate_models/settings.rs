@@ -94,13 +94,8 @@ impl SnpMinTcb {
     }
 }
 
-/// Minimum NVIDIA confidential-GPU driver from `settings.nvidia_cc_min`.
-/// Absent `min_driver` means the aggregate does not raise the built-in
-/// baseline; the client falls back to it. `accepted_archs` is kept verbatim,
-/// unvalidated: `NvidiaFloor::raise_to` only ever intersects it with the
-/// baseline's archs, so an unrecognized entry (typo, a future arch this
-/// client doesn't know yet) can only narrow the accepted set further, never
-/// widen it - fail-closed without needing to reject it here.
+/// Minimum NVIDIA confidential-GPU driver from `settings.nvidia_cc_min`; absent `min_driver` falls back to the built-in baseline.
+/// `accepted_archs` is kept unvalidated, since an unrecognized entry can only narrow the accepted set, never widen it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NvidiaCcMin {
     #[serde(default)]

@@ -2,6 +2,16 @@
 //!
 //! Produces kernel boot cmdlines from templates by replacing placeholders defined
 //! by aleph-vprogram-runtime/1.
+//!
+//! A GPU requirement fills three measured tokens: `gpu_arch=<hopper|blackwell>`,
+//! `gpu_count=<1..=8>` and, only when the message narrows to specific models,
+//! `gpu_models=<vvvv:dddd,...>` (sorted, deduplicated, whole token dropped
+//! otherwise, like `verified_volumes`). These are what the measured guest
+//! checks against the GPUs it verifies at boot: exact count, architecture,
+//! and, for a pinned model, the board identity the GPU itself signs (mapped
+//! from the PCI id through the runtime manifest's `boards` table, since PCI
+//! ids are host controlled). `instantiate_cmdline` refuses any request the
+//! runtime cannot serve before the cmdline is measured.
 
 use crate::vprogram::manifest::GpuRuntimeSpec;
 use aleph_types::message::{ConfidentialGpuRequirement, MAX_CONFIDENTIAL_GPUS};
