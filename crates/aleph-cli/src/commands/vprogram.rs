@@ -32,8 +32,8 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::environment::SevSnpRegisters;
 use aleph_types::message::execution::environment::validate_snp_policy;
 use aleph_types::message::{
-    MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType, TeeVerification,
-    VerifiableProgramContent, VerifiedVolume, VerifiedWorkload,
+    ConfidentialGpuRequirement, MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType,
+    TeeVerification, VerifiableProgramContent, VerifiedVolume, VerifiedWorkload,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use memsizes::MiB;
@@ -44,7 +44,7 @@ use crate::account::CliAccount;
 use crate::cli::PlatformRequirement;
 use crate::cli::{
     ImageRef, StorageEngineCli, VProgramBuildArgs, VProgramCallArgs, VProgramCommand,
-    VProgramCreateArgs, VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs,
+    VProgramCreateArgs, VProgramDeleteArgs, VProgramListArgs, VProgramShowArgs, gpu_requirement,
 };
 use crate::common::{
     confirm_action, resolve_account, resolve_address, resolve_address_or_active, submit_or_preview,
@@ -160,6 +160,7 @@ async fn handle_create(
     let account = resolve_account(&args.signing.identity)?;
     validate_snp_policy(args.policy)?;
     attest_common::check_debug_policy(args.policy, args.allow_debug)?;
+    let gpu = gpu_requirement(args.gpu, &args.gpu_models).context("invalid --gpu")?;
     let dry_run = args.signing.dry_run;
     let volume_refs_by_path = index_volume_refs(&args.volume_refs, &args.build.volumes)?;
 
@@ -267,6 +268,9 @@ async fn handle_create(
                 "name".to_string(),
                 serde_json::json!(args.name),
             )]));
+    if let Some(gpu) = gpu {
+        builder = builder.gpu(gpu);
+    }
     if let Some(crn_hash) = crn_hash {
         builder = builder.node_hash(crn_hash.to_string());
     }
@@ -1101,6 +1105,8 @@ pub(crate) struct VProgramShow {
     pub workload_ref: String,
     pub resources: ShowResources,
     pub internet: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<ConfidentialGpuRequirement>,
     pub storage: ShowStorage,
     pub measurements: Vec<MeasurementSummary>,
     /// Whether the CRN currently reports this VM as active. `false` when the
@@ -1214,6 +1220,7 @@ pub(crate) fn build_show(
             memory_mib: u64::from(content.base.resources.memory),
         },
         internet: content.environment.internet,
+        gpu: content.gpu.clone(),
         storage,
         measurements,
         running: net.is_some(),
@@ -1244,6 +1251,14 @@ fn render_text(s: &VProgramShow) -> String {
         if s.internet { "yes" } else { "no" }
     )
     .unwrap();
+    if let Some(gpu) = &s.gpu {
+        writeln!(
+            out,
+            "  GPU: {} {} x{} ({})",
+            gpu.vendor, gpu.arch, gpu.count, gpu.mode
+        )
+        .unwrap();
+    }
 
     writeln!(out).unwrap();
     writeln!(out, "STORAGE").unwrap();
@@ -2373,6 +2388,66 @@ mod show_tests {
             "{out}"
         );
         assert!(out.contains("Total          1.7 GiB"), "{out}");
+    }
+
+    #[test]
+    fn render_show_includes_gpu_line_and_json_when_present() {
+        let (item_hash, mut content) = fixture_content();
+        let gpu = serde_json::from_value::<ConfidentialGpuRequirement>(serde_json::json!({
+            "vendor": "nvidia", "arch": "hopper", "count": 1, "mode": "cc",
+        }))
+        .unwrap();
+        content.gpu = Some(gpu);
+
+        let out = render_show(
+            &item_hash,
+            &content,
+            None,
+            None,
+            &ArtifactSizes::new(),
+            false,
+        );
+        assert!(out.contains("GPU: nvidia hopper x1 (cc)"), "{out}");
+
+        let out_json = render_show(
+            &item_hash,
+            &content,
+            None,
+            None,
+            &ArtifactSizes::new(),
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out_json).unwrap();
+        assert_eq!(
+            v["gpu"],
+            serde_json::json!({"vendor": "nvidia", "arch": "hopper", "count": 1, "mode": "cc"})
+        );
+    }
+
+    #[test]
+    fn render_show_omits_gpu_when_absent() {
+        let (item_hash, content) = fixture_content();
+
+        let out = render_show(
+            &item_hash,
+            &content,
+            None,
+            None,
+            &ArtifactSizes::new(),
+            false,
+        );
+        assert!(!out.contains("GPU:"), "{out}");
+
+        let out_json = render_show(
+            &item_hash,
+            &content,
+            None,
+            None,
+            &ArtifactSizes::new(),
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out_json).unwrap();
+        assert!(v.get("gpu").is_none());
     }
 
     #[test]

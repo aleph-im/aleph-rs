@@ -3,6 +3,7 @@ use aleph_sdk::credit::PriceSource;
 use aleph_types::chain::Address;
 use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::environment::GpuProperties;
+use aleph_types::message::{ConfidentialGpuRequirement, MAX_CONFIDENTIAL_GPUS};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use url::Url;
@@ -3482,6 +3483,80 @@ fn parse_volume_ref(s: &str) -> Result<(PathBuf, ItemHash), String> {
     Ok((PathBuf::from(path), item_hash))
 }
 
+/// GPU architecture family a `--gpu` request can name. Kept CLI-side: the
+/// message field is a validated `String`, this enum only gives clap a small
+/// closed vocabulary to parse `--gpu` against.
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GpuArch {
+    Hopper,
+    Blackwell,
+}
+
+#[cfg(feature = "vprogram")]
+impl GpuArch {
+    fn as_str(self) -> &'static str {
+        match self {
+            GpuArch::Hopper => "hopper",
+            GpuArch::Blackwell => "blackwell",
+        }
+    }
+}
+
+#[cfg(feature = "vprogram")]
+/// Parse a `--gpu` value: `ARCH[:COUNT]`. ARCH is `hopper` or `blackwell`;
+/// COUNT defaults to 1 and must be `1..=MAX_CONFIDENTIAL_GPUS`.
+fn parse_gpu_spec(s: &str) -> Result<(GpuArch, u8), String> {
+    let (arch_str, count_str) = match s.split_once(':') {
+        Some((arch, count)) => (arch, Some(count)),
+        None => (s, None),
+    };
+    let arch = match arch_str {
+        "hopper" => GpuArch::Hopper,
+        "blackwell" => GpuArch::Blackwell,
+        other => {
+            return Err(format!(
+                "unsupported GPU architecture '{other}', expected hopper or blackwell"
+            ));
+        }
+    };
+    let count = match count_str {
+        Some(count) => count
+            .parse::<u8>()
+            .map_err(|_| format!("invalid GPU count '{count}', expected a number"))?,
+        None => 1,
+    };
+    if count == 0 || count > MAX_CONFIDENTIAL_GPUS {
+        return Err(format!(
+            "GPU count must be between 1 and {MAX_CONFIDENTIAL_GPUS}, got {count}"
+        ));
+    }
+    Ok((arch, count))
+}
+
+#[cfg(feature = "vprogram")]
+/// Build the confidential GPU requirement `--gpu`/`--gpu-model` describe, if
+/// any. Always goes through `ConfidentialGpuRequirement`'s validating
+/// deserialize path, so model format and uniqueness are enforced once, in
+/// aleph-types, rather than reimplemented here.
+pub(crate) fn gpu_requirement(
+    gpu: Option<(GpuArch, u8)>,
+    models: &[String],
+) -> Result<Option<ConfidentialGpuRequirement>, serde_json::Error> {
+    let Some((arch, count)) = gpu else {
+        return Ok(None);
+    };
+    let models = (!models.is_empty()).then(|| models.to_vec());
+    serde_json::from_value(serde_json::json!({
+        "vendor": "nvidia",
+        "arch": arch.as_str(),
+        "count": count,
+        "models": models,
+        "mode": "cc",
+    }))
+    .map(Some)
+}
+
 /// Flags that shape the workload and runtime, shared by `vprogram create`
 /// (which publishes the result) and `vprogram run` (which boots it locally).
 #[cfg(feature = "vprogram")]
@@ -3573,6 +3648,19 @@ pub struct VProgramCreateArgs {
     /// with a debug-enabled policy.
     #[arg(long)]
     pub allow_debug: bool,
+
+    /// Request confidential GPUs: `ARCH[:COUNT]`, ARCH is hopper or
+    /// blackwell, COUNT defaults to 1 (1 to 8). The CRN resolves the
+    /// requirement to concrete cards of that architecture; narrow further
+    /// with --gpu-model.
+    #[arg(long, value_parser = parse_gpu_spec, value_name = "ARCH[:COUNT]")]
+    pub gpu: Option<(GpuArch, u8)>,
+
+    /// Narrow the confidential GPU requirement to specific card kinds, as a
+    /// lowercase PCI vendor:device id (e.g. 10de:2b85). Repeatable; requires
+    /// --gpu.
+    #[arg(long = "gpu-model", value_name = "VVVV:DDDD", requires = "gpu")]
+    pub gpu_models: Vec<String>,
 
     /// CRN node hash. Pins the V-Program to a specific compute node. Accepts
     /// a full hash or a unique fragment (an anchored prefix or suffix, such as
@@ -5065,6 +5153,8 @@ mod vprogram_create_args_tests {
         assert!(!args.no_internet);
         assert_eq!(args.policy, 0x30000);
         assert!(args.build.volumes.is_empty());
+        assert_eq!(args.gpu, None);
+        assert!(args.gpu_models.is_empty());
     }
 
     #[test]
@@ -5386,6 +5476,111 @@ mod vprogram_create_args_tests {
         };
         assert_eq!(args.build.compose, Some(PathBuf::from("f.yml")));
         assert_eq!(args.build.image_archives.len(), 2);
+    }
+
+    fn create_args_with(extra: &[&str]) -> Result<VProgramCreateArgs, clap::Error> {
+        let mut argv = vec![
+            "aleph",
+            "vprogram",
+            "create",
+            "my-vprogram",
+            "--workload",
+            "/tmp/w.ext4",
+        ];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv)?.command {
+            Commands::Vprogram {
+                command: VProgramCommand::Create(args),
+            } => Ok(*args),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn vprogram_create_gpu_parses_arch_with_default_count() {
+        let args = create_args_with(&["--gpu", "hopper"]).unwrap();
+        assert_eq!(args.gpu, Some((GpuArch::Hopper, 1)));
+    }
+
+    #[test]
+    fn vprogram_create_gpu_parses_arch_and_explicit_count() {
+        let args = create_args_with(&["--gpu", "blackwell:4"]).unwrap();
+        assert_eq!(args.gpu, Some((GpuArch::Blackwell, 4)));
+    }
+
+    #[test]
+    fn vprogram_create_gpu_rejects_unknown_arch() {
+        let err = create_args_with(&["--gpu", "ampere"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn vprogram_create_gpu_rejects_zero_count() {
+        let err = create_args_with(&["--gpu", "hopper:0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn vprogram_create_gpu_rejects_count_above_max() {
+        let err = create_args_with(&["--gpu", "hopper:9"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn vprogram_create_gpu_rejects_non_numeric_count() {
+        let err = create_args_with(&["--gpu", "hopper:x"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn vprogram_create_gpu_model_alone_fails() {
+        let err = create_args_with(&["--gpu-model", "10de:2331"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn gpu_requirement_rejects_uppercase_model() {
+        let err =
+            gpu_requirement(Some((GpuArch::Hopper, 1)), &["10DE:233B".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("PCI"), "{err}");
+    }
+
+    #[test]
+    fn gpu_requirement_rejects_duplicate_models() {
+        let err = gpu_requirement(
+            Some((GpuArch::Hopper, 1)),
+            &["10de:2331".to_string(), "10de:2331".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn gpu_requirement_none_when_no_gpu_flag() {
+        assert!(gpu_requirement(None, &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn gpu_requirement_serializes_without_defaulted_keys() {
+        let gpu = gpu_requirement(Some((GpuArch::Hopper, 1)), &[])
+            .unwrap()
+            .unwrap();
+        let value = serde_json::to_value(&gpu).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"vendor": "nvidia", "arch": "hopper", "count": 1, "mode": "cc"})
+        );
+    }
+
+    #[test]
+    fn gpu_requirement_blackwell_serializes_expected_arch_string() {
+        // Pins GpuArch::Blackwell -> "blackwell" so the private CLI enum
+        // cannot silently drift from the strings aleph-types accepts.
+        let gpu = gpu_requirement(Some((GpuArch::Blackwell, 2)), &[])
+            .unwrap()
+            .unwrap();
+        let value = serde_json::to_value(&gpu).unwrap();
+        assert_eq!(value["arch"], serde_json::json!("blackwell"));
     }
 }
 
