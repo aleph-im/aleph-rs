@@ -7,7 +7,7 @@
 //! client.
 
 #[cfg(feature = "vprogram")]
-use crate::attest::{AmdProduct, DriverVersion, NvidiaFloor, TcbFloor};
+use crate::attest::{AmdProduct, AttestError, DriverVersion, NvidiaFloor, TcbFloor};
 use aleph_types::address;
 use aleph_types::chain::Address;
 use serde::Deserialize;
@@ -96,7 +96,11 @@ impl SnpMinTcb {
 
 /// Minimum NVIDIA confidential-GPU driver from `settings.nvidia_cc_min`.
 /// Absent `min_driver` means the aggregate does not raise the built-in
-/// baseline; the client falls back to it.
+/// baseline; the client falls back to it. `accepted_archs` is kept verbatim,
+/// unvalidated: `NvidiaFloor::raise_to` only ever intersects it with the
+/// baseline's archs, so an unrecognized entry (typo, a future arch this
+/// client doesn't know yet) can only narrow the accepted set further, never
+/// widen it - fail-closed without needing to reject it here.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NvidiaCcMin {
     #[serde(default)]
@@ -110,7 +114,7 @@ pub struct NvidiaCcMin {
 // conversion to the attest crate's `NvidiaFloor` is gated behind `vprogram`.
 #[cfg(feature = "vprogram")]
 impl NvidiaCcMin {
-    pub fn floor(&self) -> Option<Result<NvidiaFloor, String>> {
+    pub fn floor(&self) -> Option<Result<NvidiaFloor, AttestError>> {
         let min_driver = self.min_driver.as_ref()?;
         Some(
             min_driver
@@ -377,7 +381,8 @@ mod tests {
       }
     }"#;
         let agg: SettingsAggregate = serde_json::from_str(json).unwrap();
-        assert!(agg.settings.nvidia_cc_min.floor().unwrap().is_err());
+        let err = agg.settings.nvidia_cc_min.floor().unwrap().unwrap_err();
+        assert!(matches!(err, AttestError::GpuDriverUnparsable(v) if v == "not-a-version"));
     }
 
     #[test]

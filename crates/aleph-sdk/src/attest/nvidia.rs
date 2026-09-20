@@ -16,22 +16,20 @@ use super::AttestError;
 pub struct DriverVersion(Vec<u32>);
 
 impl FromStr for DriverVersion {
-    type Err = String;
+    type Err = AttestError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split('.').collect();
         if parts.len() != 2 && parts.len() != 3 {
-            return Err(format!(
-                "driver version must be 2 or 3 dot-separated numeric components, got {s:?}"
-            ));
+            return Err(AttestError::GpuDriverUnparsable(s.to_string()));
         }
         let mut components = parts
             .iter()
             .map(|p| {
                 p.parse::<u32>()
-                    .map_err(|_| format!("driver version component must be numeric, got {s:?}"))
+                    .map_err(|_| AttestError::GpuDriverUnparsable(s.to_string()))
             })
-            .collect::<Result<Vec<u32>, String>>()?;
+            .collect::<Result<Vec<u32>, AttestError>>()?;
         if components.len() == 2 {
             components.push(0);
         }
@@ -94,9 +92,7 @@ impl NvidiaFloor {
         if !self.accepted_archs.iter().any(|a| a == arch) {
             return Err(AttestError::GpuArchNotAccepted(arch.to_string()));
         }
-        let got: DriverVersion = driver_version
-            .parse()
-            .map_err(|_| AttestError::GpuDriverUnparsable(driver_version.to_string()))?;
+        let got: DriverVersion = driver_version.parse()?;
         if got < self.min_driver {
             return Err(AttestError::GpuDriverBelowFloor {
                 floor: self.min_driver.to_string(),
