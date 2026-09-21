@@ -44,14 +44,11 @@ pub async fn handle_start(scheduler_url: Url, json: bool, args: CrnStartArgs) ->
     if let Some(secs) = args.wait
         && response.successful
     {
-        use crate::commands::instance_wait::{WaitOutcome, report_ready, report_timeout};
         let timeout = std::time::Duration::from_secs(secs);
-        match crate::commands::instance_wait::wait_until_ready(&scheduler_url, &vm_id, timeout)
-            .await?
-        {
-            WaitOutcome::Ready(conn) => report_ready(&conn, &vm_id, json),
-            WaitOutcome::Timeout => report_timeout(&vm_id, json),
-        }
+        let outcome =
+            crate::commands::instance_wait::wait_until_ready(&scheduler_url, &vm_id, timeout)
+                .await?;
+        crate::commands::instance_wait::finish_wait(outcome, &vm_id, json)?;
     }
 
     Ok(())
