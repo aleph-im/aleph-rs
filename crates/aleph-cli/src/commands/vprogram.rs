@@ -474,7 +474,7 @@ pub(crate) async fn prepare_local_build(
                     })?
                     .vm_images
             };
-            let runtime = resolve_vprogram_runtime(runtime_ref, model, &vm_images)?;
+            let runtime = resolve_vprogram_runtime(runtime_ref, model, gpu.is_some(), &vm_images)?;
             if !json {
                 eprintln!("Fetching runtime manifest {}...", runtime.hash);
             }
@@ -682,10 +682,13 @@ pub(crate) struct ResolvedRuntime {
 }
 
 /// Resolve `--runtime` for workload `model` against an in-memory
-/// `VmImagesData`. Pure: does no network I/O.
+/// `VmImagesData`; `gpu` is whether the message requests confidential GPUs,
+/// which picks the catalogue's GPU default when no runtime is named. Pure:
+/// does no network I/O.
 pub(crate) fn resolve_vprogram_runtime(
     runtime: Option<ImageRef>,
     model: &str,
+    gpu: bool,
     data: &VmImagesData,
 ) -> Result<ResolvedRuntime> {
     let selector = match runtime {
@@ -704,7 +707,7 @@ pub(crate) fn resolve_vprogram_runtime(
         VPROGRAM_MODEL_EXEC => " (did you mean --workload?)",
         _ => "",
     };
-    let resolved = data.resolve_vprogram_runtime(model, selector.as_deref(), hint)?;
+    let resolved = data.resolve_vprogram_runtime(model, selector.as_deref(), gpu, hint)?;
     Ok(ResolvedRuntime {
         hash: resolved.hash,
         contract: Some(resolved.contract),
@@ -3327,11 +3330,16 @@ mod compose_wiring_tests {
                 vprogram_runtimes: BTreeMap::from([
                     ("exec-1.0".to_string(), entry("aaaa", "aleph.exec/1")),
                     ("compose-1.0".to_string(), entry("bbbb", "aleph.compose/1")),
+                    ("gpu-1.0".to_string(), entry("cccc", "aleph.exec/1")),
                 ]),
                 vprogram_contracts: BTreeMap::from([
                     ("aleph.exec/1".to_string(), "exec-1.0".to_string()),
                     ("aleph.compose/1".to_string(), "compose-1.0".to_string()),
                 ]),
+                vprogram_gpu_contracts: BTreeMap::from([(
+                    "aleph.exec/1".to_string(),
+                    "gpu-1.0".to_string(),
+                )]),
                 defaults: VmImageDefaults {
                     vprogram_models: BTreeMap::from([
                         ("exec".to_string(), "aleph.exec/1".to_string()),
@@ -3349,6 +3357,7 @@ mod compose_wiring_tests {
             let got = resolve_vprogram_runtime(
                 Some(ImageRef::Hash(raw.clone())),
                 VPROGRAM_MODEL_EXEC,
+                false,
                 &VmImagesData::default(),
             )
             .unwrap();
@@ -3364,12 +3373,34 @@ mod compose_wiring_tests {
 
         #[test]
         fn omitted_picks_the_default_for_the_model() {
-            let exec = resolve_vprogram_runtime(None, VPROGRAM_MODEL_EXEC, &data()).unwrap();
+            let exec = resolve_vprogram_runtime(None, VPROGRAM_MODEL_EXEC, false, &data()).unwrap();
             assert_eq!(exec.hash.to_string(), "aaaa".repeat(16));
             assert_eq!(exec.contract.as_deref(), Some("aleph.exec/1"));
             assert_eq!(exec.label.as_deref(), Some("exec-1.0"));
-            let compose = resolve_vprogram_runtime(None, VPROGRAM_MODEL_COMPOSE, &data()).unwrap();
+            let compose =
+                resolve_vprogram_runtime(None, VPROGRAM_MODEL_COMPOSE, false, &data()).unwrap();
             assert_eq!(compose.hash.to_string(), "bbbb".repeat(16));
+        }
+
+        #[test]
+        fn a_gpu_request_picks_the_gpu_default_unless_a_runtime_is_named() {
+            let gpu = resolve_vprogram_runtime(None, VPROGRAM_MODEL_EXEC, true, &data()).unwrap();
+            assert_eq!(gpu.hash.to_string(), "cccc".repeat(16));
+            assert_eq!(gpu.label.as_deref(), Some("gpu-1.0"));
+
+            let named = resolve_vprogram_runtime(
+                Some(ImageRef::Preset("exec-1.0".into())),
+                VPROGRAM_MODEL_EXEC,
+                true,
+                &data(),
+            )
+            .unwrap();
+            assert_eq!(named.label.as_deref(), Some("exec-1.0"));
+
+            let err = resolve_vprogram_runtime(None, VPROGRAM_MODEL_COMPOSE, true, &data())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no default GPU runtime"), "{err}");
         }
 
         #[test]
@@ -3377,12 +3408,14 @@ mod compose_wiring_tests {
             let by_contract = resolve_vprogram_runtime(
                 Some(ImageRef::Preset("aleph.compose/1".into())),
                 VPROGRAM_MODEL_COMPOSE,
+                false,
                 &data(),
             )
             .unwrap();
             let by_impl = resolve_vprogram_runtime(
                 Some(ImageRef::Preset("compose-1.0".into())),
                 VPROGRAM_MODEL_COMPOSE,
+                false,
                 &data(),
             )
             .unwrap();
@@ -3394,6 +3427,7 @@ mod compose_wiring_tests {
             let err = resolve_vprogram_runtime(
                 Some(ImageRef::Preset("compose-1.0".into())),
                 VPROGRAM_MODEL_EXEC,
+                false,
                 &data(),
             )
             .unwrap_err()
@@ -3403,6 +3437,7 @@ mod compose_wiring_tests {
             let err = resolve_vprogram_runtime(
                 Some(ImageRef::Preset("aleph.exec/1".into())),
                 VPROGRAM_MODEL_COMPOSE,
+                false,
                 &data(),
             )
             .unwrap_err()
@@ -3412,9 +3447,14 @@ mod compose_wiring_tests {
 
         #[test]
         fn omitted_without_catalogue_is_an_error() {
-            let err = resolve_vprogram_runtime(None, VPROGRAM_MODEL_EXEC, &VmImagesData::default())
-                .unwrap_err()
-                .to_string();
+            let err = resolve_vprogram_runtime(
+                None,
+                VPROGRAM_MODEL_EXEC,
+                false,
+                &VmImagesData::default(),
+            )
+            .unwrap_err()
+            .to_string();
             assert!(
                 err.contains("no default contract for V-Program workload model \"exec\""),
                 "{err}"
@@ -3426,6 +3466,7 @@ mod compose_wiring_tests {
             let err = resolve_vprogram_runtime(
                 Some(ImageRef::Preset("nope".into())),
                 VPROGRAM_MODEL_EXEC,
+                false,
                 &data(),
             )
             .unwrap_err()
