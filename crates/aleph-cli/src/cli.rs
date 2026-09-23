@@ -3323,6 +3323,15 @@ pub enum VProgramCommand {
     /// exposes a single attested
     /// endpoint that proxies to 127.0.0.1:8080, so the runtime manifest must
     /// declare workload.contract: "aleph.compose/1".
+    ///
+    /// --gpu bakes the GPU requirement (count, architecture and, with
+    /// --gpu-model, the pinned board identity) into the same launch
+    /// measurement: the measured guest verifies every attached GPU with
+    /// NVIDIA's own verifier at boot and powers off on a mismatch, so
+    /// pinning the measurement is what gives a caller those guarantees.
+    /// This command refuses a request the runtime cannot serve (no GPU
+    /// slots, an unoffered architecture, a model with no board entry, or
+    /// --gpu missing on a GPU-only runtime) before anything is uploaded.
     Create(Box<VProgramCreateArgs>),
     /// Boot a V-PROGRAM locally in plain QEMU (no SEV-SNP) before publishing it.
     #[command(long_about = "\
@@ -3345,6 +3354,8 @@ and the console shows the workload coming up.
 What it does NOT prove: the SEV-SNP launch measurement, the firmware
 (SeaBIOS is used instead of the bundle's OVMF), the CPU model, TLS and
 attestation, or the production tap network. Nothing is uploaded or signed.
+There is no --gpu flag: a GPU runtime is refused, since a local run attaches
+no device and cannot exercise the guest's GPU verification.
 
 Needs qemu-system-x86_64 on PATH and, for a usable boot time, /dev/kvm. The
 runtime must be built from an aleph-vm that includes unattested mode (PR
@@ -3398,6 +3409,9 @@ before the body is read:
     to e.g. a debug-enabled launch; a debug-enabled policy prints a warning)
   - TCB floor: the launch TCB meets the network floor for the chip
     (raise with --min-tcb, lower only with --accept-outdated-tcb)
+  - NVIDIA driver floor, only for GPU V-Programs: the runtime's pinned
+    driver version meets the network floor (raise with --min-gpu-driver,
+    lower only with --accept-outdated-gpu-driver)
   - fresh nonce: a second report bound to a nonce generated for this call
     proves the guest is live now, not a replay of an old key
     (skip with --allow-stale-attestation)
@@ -3657,8 +3671,10 @@ pub struct VProgramCreateArgs {
     pub gpu: Option<(GpuArch, u8)>,
 
     /// Narrow the confidential GPU requirement to specific card kinds, as a
-    /// lowercase PCI vendor:device id (e.g. 10de:2b85). Repeatable; requires
-    /// --gpu.
+    /// lowercase PCI vendor:device id (e.g. 10de:2b85). The measured guest
+    /// checks the board identity the GPU itself signs, not the PCI id
+    /// (host controlled), mapped through the runtime's board table.
+    /// Repeatable; requires --gpu.
     #[arg(long = "gpu-model", value_name = "VVVV:DDDD", requires = "gpu")]
     pub gpu_models: Vec<String>,
 
@@ -3804,6 +3820,18 @@ pub struct VProgramCallArgs {
     /// and the guest may be exposed.
     #[arg(long)]
     pub accept_outdated_tcb: bool,
+
+    /// Raise (or, with --accept-outdated-gpu-driver, lower) the minimum
+    /// NVIDIA confidential-GPU driver version, e.g. `590.10`. Only checked
+    /// for V-Programs that require a GPU.
+    #[arg(long)]
+    pub min_gpu_driver: Option<String>,
+
+    /// Acknowledge accepting an NVIDIA driver floor below the network floor
+    /// (required when --min-gpu-driver lowers it). The workload's runtime
+    /// may then run known-vulnerable driver code.
+    #[arg(long)]
+    pub accept_outdated_gpu_driver: bool,
 
     /// Skip the fresh-nonce liveness challenge and accept the (timeless)
     /// certificate attestation alone. The certificate checks still apply,
@@ -5702,5 +5730,43 @@ mod vprogram_call_args_tests {
             panic!("wrong variant");
         };
         assert!(args.allow_stale_attestation);
+    }
+
+    #[test]
+    fn vprogram_call_gpu_driver_flags_default_off() {
+        let hash = "a".repeat(64);
+        let cli = Cli::try_parse_from(["aleph", "vprogram", "call", &hash, "/fib/10"]).unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert!(args.min_gpu_driver.is_none());
+        assert!(!args.accept_outdated_gpu_driver);
+    }
+
+    #[test]
+    fn vprogram_call_parses_gpu_driver_flags() {
+        let hash = "a".repeat(64);
+        let cli = Cli::try_parse_from([
+            "aleph",
+            "vprogram",
+            "call",
+            &hash,
+            "/fib/10",
+            "--min-gpu-driver",
+            "590.10",
+            "--accept-outdated-gpu-driver",
+        ])
+        .unwrap();
+        let Commands::Vprogram {
+            command: VProgramCommand::Call(args),
+        } = cli.command
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(args.min_gpu_driver.as_deref(), Some("590.10"));
+        assert!(args.accept_outdated_gpu_driver);
     }
 }

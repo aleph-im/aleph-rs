@@ -7,7 +7,7 @@
 //! client.
 
 #[cfg(feature = "vprogram")]
-use crate::attest::{AmdProduct, TcbFloor};
+use crate::attest::{AmdProduct, AttestError, DriverVersion, NvidiaFloor, TcbFloor};
 use aleph_types::address;
 use aleph_types::chain::Address;
 use serde::Deserialize;
@@ -36,6 +36,8 @@ pub struct SettingsData {
     pub compatible_gpus: Vec<CompatibleGpu>,
     #[serde(default)]
     pub snp_min_tcb: SnpMinTcb,
+    #[serde(default)]
+    pub nvidia_cc_min: NvidiaCcMin,
 }
 
 /// Per-generation minimum SEV-SNP TCB from `settings.snp_min_tcb`. Absent
@@ -89,6 +91,34 @@ impl SnpMinTcb {
             AmdProduct::Turin => self.turin.as_ref(),
         };
         dto.map(TcbFloor::from)
+    }
+}
+
+/// Minimum NVIDIA confidential-GPU driver from `settings.nvidia_cc_min`; absent `min_driver` falls back to the built-in baseline.
+/// `accepted_archs` is kept unvalidated, since an unrecognized entry can only narrow the accepted set, never widen it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NvidiaCcMin {
+    #[serde(default)]
+    pub min_driver: Option<String>,
+    #[serde(default)]
+    pub accepted_archs: Vec<String>,
+}
+
+// Same gating as `SnpMinTcb::floor_for` above: the DTO and field stay
+// ungated so `SettingsData` deserializes identically either way, only the
+// conversion to the attest crate's `NvidiaFloor` is gated behind `vprogram`.
+#[cfg(feature = "vprogram")]
+impl NvidiaCcMin {
+    pub fn floor(&self) -> Option<Result<NvidiaFloor, AttestError>> {
+        let min_driver = self.min_driver.as_ref()?;
+        Some(
+            min_driver
+                .parse::<DriverVersion>()
+                .map(|min_driver| NvidiaFloor {
+                    min_driver,
+                    accepted_archs: self.accepted_archs.clone(),
+                }),
+        )
     }
 }
 
@@ -232,6 +262,7 @@ mod tests {
                 gpu(None, "L40S", "10de:26b9"),
             ],
             snp_min_tcb: SnpMinTcb::default(),
+            nvidia_cc_min: NvidiaCcMin::default(),
         };
         let variants = data.gpu_variants_for_model_id("rtx3090");
         assert_eq!(variants.len(), 2);
@@ -248,6 +279,7 @@ mod tests {
                 "10de:2bb4",
             )],
             snp_min_tcb: SnpMinTcb::default(),
+            nvidia_cc_min: NvidiaCcMin::default(),
         };
         assert_eq!(
             data.model_id_for_name("RTX PRO 6000 Blackwell Max-Q"),
@@ -309,5 +341,52 @@ mod tests {
         // this holds regardless of the `vprogram` feature.
         let tcb = &agg.settings.snp_min_tcb;
         assert!(tcb.milan.is_none() && tcb.genoa.is_none() && tcb.turin.is_none());
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn parses_nvidia_cc_min_and_builds_a_floor() {
+        let json = r#"{
+      "settings": {
+        "compatible_gpus": [],
+        "nvidia_cc_min": { "min_driver": "590.10", "accepted_archs": ["hopper"] }
+      }
+    }"#;
+        let agg: SettingsAggregate = serde_json::from_str(json).unwrap();
+        let floor = agg.settings.nvidia_cc_min.floor().unwrap().unwrap();
+        assert_eq!(floor.min_driver.to_string(), "590.10.0");
+        assert_eq!(floor.accepted_archs, vec!["hopper"]);
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn nvidia_cc_min_floor_is_none_without_min_driver() {
+        let json = r#"{ "settings": { "compatible_gpus": [] } }"#;
+        let agg: SettingsAggregate = serde_json::from_str(json).unwrap();
+        assert!(agg.settings.nvidia_cc_min.floor().is_none());
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn nvidia_cc_min_floor_surfaces_a_parse_error() {
+        let json = r#"{
+      "settings": {
+        "compatible_gpus": [],
+        "nvidia_cc_min": { "min_driver": "not-a-version" }
+      }
+    }"#;
+        let agg: SettingsAggregate = serde_json::from_str(json).unwrap();
+        let err = agg.settings.nvidia_cc_min.floor().unwrap().unwrap_err();
+        assert!(matches!(err, AttestError::GpuDriverUnparsable(v) if v == "not-a-version"));
+    }
+
+    #[test]
+    fn settings_without_nvidia_cc_min_still_deserializes() {
+        let json = r#"{ "settings": { "compatible_gpus": [] } }"#;
+        let agg: SettingsAggregate = serde_json::from_str(json).unwrap();
+        // Checked via the ungated DTO fields so this holds regardless of the
+        // `vprogram` feature.
+        assert!(agg.settings.nvidia_cc_min.min_driver.is_none());
+        assert!(agg.settings.nvidia_cc_min.accepted_archs.is_empty());
     }
 }

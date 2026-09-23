@@ -1,5 +1,7 @@
 use aleph_types::message::execution::environment::MAX_MEASUREMENTS;
-use serde::Deserialize;
+use aleph_types::message::is_pci_device_id;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const MANIFEST_FORMAT: &str = "aleph-vprogram-runtime";
 pub const MANIFEST_FORMAT_VERSION: u32 = 1;
@@ -45,6 +47,8 @@ pub enum ManifestError {
         "boot.cmdline_template carries the reserved unattested-mode token {0:?}; only `aleph vprogram run` may append it"
     )]
     ReservedCmdlineToken(String),
+    #[error("invalid gpu block: {0}")]
+    InvalidGpu(String),
 }
 
 /// Upper bound on `bundle.size`. The tarball is downloaded into memory and
@@ -105,6 +109,43 @@ pub struct RuntimeManifest {
     /// the STORE hash and the bundle sha256 are what pin the runtime).
     #[serde(default)]
     pub source: Option<SourceInfo>,
+    /// Confidential GPU requirements, absent on CPU-only runtimes.
+    #[serde(default)]
+    pub gpu: Option<GpuRuntimeSpec>,
+}
+
+/// Confidential GPU spec pinned by the runtime manifest: which driver and
+/// hardware models the guest was built and measured against.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuRuntimeSpec {
+    pub vendor: String,
+    pub driver_version: String,
+    pub library_path: String,
+    pub archs: BTreeMap<String, GpuArchSpec>,
+}
+
+/// What one GPU architecture's cards must look like for this runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuArchSpec {
+    pub accepted_models: Vec<String>,
+    /// PCI `vvvv:dddd` id to the boards sold under it. Absent means the
+    /// runtime cannot serve a requirement narrowed to specific models.
+    #[serde(default)]
+    pub boards: BTreeMap<String, Vec<GpuBoard>>,
+}
+
+/// One board a PCI id can be, as the card states it: `project`,
+/// `project_sku` and `chip_sku` come from the SPDM opaque data of verified
+/// attestation evidence, never from PCI config space or the driver.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuBoard {
+    pub name: String,
+    pub project: String,
+    pub project_sku: String,
+    pub chip_sku: String,
 }
 
 /// Where and how a runtime bundle was built, as recorded by the publisher.
@@ -164,6 +205,98 @@ fn is_lowercase_hex_64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// 2 or 3 dot-separated all-digit components, e.g. `580.0.0` or `595.71`.
+fn is_valid_driver_version(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    (parts.len() == 2 || parts.len() == 3)
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Board identity fields are compared byte for byte against attested SPDM
+/// opaque data, which carries ASCII alphanumerics only.
+fn is_board_field(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+fn validate_boards(arch: &str, spec: &GpuArchSpec) -> Result<(), ManifestError> {
+    for (id, boards) in &spec.boards {
+        if !is_pci_device_id(id) {
+            return Err(ManifestError::InvalidGpu(format!(
+                "archs.{arch}.boards key {id:?} is not a lowercase PCI vendor:device id"
+            )));
+        }
+        if boards.is_empty() {
+            return Err(ManifestError::InvalidGpu(format!(
+                "archs.{arch}.boards.{id} must list at least one board"
+            )));
+        }
+        for board in boards {
+            if board.name.is_empty() {
+                return Err(ManifestError::InvalidGpu(format!(
+                    "archs.{arch}.boards.{id} has a board with an empty name"
+                )));
+            }
+            for (field, value) in [
+                ("project", &board.project),
+                ("project_sku", &board.project_sku),
+                ("chip_sku", &board.chip_sku),
+            ] {
+                if !is_board_field(value) {
+                    return Err(ManifestError::InvalidGpu(format!(
+                        "archs.{arch}.boards.{id}: {field} must be non-empty ASCII alphanumerics, got {value:?}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_gpu(gpu: &GpuRuntimeSpec) -> Result<(), ManifestError> {
+    if gpu.vendor != "nvidia" {
+        return Err(ManifestError::InvalidGpu(format!(
+            "vendor must be nvidia, got {:?}",
+            gpu.vendor
+        )));
+    }
+    if gpu.archs.is_empty() {
+        return Err(ManifestError::InvalidGpu("archs must not be empty".into()));
+    }
+    for (arch, spec) in &gpu.archs {
+        if arch != "hopper" && arch != "blackwell" {
+            return Err(ManifestError::InvalidGpu(format!(
+                "archs key must be hopper or blackwell, got {arch:?}"
+            )));
+        }
+        if spec.accepted_models.is_empty() {
+            return Err(ManifestError::InvalidGpu(format!(
+                "archs.{arch}.accepted_models must not be empty"
+            )));
+        }
+        if spec.accepted_models.iter().any(|m| m.is_empty()) {
+            return Err(ManifestError::InvalidGpu(format!(
+                "archs.{arch}.accepted_models must not contain empty strings"
+            )));
+        }
+        validate_boards(arch, spec)?;
+    }
+    if !is_valid_driver_version(&gpu.driver_version) {
+        return Err(ManifestError::InvalidGpu(format!(
+            "driver_version must be 2 or 3 dot-separated numeric components, got {:?}",
+            gpu.driver_version
+        )));
+    }
+    if !gpu.library_path.starts_with('/') {
+        return Err(ManifestError::InvalidGpu(format!(
+            "library_path must be an absolute path, got {:?}",
+            gpu.library_path
+        )));
+    }
+    Ok(())
+}
+
 impl RuntimeManifest {
     pub fn parse(bytes: &[u8]) -> Result<Self, ManifestError> {
         let manifest: RuntimeManifest = serde_json::from_slice(bytes)?;
@@ -211,6 +344,9 @@ impl RuntimeManifest {
         // much we are willing to buffer.
         if manifest.bundle.size == 0 || manifest.bundle.size > MAX_BUNDLE_SIZE {
             return Err(ManifestError::BadBundleSize(manifest.bundle.size));
+        }
+        if let Some(gpu) = &manifest.gpu {
+            validate_gpu(gpu)?;
         }
         Ok(manifest)
     }
@@ -379,6 +515,188 @@ pub(crate) mod test {
     fn template_with_a_similar_but_different_token_is_accepted() {
         let template = "console=ttyS0 aleph_insecure_unattested_x=1 roothash={platform_roothash} workload_roothash={workload_roothash}";
         RuntimeManifest::parse(&manifest_with_template(template)).unwrap();
+    }
+
+    pub(crate) const VALID_GPU_BLOCK: &str = r#"{"vendor":"nvidia","driver_version":"595.71.05","library_path":"/opt/nvidia/lib",
+ "archs":{
+  "hopper":{"accepted_models":["GH100 A01 GSP BROM"],
+   "boards":{
+    "10de:233b":[{"name":"H200 NVL","project":"1010","project_sku":"0230","chip_sku":"894"}],
+    "10de:2331":[{"name":"H100 PCIe","project":"1010","project_sku":"0200","chip_sku":"882"}],
+    "10de:2321":[{"name":"H100 NVL","project":"1010","project_sku":"0210","chip_sku":"886"}],
+    "10de:2330":[{"name":"H100 SXM5 80GB","project":"G520","project_sku":"0200","chip_sku":"885"}],
+    "10de:2335":[{"name":"H200 SXM5 141GB","project":"G520","project_sku":"0280","chip_sku":"895"}]}},
+  "blackwell":{"accepted_models":["NVIDIA RTX PRO 6000 Blackwell Server Edition"],
+   "boards":{
+    "10de:2bb5":[{"name":"RTX PRO 6000 Blackwell Server Edition","project":"G153","project_sku":"0210","chip_sku":"895"},
+                 {"name":"RTX PRO 6000 Blackwell Server Edition","project":"G153","project_sku":"0212","chip_sku":"895"}]}}}}"#;
+
+    fn manifest_with_gpu(gpu: serde_json::Value) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_str(VALID_MANIFEST).unwrap();
+        json["gpu"] = gpu;
+        json.to_string().into_bytes()
+    }
+
+    #[test]
+    fn gpu_block_is_absent_by_default() {
+        let m = RuntimeManifest::parse(VALID_MANIFEST.as_bytes()).unwrap();
+        assert!(m.gpu.is_none());
+    }
+
+    #[test]
+    fn gpu_block_parses() {
+        let gpu: serde_json::Value = serde_json::from_str(VALID_GPU_BLOCK).unwrap();
+        let m = RuntimeManifest::parse(&manifest_with_gpu(gpu)).unwrap();
+        let gpu = m.gpu.expect("gpu block was set");
+        assert_eq!(gpu.vendor, "nvidia");
+        assert_eq!(gpu.driver_version, "595.71.05");
+        assert_eq!(gpu.library_path, "/opt/nvidia/lib");
+        assert_eq!(
+            gpu.archs["hopper"].accepted_models,
+            vec!["GH100 A01 GSP BROM"]
+        );
+        assert_eq!(
+            gpu.archs["blackwell"].accepted_models,
+            vec!["NVIDIA RTX PRO 6000 Blackwell Server Edition"]
+        );
+        let hopper = &gpu.archs["hopper"].boards;
+        assert_eq!(hopper.len(), 5);
+        let h200 = &hopper["10de:233b"][0];
+        assert_eq!(h200.name, "H200 NVL");
+        assert_eq!(
+            (
+                h200.project.as_str(),
+                h200.project_sku.as_str(),
+                h200.chip_sku.as_str()
+            ),
+            ("1010", "0230", "894")
+        );
+        // One id, two SKUs of the same board.
+        let rtx = &gpu.archs["blackwell"].boards["10de:2bb5"];
+        assert_eq!(rtx.len(), 2);
+        assert_eq!(rtx[1].project_sku, "0212");
+    }
+
+    #[test]
+    fn gpu_boards_default_to_empty() {
+        let gpu = serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100"]}}});
+        let m = RuntimeManifest::parse(&manifest_with_gpu(gpu)).unwrap();
+        assert!(m.gpu.unwrap().archs["hopper"].boards.is_empty());
+    }
+
+    #[test]
+    fn gpu_boards_reject_invariant_violations() {
+        for (boards, needle) in [
+            (
+                serde_json::json!({"10DE:233B":[{"name":"H200 NVL","project":"1010","project_sku":"0230","chip_sku":"894"}]}),
+                "not a lowercase PCI vendor:device id",
+            ),
+            (
+                serde_json::json!({"10de:233":[{"name":"H200 NVL","project":"1010","project_sku":"0230","chip_sku":"894"}]}),
+                "not a lowercase PCI vendor:device id",
+            ),
+            (
+                serde_json::json!({"10de:233b":[]}),
+                "must list at least one board",
+            ),
+            (
+                serde_json::json!({"10de:233b":[{"name":"","project":"1010","project_sku":"0230","chip_sku":"894"}]}),
+                "empty name",
+            ),
+            (
+                serde_json::json!({"10de:233b":[{"name":"H200 NVL","project":"","project_sku":"0230","chip_sku":"894"}]}),
+                "project must be non-empty",
+            ),
+            (
+                serde_json::json!({"10de:233b":[{"name":"H200 NVL","project":"1010","project_sku":"02 30","chip_sku":"894"}]}),
+                "project_sku must be non-empty",
+            ),
+            (
+                serde_json::json!({"10de:233b":[{"name":"H200 NVL","project":"1010","project_sku":"0230","chip_sku":"89-4"}]}),
+                "chip_sku must be non-empty",
+            ),
+        ] {
+            let gpu = serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100"],"boards":boards}}});
+            let err = RuntimeManifest::parse(&manifest_with_gpu(gpu)).unwrap_err();
+            assert!(matches!(err, ManifestError::InvalidGpu(_)), "{err}");
+            assert!(err.to_string().contains(needle), "got {err}");
+        }
+    }
+
+    #[test]
+    fn gpu_board_rejects_unknown_fields() {
+        let gpu = serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100"],"boards":{"10de:233b":[{"name":"H200 NVL","project":"1010","project_sku":"0230","chip_sku":"894","vbios":"96.00.99.00.01"}]}}}});
+        let err = RuntimeManifest::parse(&manifest_with_gpu(gpu)).unwrap_err();
+        assert!(matches!(err, ManifestError::Json(_)), "{err}");
+    }
+
+    #[test]
+    fn gpu_block_rejects_invariant_violations() {
+        for (patch, needle) in [
+            (
+                serde_json::json!({"vendor":"amd","driver_version":"595.71.05","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100 A01 GSP BROM"]}}}),
+                "vendor",
+            ),
+            (
+                serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05","library_path":"/opt/nvidia/lib","archs":{}}),
+                "archs must not be empty",
+            ),
+            (
+                serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05","library_path":"/opt/nvidia/lib","archs":{"ampere":{"accepted_models":["A100"]}}}),
+                "hopper or blackwell",
+            ),
+            (
+                serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":[]}}}),
+                "accepted_models must not be empty",
+            ),
+            (
+                serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":[""]}}}),
+                "accepted_models must not contain empty strings",
+            ),
+            (
+                serde_json::json!({"vendor":"nvidia","driver_version":"595","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100"]}}}),
+                "driver_version",
+            ),
+            (
+                serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05.1","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100"]}}}),
+                "driver_version",
+            ),
+            (
+                serde_json::json!({"vendor":"nvidia","driver_version":"not.a.version","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100"]}}}),
+                "driver_version",
+            ),
+            (
+                serde_json::json!({"vendor":"nvidia","driver_version":"595.71.05","library_path":"opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100"]}}}),
+                "library_path",
+            ),
+        ] {
+            let bytes = manifest_with_gpu(patch.clone());
+            let err = RuntimeManifest::parse(&bytes).unwrap_err();
+            assert!(
+                matches!(err, ManifestError::InvalidGpu(_)),
+                "{patch}: {err}"
+            );
+            assert!(err.to_string().contains(needle), "{patch}: got {err}");
+        }
+    }
+
+    #[test]
+    fn gpu_block_driver_version_with_two_components_is_accepted() {
+        let gpu = serde_json::json!({"vendor":"nvidia","driver_version":"580.0","library_path":"/opt/nvidia/lib","archs":{"hopper":{"accepted_models":["GH100"]}}});
+        RuntimeManifest::parse(&manifest_with_gpu(gpu)).unwrap();
+    }
+
+    #[test]
+    fn old_flat_gpu_shape_is_rejected() {
+        let old_shape = serde_json::json!({
+            "vendor": "nvidia",
+            "driver_version": "595.71.05",
+            "library_path": "/opt/nvidia/lib",
+            "arch": "blackwell",
+            "accepted_models": ["NVIDIA RTX PRO 6000 Blackwell Server Edition"]
+        });
+        let err = RuntimeManifest::parse(&manifest_with_gpu(old_shape)).unwrap_err();
+        assert!(err.to_string().contains("archs"), "{err}");
     }
 
     #[test]

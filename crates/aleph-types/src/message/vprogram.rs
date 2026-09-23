@@ -80,8 +80,10 @@ struct RawConfidentialGpuRequirement {
 }
 
 /// Lowercase PCI `vvvv:dddd` id, the form the settings aggregate's
-/// compatible_gpus and the CRN's inventory both use.
-fn is_pci_device_id(id: &str) -> bool {
+/// compatible_gpus and the CRN's inventory both use. Public so that the
+/// runtime manifest's board table is keyed by exactly the same form the
+/// message's `gpu.models` uses.
+pub fn is_pci_device_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     bytes.len() == 9
         && bytes[4] == b':'
