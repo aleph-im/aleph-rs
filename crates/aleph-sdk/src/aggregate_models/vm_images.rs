@@ -31,6 +31,12 @@ pub struct VmImagesData {
     /// Expected to point at the latest / most secure bundle.
     #[serde(default)]
     pub vprogram_contracts: BTreeMap<String, String>,
+    /// Default runtime per workload contract for a V-Program that requests
+    /// confidential GPUs: `{"aleph.exec/1": "gpu-1.0"}`. Kept apart from
+    /// `vprogram_contracts` because a GPU runtime refuses a non-GPU message
+    /// and the plain runtime has no GPU slots.
+    #[serde(default)]
+    pub vprogram_gpu_contracts: BTreeMap<String, String>,
     #[serde(default)]
     pub defaults: VmImageDefaults,
 }
@@ -137,6 +143,11 @@ pub enum VmImagesError {
         "vm-images aggregate has no default runtime for V-Program workload contract {contract:?}"
     )]
     NoDefaultRuntime { contract: String },
+    #[error(
+        "vm-images aggregate has no default GPU runtime for V-Program workload contract \
+         {contract:?}; pass --runtime with a GPU runtime's name or manifest hash"
+    )]
+    NoDefaultGpuRuntime { contract: String },
     #[error("unknown V-Program runtime {name:?} (available for this model: {available})")]
     UnknownVProgramRuntime { name: String, available: String },
     #[error(
@@ -245,6 +256,7 @@ impl VmImagesData {
         &self,
         model: &str,
         selector: Option<&str>,
+        gpu: bool,
         hint: impl Fn(&str) -> &'static str,
     ) -> Result<ResolvedVProgramRuntime, VmImagesError> {
         let (contract, runtime) = match selector {
@@ -284,8 +296,17 @@ impl VmImagesData {
                 hint: hint(found),
             });
         }
+        // A named runtime is taken as is; a contract resolves through the
+        // GPU table when the message asks for GPUs, the plain one otherwise.
         let runtime = match runtime {
             Some(name) => name,
+            None if gpu => self
+                .vprogram_gpu_contracts
+                .get(&contract)
+                .cloned()
+                .ok_or_else(|| VmImagesError::NoDefaultGpuRuntime {
+                    contract: contract.clone(),
+                })?,
             None => self
                 .vprogram_contracts
                 .get(&contract)
@@ -373,11 +394,18 @@ mod tests {
               "weird": {
                 "hash": "7777777777777777777777777777777777777777777777777777777777777777",
                 "contract": "legacy"
+              },
+              "gpu-1.0": {
+                "hash": "8888888888888888888888888888888888888888888888888888888888888888",
+                "contract": "aleph.exec/1"
               }
             },
             "vprogram_contracts": {
               "aleph.exec/1": "exec-1.0",
               "aleph.compose/1": "compose-1.0"
+            },
+            "vprogram_gpu_contracts": {
+              "aleph.exec/1": "gpu-1.0"
             },
             "defaults": {
               "rootfs": "ubuntu24",
@@ -536,35 +564,35 @@ mod tests {
 
         // Defaults all the way down.
         let exec = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, None, no_hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, None, false, no_hint)
             .unwrap();
         assert_eq!(exec.contract, "aleph.exec/1");
         assert_eq!(exec.runtime, "exec-1.0");
         assert_eq!(exec.hash.to_string(), "3".repeat(64));
         let compose = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_COMPOSE, None, no_hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_COMPOSE, None, false, no_hint)
             .unwrap();
         assert_eq!(compose.hash.to_string(), "4".repeat(64));
 
         // Explicit contract: its default runtime.
         let exec = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("aleph.exec/1"), no_hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("aleph.exec/1"), false, no_hint)
             .unwrap();
         assert_eq!(exec.runtime, "exec-1.0");
 
         // Explicit runtime, including a deprecated one and a non-default contract.
         let old = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("exec-0.9"), no_hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("exec-0.9"), false, no_hint)
             .unwrap();
         assert_eq!(old.hash.to_string(), "5".repeat(64));
         let rc = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("exec-2.0-rc1"), no_hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("exec-2.0-rc1"), false, no_hint)
             .unwrap();
         assert_eq!(rc.contract, "aleph.exec/2");
 
         // A contract without a default runtime cannot be picked implicitly.
         let err = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("aleph.exec/2"), no_hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("aleph.exec/2"), false, no_hint)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no default runtime"), "{err}");
@@ -575,7 +603,39 @@ mod tests {
             .iter()
             .map(|(name, _)| *name)
             .collect();
-        assert_eq!(active, vec!["exec-1.0", "exec-2.0-rc1"]);
+        assert_eq!(active, vec!["exec-1.0", "exec-2.0-rc1", "gpu-1.0"]);
+    }
+
+    #[test]
+    fn gpu_requests_resolve_through_their_own_contract_table() {
+        let agg: VmImagesAggregate = serde_json::from_str(full_fixture()).unwrap();
+        let data = &agg.vm_images;
+        let no_hint = |_: &str| "";
+
+        // The model default and an explicit contract both land on the GPU runtime.
+        let gpu = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, None, true, no_hint)
+            .unwrap();
+        assert_eq!(gpu.runtime, "gpu-1.0");
+        assert_eq!(gpu.hash.to_string(), "8".repeat(64));
+        let gpu = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("aleph.exec/1"), true, no_hint)
+            .unwrap();
+        assert_eq!(gpu.runtime, "gpu-1.0");
+
+        // A named runtime is taken as is, GPU request or not.
+        let named = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("exec-1.0"), true, no_hint)
+            .unwrap();
+        assert_eq!(named.runtime, "exec-1.0");
+
+        // No GPU default for the contract: refused, with the way out.
+        let err = data
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_COMPOSE, None, true, no_hint)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no default GPU runtime"), "{err}");
+        assert!(err.contains("--runtime"), "{err}");
     }
 
     #[test]
@@ -591,7 +651,7 @@ mod tests {
         };
 
         let err = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("compose-1.0"), hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("compose-1.0"), false, hint)
             .unwrap_err()
             .to_string();
         assert!(
@@ -601,14 +661,14 @@ mod tests {
         assert!(err.ends_with("(did you mean --compose?)"), "{err}");
 
         let err = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_COMPOSE, Some("aleph.exec/1"), hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_COMPOSE, Some("aleph.exec/1"), false, hint)
             .unwrap_err()
             .to_string();
         assert!(err.contains("workload contract \"aleph.exec/1\""), "{err}");
         assert!(!err.contains("did you mean"), "{err}");
 
         let err = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("nope"), hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("nope"), false, hint)
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown V-Program runtime \"nope\""), "{err}");
@@ -619,13 +679,13 @@ mod tests {
         );
 
         let err = data
-            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("weird"), hint)
+            .resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, Some("weird"), false, hint)
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not follow"), "{err}");
 
         let err = data
-            .resolve_vprogram_runtime("bogus", None, hint)
+            .resolve_vprogram_runtime("bogus", None, false, hint)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no default contract"), "{err}");
@@ -637,9 +697,10 @@ mod tests {
         let agg: VmImagesAggregate = serde_json::from_str(json).unwrap();
         let data = &agg.vm_images;
         assert!(data.vprogram_runtimes.is_empty() && data.vprogram_contracts.is_empty());
+        assert!(data.vprogram_gpu_contracts.is_empty());
         assert!(data.defaults.vprogram_models.is_empty());
         assert!(
-            data.resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, None, |_| "")
+            data.resolve_vprogram_runtime(VPROGRAM_MODEL_EXEC, None, false, |_| "")
                 .is_err()
         );
     }

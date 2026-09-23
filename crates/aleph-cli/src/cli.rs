@@ -3601,9 +3601,10 @@ pub struct VProgramBuildArgs {
     /// runtimes by workload model -> contract -> runtime; --workload uses
     /// the `exec` model and --compose the `compose` model, and when omitted
     /// the model's current contract and that contract's default runtime are
-    /// used. Pass a contract (`aleph.exec/1`, its default runtime), a
-    /// runtime name (`exec-1.0`), or the item hash of a runtime manifest
-    /// STORE message to override.
+    /// used; with --gpu, the contract's default GPU runtime instead. Pass a
+    /// contract (`aleph.exec/1`, its default runtime), a runtime name
+    /// (`exec-1.0`, `gpu-1.0`), or the item hash of a runtime manifest STORE
+    /// message to override.
     #[arg(long, value_parser = parse_image_ref)]
     pub runtime: Option<ImageRef>,
 
