@@ -11,6 +11,7 @@ use aleph_sdk::scheduler::SchedulerClient;
 use aleph_types::chain::{Address, Chain};
 use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::ConfidentialGpuRequirement;
 use aleph_types::message::execution::base::{Payment, PaymentType};
 use aleph_types::message::execution::environment::{
     GpuProperties, Hypervisor, TrustedExecutionEnvironment,
@@ -83,6 +84,10 @@ pub(crate) struct GpuSummary {
 pub(crate) struct TrustedExecutionSummary {
     pub firmware: Option<String>,
     pub policy: u64,
+    /// Confidential GPU requirement, absent on every non-GPU instance (and
+    /// on every legacy SEV one), so it is left out rather than nulled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<ConfidentialGpuRequirement>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -287,6 +292,7 @@ fn tee_summary(t: &TrustedExecutionEnvironment) -> TrustedExecutionSummary {
     TrustedExecutionSummary {
         firmware: t.firmware.as_ref().map(|h| h.to_string()),
         policy: t.policy,
+        gpu: t.gpu.clone(),
     }
 }
 
@@ -421,6 +427,14 @@ pub(crate) fn render_text(s: &InstanceShow) -> String {
         format_tee(s.resources.trusted_execution.as_ref())
     )
     .unwrap();
+    if let Some(gpu) = s
+        .resources
+        .trusted_execution
+        .as_ref()
+        .and_then(|t| t.gpu.as_ref())
+    {
+        writeln!(out, "  Conf. GPU      {}", format_confidential_gpu(gpu)).unwrap();
+    }
 
     // Image
     writeln!(out).unwrap();
@@ -557,6 +571,19 @@ fn format_tee(tee: Option<&TrustedExecutionSummary>) -> String {
             t.policy
         ),
     }
+}
+
+/// The confidential GPU requirement the measured guest enforces, as its own
+/// line under RESOURCES.
+fn format_confidential_gpu(gpu: &ConfidentialGpuRequirement) -> String {
+    let models = match &gpu.models {
+        Some(models) => format!(", models {}", models.join(", ")),
+        None => String::new(),
+    };
+    format!(
+        "{} {} x{}{} (mode {})",
+        gpu.vendor, gpu.arch, gpu.count, models, gpu.mode
+    )
 }
 
 fn format_volume(v: &Volume) -> String {
@@ -1017,6 +1044,64 @@ mod tests {
         let out = render_text(&show);
         assert!(out.contains("Status         -"));
         assert!(out.contains("Allocated      -"));
+    }
+
+    fn hopper_requirement() -> ConfidentialGpuRequirement {
+        serde_json::from_value(serde_json::json!({
+            "vendor": "nvidia",
+            "arch": "hopper",
+            "count": 2,
+            "models": ["10de:233b"],
+            "mode": "cc",
+        }))
+        .expect("a valid confidential GPU requirement")
+    }
+
+    fn tee_with_gpu(gpu: Option<ConfidentialGpuRequirement>) -> TrustedExecutionSummary {
+        TrustedExecutionSummary {
+            firmware: None,
+            policy: 0x30000,
+            gpu,
+        }
+    }
+
+    #[test]
+    fn render_text_shows_the_confidential_gpu_requirement() {
+        let mut show = show_for_render();
+        show.resources.trusted_execution = Some(tee_with_gpu(Some(hopper_requirement())));
+        let out = render_text(&show);
+        assert!(
+            out.contains("Conf. GPU      nvidia hopper x2, models 10de:233b (mode cc)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn render_text_omits_the_confidential_gpu_line_without_one() {
+        let mut show = show_for_render();
+        show.resources.trusted_execution = Some(tee_with_gpu(None));
+        let out = render_text(&show);
+        assert!(!out.contains("Conf. GPU"), "{out}");
+    }
+
+    #[test]
+    fn render_json_carries_the_confidential_gpu_only_when_present() {
+        let mut show = show_for_render();
+        show.resources.trusted_execution = Some(tee_with_gpu(None));
+        let v = render_json(&show);
+        let tee = v["resources"]["trusted_execution"]
+            .as_object()
+            .expect("trusted_execution is an object");
+        assert!(!tee.contains_key("gpu"));
+
+        show.resources.trusted_execution = Some(tee_with_gpu(Some(hopper_requirement())));
+        let v = render_json(&show);
+        assert_eq!(v["resources"]["trusted_execution"]["gpu"]["arch"], "hopper");
+        assert_eq!(v["resources"]["trusted_execution"]["gpu"]["count"], 2);
+        assert_eq!(
+            v["resources"]["trusted_execution"]["gpu"]["models"],
+            serde_json::json!(["10de:233b"])
+        );
     }
 
     #[test]

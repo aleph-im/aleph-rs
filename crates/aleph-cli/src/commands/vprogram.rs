@@ -1980,7 +1980,7 @@ fn apply_gpu_driver_override(
 /// Resolve the network NVIDIA driver floor (builtin baseline raised by the
 /// settings aggregate, falling back to the baseline with a warning on fetch
 /// or parse error), then apply the CLI override.
-async fn resolve_gpu_floor(
+pub(crate) async fn resolve_gpu_floor(
     aleph_client: &AlephClient,
     min_gpu_driver: Option<&str>,
     accept_outdated: bool,

@@ -125,6 +125,9 @@ pub struct Cli {
     pub command: Commands,
 }
 
+// One of these is parsed once per process, and boxing a subcommand tree
+// would break every `match cli.command` pattern for no runtime gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
     /// Manage local accounts and signing keys
@@ -2188,6 +2191,34 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub gpu: Option<Vec<String>>,
 
+    /// Request confidential GPUs: `ARCH[:COUNT]`, ARCH is hopper or
+    /// blackwell, COUNT defaults to 1 (1 to 8). Requires --confidential
+    /// --tee sev-snp; the requirement rides the measured boot cmdline and
+    /// the guest enforces it. Cannot be combined with --gpu, which buys a
+    /// plain (non-confidential) GPU tier.
+    #[cfg(feature = "vprogram")]
+    #[arg(
+        long = "confidential-gpu",
+        value_parser = parse_gpu_spec,
+        value_name = "ARCH[:COUNT]",
+        requires = "confidential",
+        conflicts_with = "gpu"
+    )]
+    pub confidential_gpu: Option<(GpuArch, u8)>,
+
+    /// Narrow the confidential GPU requirement to specific card kinds, as a
+    /// lowercase PCI vendor:device id (e.g. 10de:2b85). The measured guest
+    /// checks the board identity the GPU itself signs, not the PCI id
+    /// (host controlled), mapped through the runtime's board table.
+    /// Repeatable; requires --confidential-gpu.
+    #[cfg(feature = "vprogram")]
+    #[arg(
+        long = "confidential-gpu-model",
+        value_name = "VVVV:DDDD",
+        requires = "confidential_gpu"
+    )]
+    pub confidential_gpu_models: Vec<String>,
+
     /// Not a CLI flag: the exact GPU device(s) resolved from the pinned node by
     /// the interactive picker, used verbatim in the instance message so it
     /// demands the node's actual PCI variant. Left `None` on the non-interactive
@@ -2250,6 +2281,16 @@ pub struct InstanceAttestArgs {
     /// Required platform posture (repeatable; see `vprogram call --require-platform`).
     #[arg(long, value_delimiter = ',')]
     pub require_platform: Vec<PlatformRequirement>,
+    /// Raise (or, with --accept-outdated-gpu-driver, lower) the minimum
+    /// NVIDIA confidential-GPU driver version, e.g. `590.10`. Only checked
+    /// for instances that declare a confidential GPU.
+    #[arg(long)]
+    pub min_gpu_driver: Option<String>,
+    /// Acknowledge accepting an NVIDIA driver floor below the network floor
+    /// (required when --min-gpu-driver lowers it). The instance's runtime
+    /// may then run known-vulnerable driver code.
+    #[arg(long)]
+    pub accept_outdated_gpu_driver: bool,
 }
 
 #[cfg(feature = "vprogram")]
@@ -4726,6 +4767,86 @@ mod instance_create_args_tests {
         let args = parse_create(&["--crn-hash", "d704be0b15"]);
         assert_eq!(args.crn.as_deref(), Some("d704be0b15"));
     }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn confidential_gpu_is_absent_by_default() {
+        let args = parse_create(&["--disk-size", "20GB", "--confidential"]);
+        assert_eq!(args.confidential_gpu, None);
+        assert!(args.confidential_gpu_models.is_empty());
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn confidential_gpu_parses_arch_count_and_models() {
+        let args = parse_create(&[
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--confidential-gpu",
+            "hopper:2",
+            "--confidential-gpu-model",
+            "10de:233b",
+        ]);
+        assert_eq!(args.confidential_gpu, Some((GpuArch::Hopper, 2)));
+        assert_eq!(args.confidential_gpu_models, vec!["10de:233b".to_string()]);
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn confidential_gpu_rejects_an_unknown_arch() {
+        match try_parse_create(&[
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--confidential-gpu",
+            "ampere",
+        ]) {
+            Ok(_) => panic!("expected an unknown-arch error"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation),
+        }
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn confidential_gpu_without_confidential_is_rejected() {
+        match try_parse_create(&["--disk-size", "20GB", "--confidential-gpu", "hopper"]) {
+            Ok(_) => panic!("expected a missing --confidential error"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument),
+        }
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn confidential_gpu_conflicts_with_the_plain_gpu_tier() {
+        match try_parse_create(&[
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--gpu",
+            "l40s",
+            "--confidential-gpu",
+            "hopper",
+        ]) {
+            Ok(_) => panic!("expected a conflict error"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict),
+        }
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn confidential_gpu_model_alone_is_rejected() {
+        match try_parse_create(&[
+            "--disk-size",
+            "20GB",
+            "--confidential",
+            "--confidential-gpu-model",
+            "10de:233b",
+        ]) {
+            Ok(_) => panic!("expected a missing --confidential-gpu error"),
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4883,6 +5004,37 @@ mod instance_attest_unlock_args_tests {
             args.attest.amd_product,
             aleph_sdk::attest::AmdProduct::Genoa
         );
+    }
+
+    #[test]
+    fn instance_attest_gpu_driver_flags_default_off() {
+        let args = parse_attest(&["deadbeef"]);
+        assert!(args.min_gpu_driver.is_none());
+        assert!(!args.accept_outdated_gpu_driver);
+    }
+
+    #[test]
+    fn instance_attest_parses_gpu_driver_flags() {
+        let args = parse_attest(&[
+            "deadbeef",
+            "--min-gpu-driver",
+            "590.10",
+            "--accept-outdated-gpu-driver",
+        ]);
+        assert_eq!(args.min_gpu_driver.as_deref(), Some("590.10"));
+        assert!(args.accept_outdated_gpu_driver);
+    }
+
+    #[test]
+    fn instance_unlock_parses_gpu_driver_flags_through_the_flattened_args() {
+        let args = parse_unlock(&[
+            "deadbeef",
+            "--min-gpu-driver",
+            "590.10",
+            "--accept-outdated-gpu-driver",
+        ]);
+        assert_eq!(args.attest.min_gpu_driver.as_deref(), Some("590.10"));
+        assert!(args.attest.accept_outdated_gpu_driver);
     }
 }
 

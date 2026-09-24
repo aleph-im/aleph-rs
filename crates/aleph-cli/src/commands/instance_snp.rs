@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use aleph_sdk::aggregate_models::vm_images::VmImagesData;
+use aleph_sdk::aggregate_models::vm_images::{VmImagesData, VmImagesError};
 use aleph_sdk::attest::owner_auth::{canonical_secrets_json, inject_secret_payload};
 use aleph_sdk::attest::{
     AttestError, AttestedResponse, FreshAttestation, InjectSecretEnvelope, MeasurementPin,
@@ -29,7 +29,7 @@ use aleph_types::item_hash::ItemHash;
 use aleph_types::message::execution::environment::{
     DEFAULT_SNP_POLICY, LaunchMeasurement, SevSnpRegisters, TeeMode, TrustedExecutionEnvironment,
 };
-use aleph_types::message::{InstanceContent, MessageContentEnum};
+use aleph_types::message::{ConfidentialGpuRequirement, InstanceContent, MessageContentEnum};
 use anyhow::{Context, Result, anyhow, bail};
 use url::Url;
 
@@ -51,15 +51,28 @@ pub(crate) const SNP_DEFAULT_POLICY: u64 = DEFAULT_SNP_POLICY;
 
 /// Resolve `--runtime` (instance create, SNP flavor) against an in-memory
 /// `VmImagesData`. Pure: does no network I/O. The flag wins when given;
-/// otherwise falls back to `defaults.instance_runtime`, erroring with both
-/// names when neither is available.
+/// otherwise falls back to `defaults.instance_gpu_runtime` for a
+/// confidential-GPU request and `defaults.instance_runtime` otherwise,
+/// naming the flag and the default it looked for when neither is available.
 pub(crate) fn resolve_instance_runtime_ref(
     runtime: Option<ImageRef>,
     data: &VmImagesData,
+    confidential_gpu: bool,
 ) -> Result<ItemHash> {
     match runtime {
         Some(ImageRef::Hash(h)) => Ok(h),
         Some(ImageRef::Preset(name)) => Ok(data.instance_runtime(&name)?.hash.clone()),
+        // A confidential GPU needs the GPU flavor: the CPU-only default
+        // carries no gpu block, so its cmdline template has no GPU slots.
+        None if confidential_gpu => {
+            let entry = data.instance_gpu_runtime_default().map_err(|e| match e {
+                VmImagesError::NoDefault { .. } => anyhow!(
+                    "no default confidential-GPU instance runtime is published; pass --runtime"
+                ),
+                other => anyhow!(other),
+            })?;
+            Ok(entry.hash.clone())
+        }
         None => {
             let default_name = data.defaults.instance_runtime.as_deref().ok_or_else(|| {
                 anyhow!(
@@ -197,6 +210,7 @@ pub(crate) fn tee_from_measurements(
     runtime_ref: &ItemHash,
     policy: u64,
     measurements: Vec<LaunchMeasurement>,
+    gpu: Option<&ConfidentialGpuRequirement>,
 ) -> TrustedExecutionEnvironment {
     TrustedExecutionEnvironment {
         firmware: None,
@@ -205,7 +219,7 @@ pub(crate) fn tee_from_measurements(
         runtime: Some(runtime_ref.clone()),
         measurements: Some(measurements),
         attestation_port: None,
-        gpu: None,
+        gpu: gpu.cloned(),
     }
 }
 
@@ -222,6 +236,7 @@ pub(crate) async fn build_snp_trusted_execution(
     vcpus: u32,
     policy: u64,
     cache_dir: &Path,
+    gpu: Option<&ConfidentialGpuRequirement>,
 ) -> Result<(TrustedExecutionEnvironment, InstanceRuntimeManifest)> {
     let manifest_bytes = client
         .download_file_by_message_hash(runtime_ref)
@@ -238,14 +253,29 @@ pub(crate) async fn build_snp_trusted_execution(
         .await
         .context("failed to fetch instance runtime bundle")?;
 
-    // GPU requirement and runtime archs are not wired through create yet.
-    let cmdline = instantiate_instance_cmdline(&manifest.boot.cmdline_template, owner, None, None)
-        .context("failed to instantiate the instance runtime boot cmdline")?;
+    // The runtime's own arch and board tables are what a requirement is
+    // checked against; a GPU-less runtime has none, so it cannot serve one.
+    let runtime_archs = match gpu {
+        Some(_) => {
+            let spec = manifest.gpu.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "instance runtime {runtime_ref} declares no gpu block: a confidential GPU \
+                     needs a GPU instance runtime (pass --runtime, or publish \
+                     defaults.instance_gpu_runtime)"
+                )
+            })?;
+            Some(&spec.archs)
+        }
+        None => None,
+    };
+    let cmdline =
+        instantiate_instance_cmdline(&manifest.boot.cmdline_template, owner, gpu, runtime_archs)
+            .context("failed to instantiate the instance runtime boot cmdline")?;
 
     let measurements = compute_measurements(&artifacts, &cmdline, vcpus, &manifest.boot.cpu_models)
         .context("failed to compute SEV-SNP launch measurements")?;
 
-    let tee = tee_from_measurements(runtime_ref, policy, measurements);
+    let tee = tee_from_measurements(runtime_ref, policy, measurements, gpu);
     Ok((tee, manifest))
 }
 
@@ -293,6 +323,67 @@ pub(crate) struct AttestOutcome {
     /// same floor rather than resolving it again, so the two exchanges
     /// cannot diverge and the settings aggregate is fetched once.
     pub min_tcb: aleph_sdk::attest::TcbFloorPolicy,
+    /// The confidential GPU requirement and the driver floor it was checked
+    /// against, for an instance that declares one. `None` for a CPU-only
+    /// instance; a failed check never yields an outcome at all.
+    pub gpu: Option<InstanceGpuInfo>,
+}
+
+/// GPU evidence the `instance attest` and `instance unlock` summaries print:
+/// the message's requirement (enforced by the measured guest, not verified
+/// by this client), the pinned runtime manifest's driver version, and the
+/// floor that version was checked against.
+#[derive(Debug, Clone)]
+pub(crate) struct InstanceGpuInfo {
+    pub arch: String,
+    pub count: u8,
+    pub models: Option<Vec<String>>,
+    pub driver_version: String,
+    pub floor: String,
+}
+
+/// Check an instance's confidential GPU requirement against the NVIDIA
+/// driver floor: the pinned runtime manifest's `gpu.driver_version` and the
+/// message's architecture, against the network floor with `--min-gpu-driver`
+/// / `--accept-outdated-gpu-driver` folded in. Fails closed, so `instance
+/// unlock` aborts before it reads, let alone sends, any secret.
+async fn resolve_instance_gpu_info(
+    aleph_client: &AlephClient,
+    item_hash: &ItemHash,
+    runtime_ref: &ItemHash,
+    gpu: &ConfidentialGpuRequirement,
+    args: &InstanceAttestArgs,
+) -> Result<InstanceGpuInfo> {
+    let manifest_bytes = aleph_client
+        .download_file_by_message_hash(runtime_ref)
+        .await
+        .context("failed to download instance runtime manifest")?
+        .with_verification()
+        .bytes()
+        .await
+        .context("failed to download instance runtime manifest")?;
+    let manifest = InstanceRuntimeManifest::parse(&manifest_bytes)
+        .context("failed to parse instance runtime manifest")?;
+    let spec = manifest.gpu.as_ref().ok_or_else(|| {
+        anyhow!(
+            "instance {item_hash} declares a confidential GPU but its runtime manifest \
+             declares no gpu block"
+        )
+    })?;
+    let floor = super::vprogram::resolve_gpu_floor(
+        aleph_client,
+        args.min_gpu_driver.as_deref(),
+        args.accept_outdated_gpu_driver,
+    )
+    .await?;
+    floor.check(&spec.driver_version, &gpu.arch)?;
+    Ok(InstanceGpuInfo {
+        arch: gpu.arch.clone(),
+        count: gpu.count,
+        models: gpu.models.clone(),
+        driver_version: spec.driver_version.clone(),
+        floor: floor.min_driver.to_string(),
+    })
 }
 
 /// Reject anything that isn't a `sev_snp` confidential instance, naming the
@@ -375,6 +466,8 @@ pub(crate) async fn run_instance_attest(
     let tee = check_snp_instance(&content)?;
     let policy = tee.policy;
     let attest_port = instance_attest_port(tee);
+    let gpu_requirement = tee.gpu.clone();
+    let runtime_ref = tee.runtime.clone();
     let measurements = tee.measurements.as_deref().unwrap_or(&[]);
     let expectation = attest_common::resolve_expected_measurement(
         measurements,
@@ -456,6 +549,25 @@ pub(crate) async fn run_instance_attest(
         }
     }
 
+    // NVIDIA driver floor, after the attestation verified and before any
+    // caller acts on the outcome (`instance unlock` reads its secret only
+    // once this returns).
+    let gpu = match &gpu_requirement {
+        Some(gpu) => {
+            let runtime_ref = runtime_ref.ok_or_else(|| {
+                anyhow!(
+                    "instance {item_hash} declares a confidential GPU but pins no runtime \
+                     manifest"
+                )
+            })?;
+            Some(
+                resolve_instance_gpu_info(aleph_client, &item_hash, &runtime_ref, gpu, args)
+                    .await?,
+            )
+        }
+        None => None,
+    };
+
     Ok(AttestOutcome {
         fresh,
         endpoint,
@@ -463,6 +575,7 @@ pub(crate) async fn run_instance_attest(
         unlock_authority,
         expectation,
         min_tcb,
+        gpu,
     })
 }
 
@@ -499,8 +612,37 @@ fn platform_summary(p: &aleph_sdk::attest::PlatformPosture) -> String {
     )
 }
 
+/// One-line rendering of the confidential GPU requirement and the driver
+/// floor it was checked against. Says who enforces what: the CRN attaches
+/// the cards, the measured guest refuses to boot without them, and this
+/// client only checked the runtime's pinned driver version. Pure: no I/O.
+fn gpu_summary_line(gpu: &InstanceGpuInfo) -> String {
+    let models = match &gpu.models {
+        Some(models) => format!(", models {}", models.join(", ")),
+        None => String::new(),
+    };
+    format!(
+        "GPU requirement (enforced by the measured guest): {} x{}{}, driver {} (floor {})",
+        gpu.arch, gpu.count, models, gpu.driver_version, gpu.floor
+    )
+}
+
+/// The `gpu` object both summaries put in their JSON output, matching
+/// `vprogram call`'s shape. Pure: no I/O.
+fn gpu_summary_json(gpu: &InstanceGpuInfo) -> serde_json::Value {
+    serde_json::json!({
+        "arch": gpu.arch,
+        "count": gpu.count,
+        "models": gpu.models,
+        "driver_version": gpu.driver_version,
+        "floor": gpu.floor,
+        "enforced_by": "measured_guest",
+    })
+}
+
 /// Print the `instance attest` result: measurement, policy, launch/reported
-/// TCB, chip, platform posture, endpoint. Mirrors `vprogram call`'s
+/// TCB, chip, platform posture, endpoint, plus the confidential GPU
+/// requirement when the instance declares one. Mirrors `vprogram call`'s
 /// evidence rendering.
 fn print_attest_summary(outcome: &AttestOutcome, json: bool) {
     let fresh = &outcome.fresh;
@@ -512,7 +654,7 @@ fn print_attest_summary(outcome: &AttestOutcome, json: bool) {
         );
     }
     if json {
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "verified": true,
             "measurement": fresh.registers.launch,
             "policy": format!("{:#x}", fresh.policy),
@@ -546,6 +688,9 @@ fn print_attest_summary(outcome: &AttestOutcome, json: bool) {
             },
             "endpoint": outcome.endpoint.as_str(),
         });
+        if let Some(gpu) = &outcome.gpu {
+            out["gpu"] = gpu_summary_json(gpu);
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&out).expect("attest summary always serializes")
@@ -587,6 +732,9 @@ fn print_attest_summary(outcome: &AttestOutcome, json: bool) {
                 .map_or("unknown".to_string(), |s| s.to_string()),
         );
         println!("platform: {}", platform_summary(&fresh.platform));
+        if let Some(gpu) = &outcome.gpu {
+            println!("{}", gpu_summary_line(gpu));
+        }
         println!("endpoint: {}", outcome.endpoint);
     }
 }
@@ -687,6 +835,7 @@ fn print_unlock_summary(
     content: &InstanceContent,
     response: &AttestedResponse,
     endpoint: &Url,
+    gpu: Option<&InstanceGpuInfo>,
     json: bool,
 ) {
     let rootfs_mib: u64 = content.rootfs.size_mib.into();
@@ -700,7 +849,7 @@ fn print_unlock_summary(
         );
     }
     if json {
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "injected": injected,
             "rootfs": {
                 "size_mib": rootfs_mib,
@@ -739,6 +888,9 @@ fn print_unlock_summary(
             },
             "endpoint": endpoint.as_str(),
         });
+        if let Some(gpu) = gpu {
+            out["gpu"] = gpu_summary_json(gpu);
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&out).expect("unlock summary always serializes")
@@ -772,6 +924,9 @@ fn print_unlock_summary(
             )
         );
         println!("platform: {}", platform_summary(&response.platform));
+        if let Some(gpu) = gpu {
+            println!("{}", gpu_summary_line(gpu));
+        }
         println!("endpoint: {}", endpoint);
     }
 }
@@ -780,10 +935,11 @@ fn print_unlock_summary(
 /// LUKS passphrase (plus any `--secret` extras) over the same attested
 /// RA-TLS channel, signed by the resolved account.
 ///
-/// No secret byte is read, let alone sent, until two independent checks
+/// No secret byte is read, let alone sent, until three independent checks
 /// pass: the attestation itself (measurement, policy, TCB floor, platform
-/// posture, all enforced inside `run_instance_attest`), then the owner
-/// check below. The injection request travels over a second, independently
+/// posture), then the NVIDIA driver floor for a confidential-GPU instance
+/// (both enforced inside `run_instance_attest`), then the owner check
+/// below. The injection request travels over a second, independently
 /// attested exchange (`post_secrets`), pinned to the same measurement and
 /// policy the first one verified, and its own verified measurement is
 /// re-checked before the response is trusted.
@@ -876,6 +1032,7 @@ pub(crate) async fn handle_instance_unlock(
         &outcome.content,
         &attested,
         &outcome.endpoint,
+        outcome.gpu.as_ref(),
         json,
     );
     Ok(())
@@ -884,6 +1041,20 @@ pub(crate) async fn handle_instance_unlock(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An aggregate carrying both instance-runtime defaults: the CPU-only
+    /// `snp-1.0` and the confidential-GPU `snp-gpu-1.0`.
+    fn vm_images_with_both_defaults() -> VmImagesData {
+        serde_json::from_str(&format!(
+            r#"{{"instance_runtimes": {{"snp-1.0": {{"hash": "{cpu}"}},
+                                        "snp-gpu-1.0": {{"hash": "{gpu}"}}}},
+                "defaults": {{"instance_runtime": "snp-1.0",
+                              "instance_gpu_runtime": "snp-gpu-1.0"}}}}"#,
+            cpu = "aa".repeat(32),
+            gpu = "cc".repeat(32),
+        ))
+        .unwrap()
+    }
 
     #[test]
     fn runtime_flag_beats_the_aggregate_default() {
@@ -896,20 +1067,67 @@ mod tests {
 
         let flag_hash: ItemHash = "bb".repeat(32).parse().unwrap();
         let got =
-            resolve_instance_runtime_ref(Some(ImageRef::Hash(flag_hash.clone())), &data).unwrap();
+            resolve_instance_runtime_ref(Some(ImageRef::Hash(flag_hash.clone())), &data, false)
+                .unwrap();
         assert_eq!(got, flag_hash);
     }
 
     #[test]
     fn missing_runtime_and_default_is_a_named_error() {
         let data: VmImagesData = serde_json::from_str("{}").unwrap();
-        let err = resolve_instance_runtime_ref(None, &data)
+        let err = resolve_instance_runtime_ref(None, &data, false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("--runtime"), "error must name the flag: {err}");
         assert!(
             err.contains("instance_runtime"),
             "error must name the aggregate default: {err}"
+        );
+    }
+
+    #[test]
+    fn a_confidential_gpu_picks_the_gpu_runtime_default() {
+        let data = vm_images_with_both_defaults();
+        let cpu: ItemHash = "aa".repeat(32).parse().unwrap();
+        let gpu: ItemHash = "cc".repeat(32).parse().unwrap();
+        assert_eq!(
+            resolve_instance_runtime_ref(None, &data, false).unwrap(),
+            cpu
+        );
+        assert_eq!(
+            resolve_instance_runtime_ref(None, &data, true).unwrap(),
+            gpu
+        );
+    }
+
+    #[test]
+    fn the_runtime_flag_still_wins_for_a_confidential_gpu() {
+        let data = vm_images_with_both_defaults();
+        let got = resolve_instance_runtime_ref(
+            Some(ImageRef::Preset("snp-1.0".to_string())),
+            &data,
+            true,
+        )
+        .unwrap();
+        assert_eq!(got, "aa".repeat(32).parse::<ItemHash>().unwrap());
+    }
+
+    #[test]
+    fn a_missing_gpu_runtime_default_is_a_named_error() {
+        // Only the CPU-only default is published: falling back to it would
+        // build a cmdline with no GPU slots, so the error asks for --runtime.
+        let data: VmImagesData = serde_json::from_str(&format!(
+            r#"{{"instance_runtimes": {{"snp-1.0": {{"hash": "{cpu}"}}}},
+                "defaults": {{"instance_runtime": "snp-1.0"}}}}"#,
+            cpu = "aa".repeat(32),
+        ))
+        .unwrap();
+        let err = resolve_instance_runtime_ref(None, &data, true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "no default confidential-GPU instance runtime is published; pass --runtime"
         );
     }
 
@@ -1058,11 +1276,89 @@ mod tests {
 
     #[test]
     fn tee_struct_shape() {
-        let tee = tee_from_measurements(&"ab".repeat(32).parse().unwrap(), 0x30000, vec![]);
+        let tee = tee_from_measurements(&"ab".repeat(32).parse().unwrap(), 0x30000, vec![], None);
         assert_eq!(tee.mode, Some(TeeMode::SevSnp));
         assert_eq!(tee.policy, 0x30000);
         assert!(tee.firmware.is_none());
         assert!(tee.attestation_port.is_none());
+        assert!(tee.gpu.is_none());
+    }
+
+    /// The requirement `--confidential-gpu hopper:2 --confidential-gpu-model
+    /// 10de:233b` builds, via the same validating deserialize path the CLI
+    /// helper uses.
+    fn hopper_requirement() -> ConfidentialGpuRequirement {
+        serde_json::from_value(serde_json::json!({
+            "vendor": "nvidia",
+            "arch": "hopper",
+            "count": 2,
+            "models": ["10de:233b"],
+            "mode": "cc",
+        }))
+        .expect("a valid confidential GPU requirement")
+    }
+
+    #[test]
+    fn tee_carries_the_confidential_gpu_requirement() {
+        let gpu = hopper_requirement();
+        let tee = tee_from_measurements(
+            &"ab".repeat(32).parse().unwrap(),
+            0x30000,
+            vec![],
+            Some(&gpu),
+        );
+        assert_eq!(tee.gpu.as_ref(), Some(&gpu));
+        // The field is what the CRN and the scheduler read, so it must
+        // survive serialization as the message's own `gpu` object.
+        let value = serde_json::to_value(&tee).unwrap();
+        assert_eq!(value["gpu"]["arch"], "hopper");
+        assert_eq!(value["gpu"]["count"], 2);
+        assert_eq!(value["gpu"]["models"], serde_json::json!(["10de:233b"]));
+    }
+
+    fn gpu_info() -> InstanceGpuInfo {
+        InstanceGpuInfo {
+            arch: "hopper".to_string(),
+            count: 2,
+            models: Some(vec!["10de:233b".to_string()]),
+            driver_version: "595.71.05".to_string(),
+            floor: "580.0.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn gpu_summary_line_names_the_enforcer_the_models_and_the_floor() {
+        assert_eq!(
+            gpu_summary_line(&gpu_info()),
+            "GPU requirement (enforced by the measured guest): hopper x2, models 10de:233b, \
+             driver 595.71.05 (floor 580.0.0)"
+        );
+    }
+
+    #[test]
+    fn gpu_summary_line_omits_the_models_clause_when_absent() {
+        let mut gpu = gpu_info();
+        gpu.models = None;
+        assert_eq!(
+            gpu_summary_line(&gpu),
+            "GPU requirement (enforced by the measured guest): hopper x2, driver 595.71.05 \
+             (floor 580.0.0)"
+        );
+    }
+
+    #[test]
+    fn gpu_summary_json_matches_the_call_output_shape() {
+        assert_eq!(
+            gpu_summary_json(&gpu_info()),
+            serde_json::json!({
+                "arch": "hopper",
+                "count": 2,
+                "models": ["10de:233b"],
+                "driver_version": "595.71.05",
+                "floor": "580.0.0",
+                "enforced_by": "measured_guest",
+            })
+        );
     }
 
     use aleph_types::message::execution::base::{ExecutableContent, Payment};
