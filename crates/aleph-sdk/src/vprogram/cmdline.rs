@@ -76,6 +76,61 @@ pub(crate) enum GpuOfferError {
     ModelNotOffered { arch: String, model: String },
 }
 
+/// Neutral outcome of `layout_gpu_tokens`; each cmdline flavor maps it into
+/// its own error type (a caller with no extra droppable slot of its own, like
+/// `instance_runtime::cmdline`, may map both variants onto the same error).
+#[derive(Debug)]
+pub(crate) enum GpuLayoutError {
+    /// A droppable token was dropped and took `required_slot` down with it.
+    RequiredSlotShared,
+    /// A droppable token was dropped and took a GPU slot (or the caller's
+    /// own extra droppable slot) down with it.
+    GpuSlotShared,
+}
+
+/// Lays out the space-delimited cmdline tokens shared by both cmdline
+/// flavors: drops the caller's own extra droppable token (`verified_volumes`
+/// for `instantiate_cmdline`, none for `instantiate_instance_cmdline`) and the
+/// `{gpu_models}` token when empty, then checks that neither drop pulled
+/// `required_slot` or a GPU slot out with it. Callers have already computed
+/// `models` and resolved the GPU requirement against the runtime; this only
+/// handles the token split and the shared-token guards.
+pub(crate) fn layout_gpu_tokens(
+    template: &str,
+    required_slot: &str,
+    extra_droppable_slot: Option<(&str, bool)>,
+    gpu_present: bool,
+    models_empty: bool,
+) -> Result<Vec<String>, GpuLayoutError> {
+    let tokens: Vec<String> = template
+        .split(' ')
+        .filter(|token| {
+            !extra_droppable_slot.is_some_and(|(slot, empty)| empty && token.contains(slot))
+        })
+        .filter(|token| !(models_empty && token.contains("{gpu_models}")))
+        .map(str::to_owned)
+        .collect();
+
+    if !tokens.iter().any(|t| t.contains(required_slot)) {
+        return Err(GpuLayoutError::RequiredSlotShared);
+    }
+    let kept = |slot: &str| tokens.iter().any(|t| t.contains(slot));
+    if gpu_present && !(kept("{gpu_arch}") && kept("{gpu_count}")) {
+        return Err(GpuLayoutError::GpuSlotShared);
+    }
+    if !models_empty && !kept("{gpu_models}") {
+        return Err(GpuLayoutError::GpuSlotShared);
+    }
+    if let Some((slot, empty)) = extra_droppable_slot
+        && !empty
+        && !kept(slot)
+    {
+        return Err(GpuLayoutError::GpuSlotShared);
+    }
+
+    Ok(tokens)
+}
+
 /// The requirement must be one the runtime can actually serve: an
 /// architecture it was measured for, and a known board for every narrowed model.
 pub(crate) fn check_gpu_is_offered(
@@ -167,29 +222,17 @@ pub fn instantiate_cmdline(
         }
     };
 
-    let tokens: Vec<String> = template
-        .split(' ')
-        .filter(|token| !(volume_roothashes.is_empty() && token.contains("{verified_volumes}")))
-        .filter(|token| !(models.is_empty() && token.contains("{gpu_models}")))
-        .map(str::to_owned)
-        .collect();
-    // Dropping the {verified_volumes} token must never take the workload
-    // roothash with it (the two slots sharing a space-delimited token).
-    if !tokens.iter().any(|t| t.contains("{workload_roothash}")) {
-        return Err(CmdlineError::SharedRoothashToken);
-    }
-    // Same rule between the two droppable slots and the GPU ones: a token
-    // that goes away must carry nothing else.
-    let kept = |slot: &str| tokens.iter().any(|t| t.contains(slot));
-    if gpu.is_some() && !(kept("{gpu_arch}") && kept("{gpu_count}")) {
-        return Err(CmdlineError::SharedGpuToken);
-    }
-    if !models.is_empty() && !kept("{gpu_models}") {
-        return Err(CmdlineError::SharedGpuToken);
-    }
-    if !volume_roothashes.is_empty() && !kept("{verified_volumes}") {
-        return Err(CmdlineError::SharedGpuToken);
-    }
+    let tokens = layout_gpu_tokens(
+        template,
+        "{workload_roothash}",
+        Some(("{verified_volumes}", volume_roothashes.is_empty())),
+        gpu.is_some(),
+        models.is_empty(),
+    )
+    .map_err(|e| match e {
+        GpuLayoutError::RequiredSlotShared => CmdlineError::SharedRoothashToken,
+        GpuLayoutError::GpuSlotShared => CmdlineError::SharedGpuToken,
+    })?;
 
     let mut out = tokens.join(" ");
     out = out.replace("{platform_roothash}", platform_roothash);

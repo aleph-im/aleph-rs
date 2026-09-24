@@ -3,7 +3,9 @@
 //! Replaces {owner} and, when set, the same gpu_arch/gpu_count/gpu_models
 //! slots `vprogram::cmdline` fills, sharing its offer check and canonicalization.
 
-use crate::vprogram::cmdline::{GpuOfferError, canonical_models, check_gpu_is_offered};
+use crate::vprogram::cmdline::{
+    GpuLayoutError, GpuOfferError, canonical_models, check_gpu_is_offered, layout_gpu_tokens,
+};
 use crate::vprogram::manifest::GpuArchSpec;
 use aleph_types::message::{ConfidentialGpuRequirement, MAX_CONFIDENTIAL_GPUS};
 use std::collections::BTreeMap;
@@ -119,22 +121,12 @@ pub fn instantiate_instance_cmdline(
         }
     };
 
-    let tokens: Vec<String> = template
-        .split(' ')
-        .filter(|token| !(models.is_empty() && token.contains("{gpu_models}")))
-        .map(str::to_owned)
-        .collect();
-    // Dropping the {gpu_models} token must never take {owner} with it.
-    if !tokens.iter().any(|t| t.contains("{owner}")) {
-        return Err(InstanceCmdlineError::SharedGpuToken);
-    }
-    let kept = |slot: &str| tokens.iter().any(|t| t.contains(slot));
-    if gpu.is_some() && !(kept("{gpu_arch}") && kept("{gpu_count}")) {
-        return Err(InstanceCmdlineError::SharedGpuToken);
-    }
-    if !models.is_empty() && !kept("{gpu_models}") {
-        return Err(InstanceCmdlineError::SharedGpuToken);
-    }
+    let tokens = layout_gpu_tokens(template, "{owner}", None, gpu.is_some(), models.is_empty())
+        .map_err(|e| match e {
+            GpuLayoutError::RequiredSlotShared | GpuLayoutError::GpuSlotShared => {
+                InstanceCmdlineError::SharedGpuToken
+            }
+        })?;
 
     let mut out = tokens.join(" ");
     out = out.replace("{owner}", &normalized_owner);
@@ -161,6 +153,7 @@ pub fn instantiate_instance_cmdline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vprogram::cmdline::{CmdlineError, instantiate_cmdline};
     use crate::vprogram::manifest::GpuRuntimeSpec;
     use crate::vprogram::manifest::test::VALID_GPU_BLOCK;
 
@@ -358,5 +351,90 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    /// Both cmdline flavors run the same GPU requirement and runtime archs
+    /// through `layout_gpu_tokens`: the `gpu_arch=… gpu_count=… gpu_models=…`
+    /// suffix they render must be byte-identical, whatever precedes it
+    /// ({workload_roothash}/{verified_volumes} for vprogram, {owner} here).
+    #[test]
+    fn gpu_token_suffix_is_byte_identical_to_vprogram() {
+        let runtime_spec: GpuRuntimeSpec =
+            serde_json::from_str(VALID_GPU_BLOCK).expect("the manifest fixture gpu block parses");
+        let gpu = gpu_req("hopper", 2, &["10de:2331", "10de:2335"]);
+
+        let vprogram_template = "workload_roothash={workload_roothash} gpu_arch={gpu_arch} gpu_count={gpu_count} gpu_models={gpu_models}";
+        let vprogram_out = instantiate_cmdline(
+            vprogram_template,
+            "aa",
+            "bb",
+            &[],
+            Some(&gpu),
+            Some(&runtime_spec),
+        )
+        .unwrap();
+        let vprogram_suffix = vprogram_out
+            .strip_prefix("workload_roothash=bb ")
+            .expect("the roothash prefix is present");
+
+        let instance_out =
+            instantiate_instance_cmdline(GT, OWNER, Some(&gpu), Some(&runtime_archs())).unwrap();
+        let instance_suffix = instance_out
+            .split_once(" gpu_arch=")
+            .map(|(_, rest)| format!("gpu_arch={rest}"))
+            .expect("the gpu_arch token is present");
+
+        assert_eq!(vprogram_suffix, instance_suffix);
+    }
+
+    #[test]
+    fn shared_owner_gpu_models_token_is_an_error() {
+        // {owner} glued into the token dropped for want of narrowed models.
+        let t = "x={owner}{gpu_models} gpu_arch={gpu_arch} gpu_count={gpu_count}";
+        let err = instantiate_instance_cmdline(
+            t,
+            OWNER,
+            Some(&gpu_req("hopper", 1, &[])),
+            Some(&runtime_archs()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, InstanceCmdlineError::SharedGpuToken), "{err}");
+    }
+
+    #[test]
+    fn shared_gpu_count_gpu_models_token_is_an_error() {
+        // {gpu_count} glued into the token dropped for want of narrowed models.
+        let t = "owner={owner} gpu_arch={gpu_arch} c={gpu_count}{gpu_models}";
+        let err = instantiate_instance_cmdline(
+            t,
+            OWNER,
+            Some(&gpu_req("hopper", 1, &[])),
+            Some(&runtime_archs()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, InstanceCmdlineError::SharedGpuToken), "{err}");
+    }
+
+    #[test]
+    fn shared_gpu_models_with_models_present_is_an_error() {
+        // Ported from vprogram::cmdline: only that flavor has a second
+        // droppable slot ({verified_volumes}), so this is the one of the
+        // three glue cases `layout_gpu_tokens` cannot reach through
+        // {owner}/{gpu_arch}/{gpu_count}/{gpu_models} alone. {gpu_models}
+        // glued into the token dropped for want of volumes, with the
+        // requirement narrowed to a specific model (models present).
+        let t = "workload_roothash={workload_roothash} gpu_arch={gpu_arch} gpu_count={gpu_count} v={verified_volumes}{gpu_models}";
+        let runtime_spec: GpuRuntimeSpec =
+            serde_json::from_str(VALID_GPU_BLOCK).expect("the manifest fixture gpu block parses");
+        let err = instantiate_cmdline(
+            t,
+            "aa",
+            "bb",
+            &[],
+            Some(&gpu_req("hopper", 1, &["10de:2331"])),
+            Some(&runtime_spec),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CmdlineError::SharedGpuToken), "{err}");
     }
 }
