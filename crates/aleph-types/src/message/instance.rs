@@ -10,6 +10,8 @@ pub enum InstanceContentError {
          payments are not supported"
     )]
     MeasuredCreditOnly(&'static str),
+    #[error("requirements.gpu and trusted_execution.gpu are mutually exclusive")]
+    GpuRequirementsConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,6 +49,24 @@ impl TryFrom<RawInstanceContent> for InstanceContent {
                 let mode = tee.mode.expect("measured implies an explicit mode");
                 return Err(InstanceContentError::MeasuredCreditOnly(mode.as_str()));
             }
+        }
+        // A confidential instance declares its cards in trusted_execution.gpu;
+        // the plain passthrough list and the confidential requirement cannot
+        // both be set. An empty list is as good as none, matching the
+        // V-PROGRAM precedent.
+        let plain_gpu = raw
+            .base
+            .requirements
+            .as_ref()
+            .and_then(|r| r.gpu.as_ref())
+            .is_some_and(|gpus| !gpus.is_empty());
+        let confidential_gpu = raw
+            .environment
+            .trusted_execution
+            .as_ref()
+            .is_some_and(|tee| tee.gpu.is_some());
+        if plain_gpu && confidential_gpu {
+            return Err(InstanceContentError::GpuRequirementsConflict);
         }
         Ok(Self {
             base: raw.base,
@@ -278,6 +298,99 @@ mod test {
                 "{payment} must be rejected for SNP instances"
             );
         }
+    }
+
+    #[test]
+    fn test_snp_instance_gpu_requirements_conflict() {
+        // trusted_execution.gpu (confidential) and requirements.gpu (plain
+        // passthrough) are mutually exclusive on the same instance.
+        let json = format!(
+            r#"{{
+                "address": "0x9319Ad3B7A8E0eE24f2E639c40D8eD124C5520Ba",
+                "time": 1719502000.0,
+                "allow_amend": false,
+                "payment": {{"type": "credit"}},
+                "environment": {{
+                    "internet": true,
+                    "aleph_api": false,
+                    "hypervisor": "qemu",
+                    "trusted_execution": {{
+                        "mode": "sev_snp",
+                        "policy": 196608,
+                        "runtime": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+                        "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}],
+                        "gpu": {{"vendor": "nvidia", "arch": "hopper", "count": 1, "mode": "cc"}}
+                    }}
+                }},
+                "resources": {{"vcpus": 2, "memory": 2048, "seconds": 30}},
+                "requirements": {{
+                    "gpu": [{{"vendor": "NVIDIA", "device_name": "H100", "device_class": "0300", "device_id": "10de:2331"}}]
+                }},
+                "rootfs": {{
+                    "parent": {{"ref": "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717", "use_latest": false}},
+                    "persistence": "host",
+                    "size_mib": 4096
+                }},
+                "volumes": []
+            }}"#
+        );
+        let err = serde_json::from_str::<InstanceContent>(&json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("requirements.gpu and trusted_execution.gpu are mutually exclusive"),
+            "{err}"
+        );
+
+        // an empty requirements.gpu list is as good as none, matching the
+        // V-PROGRAM precedent: no conflict
+        let json = json.replace(
+            r#""gpu": [{"vendor": "NVIDIA", "device_name": "H100", "device_class": "0300", "device_id": "10de:2331"}]"#,
+            r#""gpu": []"#,
+        );
+        assert!(serde_json::from_str::<InstanceContent>(&json).is_ok());
+    }
+
+    #[test]
+    fn test_snp_instance_confidential_gpu_alone_is_valid() {
+        // trusted_execution.gpu alone (no plain requirements.gpu) is fine and
+        // round-trips with no extra keys.
+        let json = format!(
+            r#"{{
+                "address": "0x9319Ad3B7A8E0eE24f2E639c40D8eD124C5520Ba",
+                "time": 1719502000.0,
+                "allow_amend": false,
+                "payment": {{"type": "credit"}},
+                "environment": {{
+                    "internet": true,
+                    "aleph_api": false,
+                    "hypervisor": "qemu",
+                    "trusted_execution": {{
+                        "mode": "sev_snp",
+                        "policy": 196608,
+                        "runtime": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+                        "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}],
+                        "gpu": {{"vendor": "nvidia", "arch": "hopper", "count": 1, "mode": "cc"}}
+                    }}
+                }},
+                "resources": {{"vcpus": 2, "memory": 2048, "seconds": 30}},
+                "rootfs": {{
+                    "parent": {{"ref": "b6ff5c3a8205d1ca4c7c3369300eeafff498b558f71b851aa2114afd0a532717", "use_latest": false}},
+                    "persistence": "host",
+                    "size_mib": 4096
+                }},
+                "volumes": []
+            }}"#
+        );
+        let content: InstanceContent = serde_json::from_str(&json).unwrap();
+        assert!(
+            content
+                .environment
+                .trusted_execution
+                .as_ref()
+                .unwrap()
+                .gpu
+                .is_some()
+        );
     }
 
     fn tdx_instance_json(payment: &str) -> String {

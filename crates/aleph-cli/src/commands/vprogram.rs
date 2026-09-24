@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::attest_common::{self, MeasurementExpectation};
+use super::attest_common::{self, GpuCallInfo, MeasurementExpectation};
 use super::instance::{InstanceRow, format_item_hash_short, format_node_short};
 use super::instance_target::{VmKind, pick_unique_match};
 use aleph_sdk::aggregate_models::vm_images::{
@@ -1875,14 +1875,7 @@ pub(crate) fn render_call_result(
             },
         });
         if let Some(gpu) = gpu {
-            out["gpu"] = serde_json::json!({
-                "arch": gpu.arch,
-                "count": gpu.count,
-                "models": gpu.models,
-                "driver_version": gpu.driver_version,
-                "floor": gpu.floor,
-                "enforced_by": "measured_guest",
-            });
+            out["gpu"] = attest_common::gpu_evidence_json(gpu);
         }
         (
             serde_json::to_string_pretty(&out).expect("call result always serializes"),
@@ -1896,12 +1889,11 @@ pub(crate) fn render_call_result(
         );
         if let Some(gpu) = gpu {
             meta.push_str(&format!(
-                "\nGPU requirement (enforced by the measured guest): {} x{}",
-                gpu.arch, gpu.count
+                "\nGPU requirement (enforced by the measured guest): {} x{}{}",
+                gpu.arch,
+                gpu.count,
+                crate::common::gpu_models_clause(gpu.models.as_deref())
             ));
-            if let Some(models) = &gpu.models {
-                meta.push_str(&format!(", models {}", models.join(", ")));
-            }
             meta.push_str(&format!(
                 "\nGPU driver: {} (floor {})",
                 gpu.driver_version, gpu.floor
@@ -1927,19 +1919,6 @@ pub(crate) fn render_call_result(
             Some(meta),
         )
     }
-}
-
-/// GPU info surfaced by `render_call_result` when the V-Program requires
-/// confidential GPUs: the message's requirement (enforced by the measured
-/// guest, not verified by this client), the runtime manifest's driver
-/// version, and the floor it was checked against.
-#[derive(Debug, Clone)]
-pub(crate) struct GpuCallInfo {
-    arch: String,
-    count: u8,
-    models: Option<Vec<String>>,
-    driver_version: String,
-    floor: String,
 }
 
 /// Pure: apply --min-gpu-driver / --accept-outdated-gpu-driver onto the
@@ -1980,7 +1959,7 @@ fn apply_gpu_driver_override(
 /// Resolve the network NVIDIA driver floor (builtin baseline raised by the
 /// settings aggregate, falling back to the baseline with a warning on fetch
 /// or parse error), then apply the CLI override.
-async fn resolve_gpu_floor(
+pub(crate) async fn resolve_gpu_floor(
     aleph_client: &AlephClient,
     min_gpu_driver: Option<&str>,
     accept_outdated: bool,
