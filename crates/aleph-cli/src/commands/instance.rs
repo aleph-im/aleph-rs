@@ -945,11 +945,11 @@ pub(crate) fn resolve_image_refs(
 pub(crate) const CONFIDENTIAL_GPU_MIN_MEMORY_MIB: u64 = 2048;
 
 /// Client-side rejections for the confidential SNP `instance create` path
-/// that need no network access: GPU+SNP exclusion, `--confidential-firmware`
-/// (SEV-only) exclusion, the confidential GPU memory floor, the signing
-/// account's EVM shape (the sender is the unlock authority the cmdline
-/// binds), the policy's schema validity (reserved bit 17, the same check the
-/// network applies), and the DEBUG-policy gate. Pure:
+/// that need no network access, in the order they fire: GPU+SNP exclusion,
+/// the confidential GPU memory floor, `--confidential-firmware` (SEV-only)
+/// exclusion, the signing account's EVM shape (the sender is the unlock
+/// authority the cmdline binds), the policy's schema validity (reserved bit
+/// 17, the same check the network applies), and the DEBUG-policy gate. Pure:
 /// does no network I/O, so it must run before any privileged operation (the
 /// LUKS encryption in the create handler) or paid operation (uploading the
 /// encrypted rootfs spends STORE credits). The sender check here is an

@@ -34,7 +34,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use url::Url;
 
 use crate::cli::{ImageRef, InstanceAttestArgs, InstanceUnlockArgs};
-use crate::commands::attest_common::{self, MeasurementExpectation};
+use crate::commands::attest_common::{self, GpuCallInfo, MeasurementExpectation};
 use crate::commands::instance_target::{self, VmKind};
 use crate::common::resolve_account;
 
@@ -326,20 +326,7 @@ pub(crate) struct AttestOutcome {
     /// The confidential GPU requirement and the driver floor it was checked
     /// against, for an instance that declares one. `None` for a CPU-only
     /// instance; a failed check never yields an outcome at all.
-    pub gpu: Option<InstanceGpuInfo>,
-}
-
-/// GPU evidence the `instance attest` and `instance unlock` summaries print:
-/// the message's requirement (enforced by the measured guest, not verified
-/// by this client), the pinned runtime manifest's driver version, and the
-/// floor that version was checked against.
-#[derive(Debug, Clone)]
-pub(crate) struct InstanceGpuInfo {
-    pub arch: String,
-    pub count: u8,
-    pub models: Option<Vec<String>>,
-    pub driver_version: String,
-    pub floor: String,
+    pub gpu: Option<GpuCallInfo>,
 }
 
 /// Check an instance's confidential GPU requirement against the NVIDIA
@@ -353,7 +340,7 @@ async fn resolve_instance_gpu_info(
     runtime_ref: &ItemHash,
     gpu: &ConfidentialGpuRequirement,
     args: &InstanceAttestArgs,
-) -> Result<InstanceGpuInfo> {
+) -> Result<GpuCallInfo> {
     let manifest_bytes = aleph_client
         .download_file_by_message_hash(runtime_ref)
         .await
@@ -377,7 +364,7 @@ async fn resolve_instance_gpu_info(
     )
     .await?;
     floor.check(&spec.driver_version, &gpu.arch)?;
-    Ok(InstanceGpuInfo {
+    Ok(GpuCallInfo {
         arch: gpu.arch.clone(),
         count: gpu.count,
         models: gpu.models.clone(),
@@ -616,28 +603,15 @@ fn platform_summary(p: &aleph_sdk::attest::PlatformPosture) -> String {
 /// floor it was checked against. Says who enforces what: the CRN attaches
 /// the cards, the measured guest refuses to boot without them, and this
 /// client only checked the runtime's pinned driver version. Pure: no I/O.
-fn gpu_summary_line(gpu: &InstanceGpuInfo) -> String {
-    let models = match &gpu.models {
-        Some(models) => format!(", models {}", models.join(", ")),
-        None => String::new(),
-    };
+fn gpu_summary_line(gpu: &GpuCallInfo) -> String {
     format!(
         "GPU requirement (enforced by the measured guest): {} x{}{}, driver {} (floor {})",
-        gpu.arch, gpu.count, models, gpu.driver_version, gpu.floor
+        gpu.arch,
+        gpu.count,
+        crate::common::gpu_models_clause(gpu.models.as_deref()),
+        gpu.driver_version,
+        gpu.floor
     )
-}
-
-/// The `gpu` object both summaries put in their JSON output, matching
-/// `vprogram call`'s shape. Pure: no I/O.
-fn gpu_summary_json(gpu: &InstanceGpuInfo) -> serde_json::Value {
-    serde_json::json!({
-        "arch": gpu.arch,
-        "count": gpu.count,
-        "models": gpu.models,
-        "driver_version": gpu.driver_version,
-        "floor": gpu.floor,
-        "enforced_by": "measured_guest",
-    })
 }
 
 /// Print the `instance attest` result: measurement, policy, launch/reported
@@ -689,7 +663,7 @@ fn print_attest_summary(outcome: &AttestOutcome, json: bool) {
             "endpoint": outcome.endpoint.as_str(),
         });
         if let Some(gpu) = &outcome.gpu {
-            out["gpu"] = gpu_summary_json(gpu);
+            out["gpu"] = attest_common::gpu_evidence_json(gpu);
         }
         println!(
             "{}",
@@ -835,7 +809,7 @@ fn print_unlock_summary(
     content: &InstanceContent,
     response: &AttestedResponse,
     endpoint: &Url,
-    gpu: Option<&InstanceGpuInfo>,
+    gpu: Option<&GpuCallInfo>,
     json: bool,
 ) {
     let rootfs_mib: u64 = content.rootfs.size_mib.into();
@@ -889,7 +863,7 @@ fn print_unlock_summary(
             "endpoint": endpoint.as_str(),
         });
         if let Some(gpu) = gpu {
-            out["gpu"] = gpu_summary_json(gpu);
+            out["gpu"] = attest_common::gpu_evidence_json(gpu);
         }
         println!(
             "{}",
@@ -1316,8 +1290,8 @@ mod tests {
         assert_eq!(value["gpu"]["models"], serde_json::json!(["10de:233b"]));
     }
 
-    fn gpu_info() -> InstanceGpuInfo {
-        InstanceGpuInfo {
+    fn gpu_info() -> GpuCallInfo {
+        GpuCallInfo {
             arch: "hopper".to_string(),
             count: 2,
             models: Some(vec!["10de:233b".to_string()]),
@@ -1343,21 +1317,6 @@ mod tests {
             gpu_summary_line(&gpu),
             "GPU requirement (enforced by the measured guest): hopper x2, driver 595.71.05 \
              (floor 580.0.0)"
-        );
-    }
-
-    #[test]
-    fn gpu_summary_json_matches_the_call_output_shape() {
-        assert_eq!(
-            gpu_summary_json(&gpu_info()),
-            serde_json::json!({
-                "arch": "hopper",
-                "count": 2,
-                "models": ["10de:233b"],
-                "driver_version": "595.71.05",
-                "floor": "580.0.0",
-                "enforced_by": "measured_guest",
-            })
         );
     }
 

@@ -3590,10 +3590,12 @@ fn parse_gpu_spec(s: &str) -> Result<(GpuArch, u8), String> {
 }
 
 #[cfg(feature = "vprogram")]
-/// Build the confidential GPU requirement `--gpu`/`--gpu-model` describe, if
-/// any. Always goes through `ConfidentialGpuRequirement`'s validating
-/// deserialize path, so model format and uniqueness are enforced once, in
-/// aleph-types, rather than reimplemented here.
+/// Build the confidential GPU requirement a pair of flags describes, if any:
+/// `vprogram create --gpu`/`--gpu-model` and `instance create
+/// --confidential-gpu`/`--confidential-gpu-model`. Always goes through
+/// `ConfidentialGpuRequirement`'s validating deserialize path, so model
+/// format and uniqueness are enforced once, in aleph-types, rather than
+/// reimplemented here or twice over.
 pub(crate) fn gpu_requirement(
     gpu: Option<(GpuArch, u8)>,
     models: &[String],

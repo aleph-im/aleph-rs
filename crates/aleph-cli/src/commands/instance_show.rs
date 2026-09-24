@@ -576,13 +576,13 @@ fn format_tee(tee: Option<&TrustedExecutionSummary>) -> String {
 /// The confidential GPU requirement the measured guest enforces, as its own
 /// line under RESOURCES.
 fn format_confidential_gpu(gpu: &ConfidentialGpuRequirement) -> String {
-    let models = match &gpu.models {
-        Some(models) => format!(", models {}", models.join(", ")),
-        None => String::new(),
-    };
     format!(
         "{} {} x{}{} (mode {})",
-        gpu.vendor, gpu.arch, gpu.count, models, gpu.mode
+        gpu.vendor,
+        gpu.arch,
+        gpu.count,
+        crate::common::gpu_models_clause(gpu.models.as_deref()),
+        gpu.mode
     )
 }
 
