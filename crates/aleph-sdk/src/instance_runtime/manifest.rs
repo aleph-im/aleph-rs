@@ -7,9 +7,11 @@
 //! `ManifestError` rather than redefining them.
 
 use crate::vprogram::manifest::{
-    AttestationDescriptor, MAX_BUNDLE_SIZE, ManifestError, SourceInfo,
+    AttestationDescriptor, GpuArchSpec, MAX_BUNDLE_SIZE, ManifestError, SourceInfo,
+    validate_driver_version, validate_gpu_archs, validate_gpu_vendor,
 };
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 pub const INSTANCE_MANIFEST_FORMAT: &str = "aleph-instance-runtime";
 pub const INSTANCE_MANIFEST_FORMAT_VERSION: u32 = 1;
@@ -28,6 +30,21 @@ pub struct InstanceRuntimeManifest {
     /// Provenance of the bundle, as recorded by the publisher (not verified
     /// by anything: the bundle's own sha256 is what pins the runtime).
     pub source: SourceInfo,
+    /// Confidential GPU requirements, absent on CPU-only runtimes.
+    #[serde(default)]
+    pub gpu: Option<InstanceGpuRuntimeSpec>,
+}
+
+/// Confidential GPU spec pinned by the instance runtime manifest: which
+/// driver and hardware models the guest was built and measured against.
+/// Structural twin of `vprogram::manifest::GpuRuntimeSpec` minus
+/// `library_path`, which only the V-Program guest's driver loader needs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceGpuRuntimeSpec {
+    pub vendor: String,
+    pub driver_version: String,
+    pub archs: BTreeMap<String, GpuArchSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,8 +97,11 @@ fn check_member_path(role: &'static str, value: &str) -> Result<(), ManifestErro
 }
 
 /// Validates a boot cmdline template: it must carry an `{owner}` slot, and
-/// every brace-delimited placeholder in it must be exactly `{owner}` (v1's
-/// closed placeholder set).
+/// every brace-delimited placeholder in it must be one of v1's closed
+/// placeholder set: `owner`, and the GPU slots `gpu_arch`, `gpu_count`,
+/// `gpu_models` (legal in the template whether or not the manifest carries
+/// a `gpu` block; `instantiate_instance_cmdline` is what ties their
+/// presence to the message's GPU requirement).
 fn check_cmdline_template(template: &str) -> Result<(), ManifestError> {
     if !template.contains("{owner}") {
         return Err(ManifestError::MissingOwnerSlot);
@@ -93,11 +113,18 @@ fn check_cmdline_template(template: &str) -> Result<(), ManifestError> {
             return Err(ManifestError::UnknownPlaceholder(after.to_string()));
         };
         let name = &after[..relative_end];
-        if name != "owner" {
+        if !matches!(name, "owner" | "gpu_arch" | "gpu_count" | "gpu_models") {
             return Err(ManifestError::UnknownPlaceholder(name.to_string()));
         }
         rest = &after[relative_end + 1..];
     }
+    Ok(())
+}
+
+fn validate_instance_gpu(gpu: &InstanceGpuRuntimeSpec) -> Result<(), ManifestError> {
+    validate_gpu_vendor(&gpu.vendor)?;
+    validate_gpu_archs(&gpu.archs)?;
+    validate_driver_version(&gpu.driver_version)?;
     Ok(())
 }
 
@@ -139,6 +166,9 @@ impl InstanceRuntimeManifest {
         check_member_path("kernel", &manifest.bundle.members.kernel)?;
         check_member_path("initrd", &manifest.bundle.members.initrd)?;
         check_cmdline_template(&manifest.boot.cmdline_template)?;
+        if let Some(gpu) = &manifest.gpu {
+            validate_instance_gpu(gpu)?;
+        }
         Ok(manifest)
     }
 }
@@ -231,5 +261,69 @@ mod tests {
         let json =
             manifest_json("console=ttyS0 luks=1 owner={owner}").replace(r#""sev_snp""#, r#""tdx""#);
         assert!(InstanceRuntimeManifest::parse(json.as_bytes()).is_err());
+    }
+
+    /// A cmdline template that carries the GPU slots alongside `{owner}`.
+    const GPU_CMDLINE: &str = "console=ttyS0 luks=1 swiotlb=262144 owner={owner} gpu_arch={gpu_arch} gpu_count={gpu_count} gpu_models={gpu_models}";
+
+    fn manifest_with_gpu(cmdline: &str, gpu: serde_json::Value) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_str(&manifest_json(cmdline)).unwrap();
+        json["gpu"] = gpu;
+        json.to_string().into_bytes()
+    }
+
+    #[test]
+    fn gpu_block_is_absent_by_default() {
+        let m = InstanceRuntimeManifest::parse(
+            manifest_json("console=ttyS0 luks=1 owner={owner}").as_bytes(),
+        )
+        .unwrap();
+        assert!(m.gpu.is_none());
+    }
+
+    #[test]
+    fn cmdline_template_with_gpu_slots_is_valid() {
+        assert!(check_cmdline_template(GPU_CMDLINE).is_ok());
+    }
+
+    #[test]
+    fn gpu_block_parses() {
+        let gpu = serde_json::json!({
+            "vendor": "nvidia",
+            "driver_version": "595.71.05",
+            "archs": {
+                "hopper": {"accepted_models": ["GH100 A01 GSP BROM"]},
+            }
+        });
+        let m = InstanceRuntimeManifest::parse(&manifest_with_gpu(GPU_CMDLINE, gpu)).unwrap();
+        let gpu = m.gpu.expect("gpu block was set");
+        assert_eq!(gpu.vendor, "nvidia");
+        assert_eq!(gpu.driver_version, "595.71.05");
+        assert_eq!(
+            gpu.archs["hopper"].accepted_models,
+            vec!["GH100 A01 GSP BROM"]
+        );
+    }
+
+    #[test]
+    fn gpu_block_rejects_invariant_violations() {
+        for (gpu, needle) in [
+            (
+                serde_json::json!({"vendor": "amd", "driver_version": "595.71.05", "archs": {"hopper": {"accepted_models": ["GH100"]}}}),
+                "vendor",
+            ),
+            (
+                serde_json::json!({"vendor": "nvidia", "driver_version": "595.71.05", "archs": {}}),
+                "archs must not be empty",
+            ),
+            (
+                serde_json::json!({"vendor": "nvidia", "driver_version": "not.a.version", "archs": {"hopper": {"accepted_models": ["GH100"]}}}),
+                "driver_version",
+            ),
+        ] {
+            let err =
+                InstanceRuntimeManifest::parse(&manifest_with_gpu(GPU_CMDLINE, gpu)).unwrap_err();
+            assert!(err.to_string().contains(needle), "got {err}");
+        }
     }
 }

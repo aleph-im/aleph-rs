@@ -13,8 +13,9 @@
 //! ids are host controlled). `instantiate_cmdline` refuses any request the
 //! runtime cannot serve before the cmdline is measured.
 
-use crate::vprogram::manifest::GpuRuntimeSpec;
+use crate::vprogram::manifest::{GpuArchSpec, GpuRuntimeSpec};
 use aleph_types::message::{ConfidentialGpuRequirement, MAX_CONFIDENTIAL_GPUS};
+use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CmdlineError {
@@ -60,38 +61,48 @@ pub enum CmdlineError {
 
 /// Canonical form of the message's model narrowing: sorted, de-duplicated,
 /// as rendered into the measured `gpu_models=` token.
-fn canonical_models(gpu: &ConfidentialGpuRequirement) -> Vec<String> {
+///
+/// Shared with `instance_runtime::cmdline`, which renders the same token
+/// against the same message field.
+pub(crate) fn canonical_models(gpu: &ConfidentialGpuRequirement) -> Vec<String> {
     let mut models = gpu.models.clone().unwrap_or_default();
     models.sort();
     models.dedup();
     models
 }
 
+/// Neutral outcome of the runtime-offer check, independent of either
+/// cmdline flavor's own error type: `instantiate_cmdline` and
+/// `instantiate_instance_cmdline` each map it into their own error.
+#[derive(Debug)]
+pub(crate) enum GpuOfferError {
+    ArchNotOffered { arch: String, offered: String },
+    ModelNotOffered { arch: String, model: String },
+}
+
 /// The requirement must be one the runtime can actually serve: an
 /// architecture it was measured for, and a known board for every narrowed
 /// model. Fails closed when the runtime declares no GPUs at all.
-fn check_gpu_is_offered(
+///
+/// Shared with `instance_runtime::cmdline`: both flavors' runtime manifests
+/// carry the same `archs: BTreeMap<String, GpuArchSpec>` shape.
+pub(crate) fn check_gpu_is_offered(
     gpu: &ConfidentialGpuRequirement,
     models: &[String],
-    runtime_gpu: Option<&GpuRuntimeSpec>,
-) -> Result<(), CmdlineError> {
-    let arch = runtime_gpu
-        .and_then(|runtime| runtime.archs.get(&gpu.arch))
-        .ok_or_else(|| CmdlineError::GpuArchNotOffered {
+    runtime_archs: Option<&BTreeMap<String, GpuArchSpec>>,
+) -> Result<(), GpuOfferError> {
+    let arch = runtime_archs
+        .and_then(|archs| archs.get(&gpu.arch))
+        .ok_or_else(|| GpuOfferError::ArchNotOffered {
             arch: gpu.arch.clone(),
-            offered: match runtime_gpu {
+            offered: match runtime_archs {
                 None => "none, the runtime manifest has no gpu block".to_string(),
-                Some(runtime) => runtime
-                    .archs
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<String>>()
-                    .join(", "),
+                Some(archs) => archs.keys().cloned().collect::<Vec<String>>().join(", "),
             },
         })?;
     for model in models {
         if !arch.boards.contains_key(model) {
-            return Err(CmdlineError::GpuModelNotOffered {
+            return Err(GpuOfferError::ModelNotOffered {
                 arch: gpu.arch.clone(),
                 model: model.clone(),
             });
@@ -138,7 +149,16 @@ pub fn instantiate_cmdline(
                 return Err(CmdlineError::NoGpuSlot);
             }
             let models = canonical_models(gpu);
-            check_gpu_is_offered(gpu, &models, runtime_gpu)?;
+            check_gpu_is_offered(gpu, &models, runtime_gpu.map(|runtime| &runtime.archs)).map_err(
+                |e| match e {
+                    GpuOfferError::ArchNotOffered { arch, offered } => {
+                        CmdlineError::GpuArchNotOffered { arch, offered }
+                    }
+                    GpuOfferError::ModelNotOffered { arch, model } => {
+                        CmdlineError::GpuModelNotOffered { arch, model }
+                    }
+                },
+            )?;
             if !models.is_empty() && !template.contains("{gpu_models}") {
                 return Err(CmdlineError::NoGpuModelsSlot);
             }
