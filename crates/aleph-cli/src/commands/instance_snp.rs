@@ -238,9 +238,7 @@ pub(crate) async fn build_snp_trusted_execution(
         .await
         .context("failed to fetch instance runtime bundle")?;
 
-    // GPU requirement and runtime archs are not wired through this create
-    // path yet; a later change threads the message's `gpu` and the parsed
-    // manifest's `gpu.archs` here.
+    // GPU requirement and runtime archs are not wired through create yet.
     let cmdline = instantiate_instance_cmdline(&manifest.boot.cmdline_template, owner, None, None)
         .context("failed to instantiate the instance runtime boot cmdline")?;
 

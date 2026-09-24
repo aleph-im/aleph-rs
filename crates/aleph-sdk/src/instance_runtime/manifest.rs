@@ -35,10 +35,8 @@ pub struct InstanceRuntimeManifest {
     pub gpu: Option<InstanceGpuRuntimeSpec>,
 }
 
-/// Confidential GPU spec pinned by the instance runtime manifest: which
-/// driver and hardware models the guest was built and measured against.
-/// Structural twin of `vprogram::manifest::GpuRuntimeSpec` minus
-/// `library_path`, which only the V-Program guest's driver loader needs.
+/// Confidential GPU spec pinned by the instance runtime manifest.
+/// Structural twin of `vprogram::manifest::GpuRuntimeSpec` minus `library_path`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceGpuRuntimeSpec {
@@ -97,11 +95,7 @@ fn check_member_path(role: &'static str, value: &str) -> Result<(), ManifestErro
 }
 
 /// Validates a boot cmdline template: it must carry an `{owner}` slot, and
-/// every brace-delimited placeholder in it must be one of v1's closed
-/// placeholder set: `owner`, and the GPU slots `gpu_arch`, `gpu_count`,
-/// `gpu_models` (legal in the template whether or not the manifest carries
-/// a `gpu` block; `instantiate_instance_cmdline` is what ties their
-/// presence to the message's GPU requirement).
+/// every placeholder must be one of `owner`, `gpu_arch`, `gpu_count`, `gpu_models`.
 fn check_cmdline_template(template: &str) -> Result<(), ManifestError> {
     if !template.contains("{owner}") {
         return Err(ManifestError::MissingOwnerSlot);

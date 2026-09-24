@@ -60,10 +60,7 @@ pub enum CmdlineError {
 }
 
 /// Canonical form of the message's model narrowing: sorted, de-duplicated,
-/// as rendered into the measured `gpu_models=` token.
-///
-/// Shared with `instance_runtime::cmdline`, which renders the same token
-/// against the same message field.
+/// as rendered into the measured `gpu_models=` token. Shared with `instance_runtime::cmdline`.
 pub(crate) fn canonical_models(gpu: &ConfidentialGpuRequirement) -> Vec<String> {
     let mut models = gpu.models.clone().unwrap_or_default();
     models.sort();
@@ -71,9 +68,8 @@ pub(crate) fn canonical_models(gpu: &ConfidentialGpuRequirement) -> Vec<String> 
     models
 }
 
-/// Neutral outcome of the runtime-offer check, independent of either
-/// cmdline flavor's own error type: `instantiate_cmdline` and
-/// `instantiate_instance_cmdline` each map it into their own error.
+/// Neutral runtime-offer-check outcome; each cmdline flavor maps it into
+/// its own error type.
 #[derive(Debug)]
 pub(crate) enum GpuOfferError {
     ArchNotOffered { arch: String, offered: String },
@@ -81,11 +77,7 @@ pub(crate) enum GpuOfferError {
 }
 
 /// The requirement must be one the runtime can actually serve: an
-/// architecture it was measured for, and a known board for every narrowed
-/// model. Fails closed when the runtime declares no GPUs at all.
-///
-/// Shared with `instance_runtime::cmdline`: both flavors' runtime manifests
-/// carry the same `archs: BTreeMap<String, GpuArchSpec>` shape.
+/// architecture it was measured for, and a known board for every narrowed model.
 pub(crate) fn check_gpu_is_offered(
     gpu: &ConfidentialGpuRequirement,
     models: &[String],

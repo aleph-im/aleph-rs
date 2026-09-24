@@ -1,12 +1,7 @@
 //! SNP instance runtime cmdline template instantiation.
 //!
-//! Produces LUKS boot cmdlines from templates by replacing the {owner}
-//! placeholder, plus the same measured GPU slots `vprogram::cmdline` fills:
-//! `gpu_arch=<hopper|blackwell>`, `gpu_count=<1..=8>` and, only when the
-//! message narrows to specific models, `gpu_models=<vvvv:dddd,...>` (sorted,
-//! deduplicated, whole token dropped otherwise). The arch/model offer check
-//! and model canonicalization are shared with `vprogram::cmdline` so the two
-//! runtime flavors render identical bytes for identical inputs.
+//! Replaces {owner} and, when set, the same gpu_arch/gpu_count/gpu_models
+//! slots `vprogram::cmdline` fills, sharing its offer check and canonicalization.
 
 use crate::vprogram::cmdline::{GpuOfferError, canonical_models, check_gpu_is_offered};
 use crate::vprogram::manifest::GpuArchSpec;
@@ -72,14 +67,8 @@ pub fn normalize_evm_owner(owner: &str) -> Result<String, InstanceCmdlineError> 
 
 /// Instantiate a SNP instance runtime cmdline template.
 ///
-/// Replaces the {owner} placeholder with the normalized owner address, and,
-/// when `gpu` is set, the GPU slots as `vprogram::cmdline::instantiate_cmdline`
-/// does: `gpu` must be one `runtime_archs` (the manifest's `gpu.archs`) can
-/// actually serve, an architecture it lists and, for every narrowed model, a
-/// known board; the whole `{gpu_models}` token is dropped when the message
-/// names no model. `gpu` and the template's GPU slots must agree: neither
-/// may be present without the other. Rejects any other unresolved
-/// placeholder.
+/// Replaces {owner}, plus gpu_arch/gpu_count/gpu_models when `gpu` is set,
+/// using the same rules as `vprogram::cmdline::instantiate_cmdline`.
 pub fn instantiate_instance_cmdline(
     template: &str,
     owner: &str,
@@ -259,17 +248,21 @@ mod tests {
 
     #[test]
     fn fills_the_gpu_tokens_with_sorted_deduplicated_models() {
-        let out = instantiate_instance_cmdline(
-            GT,
-            OWNER,
-            Some(&gpu_req(
-                "hopper",
-                1,
-                &["10de:233b", "10de:2331", "10de:233b"],
-            )),
-            Some(&runtime_archs()),
-        )
-        .unwrap();
+        // Built directly: the message type's own deserialize path rejects a
+        // duplicate model id, so serde_json can't reach the cmdline's dedup.
+        let gpu = ConfidentialGpuRequirement {
+            vendor: "nvidia".into(),
+            arch: "hopper".into(),
+            count: 1,
+            models: Some(vec![
+                "10de:233b".into(),
+                "10de:2331".into(),
+                "10de:233b".into(),
+            ]),
+            mode: "cc".into(),
+        };
+        let out =
+            instantiate_instance_cmdline(GT, OWNER, Some(&gpu), Some(&runtime_archs())).unwrap();
         assert_eq!(
             out,
             "console=ttyS0 luks=1 swiotlb=262144 owner=0x9319ad3b7a8e0ee24f2e639c40d8ed124c5520ba gpu_arch=hopper gpu_count=1 gpu_models=10de:2331,10de:233b"
