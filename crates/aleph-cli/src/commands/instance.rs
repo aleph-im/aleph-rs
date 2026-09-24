@@ -1388,6 +1388,7 @@ async fn handle_instance_create(
                     runtime: None,
                     measurements: None,
                     attestation_port: None,
+                    gpu: None,
                 });
             }
             #[cfg(feature = "vprogram")]

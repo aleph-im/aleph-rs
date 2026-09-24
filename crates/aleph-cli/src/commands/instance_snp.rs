@@ -205,6 +205,7 @@ pub(crate) fn tee_from_measurements(
         runtime: Some(runtime_ref.clone()),
         measurements: Some(measurements),
         attestation_port: None,
+        gpu: None,
     }
 }
 
@@ -1134,6 +1135,7 @@ mod tests {
             runtime: None,
             measurements: None,
             attestation_port: None,
+            gpu: None,
         };
         let content = minimal_instance_content(Some(tee));
         let err = check_snp_instance(&content).unwrap_err().to_string();
@@ -1152,6 +1154,7 @@ mod tests {
             runtime: Some("cc".repeat(32).parse().unwrap()),
             measurements: Some(vec![]),
             attestation_port: None,
+            gpu: None,
         };
         assert_eq!(instance_attest_port(&tee), INSTANCE_ATTEST_PORT);
         tee.attestation_port = Some(std::num::NonZeroU16::new(9443).unwrap());
@@ -1167,6 +1170,7 @@ mod tests {
             runtime: Some("cc".repeat(32).parse().unwrap()),
             measurements: Some(vec![]),
             attestation_port: None,
+            gpu: None,
         };
         let content = minimal_instance_content(Some(tee));
         let got = check_snp_instance(&content).unwrap();
