@@ -67,7 +67,8 @@ pub(crate) fn resolve_instance_runtime_ref(
         None if confidential_gpu => {
             let entry = data.instance_gpu_runtime_default().map_err(|e| match e {
                 VmImagesError::NoDefault { .. } => anyhow!(
-                    "no default confidential-GPU instance runtime is published; pass --runtime"
+                    "no confidential-GPU instance runtime given: pass --runtime, or configure \
+                     defaults.instance_gpu_runtime in the vm-images aggregate"
                 ),
                 other => anyhow!(other),
             })?;
@@ -1101,7 +1102,8 @@ mod tests {
             .to_string();
         assert_eq!(
             err,
-            "no default confidential-GPU instance runtime is published; pass --runtime"
+            "no confidential-GPU instance runtime given: pass --runtime, or configure \
+             defaults.instance_gpu_runtime in the vm-images aggregate"
         );
     }
 
