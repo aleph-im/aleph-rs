@@ -1713,50 +1713,6 @@ fn tcb_floor_json(floor: &aleph_sdk::attest::TcbFloor) -> serde_json::Value {
     )
 }
 
-/// Whether this call's attestation evidence includes a verified
-/// fresh-nonce liveness challenge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Freshness {
-    Verified,
-    Skipped,
-}
-
-/// Transfer the liveness proof from the challenge exchange to the workload
-/// exchange: both must have been answered by the same TLS identity
-/// presenting the same measured stack. Guards against a load balancer (or
-/// an attacker) splitting the two requests across different guests.
-///
-/// Both reports are pinned independently (`Exact`/`OneOf`); in the `OneOf`
-/// case this also rules out the two exchanges presenting different members
-/// of the pinned set.
-fn check_fresh_consistency(
-    fresh: &aleph_sdk::attest::FreshAttestation,
-    response: &aleph_sdk::attest::AttestedResponse,
-) -> Result<()> {
-    if fresh.served_public_key != response.served_public_key {
-        bail!(
-            "the fresh attestation challenge was answered by a different TLS identity \
-             than the one that served the response; refusing to transfer liveness"
-        );
-    }
-    if fresh.registers != response.registers {
-        bail!(
-            "fresh report launch measurement {} does not match the response's verified \
-             launch measurement {}",
-            fresh.registers.launch,
-            response.registers.launch
-        );
-    }
-    if fresh.policy != response.policy {
-        bail!(
-            "fresh report policy {:#x} does not match the response's verified policy {:#x}",
-            fresh.policy,
-            response.policy
-        );
-    }
-    Ok(())
-}
-
 /// Render a [`PlatformPosture`] as the one-line text form used in the meta
 /// block, e.g. `SMT=on TSME=off ECC=off RAPL=on ciphertext-hiding=off
 /// alias-check=no (0x1)`. RAPL renders enablement (`on` = telemetry active),
@@ -1781,15 +1737,10 @@ fn platform_posture_line(p: &PlatformPosture) -> String {
 /// enforced fail-closed upstream (`attested_request` plus the CLI re-checks
 /// in `handle_call`), so the line only ever describes a verified response:
 /// the point is to tell the reader WHAT "verified" covers, not whether.
-fn attestation_verdict_line(freshness: Freshness) -> String {
-    let checks = "AMD SEV-SNP; certificate chain and report signature, TLS key binding, \
-                  launch measurement pinned, guest policy pinned, TCB floor";
-    match freshness {
-        Freshness::Verified => format!("verified ({checks}, fresh nonce)"),
-        Freshness::Skipped => {
-            format!("verified ({checks}; fresh nonce SKIPPED by --allow-stale-attestation)")
-        }
-    }
+fn attestation_verdict_line() -> String {
+    "verified (AMD SEV-SNP; certificate chain and report signature, TLS key binding, \
+     launch measurement pinned, guest policy pinned, TCB floor, fresh nonce)"
+        .to_string()
 }
 
 /// `component=value` rendering of a TCB for the verbose text meta.
@@ -1819,7 +1770,6 @@ fn tcb_line(fmc: Option<u8>, bootloader: u8, tee: u8, snp: u8, microcode: u8) ->
 pub(crate) fn render_call_result(
     response: &aleph_sdk::attest::AttestedResponse,
     min_tcb: &aleph_sdk::attest::TcbFloorPolicy,
-    freshness: Freshness,
     gpu: Option<&GpuCallInfo>,
     json: bool,
     verbose: bool,
@@ -1864,10 +1814,7 @@ pub(crate) fn render_call_result(
             },
             "status": response.status,
             "body": body,
-            "freshness": match freshness {
-                Freshness::Verified => "verified",
-                Freshness::Skipped => "skipped",
-            },
+            "freshness": "verified",
         });
         if let Some(gpu) = gpu {
             out["gpu"] = attest_common::gpu_evidence_json(gpu);
@@ -1879,7 +1826,7 @@ pub(crate) fn render_call_result(
     } else {
         let mut meta = format!(
             "Attestation: {}\nHTTP {}",
-            attestation_verdict_line(freshness),
+            attestation_verdict_line(),
             response.status
         );
         if let Some(gpu) = gpu {
@@ -2088,27 +2035,6 @@ async fn handle_call(
         None => None,
     };
 
-    // Fresh-nonce liveness challenge (G4a): runs first and fails closed. No
-    // response is trusted or surfaced unless this challenge and the served-key
-    // consistency check both pass. A live-key-copy MITM can still receive the
-    // request body; only the response is gated (a stated limit in the design doc).
-    let fresh = if args.allow_stale_attestation {
-        None
-    } else {
-        Some(
-            aleph_sdk::attest::fresh_attestation(
-                &base_url,
-                handshake_pin,
-                policy_pin,
-                args.amd_product,
-                &min_tcb,
-                &platform_policy,
-            )
-            .await
-            .map_err(|e| anyhow!("fresh attestation challenge failed: {e}"))?,
-        )
-    };
-
     let response = attested_request(
         &base_url,
         args.method.clone(),
@@ -2196,25 +2122,10 @@ async fn handle_call(
         bail!("guest launch TCB is below the required floor: {defs:?}");
     }
 
-    let freshness = match &fresh {
-        Some(fresh) => {
-            check_fresh_consistency(fresh, &response)?;
-            Freshness::Verified
-        }
-        None => Freshness::Skipped,
-    };
-
     // Posture is what --require-platform gates on, so it is worth showing
     // whenever the user asked for a requirement, verbose or not.
     let verbose = args.verbose || !args.require_platform.is_empty();
-    let (out, meta) = render_call_result(
-        &response,
-        &min_tcb,
-        freshness,
-        gpu_info.as_ref(),
-        json,
-        verbose,
-    );
+    let (out, meta) = render_call_result(&response, &min_tcb, gpu_info.as_ref(), json, verbose);
     if let Some(meta) = meta {
         eprintln!("{meta}");
     }
@@ -2634,7 +2545,7 @@ mod show_tests {
 #[cfg(test)]
 mod call_tests {
     use super::*;
-    use aleph_sdk::attest::{AttestedResponse, FreshAttestation, TcbFloor, TcbFloorPolicy};
+    use aleph_sdk::attest::{AttestedResponse, TcbFloor, TcbFloorPolicy};
 
     #[test]
     fn parse_header_splits_on_colon_and_trims() {
@@ -2712,7 +2623,6 @@ mod call_tests {
         let (out, _) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             None,
             true,
             false,
@@ -2736,7 +2646,6 @@ mod call_tests {
         let (_, meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             None,
             false,
             true,
@@ -2767,7 +2676,6 @@ mod call_tests {
         let (out, meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             None,
             true,
             false,
@@ -2812,7 +2720,6 @@ mod call_tests {
         let (out, _meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             None,
             true,
             false,
@@ -2829,7 +2736,6 @@ mod call_tests {
         let (out, meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             None,
             false,
             false,
@@ -2854,7 +2760,6 @@ mod call_tests {
         let (_, meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             None,
             false,
             true,
@@ -2913,99 +2818,13 @@ mod call_tests {
         response.cpuid_model = Some(0xA1);
         response.cpuid_stepping = Some(2);
 
-        let (out, _meta) =
-            render_call_result(&response, &net(), Freshness::Verified, None, true, false);
+        let (out, _meta) = render_call_result(&response, &net(), None, true, false);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
         assert_eq!(v["effective_tcb_floor"]["microcode"], serde_json::json!(28));
         assert_eq!(v["cpuid"]["family"], serde_json::json!(0x19));
         assert_eq!(v["cpuid"]["model"], serde_json::json!(0xA1));
         assert_eq!(v["cpuid"]["stepping"], serde_json::json!(2));
-    }
-
-    #[test]
-    fn render_call_result_reports_freshness_in_json() {
-        let response = dummy_response(&"ab".repeat(48), br#"{"fib":55}"#);
-        let (out, _) = render_call_result(
-            &response,
-            &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
-            None,
-            true,
-            false,
-        );
-        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
-        assert_eq!(v["freshness"], serde_json::json!("verified"));
-
-        let (out, _) = render_call_result(
-            &response,
-            &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Skipped,
-            None,
-            true,
-            false,
-        );
-        let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
-        assert_eq!(v["freshness"], serde_json::json!("skipped"));
-    }
-
-    #[test]
-    fn render_call_result_reports_freshness_in_text_meta() {
-        let response = dummy_response(&"ab".repeat(48), b"55");
-        let (_, meta) = render_call_result(
-            &response,
-            &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
-            None,
-            false,
-            false,
-        );
-        let meta = meta.unwrap();
-        assert!(meta.contains("fresh nonce)"), "{meta}");
-        assert!(!meta.contains("SKIPPED"), "{meta}");
-        let (_, meta) = render_call_result(
-            &response,
-            &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Skipped,
-            None,
-            false,
-            false,
-        );
-        let meta = meta.unwrap();
-        assert!(meta.starts_with("Attestation: verified ("), "{meta}");
-        assert!(
-            meta.contains("fresh nonce SKIPPED by --allow-stale-attestation"),
-            "{meta}"
-        );
-    }
-
-    #[test]
-    fn fresh_consistency_rejects_key_measurement_and_policy_drift() {
-        let response = dummy_response(&"ab".repeat(48), b"ok");
-        let fresh = FreshAttestation {
-            registers: response.registers.clone(),
-            policy: response.policy,
-            launch_tcb: response.launch_tcb,
-            reported_tcb: response.reported_tcb,
-            cpuid_family: None,
-            cpuid_model: None,
-            cpuid_stepping: None,
-            platform: response.platform,
-            served_public_key: response.served_public_key.clone(),
-        };
-        check_fresh_consistency(&fresh, &response).expect("matching evidence must pass");
-
-        let mut wrong_key = fresh.clone();
-        wrong_key.served_public_key = b"someone else".to_vec();
-        assert!(check_fresh_consistency(&wrong_key, &response).is_err());
-
-        let mut wrong_measurement = fresh.clone();
-        wrong_measurement.registers.launch = "cd".repeat(48);
-        assert!(check_fresh_consistency(&wrong_measurement, &response).is_err());
-
-        let mut wrong_policy = fresh;
-        wrong_policy.policy ^= 1;
-        assert!(check_fresh_consistency(&wrong_policy, &response).is_err());
     }
 
     fn gpu_call_info() -> GpuCallInfo {
@@ -3024,7 +2843,6 @@ mod call_tests {
         let (out, _) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             Some(&gpu_call_info()),
             true,
             false,
@@ -3049,7 +2867,6 @@ mod call_tests {
         let (out, _) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             None,
             true,
             false,
@@ -3064,7 +2881,6 @@ mod call_tests {
         let (_, meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             Some(&gpu_call_info()),
             false,
             false,
@@ -3088,7 +2904,6 @@ mod call_tests {
         let (_, meta) = render_call_result(
             &response,
             &TcbFloorPolicy::uniform(dummy_floor()),
-            Freshness::Verified,
             None,
             false,
             false,

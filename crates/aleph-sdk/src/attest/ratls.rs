@@ -2,9 +2,9 @@
 //!
 //! Ties together the cert-extension extraction (`x509`) and SEV-SNP
 //! verification (`verify`) modules into a single [`attested_request`]: an
-//! HTTP call made over a TLS channel whose server certificate is checked,
-//! *during the handshake*, to carry a SEV-SNP attestation report that is
-//! cryptographically bound to that exact TLS connection.
+//! HTTP call to a server that first proves, via [`fresh_attestation`], that
+//! its TLS key belongs to a verified SEV-SNP guest, then receives the request
+//! over a TLS channel pinned to that key.
 //!
 //! Ported from aleph-cvm `crates/aleph-attest-cli/src/verify.rs` and
 //! `client.rs`, adapted to this crate's [`AttestError`] and to return
@@ -34,13 +34,15 @@
 //! fields were unsigned JSON a malicious node could lie in (the C1 finding),
 //! and the wire schema has since dropped them on both sides.
 //!
-//! [`attested_request`] rejects the whole call (`Err`) if, after a
-//! successful handshake, no report was stashed (should be unreachable, but
-//! checked anyway), or if the post-handshake AMD certificate-chain check
-//! ([`verify_sev_snp_report`]) fails. An `Ok(AttestedResponse)` therefore
-//! always means the attestation verified: a bad attestation is an `Err`,
-//! never a successful response.
+//! The AMD certificate-chain check ([`verify_sev_snp_report`]) runs after
+//! that handshake, so only a random nonce is ever sent over a channel gated
+//! by `SnpCertVerifier` alone. [`attested_request`] sends its request only
+//! once [`fresh_attestation`] has fully verified, and only to a server that
+//! proves possession of the key that attestation verified. An
+//! `Ok(AttestedResponse)` therefore always means the attestation verified: a
+//! bad attestation is an `Err`, never a successful response.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -234,14 +236,14 @@ pub struct FreshAttestation {
 /// Full AMD certificate-chain verification ([`verify_sev_snp_report`]) is
 /// deliberately *not* done here: `ServerCertVerifier::verify_server_cert` is
 /// a synchronous callback, while the chain check needs an async VCEK fetch.
-/// It is done by the caller ([`attested_request`]) after the handshake
+/// It is done by the caller (`cert_attested_get`) after the handshake
 /// completes, using the report this verifier stashes.
 #[derive(Debug)]
 struct SnpCertVerifier {
     extracted_report: Mutex<Option<AttestationReport>>,
     /// Why this verifier last rejected a handshake, if it did. reqwest
     /// surfaces a mid-handshake rejection only as an opaque "error sending
-    /// request", so `attested_request` reads this back to name the actual
+    /// request", so `cert_attested_get` reads this back to name the actual
     /// attestation failure (a measurement mismatch looks identical to a
     /// connection refusal otherwise).
     last_rejection: Mutex<Option<String>>,
@@ -463,7 +465,9 @@ impl ServerCertVerifier for SnpCertVerifier {
 /// default provider via `CryptoProvider::get_default_or_install_from_crate_features()`,
 /// which panics when that's ambiguous. Selecting the provider explicitly
 /// here sidesteps that global, order-dependent state entirely.
-fn build_attested_client(verifier: Arc<SnpCertVerifier>) -> Result<reqwest::Client, AttestError> {
+fn build_attested_client(
+    verifier: Arc<dyn ServerCertVerifier>,
+) -> Result<reqwest::Client, AttestError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let tls_config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -472,32 +476,25 @@ fn build_attested_client(verifier: Arc<SnpCertVerifier>) -> Result<reqwest::Clie
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
 
+    // A redirect would leave the attested origin.
     reqwest::Client::builder()
         .use_preconfigured_tls(tls_config)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(AttestError::Http)
 }
 
-/// Make an HTTP request over a TLS channel whose server certificate is
-/// verified, during the handshake, to carry a SEV-SNP attestation report
-/// bound to that certificate's key and gated on the `measurement` and
-/// `policy` pins. After the handshake, the report is further checked
-/// against AMD's certificate chain via [`verify_sev_snp_report`].
+/// GET `path` over a TLS channel whose server certificate is verified,
+/// during the handshake, to carry a SEV-SNP attestation report bound to that
+/// certificate's key and gated on the `measurement` and `policy` pins. After
+/// the handshake, the report is further checked against AMD's certificate
+/// chain via [`verify_sev_snp_report`], before the body is read.
 ///
-/// The URL requested is `base_url` joined with `path` (so `path` may be
-/// absolute, e.g. `"/status"`, replacing `base_url`'s path component per
-/// `Url::join`'s usual rules).
-///
-/// Fails closed: if the handshake never stashes a report, or if
-/// `verify_sev_snp_report` errors, this returns `Err`; an `Ok` response
-/// always carries a fully verified attestation.
-#[allow(clippy::too_many_arguments)]
-pub async fn attested_request(
+/// The request is sent before that chain check: it must carry nothing but
+/// what may reach an unverified server.
+async fn cert_attested_get(
     base_url: &url::Url,
-    method: reqwest::Method,
     path: &str,
-    headers: &[(String, String)],
-    body: Option<bytes::Bytes>,
     measurement: MeasurementPin<'_>,
     policy: PolicyPin,
     product: AmdProduct,
@@ -511,14 +508,7 @@ pub async fn attested_request(
         policy.as_option(),
     );
     let client = build_attested_client(verifier.clone())?;
-
-    let mut request = client.request(method, url);
-    for (name, value) in headers {
-        request = request.header(name.as_str(), value.as_str());
-    }
-    if let Some(body) = body {
-        request = request.body(body);
-    }
+    let request = client.get(url);
 
     // A request that died mid-handshake because OUR verifier rejected the
     // peer's attestation surfaces from reqwest as an opaque "error sending
@@ -576,6 +566,165 @@ pub async fn attested_request(
         headers: response_headers,
         body,
     })
+}
+
+/// Make an HTTP request to a SEV-SNP guest whose attestation fully verifies
+/// before any request byte is sent.
+///
+/// First runs [`fresh_attestation`] with the same pins, floor and platform
+/// policy (sending only a random nonce), then sends the request over a new
+/// TLS connection that accepts only a server proving possession of the TLS
+/// key that attestation verified. Costs one extra round trip per call.
+///
+/// The URL requested is `base_url` joined with `path` (so `path` may be
+/// absolute, e.g. `"/status"`, replacing `base_url`'s path component per
+/// `Url::join`'s usual rules). Redirects are not followed.
+#[allow(clippy::too_many_arguments)]
+pub async fn attested_request(
+    base_url: &url::Url,
+    method: reqwest::Method,
+    path: &str,
+    headers: &[(String, String)],
+    body: Option<bytes::Bytes>,
+    measurement: MeasurementPin<'_>,
+    policy: PolicyPin,
+    product: AmdProduct,
+    min_tcb: &TcbFloorPolicy,
+    platform: &PlatformPolicy,
+) -> Result<AttestedResponse, AttestError> {
+    let url = base_url.join(path)?;
+    let fresh =
+        fresh_attestation(base_url, measurement, policy, product, min_tcb, platform).await?;
+    let response = pinned_request(&fresh.served_public_key, method, url, headers, body).await?;
+
+    let status = response.status().as_u16();
+    let response_headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.to_string(),
+                value.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let body = response.bytes().await.map_err(AttestError::Http)?;
+
+    Ok(AttestedResponse {
+        registers: fresh.registers,
+        policy: fresh.policy,
+        launch_tcb: fresh.launch_tcb,
+        reported_tcb: fresh.reported_tcb,
+        cpuid_family: fresh.cpuid_family,
+        cpuid_model: fresh.cpuid_model,
+        cpuid_stepping: fresh.cpuid_stepping,
+        platform: fresh.platform,
+        served_public_key: fresh.served_public_key,
+        status,
+        headers: response_headers,
+        body,
+    })
+}
+
+/// Send a request over TLS to a server whose leaf certificate carries
+/// `public_key` (raw subjectPublicKey bytes).
+async fn pinned_request(
+    public_key: &[u8],
+    method: reqwest::Method,
+    url: url::Url,
+    headers: &[(String, String)],
+    body: Option<bytes::Bytes>,
+) -> Result<reqwest::Response, AttestError> {
+    let verifier = Arc::new(PinnedKeyVerifier {
+        public_key: public_key.to_vec(),
+        rejected: AtomicBool::new(false),
+        provider: Arc::new(rustls::crypto::ring::default_provider()),
+    });
+    let client = build_attested_client(verifier.clone())?;
+    let mut request = client.request(method, url);
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+    request.send().await.map_err(|error| {
+        if verifier.rejected.load(Ordering::Relaxed) {
+            AttestError::HandshakeRejected(
+                "server certificate key differs from the attested key".to_string(),
+            )
+        } else {
+            AttestError::Http(error)
+        }
+    })
+}
+
+/// A `rustls` [`ServerCertVerifier`] accepting only a leaf certificate whose
+/// subjectPublicKey equals `public_key`. The handshake signature checks are
+/// what make the server prove it holds the matching private key.
+#[derive(Debug)]
+struct PinnedKeyVerifier {
+    public_key: Vec<u8>,
+    rejected: AtomicBool,
+    provider: Arc<CryptoProvider>,
+}
+
+impl ServerCertVerifier for PinnedKeyVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        let matches =
+            x509_parser::parse_x509_certificate(end_entity.as_ref()).is_ok_and(|(_, cert)| {
+                let served = &cert.tbs_certificate.subject_pki.subject_public_key.data;
+                bool::from(served.as_ref().ct_eq(&self.public_key))
+            });
+        if !matches {
+            self.rejected.store(true, Ordering::Relaxed);
+            return Err(RustlsError::General(
+                "server certificate key differs from the attested key".to_string(),
+            ));
+        }
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 /// The pinned launch digest as bytes, for the handshake's constant-time
@@ -678,12 +827,9 @@ async fn fresh_attestation_with_nonce(
     // The challenge request itself runs over an attested channel, with the
     // same pins enforced on the CERT report during its handshake.
     let path = format!("/.well-known/attestation?nonce={}", hex::encode(nonce));
-    let response = attested_request(
+    let response = cert_attested_get(
         base_url,
-        reqwest::Method::GET,
         &path,
-        &[],
-        None,
         measurement,
         policy,
         product,
@@ -1362,5 +1508,77 @@ mod tests {
         let v = dummy_verification(&"ab".repeat(48), 0x30000);
         let err = check_fresh_pins(&v, None, Some(0xa0000)).unwrap_err();
         assert!(matches!(err, AttestError::FreshPolicyMismatch { .. }));
+    }
+
+    /// A one-connection TLS server presenting `key_pair`'s certificate.
+    /// Answers `200 ok` once it reads a full request head; returns every
+    /// application byte it received.
+    fn serve_once(key_pair: &rcgen::KeyPair) -> (url::Url, std::thread::JoinHandle<Vec<u8>>) {
+        use std::io::{Read, Write};
+        let cert = CertificateDer::from(self_signed_der(key_pair, None));
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der());
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key.into())
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}/", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut conn = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
+            let mut received = Vec::new();
+            let mut buf = [0u8; 1024];
+            while let Ok(n @ 1..) = tls.read(&mut buf) {
+                received.extend_from_slice(&buf[..n]);
+                if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let _ = tls.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    );
+                    break;
+                }
+            }
+            received
+        });
+        (url.parse().unwrap(), handle)
+    }
+
+    #[tokio::test]
+    async fn pinned_request_reaches_the_server_holding_the_attested_key() {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let (url, server) = serve_once(&key_pair);
+        let response = pinned_request(
+            key_pair.public_key_raw(),
+            reqwest::Method::GET,
+            url,
+            &[],
+            None,
+        )
+        .await
+        .expect("the attested key must be accepted");
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().await.unwrap(), "ok");
+        assert!(server.join().unwrap().starts_with(b"GET / "));
+    }
+
+    #[tokio::test]
+    async fn a_server_presenting_another_key_receives_no_request_bytes() {
+        let attested = rcgen::KeyPair::generate().unwrap();
+        let (url, server) = serve_once(&rcgen::KeyPair::generate().unwrap());
+        let err = pinned_request(
+            attested.public_key_raw(),
+            reqwest::Method::POST,
+            url,
+            &[],
+            Some(bytes::Bytes::from_static(b"secret")),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AttestError::HandshakeRejected(_)), "{err}");
+        assert!(server.join().unwrap().is_empty());
     }
 }
