@@ -938,27 +938,58 @@ pub(crate) fn resolve_image_refs(
     })
 }
 
+/// Smallest guest memory a confidential GPU instance may ask for: the
+/// resident GPU verifier in the measured initrd plus the driver's own
+/// allocations do not fit in less.
+#[cfg(feature = "vprogram")]
+pub(crate) const CONFIDENTIAL_GPU_MIN_MEMORY_MIB: u64 = 2048;
+
+/// The client-side checks `snp_create_guards` runs before any privileged or
+/// paid step of the confidential SNP `instance create` path. Named fields so
+/// call sites (and their tests) read as what they mean, not four adjacent
+/// bools.
+#[cfg(feature = "vprogram")]
+pub(crate) struct SnpCreateRequest<'a> {
+    pub gpu_requested: bool,
+    pub confidential_gpu: bool,
+    pub confidential_firmware_set: bool,
+    pub owner_address: &'a str,
+    pub policy: u64,
+    pub allow_debug: bool,
+    pub memory_mib: u64,
+}
+
 /// Client-side rejections for the confidential SNP `instance create` path
-/// that need no network access: GPU+SNP exclusion, `--confidential-firmware`
-/// (SEV-only) exclusion, the signing account's EVM shape (the sender is the
-/// unlock authority the cmdline binds), the policy's schema validity
-/// (reserved bit 17, the same check the network applies), and the
-/// DEBUG-policy gate. Pure:
+/// that need no network access, in the order they fire: GPU+SNP exclusion,
+/// the confidential GPU memory floor, `--confidential-firmware` (SEV-only)
+/// exclusion, the signing account's EVM shape (the sender is the unlock
+/// authority the cmdline binds), the policy's schema validity (reserved bit
+/// 17, the same check the network applies), and the DEBUG-policy gate. Pure:
 /// does no network I/O, so it must run before any privileged operation (the
 /// LUKS encryption in the create handler) or paid operation (uploading the
 /// encrypted rootfs spends STORE credits). The sender check here is an
 /// eager, redundant gate: `instantiate_instance_cmdline` still re-validates
 /// the unlock authority later in the normal flow.
 #[cfg(feature = "vprogram")]
-pub(crate) fn snp_create_guards(
-    gpu_requested: bool,
-    confidential_firmware_set: bool,
-    owner_address: &str,
-    policy: u64,
-    allow_debug: bool,
-) -> anyhow::Result<()> {
+pub(crate) fn snp_create_guards(request: SnpCreateRequest<'_>) -> anyhow::Result<()> {
+    let SnpCreateRequest {
+        gpu_requested,
+        confidential_gpu,
+        confidential_firmware_set,
+        owner_address,
+        policy,
+        allow_debug,
+        memory_mib,
+    } = request;
+
     if gpu_requested {
         bail!("confidential SNP and GPU pricing tiers cannot be combined");
+    }
+    if confidential_gpu && memory_mib < CONFIDENTIAL_GPU_MIN_MEMORY_MIB {
+        bail!(
+            "a confidential GPU needs at least {CONFIDENTIAL_GPU_MIN_MEMORY_MIB} MiB of guest \
+             memory, got {memory_mib} MiB: raise --memory or pick a larger --size"
+        );
     }
     if confidential_firmware_set {
         bail!(
@@ -1185,6 +1216,19 @@ async fn handle_instance_create(
     let snp_confidential = args.confidential && args.tee == TeeFlavor::SevSnp;
     let legacy_sev_confidential = args.confidential && args.tee == TeeFlavor::Sev;
 
+    // Built here (not in the SNP branch below) so an invalid model list is
+    // rejected before any prompt, privileged step or upload.
+    #[cfg(feature = "vprogram")]
+    let confidential_gpu =
+        crate::cli::gpu_requirement(args.confidential_gpu, &args.confidential_gpu_models)
+            .context("invalid --confidential-gpu")?;
+    #[cfg(feature = "vprogram")]
+    if confidential_gpu.is_some() && !snp_confidential {
+        // Clap already required --confidential, so this is the legacy flavor:
+        // it has no measured cmdline to carry the requirement.
+        bail!("confidential GPUs need --tee sev-snp");
+    }
+
     // Client-side SNP rejections that need no network access run here, ahead
     // of the image_ref/encrypt match and the vm-images aggregate fetch below,
     // so they fire before any privileged operation (the LUKS encryption
@@ -1197,13 +1241,15 @@ async fn handle_instance_create(
         let policy = args
             .policy
             .unwrap_or(super::instance_snp::SNP_DEFAULT_POLICY);
-        snp_create_guards(
+        snp_create_guards(SnpCreateRequest {
             gpu_requested,
-            args.confidential_firmware.is_some(),
-            &account.address().to_string(),
+            confidential_gpu: confidential_gpu.is_some(),
+            confidential_firmware_set: args.confidential_firmware.is_some(),
+            owner_address: &account.address().to_string(),
             policy,
-            args.allow_debug,
-        )?;
+            allow_debug: args.allow_debug,
+            memory_mib,
+        })?;
     }
 
     // The vm-images aggregate resolves an image preset, legacy SEV firmware
@@ -1240,8 +1286,11 @@ async fn handle_instance_create(
         // GPU+SNP, --confidential-firmware+SNP, the sender shape and the
         // policy are already rejected above.
         let owner = super::instance_snp::snp_unlock_authority(account.address());
-        let runtime_ref =
-            super::instance_snp::resolve_instance_runtime_ref(args.runtime.clone(), &vm_images)?;
+        let runtime_ref = super::instance_snp::resolve_instance_runtime_ref(
+            args.runtime.clone(),
+            &vm_images,
+            confidential_gpu.is_some(),
+        )?;
         let policy = args
             .policy
             .unwrap_or(super::instance_snp::SNP_DEFAULT_POLICY);
@@ -1253,6 +1302,7 @@ async fn handle_instance_create(
             vcpus,
             policy,
             &cache_dir,
+            confidential_gpu.as_ref(),
         )
         .await?;
         Some(tee)
@@ -1388,6 +1438,7 @@ async fn handle_instance_create(
                     runtime: None,
                     measurements: None,
                     attestation_port: None,
+                    gpu: None,
                 });
             }
             #[cfg(feature = "vprogram")]
@@ -2054,16 +2105,35 @@ mod tests {
     #[cfg(feature = "vprogram")]
     const VALID_EVM_OWNER: &str = "0x1111111111111111111111111111111111111111";
 
+    /// `SnpCreateRequest` defaults matching `snp_create_guards_accepts_a_clean_request`;
+    /// individual tests override only the field(s) under test.
+    #[cfg(feature = "vprogram")]
+    fn clean_snp_create_request() -> SnpCreateRequest<'static> {
+        SnpCreateRequest {
+            gpu_requested: false,
+            confidential_gpu: false,
+            confidential_firmware_set: false,
+            owner_address: VALID_EVM_OWNER,
+            policy: 0x30000,
+            allow_debug: false,
+            memory_mib: 2048,
+        }
+    }
+
     #[cfg(feature = "vprogram")]
     #[test]
     fn snp_create_guards_accepts_a_clean_request() {
-        assert!(snp_create_guards(false, false, VALID_EVM_OWNER, 0x30000, false).is_ok());
+        assert!(snp_create_guards(clean_snp_create_request()).is_ok());
     }
 
     #[cfg(feature = "vprogram")]
     #[test]
     fn snp_create_guards_rejects_gpu_plus_snp() {
-        let err = snp_create_guards(true, false, VALID_EVM_OWNER, 0x30000, false).unwrap_err();
+        let err = snp_create_guards(SnpCreateRequest {
+            gpu_requested: true,
+            ..clean_snp_create_request()
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("GPU"),
             "expected a GPU+SNP rejection, got: {err}"
@@ -2073,7 +2143,11 @@ mod tests {
     #[cfg(feature = "vprogram")]
     #[test]
     fn snp_create_guards_rejects_confidential_firmware() {
-        let err = snp_create_guards(false, true, VALID_EVM_OWNER, 0x30000, false).unwrap_err();
+        let err = snp_create_guards(SnpCreateRequest {
+            confidential_firmware_set: true,
+            ..clean_snp_create_request()
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("--confidential-firmware"),
             "expected a --confidential-firmware rejection, got: {err}"
@@ -2083,7 +2157,11 @@ mod tests {
     #[cfg(feature = "vprogram")]
     #[test]
     fn snp_create_guards_rejects_a_non_evm_owner() {
-        let err = snp_create_guards(false, false, "not-an-address", 0x30000, false).unwrap_err();
+        let err = snp_create_guards(SnpCreateRequest {
+            owner_address: "not-an-address",
+            ..clean_snp_create_request()
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("EVM owner"),
             "expected a non-EVM-owner rejection, got: {err}"
@@ -2094,8 +2172,11 @@ mod tests {
     #[test]
     fn snp_create_guards_rejects_debug_policy_without_allow_debug() {
         // 0x30000 | DEBUG bit (19).
-        let err = snp_create_guards(false, false, VALID_EVM_OWNER, 0x30000 | (1 << 19), false)
-            .unwrap_err();
+        let err = snp_create_guards(SnpCreateRequest {
+            policy: 0x30000 | (1 << 19),
+            ..clean_snp_create_request()
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("--allow-debug"),
             "expected a DEBUG-policy rejection, got: {err}"
@@ -2108,7 +2189,11 @@ mod tests {
         // 0x1 lacks reserved bit 17: the network schema rejects it, but only
         // at message build time, after --encrypt-rootfs has already paid for
         // the upload. The guard must catch it first.
-        let err = snp_create_guards(false, false, VALID_EVM_OWNER, 0x1, false).unwrap_err();
+        let err = snp_create_guards(SnpCreateRequest {
+            policy: 0x1,
+            ..clean_snp_create_request()
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("bit 17"),
             "expected a reserved-bit policy rejection, got: {err}"
@@ -2119,7 +2204,12 @@ mod tests {
     #[test]
     fn snp_create_guards_accepts_debug_policy_with_allow_debug() {
         assert!(
-            snp_create_guards(false, false, VALID_EVM_OWNER, 0x30000 | (1 << 19), true).is_ok()
+            snp_create_guards(SnpCreateRequest {
+                policy: 0x30000 | (1 << 19),
+                allow_debug: true,
+                ..clean_snp_create_request()
+            })
+            .is_ok()
         );
     }
 
@@ -2128,10 +2218,58 @@ mod tests {
     fn snp_create_guards_checks_gpu_before_firmware_and_owner() {
         // All three would fail; the GPU rejection must be the one that fires,
         // matching the create handler's declared check order.
-        let err = snp_create_guards(true, true, "not-an-address", 0x30000, false).unwrap_err();
+        let err = snp_create_guards(SnpCreateRequest {
+            gpu_requested: true,
+            confidential_firmware_set: true,
+            owner_address: "not-an-address",
+            ..clean_snp_create_request()
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("GPU"),
             "expected the GPU+SNP rejection to fire first, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_rejects_a_confidential_gpu_below_the_memory_floor() {
+        let err = snp_create_guards(SnpCreateRequest {
+            confidential_gpu: true,
+            memory_mib: CONFIDENTIAL_GPU_MIN_MEMORY_MIB - 1,
+            ..clean_snp_create_request()
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("--memory"),
+            "expected a memory-floor rejection naming the flag, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_accepts_a_confidential_gpu_at_the_memory_floor() {
+        assert!(
+            snp_create_guards(SnpCreateRequest {
+                confidential_gpu: true,
+                memory_mib: CONFIDENTIAL_GPU_MIN_MEMORY_MIB,
+                ..clean_snp_create_request()
+            })
+            .is_ok()
+        );
+    }
+
+    #[cfg(feature = "vprogram")]
+    #[test]
+    fn snp_create_guards_ignores_the_memory_floor_without_a_confidential_gpu() {
+        // The floor is the GPU verifier's requirement, not the instance's:
+        // a CPU-only confidential instance may still be tiny.
+        assert!(
+            snp_create_guards(SnpCreateRequest {
+                memory_mib: 512,
+                ..clean_snp_create_request()
+            })
+            .is_ok()
         );
     }
 

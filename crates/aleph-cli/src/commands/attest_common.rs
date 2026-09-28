@@ -192,6 +192,33 @@ pub(crate) fn platform_policy_from(requirements: &[PlatformRequirement]) -> Plat
     policy
 }
 
+/// The confidential GPU evidence `vprogram call`, `instance attest` and
+/// `instance unlock` report: the message's requirement (enforced by the
+/// measured guest, never verified by this client), the runtime manifest's
+/// pinned driver version, and the floor that version was checked against.
+#[derive(Debug, Clone)]
+pub(crate) struct GpuCallInfo {
+    pub arch: String,
+    pub count: u8,
+    pub models: Option<Vec<String>>,
+    pub driver_version: String,
+    pub floor: String,
+}
+
+/// The `gpu` object every GPU-aware attestation output carries, so the three
+/// verbs cannot drift in key names or in who is credited with enforcement.
+/// Pure: no I/O.
+pub(crate) fn gpu_evidence_json(gpu: &GpuCallInfo) -> serde_json::Value {
+    serde_json::json!({
+        "arch": gpu.arch,
+        "count": gpu.count,
+        "models": gpu.models,
+        "driver_version": gpu.driver_version,
+        "floor": gpu.floor,
+        "enforced_by": "measured_guest",
+    })
+}
+
 /// True if `policy` has the SEV-SNP DEBUG bit (19) set: the host may then
 /// decrypt guest memory via the firmware debug API, so the deployment is
 /// not confidential in any meaningful sense.
@@ -325,6 +352,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gpu_info() -> GpuCallInfo {
+        GpuCallInfo {
+            arch: "hopper".to_string(),
+            count: 2,
+            models: Some(vec!["10de:233b".to_string()]),
+            driver_version: "595.71.05".to_string(),
+            floor: "580.0.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn gpu_evidence_json_matches_the_call_output_shape() {
+        assert_eq!(
+            gpu_evidence_json(&gpu_info()),
+            serde_json::json!({
+                "arch": "hopper",
+                "count": 2,
+                "models": ["10de:233b"],
+                "driver_version": "595.71.05",
+                "floor": "580.0.0",
+                "enforced_by": "measured_guest",
+            })
+        );
+    }
+
+    #[test]
+    fn gpu_evidence_json_carries_a_null_models_when_the_requirement_names_none() {
+        let mut gpu = gpu_info();
+        gpu.models = None;
+        assert!(gpu_evidence_json(&gpu)["models"].is_null());
+    }
 
     #[test]
     fn policy_debug_allowed_detects_the_snp_debug_bit() {

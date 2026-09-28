@@ -35,6 +35,18 @@ pub fn format_epoch_for_tty(secs: f64) -> String {
         .unwrap_or_else(|| secs.to_string())
 }
 
+/// The `, models 10de:233b, 10de:2331` clause every text rendering of a
+/// confidential GPU requirement appends, empty when the requirement names no
+/// specific cards. Lives here rather than next to the attestation helpers
+/// because `instance show` renders the requirement without the `vprogram`
+/// feature. Pure: no I/O.
+pub fn gpu_models_clause(models: Option<&[String]>) -> String {
+    match models {
+        Some(models) => format!(", models {}", models.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// Render one upload-progress tick to stderr, overwriting the current line.
 ///
 /// Used as the `on_tick` callback for [`aleph_sdk::progress::report_upload_progress`]
@@ -768,6 +780,19 @@ mod tests {
     use super::*;
     use crate::config::store::ConfigStore;
     use tempfile::TempDir;
+
+    #[test]
+    fn gpu_models_clause_joins_and_is_empty_without_models() {
+        assert_eq!(gpu_models_clause(None), "");
+        assert_eq!(
+            gpu_models_clause(Some(&["10de:233b".to_string()])),
+            ", models 10de:233b"
+        );
+        assert_eq!(
+            gpu_models_clause(Some(&["10de:233b".to_string(), "10de:2331".to_string()])),
+            ", models 10de:233b, 10de:2331"
+        );
+    }
 
     #[test]
     fn confirm_action_short_circuits_when_assume_yes() {

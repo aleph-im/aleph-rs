@@ -220,7 +220,7 @@ fn is_board_field(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
-fn validate_boards(arch: &str, spec: &GpuArchSpec) -> Result<(), ManifestError> {
+pub(crate) fn validate_boards(arch: &str, spec: &GpuArchSpec) -> Result<(), ManifestError> {
     for (id, boards) in &spec.boards {
         if !is_pci_device_id(id) {
             return Err(ManifestError::InvalidGpu(format!(
@@ -254,17 +254,26 @@ fn validate_boards(arch: &str, spec: &GpuArchSpec) -> Result<(), ManifestError> 
     Ok(())
 }
 
-fn validate_gpu(gpu: &GpuRuntimeSpec) -> Result<(), ManifestError> {
-    if gpu.vendor != "nvidia" {
+/// Shared with `instance_runtime::manifest`: both flavors' gpu blocks
+/// require the vendor to be nvidia.
+pub(crate) fn validate_gpu_vendor(vendor: &str) -> Result<(), ManifestError> {
+    if vendor != "nvidia" {
         return Err(ManifestError::InvalidGpu(format!(
-            "vendor must be nvidia, got {:?}",
-            gpu.vendor
+            "vendor must be nvidia, got {vendor:?}"
         )));
     }
-    if gpu.archs.is_empty() {
+    Ok(())
+}
+
+/// Shared with `instance_runtime::manifest`: both flavors' gpu blocks carry
+/// the same `archs: BTreeMap<String, GpuArchSpec>` shape and invariants.
+pub(crate) fn validate_gpu_archs(
+    archs: &BTreeMap<String, GpuArchSpec>,
+) -> Result<(), ManifestError> {
+    if archs.is_empty() {
         return Err(ManifestError::InvalidGpu("archs must not be empty".into()));
     }
-    for (arch, spec) in &gpu.archs {
+    for (arch, spec) in archs {
         if arch != "hopper" && arch != "blackwell" {
             return Err(ManifestError::InvalidGpu(format!(
                 "archs key must be hopper or blackwell, got {arch:?}"
@@ -282,12 +291,24 @@ fn validate_gpu(gpu: &GpuRuntimeSpec) -> Result<(), ManifestError> {
         }
         validate_boards(arch, spec)?;
     }
-    if !is_valid_driver_version(&gpu.driver_version) {
+    Ok(())
+}
+
+/// Shared with `instance_runtime::manifest`: both flavors' gpu blocks pin a
+/// driver version in the same shape.
+pub(crate) fn validate_driver_version(driver_version: &str) -> Result<(), ManifestError> {
+    if !is_valid_driver_version(driver_version) {
         return Err(ManifestError::InvalidGpu(format!(
-            "driver_version must be 2 or 3 dot-separated numeric components, got {:?}",
-            gpu.driver_version
+            "driver_version must be 2 or 3 dot-separated numeric components, got {driver_version:?}"
         )));
     }
+    Ok(())
+}
+
+fn validate_gpu(gpu: &GpuRuntimeSpec) -> Result<(), ManifestError> {
+    validate_gpu_vendor(&gpu.vendor)?;
+    validate_gpu_archs(&gpu.archs)?;
+    validate_driver_version(&gpu.driver_version)?;
     if !gpu.library_path.starts_with('/') {
         return Err(ManifestError::InvalidGpu(format!(
             "library_path must be an absolute path, got {:?}",

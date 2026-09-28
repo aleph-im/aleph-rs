@@ -1,5 +1,6 @@
 use crate::chain::Address;
 use crate::item_hash::ItemHash;
+use crate::message::vprogram::ConfidentialGpuRequirement;
 use memsizes::MiB;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU16;
@@ -198,6 +199,8 @@ pub enum TeeError {
     TdxPolicySet,
     #[error("V-PROGRAM supports only the sev_snp backend")]
     UnsupportedVProgramBackend,
+    #[error("gpu is only supported in sev_snp mode")]
+    GpuRequiresSnp,
 }
 
 /// Raise an error unless the value is a plausible SEV-SNP guest policy.
@@ -476,6 +479,11 @@ pub struct TrustedExecutionEnvironment {
     /// bundle default (8443).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_port: Option<NonZeroU16>,
+    /// Confidential GPU requirement (sev_snp only). Mutually exclusive with
+    /// the plain `requirements.gpu` list on the instance: a confidential
+    /// instance declares its cards here instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<ConfidentialGpuRequirement>,
 }
 
 impl TrustedExecutionEnvironment {
@@ -494,6 +502,9 @@ impl TrustedExecutionEnvironment {
                 let mode_str = mode.as_str();
                 if self.firmware.is_some() {
                     return Err(TeeError::FirmwareInMeasuredMode(mode_str));
+                }
+                if self.gpu.is_some() && mode != TeeMode::SevSnp {
+                    return Err(TeeError::GpuRequiresSnp);
                 }
                 if self.runtime.is_none() {
                     return Err(TeeError::MeasuredModeRequires {
@@ -546,6 +557,9 @@ impl TrustedExecutionEnvironment {
                 if self.attestation_port.is_some() {
                     return Err(TeeError::MeasuredOnlyField("attestation_port"));
                 }
+                if self.gpu.is_some() {
+                    return Err(TeeError::MeasuredOnlyField("gpu"));
+                }
             }
         }
         Ok(())
@@ -566,6 +580,8 @@ struct RawTrustedExecutionEnvironment {
     measurements: Option<Vec<LaunchMeasurement>>,
     #[serde(default)]
     attestation_port: Option<NonZeroU16>,
+    #[serde(default)]
+    gpu: Option<ConfidentialGpuRequirement>,
 }
 
 impl TryFrom<RawTrustedExecutionEnvironment> for TrustedExecutionEnvironment {
@@ -579,6 +595,7 @@ impl TryFrom<RawTrustedExecutionEnvironment> for TrustedExecutionEnvironment {
             runtime: raw.runtime,
             measurements: raw.measurements,
             attestation_port: raw.attestation_port,
+            gpu: raw.gpu,
         };
         tee.check_mode_consistency()?;
         Ok(tee)
@@ -719,6 +736,8 @@ mod test {
                 r#""measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]"#
             ),
             r#""attestation_port": 8443"#.to_string(),
+            r#""gpu": {"vendor": "nvidia", "arch": "hopper", "count": 1, "mode": "cc"}"#
+                .to_string(),
         ] {
             let json = format!(r#"{{"policy": 1, {extra}}}"#);
             assert!(
@@ -1042,5 +1061,54 @@ mod test {
         let json = tdx_tee_json().replacen("{", r#"{"attestation_port": 8443, "#, 1);
         let tee: TrustedExecutionEnvironment = serde_json::from_str(&json).unwrap();
         assert_eq!(tee.attestation_port.map(NonZeroU16::get), Some(8443));
+    }
+
+    fn gpu_requirement_json() -> String {
+        r#"{"vendor": "nvidia", "arch": "hopper", "count": 2, "mode": "cc"}"#.to_string()
+    }
+
+    #[test]
+    fn test_trusted_execution_snp_gpu_round_trips() {
+        // no defaulted keys appear: the dump equals the parsed input exactly
+        let json = format!(
+            r#"{{"mode": "sev_snp", "policy": 196608, "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}],
+                 "gpu": {}}}"#,
+            gpu_requirement_json()
+        );
+        let tee: TrustedExecutionEnvironment = serde_json::from_str(&json).unwrap();
+        assert!(tee.gpu.is_some());
+        let expected: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let actual = serde_json::to_value(&tee).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_trusted_execution_tdx_gpu_rejected() {
+        // gpu is sev_snp-only: tdx mode rejects it with a dedicated error
+        let json = format!(
+            r#"{{"mode": "tdx", "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{{"platform": "tdx", "registers": {}}}],
+                 "gpu": {}}}"#,
+            tdx_registers_json(),
+            gpu_requirement_json()
+        );
+        let err = serde_json::from_str::<TrustedExecutionEnvironment>(&json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("gpu is only supported in sev_snp mode"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_trusted_execution_legacy_sev_gpu_rejected() {
+        let json = format!(r#"{{"policy": 1, "gpu": {}}}"#, gpu_requirement_json());
+        let err = serde_json::from_str::<TrustedExecutionEnvironment>(&json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("gpu is only valid in the measured TEE modes"),
+            "{err}"
+        );
     }
 }

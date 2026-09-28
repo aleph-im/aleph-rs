@@ -122,6 +122,10 @@ pub struct VmImageDefaults {
     pub runtime: Option<String>,
     #[serde(default)]
     pub instance_runtime: Option<String>,
+    /// Default GPU-capable instance runtime, kept apart from `instance_runtime`
+    /// like `vprogram_gpu_contracts` is from `vprogram_contracts`.
+    #[serde(default)]
+    pub instance_gpu_runtime: Option<String>,
     /// Current workload contract per model: `{"exec": "aleph.exec/1"}`.
     #[serde(default)]
     pub vprogram_models: BTreeMap<String, String>,
@@ -234,6 +238,19 @@ impl VmImagesData {
                         .map(|(n, _)| n.as_str()),
                 ),
             })
+    }
+
+    /// Resolve `defaults.instance_gpu_runtime`, mirroring `defaults.instance_runtime`'s
+    /// own default-name resolution.
+    pub fn instance_gpu_runtime_default(&self) -> Result<&ImageEntry, VmImagesError> {
+        let name =
+            self.defaults
+                .instance_gpu_runtime
+                .as_deref()
+                .ok_or(VmImagesError::NoDefault {
+                    kind: "instance_gpu_runtime",
+                })?;
+        self.instance_runtime(name)
     }
 
     /// Non-deprecated V-Program runtimes implementing a contract of `model`,
@@ -722,5 +739,36 @@ mod tests {
         let data: VmImagesData = serde_json::from_str("{}").unwrap();
         assert!(data.instance_runtimes.is_empty());
         assert!(data.defaults.instance_runtime.is_none());
+        assert!(data.defaults.instance_gpu_runtime.is_none());
+    }
+
+    #[test]
+    fn instance_gpu_runtime_default_resolves_through_the_same_table() {
+        let json = r#"{
+            "instance_runtimes": {
+                "snp-1.0": {"hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                "snp-gpu-1.0": {"hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+            },
+            "defaults": {"instance_runtime": "snp-1.0", "instance_gpu_runtime": "snp-gpu-1.0"}
+        }"#;
+        let data: VmImagesData = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            data.defaults.instance_gpu_runtime.as_deref(),
+            Some("snp-gpu-1.0")
+        );
+        assert_eq!(
+            data.instance_gpu_runtime_default()
+                .unwrap()
+                .hash
+                .to_string(),
+            "b".repeat(64)
+        );
+    }
+
+    #[test]
+    fn instance_gpu_runtime_default_errors_when_unset() {
+        let data: VmImagesData = serde_json::from_str("{}").unwrap();
+        let err = data.instance_gpu_runtime_default().unwrap_err().to_string();
+        assert!(err.contains("instance_gpu_runtime"), "{err}");
     }
 }
