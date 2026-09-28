@@ -483,13 +483,7 @@ pub(crate) async fn run_instance_attest(
         }
     };
 
-    let measurement_pin = match &expectation {
-        MeasurementExpectation::Pin(registers) => MeasurementPin::Exact(registers),
-        // Fleet flow: the exact model is only known from the response, so
-        // the handshake pin is explicitly deferred; the `measurement_is_expected`
-        // check below is what discharges the CallerVerified obligation.
-        MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
-    };
+    let measurement_pin = expectation.pin();
     let policy_pin = PolicyPin::Exact(policy);
     let platform_policy = attest_common::platform_policy_from(&args.require_platform);
 
@@ -512,11 +506,8 @@ pub(crate) async fn run_instance_attest(
     .await
     .map_err(|e| anyhow!("attestation failed: {e}"))?;
 
-    // Post-handshake re-check on the verified (SIGNED) measurement: for a
-    // `Pin` this is belt-and-suspenders on top of the handshake pin; for a
-    // `MemberOf` fleet it is the ONLY place the guest's measurement is
-    // checked against the pinned set, since the handshake could not pin one
-    // model ahead of time.
+    // Belt-and-suspenders re-check on the verified (SIGNED) measurement, on
+    // top of the `Exact`/`OneOf` pin `fresh_attestation` enforced.
     if !measurement_is_expected(&fresh.registers, &expectation) {
         match &expectation {
             MeasurementExpectation::Pin(pin) => bail!(

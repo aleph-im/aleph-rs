@@ -9,9 +9,7 @@ use super::instance_target::{VmKind, pick_unique_match};
 use aleph_sdk::aggregate_models::vm_images::{
     VPROGRAM_CONTRACT_COMPOSE, VPROGRAM_MODEL_COMPOSE, VPROGRAM_MODEL_EXEC, VmImagesData,
 };
-use aleph_sdk::attest::{
-    MeasurementPin, NvidiaFloor, PlatformPosture, PolicyPin, attested_request,
-};
+use aleph_sdk::attest::{NvidiaFloor, PlatformPosture, PolicyPin, attested_request};
 use aleph_sdk::caching_aggregate_client::CachingAggregateClient;
 use aleph_sdk::client::{
     AlephAggregateClient, AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus,
@@ -1728,12 +1726,9 @@ pub(crate) enum Freshness {
 /// presenting the same measured stack. Guards against a load balancer (or
 /// an attacker) splitting the two requests across different guests.
 ///
-/// This is also what pins the measurement/policy of the fresh report in the
-/// `MeasurementExpectation::MemberOf` fleet case: there the handshake pin is
-/// `None` (the fleet's exact model is not known ahead of the call), so the
-/// fresh report carries no pin of its own. Closing the loop against
-/// `response.measurement`/`response.policy`, which the caller's
-/// post-handshake checks already validated, is what pins it instead.
+/// Both reports are pinned independently (`Exact`/`OneOf`); in the `OneOf`
+/// case this also rules out the two exchanges presenting different members
+/// of the pinned set.
 fn check_fresh_consistency(
     fresh: &aleph_sdk::attest::FreshAttestation,
     response: &aleph_sdk::attest::AttestedResponse,
@@ -2045,13 +2040,7 @@ async fn handle_call(
         .collect::<Result<Vec<_>>>()?;
     let body = args.data.clone().map(bytes::Bytes::from);
 
-    let handshake_pin = match &expected {
-        MeasurementExpectation::Pin(registers) => MeasurementPin::Exact(registers),
-        // Fleet flow: the exact model is only known from the response, so
-        // the handshake pin is explicitly deferred; the MemberOf allow-list
-        // check below is what discharges the CallerVerified obligation.
-        MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
-    };
+    let handshake_pin = expected.pin();
     let policy_pin = PolicyPin::Exact(content.verification.policy);
     let platform_policy = attest_common::platform_policy_from(&args.require_platform);
 
@@ -2140,9 +2129,8 @@ async fn handle_call(
     // and key binding are already fully verified at this point
     // (`attested_request` fails closed on all of that).
     match &expected {
-        // Multi-model fleet: the handshake pinned nothing (it couldn't know
-        // which model the guest would present), so the membership check is
-        // deferred to here.
+        // Belt-and-suspenders re-check of the handshake's `OneOf` pin on the
+        // verified value.
         MeasurementExpectation::MemberOf(set) => {
             if !set.contains(&response.registers) {
                 bail!(
