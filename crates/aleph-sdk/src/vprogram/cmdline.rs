@@ -57,6 +57,40 @@ pub enum CmdlineError {
     GpuArchNotOffered { arch: String, offered: String },
     #[error("runtime architecture {arch} lists no board for GPU model {model}")]
     GpuModelNotOffered { arch: String, model: String },
+    #[error(
+        "tdx cmdline template must carry {{platform_roothash}} and no other placeholder: the \
+         per-deployment tokens travel on the descriptor drive"
+    )]
+    TdxTemplateShape,
+}
+
+/// The per-deployment descriptor of a TDX V-PROGRAM: the tokens an SEV-SNP
+/// runtime would carry on its cmdline after the fixed part, rendered exactly
+/// as the CRN renders them, so both sides hash to the same MRCONFIGID.
+/// `verified_volumes` is dropped when there are none, as on the SNP cmdline.
+pub fn tdx_descriptor_suffix(workload_roothash: &str, volume_roothashes: &[String]) -> String {
+    let mut suffix = format!("workload_roothash={workload_roothash}");
+    if !volume_roothashes.is_empty() {
+        suffix.push_str(" verified_volumes=");
+        suffix.push_str(&volume_roothashes.join(","));
+    }
+    suffix
+}
+
+/// Instantiate a tdx runtime's cmdline: fixed per runtime, one slot. The
+/// result is what RTMR2 measures, identical for every deployment.
+pub fn instantiate_tdx_cmdline(
+    template: &str,
+    platform_roothash: &str,
+) -> Result<String, CmdlineError> {
+    if !template.contains("{platform_roothash}") {
+        return Err(CmdlineError::TdxTemplateShape);
+    }
+    let out = template.replace("{platform_roothash}", platform_roothash);
+    if out.contains('{') || out.contains('}') {
+        return Err(CmdlineError::TdxTemplateShape);
+    }
+    Ok(out)
 }
 
 /// Canonical form of the message's model narrowing: sorted, de-duplicated,
@@ -618,6 +652,50 @@ mod tests {
             assert!(
                 matches!(err, CmdlineError::BadGpuCount(c) if c == count),
                 "{err}"
+            );
+        }
+    }
+    #[test]
+    fn tdx_descriptor_suffix_matches_the_crn_rendering() {
+        // The CRN joins `workload_roothash=` and, when the message has
+        // volumes, `verified_volumes=` (comma list, message order) with one
+        // space; nothing else on a tdx deployment.
+        let w = "cd".repeat(32);
+        assert_eq!(
+            tdx_descriptor_suffix(&w, &[]),
+            format!("workload_roothash={w}")
+        );
+        let volumes = ["ef".repeat(32), "01".repeat(32)];
+        assert_eq!(
+            tdx_descriptor_suffix(&w, &volumes),
+            format!(
+                "workload_roothash={w} verified_volumes={},{}",
+                volumes[0], volumes[1]
+            )
+        );
+    }
+
+    #[test]
+    fn tdx_cmdline_is_fixed_per_runtime() {
+        let template = "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash} aleph_tdx_descriptor=1";
+        let r = "cb".repeat(32);
+        assert_eq!(
+            instantiate_tdx_cmdline(template, &r).unwrap(),
+            format!(
+                "console=ttyS0 root=/dev/mapper/verity-root ro roothash={r} aleph_tdx_descriptor=1"
+            )
+        );
+        for bad in [
+            "console=ttyS0 root=/dev/mapper/verity-root ro aleph_tdx_descriptor=1",
+            "console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash}",
+            "console=ttyS0 roothash={platform_roothash} verified_volumes={verified_volumes}",
+        ] {
+            assert!(
+                matches!(
+                    instantiate_tdx_cmdline(bad, &r),
+                    Err(CmdlineError::TdxTemplateShape)
+                ),
+                "{bad}"
             );
         }
     }
