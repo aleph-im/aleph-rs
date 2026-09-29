@@ -246,16 +246,16 @@ fn default_snp_policy() -> u64 {
 ///
 /// Two backends: sev_snp (`policy` is the SEV-SNP 64-bit guest policy, one
 /// measurement per vcpu_type across a mixed fleet) and tdx (no host-chosen
-/// launch policy, and the registers do not depend on the CPU model so
+/// launch policy, so `policy` is absent from the wire and reads as the SNP
+/// default here, and the registers do not depend on the CPU model so
 /// exactly one measurement is declared).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "RawTeeVerification")]
+#[serde(try_from = "RawTeeVerification", into = "WireTeeVerification")]
 pub struct TeeVerification {
     /// TEE attestation platform the VM launches with.
     pub backend: TeePlatform,
-    /// SEV-SNP 64-bit guest policy (not SEV bit semantics); left at its
-    /// default with the tdx backend.
-    #[serde(default = "default_snp_policy")]
+    /// SEV-SNP 64-bit guest policy (not SEV bit semantics). Meaningless on
+    /// tdx, where it holds the default and is not serialized.
     pub policy: u64,
     /// Expected launch digests; never sent to the supervisor.
     pub measurements: Vec<LaunchMeasurement>,
@@ -264,9 +264,34 @@ pub struct TeeVerification {
 #[derive(Deserialize)]
 struct RawTeeVerification {
     backend: TeePlatform,
-    #[serde(default = "default_snp_policy")]
-    policy: u64,
+    #[serde(default)]
+    policy: Option<u64>,
     measurements: Vec<LaunchMeasurement>,
+}
+
+/// The wire shape: `policy` only with the sev_snp backend. The CCN compares
+/// a message's content dump to its signed item_content, so a tdx block
+/// must not grow a policy key on the way out.
+#[derive(Serialize)]
+struct WireTeeVerification {
+    backend: TeePlatform,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<u64>,
+    measurements: Vec<LaunchMeasurement>,
+}
+
+impl From<TeeVerification> for WireTeeVerification {
+    fn from(verification: TeeVerification) -> Self {
+        let policy = match verification.backend {
+            TeePlatform::SevSnp => Some(verification.policy),
+            TeePlatform::Tdx => None,
+        };
+        Self {
+            backend: verification.backend,
+            policy,
+            measurements: verification.measurements,
+        }
+    }
 }
 
 impl TryFrom<RawTeeVerification> for TeeVerification {
@@ -276,16 +301,17 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
         // Policy semantics are per platform: dispatch on the backend so a
         // future variant cannot silently inherit SNP validation. Adding a
         // variant is a compile error here until it gets its own arm.
-        match raw.backend {
-            TeePlatform::SevSnp => validate_snp_policy(raw.policy)?,
+        let policy = match (raw.backend, raw.policy) {
+            (TeePlatform::SevSnp, policy) => {
+                let policy = policy.unwrap_or_else(default_snp_policy);
+                validate_snp_policy(policy)?;
+                policy
+            }
             // TDATTRIBUTES and XFAM are set by the TDX module and measured,
             // not selected; reject a value rather than invent a meaning.
-            TeePlatform::Tdx => {
-                if raw.policy != DEFAULT_SNP_POLICY {
-                    return Err(TeeError::TdxPolicySet);
-                }
-            }
-        }
+            (TeePlatform::Tdx, Some(_)) => return Err(TeeError::TdxPolicySet),
+            (TeePlatform::Tdx, None) => default_snp_policy(),
+        };
         if raw.measurements.is_empty() {
             return Err(TeeError::MeasuredModeRequires {
                 mode: raw.backend.as_str(),
@@ -312,7 +338,7 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
         }
         Ok(Self {
             backend: raw.backend,
-            policy: raw.policy,
+            policy,
             measurements: raw.measurements,
         })
     }
@@ -612,8 +638,13 @@ mod test {
     fn test_tee_verification_tdx_backend() {
         let v: TeeVerification = serde_json::from_str(&tdx_verification_json("", 1)).unwrap();
         assert_eq!(v.backend, TeePlatform::Tdx);
-        // The field exists for sev_snp; nothing reads it on tdx.
+        // The field exists for sev_snp; nothing reads it on tdx and the
+        // wire form has no such key.
         assert_eq!(v.policy, DEFAULT_SNP_POLICY);
+        let wire = serde_json::to_value(&v).unwrap();
+        assert!(wire.get("policy").is_none(), "{wire}");
+        let back: TeeVerification = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, v);
         let registers = v.measurements[0].registers.as_tdx().expect("tdx registers");
         assert!(registers.mrconfigid.starts_with("38b060a7"));
         assert!(v.measurements[0].registers.as_sev_snp().is_none());
@@ -622,11 +653,9 @@ mod test {
 
     #[test]
     fn test_tee_verification_tdx_has_no_policy() {
-        // Stating the default is indistinguishable from leaving it; any
-        // other value is refused rather than interpreted.
-        serde_json::from_str::<TeeVerification>(&tdx_verification_json(", \"policy\": 196608", 1))
-            .unwrap();
-        for policy in ["1", "131072", "196609", "0"] {
+        // Any value, the SNP default included, is refused rather than
+        // interpreted: the key itself does not belong on a tdx block.
+        for policy in ["196608", "1", "131072", "196609", "0"] {
             let err = serde_json::from_str::<TeeVerification>(&tdx_verification_json(
                 &format!(", \"policy\": {policy}"),
                 1,
