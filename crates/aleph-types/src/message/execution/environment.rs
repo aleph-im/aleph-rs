@@ -197,8 +197,11 @@ pub enum TeeError {
     },
     #[error("tdx mode has no host-chosen launch policy; policy must be left at its default")]
     TdxPolicySet,
-    #[error("V-PROGRAM supports only the sev_snp backend")]
-    UnsupportedVProgramBackend,
+    #[error(
+        "the tdx backend declares exactly one measurement: its registers do not depend on the \
+         CPU model"
+    )]
+    TdxSingleMeasurement,
     #[error("gpu is only supported in sev_snp mode")]
     GpuRequiresSnp,
 }
@@ -348,6 +351,14 @@ impl MeasurementRegisters {
         match self {
             MeasurementRegisters::SevSnp(r) => Some(r),
             MeasurementRegisters::Tdx(_) => None,
+        }
+    }
+
+    /// The TDX registers, if this is a TDX set.
+    pub fn as_tdx(&self) -> Option<&TdxRegisters> {
+        match self {
+            MeasurementRegisters::Tdx(r) => Some(r),
+            MeasurementRegisters::SevSnp(_) => None,
         }
     }
 }
@@ -542,6 +553,12 @@ impl TrustedExecutionEnvironment {
                     TeeMode::Tdx => {
                         if self.policy != default_amd_sev_policy() {
                             return Err(TeeError::TdxPolicySet);
+                        }
+                        // MRTD, RTMR1 and RTMR2 are functions of the runtime
+                        // bundle alone and MRCONFIGID of this message, so a
+                        // second entry could only disagree with the first.
+                        if measurements.len() != 1 {
+                            return Err(TeeError::TdxSingleMeasurement);
                         }
                     }
                     TeeMode::Sev => unreachable!("matched as measured above"),
@@ -1038,6 +1055,22 @@ mod test {
         // the explicit default is accepted (it appears in every dump)
         let json = tdx_tee_json().replacen("{", r#"{"policy": 1, "#, 1);
         assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_ok());
+    }
+
+    #[test]
+    fn test_trusted_execution_tdx_declares_exactly_one_measurement() {
+        // Same rule as the V-PROGRAM backend: the registers do not depend
+        // on the CPU model, so a list could only disagree with itself.
+        let measurement = format!(
+            r#"{{"platform": "tdx", "registers": {}}}"#,
+            tdx_registers_json()
+        );
+        let json = format!(
+            r#"{{"mode": "tdx", "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{measurement}, {measurement}]}}"#
+        );
+        let err = serde_json::from_str::<TrustedExecutionEnvironment>(&json).unwrap_err();
+        assert!(err.to_string().contains("exactly one measurement"), "{err}");
     }
 
     #[test]

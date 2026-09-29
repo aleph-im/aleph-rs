@@ -243,13 +243,19 @@ fn default_snp_policy() -> u64 {
 }
 
 /// TEE launch configuration plus supervisor-opaque measurement annotations.
+///
+/// Two backends: sev_snp (`policy` is the SEV-SNP 64-bit guest policy, one
+/// measurement per vcpu_type across a mixed fleet) and tdx (no host-chosen
+/// launch policy, so `policy` is absent from the wire and reads as the SNP
+/// default here, and the registers do not depend on the CPU model so
+/// exactly one measurement is declared).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "RawTeeVerification")]
+#[serde(try_from = "RawTeeVerification", into = "WireTeeVerification")]
 pub struct TeeVerification {
     /// TEE attestation platform the VM launches with.
     pub backend: TeePlatform,
-    /// SEV-SNP 64-bit guest policy (not SEV bit semantics).
-    #[serde(default = "default_snp_policy")]
+    /// SEV-SNP 64-bit guest policy (not SEV bit semantics). Meaningless on
+    /// tdx, where it holds the default and is not serialized.
     pub policy: u64,
     /// Expected launch digests; never sent to the supervisor.
     pub measurements: Vec<LaunchMeasurement>,
@@ -258,9 +264,34 @@ pub struct TeeVerification {
 #[derive(Deserialize)]
 struct RawTeeVerification {
     backend: TeePlatform,
-    #[serde(default = "default_snp_policy")]
-    policy: u64,
+    #[serde(default)]
+    policy: Option<u64>,
     measurements: Vec<LaunchMeasurement>,
+}
+
+/// The wire shape: `policy` only with the sev_snp backend. The CCN compares
+/// a message's content dump to its signed item_content, so a tdx block
+/// must not grow a policy key on the way out.
+#[derive(Serialize)]
+struct WireTeeVerification {
+    backend: TeePlatform,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<u64>,
+    measurements: Vec<LaunchMeasurement>,
+}
+
+impl From<TeeVerification> for WireTeeVerification {
+    fn from(verification: TeeVerification) -> Self {
+        let policy = match verification.backend {
+            TeePlatform::SevSnp => Some(verification.policy),
+            TeePlatform::Tdx => None,
+        };
+        Self {
+            backend: verification.backend,
+            policy,
+            measurements: verification.measurements,
+        }
+    }
 }
 
 impl TryFrom<RawTeeVerification> for TeeVerification {
@@ -270,12 +301,17 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
         // Policy semantics are per platform: dispatch on the backend so a
         // future variant cannot silently inherit SNP validation. Adding a
         // variant is a compile error here until it gets its own arm.
-        match raw.backend {
-            TeePlatform::SevSnp => validate_snp_policy(raw.policy)?,
-            // The V-PROGRAM runtime vocabulary is SEV-SNP-only for now; a
-            // TDX runtime arrives as its own backend value once one exists.
-            TeePlatform::Tdx => return Err(TeeError::UnsupportedVProgramBackend),
-        }
+        let policy = match (raw.backend, raw.policy) {
+            (TeePlatform::SevSnp, policy) => {
+                let policy = policy.unwrap_or_else(default_snp_policy);
+                validate_snp_policy(policy)?;
+                policy
+            }
+            // TDATTRIBUTES and XFAM are set by the TDX module and measured,
+            // not selected; reject a value rather than invent a meaning.
+            (TeePlatform::Tdx, Some(_)) => return Err(TeeError::TdxPolicySet),
+            (TeePlatform::Tdx, None) => default_snp_policy(),
+        };
         if raw.measurements.is_empty() {
             return Err(TeeError::MeasuredModeRequires {
                 mode: raw.backend.as_str(),
@@ -285,7 +321,13 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
         if raw.measurements.len() > MAX_MEASUREMENTS {
             return Err(TeeError::TooManyMeasurements(raw.measurements.len()));
         }
-        // A sev_snp backend must not carry another platform's measurements.
+        // MRTD, RTMR1 and RTMR2 are functions of the runtime bundle alone and
+        // MRCONFIGID of this message, so a second entry could only disagree
+        // with the first.
+        if raw.backend == TeePlatform::Tdx && raw.measurements.len() != 1 {
+            return Err(TeeError::TdxSingleMeasurement);
+        }
+        // A backend must not carry another platform's measurements.
         for measurement in &raw.measurements {
             if measurement.platform != raw.backend {
                 return Err(TeeError::MeasurementPlatformMismatch {
@@ -296,7 +338,7 @@ impl TryFrom<RawTeeVerification> for TeeVerification {
         }
         Ok(Self {
             backend: raw.backend,
-            policy: raw.policy,
+            policy,
             measurements: raw.measurements,
         })
     }
@@ -353,10 +395,13 @@ pub enum VProgramError {
          confidential-computing mode; declare the cards in gpu instead"
     )]
     PlainGpuRequirements,
+    #[error("gpu is only supported with the sev_snp backend")]
+    GpuRequiresSnp,
 }
 
 /// Message content for scheduling a verifiable program (V-Program): an
-/// auto-booting SEV-SNP VM whose full software stack is attestable.
+/// auto-booting confidential VM (SEV-SNP or Intel TDX) whose full software
+/// stack is attestable.
 ///
 /// Unlike classic programs there is no code/entrypoint/triggers model (the
 /// workload contract belongs to the runtime bundle) and no hypervisor choice
@@ -491,6 +536,11 @@ impl TryFrom<RawVerifiableProgramContent> for VerifiableProgramContent {
         {
             return Err(VProgramError::PlainGpuRequirements);
         }
+        // Deliberately not `== Tdx`: a new backend opts in to GPUs once its
+        // guest verifier exists, it does not get them by default.
+        if raw.gpu.is_some() && raw.verification.backend != TeePlatform::SevSnp {
+            return Err(VProgramError::GpuRequiresSnp);
+        }
         Ok(Self {
             base: raw.base,
             environment: raw.environment,
@@ -569,20 +619,63 @@ mod test {
         assert!(serde_json::from_str::<TeeVerification>(json).is_err()); // min 1
     }
 
+    /// Registers a TD quoted on a Xeon 6731E from aleph-vm's tdxImage
+    /// runtime (2026-09-29); MRCONFIGID is SHA-384 of the empty descriptor.
+    const XEON6_TDX_REGISTERS: &str = r#"{
+        "mrtd": "d4f5ee3d5fe9a5a3cbb1df8c40946714f55d5918b9b0e9ecd82a1d8adeea668495901baee134e3152dd5e0e2d1781262",
+        "rtmr1": "8d91abe1ea40a7dba9dbd110eea6fff8e3c79d983a7cae359a046ec8ae339cfbfbed4298c66ec2bdbbf08abb9c63e5c8",
+        "rtmr2": "c785503b238756732626c8162997f514084d10d699b602bba0691dcbb94a97901acc63c8aea322af4946141573d0766e",
+        "mrconfigid": "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"
+    }"#;
+
+    fn tdx_verification_json(policy_member: &str, measurements: usize) -> String {
+        let measurement = format!(r#"{{"platform": "tdx", "registers": {XEON6_TDX_REGISTERS}}}"#);
+        let measurements = vec![measurement; measurements].join(",");
+        format!(r#"{{"backend": "tdx"{policy_member}, "measurements": [{measurements}]}}"#)
+    }
+
     #[test]
-    fn test_tee_verification_rejects_tdx_backend() {
-        // the V-PROGRAM runtime vocabulary is SEV-SNP-only for now
-        let json = format!(
-            r#"{{"backend": "tdx",
-                 "measurements": [{{"platform": "tdx", "registers":
-                    {{"mrtd": "{r}", "rtmr1": "{r}", "rtmr2": "{r}", "mrconfigid": "{r}"}}}}]}}"#,
-            r = "11".repeat(48)
-        );
-        let err = serde_json::from_str::<TeeVerification>(&json).unwrap_err();
-        assert!(
-            err.to_string().contains("only the sev_snp backend"),
-            "{err}"
-        );
+    fn test_tee_verification_tdx_backend() {
+        let v: TeeVerification = serde_json::from_str(&tdx_verification_json("", 1)).unwrap();
+        assert_eq!(v.backend, TeePlatform::Tdx);
+        // The field exists for sev_snp; nothing reads it on tdx and the
+        // wire form has no such key.
+        assert_eq!(v.policy, DEFAULT_SNP_POLICY);
+        let wire = serde_json::to_value(&v).unwrap();
+        assert!(wire.get("policy").is_none(), "{wire}");
+        let back: TeeVerification = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, v);
+        let registers = v.measurements[0].registers.as_tdx().expect("tdx registers");
+        assert!(registers.mrconfigid.starts_with("38b060a7"));
+        assert!(v.measurements[0].registers.as_sev_snp().is_none());
+        assert!(v.measurements[0].vcpu_type.is_none());
+    }
+
+    #[test]
+    fn test_tee_verification_tdx_has_no_policy() {
+        // Any value, the SNP default included, is refused rather than
+        // interpreted: the key itself does not belong on a tdx block.
+        for policy in ["196608", "1", "131072", "196609", "0"] {
+            let err = serde_json::from_str::<TeeVerification>(&tdx_verification_json(
+                &format!(", \"policy\": {policy}"),
+                1,
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("no host-chosen launch policy"),
+                "{policy}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tee_verification_tdx_declares_exactly_one_measurement() {
+        let err =
+            serde_json::from_str::<TeeVerification>(&tdx_verification_json("", 2)).unwrap_err();
+        assert!(err.to_string().contains("exactly one measurement"), "{err}");
+        let err =
+            serde_json::from_str::<TeeVerification>(&tdx_verification_json("", 0)).unwrap_err();
+        assert!(err.to_string().contains("measurements"), "{err}");
     }
 
     #[test]
@@ -593,6 +686,13 @@ mod test {
                  "measurements": [{{"platform": "tdx", "registers":
                     {{"mrtd": "{r}", "rtmr1": "{r}", "rtmr2": "{r}", "mrconfigid": "{r}"}}}}]}}"#,
             r = "11".repeat(48)
+        );
+        let err = serde_json::from_str::<TeeVerification>(&json).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+        // and an SNP launch digest says nothing about a tdx backend
+        let json = format!(
+            r#"{{"backend": "tdx",
+                 "measurements": [{{"platform": "sev_snp", "registers": {{"launch": "{SNP_DIGEST}"}}}}]}}"#
         );
         let err = serde_json::from_str::<TeeVerification>(&json).unwrap_err();
         assert!(err.to_string().contains("does not match"), "{err}");
@@ -703,6 +803,49 @@ mod test {
 
     fn vprogram_content_json_gpu(gpu: &str) -> String {
         vprogram_content_json_full(r#"{"type": "credit"}"#, "[]", &format!(", \"gpu\": {gpu}"))
+    }
+
+    /// The credit-paid content with its verification block swapped for a
+    /// tdx one; `trailing` is spliced in like `gpu_member` above.
+    fn tdx_vprogram_content_json(trailing: &str) -> String {
+        let snp = vprogram_content_json_full(r#"{"type": "credit"}"#, "[]", trailing);
+        let start = snp
+            .find("\"verification\": {")
+            .expect("verification member");
+        let end = start + snp[start..].find("\"volumes\"").expect("volumes follows");
+        format!(
+            "{}\"verification\": {},\n                {}",
+            &snp[..start],
+            tdx_verification_json("", 1),
+            &snp[end..]
+        )
+    }
+
+    #[test]
+    fn test_vprogram_tdx_content_round_trips() {
+        let content: VerifiableProgramContent =
+            serde_json::from_str(&tdx_vprogram_content_json("")).unwrap();
+        assert_eq!(content.verification.backend, TeePlatform::Tdx);
+        assert!(content.gpu.is_none());
+        let out = serde_json::to_string(&content).unwrap();
+        let back: VerifiableProgramContent = serde_json::from_str(&out).unwrap();
+        assert_eq!(back, content);
+    }
+
+    #[test]
+    fn test_vprogram_tdx_rejects_gpu() {
+        // Confidential GPUs are an SEV-SNP feature: the TDX guest has no
+        // verifier for them yet.
+        let gpu = r#"{"vendor": "nvidia", "arch": "hopper", "count": 1, "mode": "cc"}"#;
+        let err = serde_json::from_str::<VerifiableProgramContent>(&tdx_vprogram_content_json(
+            &format!(", \"gpu\": {gpu}"),
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only supported with the sev_snp backend"),
+            "{err}"
+        );
     }
 
     #[test]
