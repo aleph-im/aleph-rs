@@ -346,11 +346,20 @@ fn boot_spec(build: &LocalBuild, args: &VProgramRunArgs, accel: Accel) -> Result
         .platform
         .as_ref()
         .context("runtime bundle has no platform rootfs to boot from")?;
+    let mut disks = disk_order(platform, &build.workload, &build.volumes);
+    // A tdx runtime reads its per-deployment tokens off the last drive; in
+    // unattested mode the init takes them without the MRCONFIGID check.
+    if let Some(suffix) = &build.descriptor_suffix {
+        disks.push(super::vprogram_tdx::write_descriptor_image(
+            build.scratch_dir(),
+            suffix,
+        )?);
+    }
     Ok(LocalBootSpec {
         kernel: build.artifacts.kernel.clone(),
         initrd: build.artifacts.initrd.clone(),
         cmdline: build.cmdline.clone(),
-        disks: disk_order(platform, &build.workload, &build.volumes),
+        disks,
         vcpus: args.build.vcpus,
         mem_mib: args.build.memory,
         host_port: args.port,
