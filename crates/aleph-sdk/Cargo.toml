@@ -54,6 +54,11 @@ p256 = { workspace = true }
 rand = { workspace = true }
 tempfile = { workspace = true }
 sev = { version = "8", default-features = false, features = ["snp", "crypto_nossl"], optional = true }
+# Intel TDX: register prediction (MRTD/RTMR1/RTMR2/MRCONFIGID) and quote
+# verification, shared with the CRN and the guest agent. Pinned to a git rev
+# until 0.1.0 is on crates.io; cargo drops the git source at publish time and
+# requires the version to exist there.
+aleph-tee = { version = "0.1.0", git = "https://github.com/aleph-im/aleph-vm", rev = "2296eab07a57f4ddf4af74d3c16bc59c0edd95e7", default-features = false, features = ["verify"], optional = true }
 der = { version = "0.7", optional = true }
 x509-parser = { version = "0.16", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
@@ -94,7 +99,7 @@ swap = [
 ]
 # Verifiable programs (attestable SEV-SNP VMs): launch measurement, runtime
 # bundle handling, and the VProgramBuilder message builder.
-vprogram = ["dep:sev", "dep:der", "dep:x509-parser", "dep:rustls", "dep:ring"]
+vprogram = ["dep:sev", "dep:der", "dep:x509-parser", "dep:rustls", "dep:ring", "dep:aleph-tee"]
 # Gates network-tier integration tests (kept out of plain `cargo test`).
 test-helpers = []
 
