@@ -197,8 +197,11 @@ pub enum TeeError {
     },
     #[error("tdx mode has no host-chosen launch policy; policy must be left at its default")]
     TdxPolicySet,
-    #[error("V-PROGRAM supports only the sev_snp backend")]
-    UnsupportedVProgramBackend,
+    #[error(
+        "the tdx backend declares exactly one measurement: its registers do not depend on the \
+         CPU model"
+    )]
+    TdxSingleMeasurement,
     #[error("gpu is only supported in sev_snp mode")]
     GpuRequiresSnp,
 }
@@ -348,6 +351,14 @@ impl MeasurementRegisters {
         match self {
             MeasurementRegisters::SevSnp(r) => Some(r),
             MeasurementRegisters::Tdx(_) => None,
+        }
+    }
+
+    /// The TDX registers, if this is a TDX set.
+    pub fn as_tdx(&self) -> Option<&TdxRegisters> {
+        match self {
+            MeasurementRegisters::Tdx(r) => Some(r),
+            MeasurementRegisters::SevSnp(_) => None,
         }
     }
 }
