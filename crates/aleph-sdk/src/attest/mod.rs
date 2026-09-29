@@ -21,6 +21,7 @@ pub mod owner_auth;
 pub mod platform;
 pub mod ratls;
 pub mod tcb;
+pub mod tdx;
 pub mod verify;
 pub mod x509;
 
@@ -28,13 +29,15 @@ pub use inject::{InjectSecretEnvelope, InjectSecretResponse, post_secrets};
 pub use nvidia::{DriverVersion, NvidiaFloor};
 pub use platform::{PlatformPolicy, PlatformPosture};
 pub use ratls::{
-    AttestedResponse, FreshAttestation, MeasurementPin, PolicyPin, attested_request,
-    fresh_attestation,
+    AttestedResponse, FreshAttestation, MeasurementPin, PolicyPin, TdxAttestedResponse,
+    TdxFreshAttestation, TdxRegisterPin, attested_request, attested_request_tdx, fresh_attestation,
+    fresh_attestation_tdx,
 };
 pub use tcb::{
     Component, Deficiency, TcbFloor, TcbFloorOverride, TcbFloorPolicy, builtin_baseline,
     builtin_baseline_policy,
 };
+pub use tdx::{PcsClient, TcbStatus, TdxTcbPolicy, TdxVerificationResult, verify_tdx_report};
 pub use verify::{AmdProduct, VerificationResult, verify_sev_snp_report};
 pub use x509::{
     ATTESTATION_OID, ATTESTATION_OID_STR, AttestError, decode_attestation_extension,
