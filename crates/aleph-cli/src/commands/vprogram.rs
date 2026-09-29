@@ -32,7 +32,7 @@ use aleph_types::channel::Channel;
 use aleph_types::item_hash::ItemHash;
 #[cfg(test)]
 use aleph_types::message::execution::environment::SevSnpRegisters;
-use aleph_types::message::execution::environment::validate_snp_policy;
+use aleph_types::message::execution::environment::{TeePlatform, validate_snp_policy};
 use aleph_types::message::{
     ConfidentialGpuRequirement, MAX_VERIFIED_VOLUMES, Message, MessageContentEnum, MessageType,
     TeeVerification, VerifiableProgramContent, VerifiedVolume, VerifiedWorkload,
@@ -160,8 +160,6 @@ async fn handle_create(
     // upload. The numbered steps below are what `create` adds on top of that
     // build: upload, measure, publish.
     let account = resolve_account(&args.signing.identity)?;
-    validate_snp_policy(args.policy)?;
-    attest_common::check_debug_policy(args.policy, args.allow_debug)?;
     let gpu = gpu_requirement(args.gpu, &args.gpu_models).context("invalid --gpu")?;
     let dry_run = args.signing.dry_run;
     let volume_refs_by_path = index_volume_refs(&args.volume_refs, &args.build.volumes)?;
@@ -224,26 +222,37 @@ async fn handle_create(
         );
     }
 
-    // 2. Measurements. The cmdline was instantiated by the local build.
-    if !json {
-        eprintln!(
-            "Computing measurements ({} cpu model(s))...",
-            build.manifest.boot.cpu_models.len()
-        );
-    }
-    let measurements = compute_measurements(
-        &build.artifacts,
-        &build.cmdline,
-        args.build.vcpus,
-        &build.manifest.boot.cpu_models,
-    )?;
+    // 2. Measurements, per platform. The cmdline (and, on tdx, the
+    //    descriptor suffix) was instantiated by the local build. The policy
+    //    knobs are SEV-SNP's: validated there, refused on tdx.
+    let verification = match build.manifest.tee_platform()? {
+        TeePlatform::SevSnp => {
+            validate_snp_policy(args.policy)?;
+            attest_common::check_debug_policy(args.policy, args.allow_debug)?;
+            if !json {
+                eprintln!(
+                    "Computing measurements ({} cpu model(s))...",
+                    build.manifest.boot.cpu_models.len()
+                );
+            }
+            let measurements = compute_measurements(
+                &build.artifacts,
+                &build.cmdline,
+                args.build.vcpus,
+                &build.manifest.boot.cpu_models,
+            )?;
+            serde_json::from_value::<TeeVerification>(serde_json::json!({
+                "backend": "sev_snp",
+                "policy": args.policy,
+                "measurements": measurements,
+            }))?
+        }
+        TeePlatform::Tdx => {
+            super::vprogram_tdx::tdx_verification(&build, args.policy, args.allow_debug, json)?
+        }
+    };
 
     // 3. Assemble and publish.
-    let verification = serde_json::from_value::<TeeVerification>(serde_json::json!({
-        "backend": "sev_snp",
-        "policy": args.policy,
-        "measurements": measurements,
-    }))?;
     let workload = serde_json::from_value::<VerifiedWorkload>(serde_json::json!({
         "ref": workload_refs.data_message,
         "hash_tree": workload_refs.tree_message,
@@ -346,9 +355,19 @@ pub(crate) struct LocalBuild {
     pub(crate) workload: VerityArtifact,
     pub(crate) volumes: Vec<VerityArtifact>,
     pub(crate) cmdline: String,
+    /// The per-deployment descriptor line of a tdx runtime (the tokens an
+    /// SNP cmdline carries after its fixed part); None on sev_snp.
+    pub(crate) descriptor_suffix: Option<String>,
     _built_workload: Option<tempfile::NamedTempFile>,
     _built_workload_dir: Option<tempfile::TempDir>,
     _verity_dir: tempfile::TempDir,
+}
+
+impl LocalBuild {
+    /// Scratch space that lives as long as this build (the verity dir).
+    pub(crate) fn scratch_dir(&self) -> &Path {
+        self._verity_dir.path()
+    }
 }
 
 /// The contract gate `create` and `run` share: catalogue-resolved runtimes
@@ -380,15 +399,46 @@ fn probe_cmdline_slots(
     volumes: usize,
     gpu: Option<&ConfidentialGpuRequirement>,
 ) -> Result<()> {
-    instantiate_cmdline(
-        &manifest.boot.cmdline_template,
-        &manifest.boot.platform_roothash,
+    boot_inputs(
+        manifest,
         &"0".repeat(64),
         &vec!["0".repeat(64); volumes],
         gpu,
-        manifest.gpu.as_ref(),
     )?;
     Ok(())
+}
+
+/// The measured boot inputs of a deployment, per platform: on sev_snp the
+/// whole cmdline from the template; on tdx the runtime's fixed cmdline plus
+/// the descriptor suffix the CRN writes on the MRCONFIGID-bound drive.
+fn boot_inputs(
+    manifest: &RuntimeManifest,
+    workload_roothash: &str,
+    volume_roothashes: &[String],
+    gpu: Option<&ConfidentialGpuRequirement>,
+) -> Result<(String, Option<String>)> {
+    match manifest.tee_platform()? {
+        TeePlatform::SevSnp => Ok((
+            instantiate_cmdline(
+                &manifest.boot.cmdline_template,
+                &manifest.boot.platform_roothash,
+                workload_roothash,
+                volume_roothashes,
+                gpu,
+                manifest.gpu.as_ref(),
+            )?,
+            None,
+        )),
+        TeePlatform::Tdx => {
+            let (cmdline, suffix) = super::vprogram_tdx::tdx_boot_inputs(
+                manifest,
+                workload_roothash,
+                volume_roothashes,
+                gpu,
+            )?;
+            Ok((cmdline, Some(suffix)))
+        }
+    }
 }
 
 /// The local half of a V-PROGRAM deployment, shared by `create` and `run`:
@@ -642,13 +692,11 @@ pub(crate) async fn prepare_local_build(
         .iter()
         .map(|v| v.root_hash.clone())
         .collect();
-    let cmdline = instantiate_cmdline(
-        &manifest.boot.cmdline_template,
-        &manifest.boot.platform_roothash,
+    let (cmdline, descriptor_suffix) = boot_inputs(
+        &manifest,
         &workload_verity.root_hash,
         &volume_roothashes,
         gpu,
-        manifest.gpu.as_ref(),
     )?;
     Ok(LocalBuild {
         manifest,
@@ -657,6 +705,7 @@ pub(crate) async fn prepare_local_build(
         workload: workload_verity,
         volumes: volume_verities,
         cmdline,
+        descriptor_suffix,
         _built_workload,
         _built_workload_dir,
         _verity_dir: verity_dir,
@@ -2011,11 +2060,6 @@ async fn handle_call(
         );
     };
 
-    let expected = attest_common::resolve_expected_measurement(
-        &content.verification.measurements,
-        args.expected_measurement.as_deref(),
-    )?;
-
     let base_url = match &args.url {
         Some(url) => url.clone(),
         None => {
@@ -2044,6 +2088,30 @@ async fn handle_call(
         .map(|h| parse_header(h))
         .collect::<Result<Vec<_>>>()?;
     let body = args.data.clone().map(bytes::Bytes::from);
+
+    // A TD is verified against Intel's collateral under a TCB-status policy
+    // and pins four registers; nothing below (AMD product, SNP TCB floor,
+    // guest policy, platform posture) applies to it.
+    if content.verification.backend == TeePlatform::Tdx {
+        let expected = super::vprogram_tdx::resolve_expected_registers(
+            &content.verification.measurements,
+            args.expected_measurement.as_deref(),
+        )?;
+        let (response, freshness) =
+            super::vprogram_tdx::call_tdx(&base_url, &args, &headers, body, &expected).await?;
+        let (out, meta) =
+            super::vprogram_tdx::render_tdx_call_result(&response, freshness, json, args.verbose);
+        if let Some(meta) = meta {
+            eprintln!("{meta}");
+        }
+        println!("{out}");
+        return Ok(());
+    }
+
+    let expected = attest_common::resolve_expected_measurement(
+        &content.verification.measurements,
+        args.expected_measurement.as_deref(),
+    )?;
 
     let handshake_pin = match &expected {
         MeasurementExpectation::Pin(registers) => MeasurementPin::Exact(registers),

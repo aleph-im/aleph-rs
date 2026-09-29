@@ -31,4 +31,6 @@ pub mod upload;
 pub mod vprogram;
 #[cfg(feature = "vprogram")]
 pub mod vprogram_run;
+#[cfg(feature = "vprogram")]
+pub mod vprogram_tdx;
 pub mod website;

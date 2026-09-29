@@ -3458,6 +3458,13 @@ before the body is read:
     (skip with --allow-stale-attestation)
   - platform posture, only if --require-platform is given
 
+For a V-Program on the tdx backend the checks are the Intel equivalents:
+the quote's PCK chain, CRLs and QE identity against Intel PCS collateral,
+the quote signature, TLS key binding, the four pinned registers (MRTD,
+RTMR1, RTMR2, MRCONFIGID) and the platform's TCB status under the policy
+(default: up-to-date or sw-hardening-needed; widen with --tdx-accept-tcb,
+refuse advisories with --tdx-deny-advisory). The AMD flags do not apply.
+
 Output: the response body is written verbatim to stdout (pipe it like curl).
 stderr gets an `Attestation: verified (...)` line listing the checks, the
 `HTTP <status>` line, and with --verbose the evidence (measurement, policy,
@@ -3696,14 +3703,15 @@ pub struct VProgramCreateArgs {
     #[arg(long)]
     pub no_internet: bool,
 
-    /// SEV-SNP 64-bit guest policy (accepts 0x-prefixed hex).
+    /// SEV-SNP 64-bit guest policy (accepts 0x-prefixed hex). A tdx runtime
+    /// has no launch policy and refuses any value.
     #[arg(long, value_parser = parse_u64_maybe_hex, default_value = "0x30000")]
     pub policy: u64,
 
     /// Allow the DEBUG bit (19) in the guest policy. The host can then
     /// decrypt guest memory via the firmware debug API, so the deployment
     /// is NOT confidential. This flag is required to publish a V-Program
-    /// with a debug-enabled policy.
+    /// with a debug-enabled policy. SEV-SNP runtimes only.
     #[arg(long)]
     pub allow_debug: bool,
 
@@ -3890,11 +3898,37 @@ pub struct VProgramCallArgs {
     #[arg(long = "require-platform", value_delimiter = ',')]
     pub require_platform: Vec<PlatformRequirement>,
 
+    /// Intel TDX only: also accept quotes whose platform Intel appraises at
+    /// this TCB status (repeatable or comma-separated). The default accepts
+    /// up-to-date and sw-hardening-needed; a host on old firmware appraises
+    /// out-of-date and needs this to be admitted, at your own risk.
+    #[arg(long = "tdx-accept-tcb", value_delimiter = ',')]
+    pub tdx_accept_tcb: Vec<TdxTcbStatusArg>,
+
+    /// Intel TDX only: refuse a quote whose appraised TCB level carries this
+    /// Intel security advisory, e.g. `INTEL-SA-01245` (repeatable or
+    /// comma-separated).
+    #[arg(long = "tdx-deny-advisory", value_delimiter = ',')]
+    pub tdx_deny_advisory: Vec<String>,
+
     /// Also print the verified evidence on stderr: launch measurement,
     /// guest policy, launch TCB and host platform posture. (--json output
     /// always includes it.)
     #[arg(short, long)]
     pub verbose: bool,
+}
+
+/// An Intel TCB status `vprogram call --tdx-accept-tcb` can admit. Revoked
+/// is deliberately absent: the verifier refuses it whatever the policy.
+#[cfg(feature = "vprogram")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum TdxTcbStatusArg {
+    UpToDate,
+    SwHardeningNeeded,
+    ConfigurationNeeded,
+    ConfigurationAndSwHardeningNeeded,
+    OutOfDate,
+    OutOfDateConfigurationNeeded,
 }
 
 /// A PLATFORM_INFO requirement `vprogram call` can gate on. Each value is a
