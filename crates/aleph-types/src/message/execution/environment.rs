@@ -554,6 +554,12 @@ impl TrustedExecutionEnvironment {
                         if self.policy != default_amd_sev_policy() {
                             return Err(TeeError::TdxPolicySet);
                         }
+                        // MRTD, RTMR1 and RTMR2 are functions of the runtime
+                        // bundle alone and MRCONFIGID of this message, so a
+                        // second entry could only disagree with the first.
+                        if measurements.len() != 1 {
+                            return Err(TeeError::TdxSingleMeasurement);
+                        }
                     }
                     TeeMode::Sev => unreachable!("matched as measured above"),
                 }
@@ -1049,6 +1055,22 @@ mod test {
         // the explicit default is accepted (it appears in every dump)
         let json = tdx_tee_json().replacen("{", r#"{"policy": 1, "#, 1);
         assert!(serde_json::from_str::<TrustedExecutionEnvironment>(&json).is_ok());
+    }
+
+    #[test]
+    fn test_trusted_execution_tdx_declares_exactly_one_measurement() {
+        // Same rule as the V-PROGRAM backend: the registers do not depend
+        // on the CPU model, so a list could only disagree with itself.
+        let measurement = format!(
+            r#"{{"platform": "tdx", "registers": {}}}"#,
+            tdx_registers_json()
+        );
+        let json = format!(
+            r#"{{"mode": "tdx", "runtime": "{ITEM_HASH_HEX}",
+                 "measurements": [{measurement}, {measurement}]}}"#
+        );
+        let err = serde_json::from_str::<TrustedExecutionEnvironment>(&json).unwrap_err();
+        assert!(err.to_string().contains("exactly one measurement"), "{err}");
     }
 
     #[test]
