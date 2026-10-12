@@ -483,7 +483,7 @@ pub enum RemovalReason {
 /// which is the outgoing message type used for submission.
 ///
 /// Time is typed as `DateTime<Utc>` (rather than `Timestamp`) because the CCN
-/// emits ISO-8601 datetime strings for pending messages, like `ForgottenMessage`.
+/// emits ISO-8601 datetime strings for pending messages.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RawPendingMessage {
     pub sender: Address,
@@ -515,6 +515,28 @@ pub struct RejectedMessage {
     pub content: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Accepts a datetime either as an epoch float (what current pyaleph emits
+/// for forgotten messages) or as an RFC 3339 string (what earlier releases
+/// emitted, and what [`DateTime`] serialises to).
+fn deserialize_epoch_or_rfc3339<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum EpochOrRfc3339 {
+        Epoch(f64),
+        Rfc3339(DateTime<Utc>),
+    }
+
+    match EpochOrRfc3339::deserialize(deserializer)? {
+        EpochOrRfc3339::Epoch(secs) => Timestamp::from(secs)
+            .to_datetime()
+            .map_err(|e| serde::de::Error::custom(format!("epoch timestamp {secs}: {e}"))),
+        EpochOrRfc3339::Rfc3339(datetime) => Ok(datetime),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ForgottenMessage {
     pub sender: Address,
@@ -523,6 +545,8 @@ pub struct ForgottenMessage {
     #[serde(rename = "type")]
     pub message_type: MessageType,
     pub item_hash: ItemHash,
+    /// Epoch float on current CCNs, RFC 3339 string on older ones.
+    #[serde(deserialize_with = "deserialize_epoch_or_rfc3339")]
     pub time: DateTime<Utc>,
     pub channel: Option<Channel>,
 }
@@ -535,8 +559,7 @@ pub struct ForgottenMessage {
 /// nor `item_content`. Every metadata field is nullable: removals that predate
 /// the snapshot come back with only `item_hash` set.
 ///
-/// `time` and `removed_at` are epoch floats here, unlike the ISO-8601 strings
-/// of [`ForgottenMessage`].
+/// `time` and `removed_at` are epoch floats, as the CCN emits them.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RemovedMessage {
     pub sender: Option<Address>,
@@ -3736,6 +3759,13 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/api-responses/pending-message.json"
     ));
+    /// Captured from api.aleph.im on 2026-10-12. Current pyaleph serialises a
+    /// forgotten message's `time` (and `forgotten_at`) as epoch floats; the
+    /// older fixture above has the ISO-8601 string earlier releases emitted.
+    const FORGOTTEN_MESSAGE_EPOCH_TIME: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/api-responses/forgotten-message-epoch-time.json"
+    ));
     /// Captured from api.aleph.im on 2026-10-12. pyaleph deletes the messages
     /// row at removal and rebuilds the `message` object from its
     /// removed_messages snapshot, so it carries neither `content` nor
@@ -3797,6 +3827,32 @@ mod tests {
                     forgotten_by[0],
                     item_hash!("3292ebfacccf1315ad21615101661b147dabfb2e1f97d7c46262a528a3e22852")
                 );
+            }
+            _ => panic!("Expected Forgotten variant"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_forgotten_message_with_epoch_time() {
+        let message: MessageWithStatus<Message> =
+            serde_json::from_str(FORGOTTEN_MESSAGE_EPOCH_TIME).unwrap();
+
+        match message {
+            MessageWithStatus::Forgotten {
+                message,
+                forgotten_by,
+            } => {
+                assert_eq!(
+                    message.item_hash,
+                    item_hash!("00fda916713fae645b8cf7a30b956d38d0a031aaba568ff642446abd9563ea11")
+                );
+                assert_eq!(message.message_type, MessageType::Instance);
+                assert_eq!(message.channel, Some(channel!("BAAL")));
+                assert_eq!(
+                    message.time,
+                    Timestamp::from(1787142893.236233).to_datetime().unwrap()
+                );
+                assert_eq!(forgotten_by.len(), 1);
             }
             _ => panic!("Expected Forgotten variant"),
         }
