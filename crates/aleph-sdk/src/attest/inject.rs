@@ -37,7 +37,8 @@ pub struct InjectSecretResponse {
 
 /// POST a signed [`InjectSecretEnvelope`] to the guest agent's
 /// `/confidential/inject-secret` endpoint over an attested TLS channel, and
-/// parse its response.
+/// parse its response. The envelope is sent only once the guest's
+/// attestation has fully verified (see [`attested_request`]).
 ///
 /// # Two-step contract
 ///

@@ -483,13 +483,7 @@ pub(crate) async fn run_instance_attest(
         }
     };
 
-    let measurement_pin = match &expectation {
-        MeasurementExpectation::Pin(registers) => MeasurementPin::Exact(registers),
-        // Fleet flow: the exact model is only known from the response, so
-        // the handshake pin is explicitly deferred; the `measurement_is_expected`
-        // check below is what discharges the CallerVerified obligation.
-        MeasurementExpectation::MemberOf(_) => MeasurementPin::CallerVerified,
-    };
+    let measurement_pin = expectation.pin();
     let policy_pin = PolicyPin::Exact(policy);
     let platform_policy = attest_common::platform_policy_from(&args.require_platform);
 
@@ -512,11 +506,8 @@ pub(crate) async fn run_instance_attest(
     .await
     .map_err(|e| anyhow!("attestation failed: {e}"))?;
 
-    // Post-handshake re-check on the verified (SIGNED) measurement: for a
-    // `Pin` this is belt-and-suspenders on top of the handshake pin; for a
-    // `MemberOf` fleet it is the ONLY place the guest's measurement is
-    // checked against the pinned set, since the handshake could not pin one
-    // model ahead of time.
+    // Belt-and-suspenders re-check on the verified (SIGNED) measurement, on
+    // top of the `Exact`/`OneOf` pin `fresh_attestation` enforced.
     if !measurement_is_expected(&fresh.registers, &expectation) {
         match &expectation {
             MeasurementExpectation::Pin(pin) => bail!(
@@ -949,19 +940,13 @@ pub(crate) async fn handle_instance_unlock(
         signature: ensure_0x_prefixed(signature.as_str()),
     };
 
-    // Always pin the POST handshake to the exact registers `fresh_attestation`
-    // already verified, never `CallerVerified`, even for a `MemberOf` fleet
-    // pin (where `run_instance_attest` already checked `outcome.fresh.registers`
-    // against the pinned set). `CallerVerified` would let the handshake
-    // succeed against any genuine, policy/TCB/platform-compliant SEV-SNP
-    // guest regardless of its measurement, and the envelope (the plaintext
-    // secret) is sent as soon as the handshake completes, before any
-    // response-side check runs: a rogue-but-genuinely-attested guest could
-    // receive the passphrase before its measurement was ever checked on this
-    // exchange. With an Exact pin, a guest whose measurement changed between
-    // attest and unlock (rebooted onto a different image) fails the
-    // handshake itself, so no secret byte leaves; the recovery is the same
-    // as any other stale-attestation case here: re-run unlock.
+    // Pin the POST to the exact registers `fresh_attestation` already
+    // verified, never `CallerVerified`: `post_secrets` sends the envelope
+    // (the plaintext secret) to any server whose attestation satisfies its
+    // pins, so without a measurement pin any genuine, policy/TCB/platform-
+    // compliant SEV-SNP guest would receive it. A guest whose measurement
+    // changed since the attest step (rebooted onto a different image) fails
+    // before any secret byte leaves; the recovery is to re-run unlock.
     let measurement_pin = MeasurementPin::Exact(&outcome.fresh.registers);
     let policy_pin = PolicyPin::Exact(outcome.fresh.policy);
     let platform_policy = attest_common::platform_policy_from(&args.attest.require_platform);

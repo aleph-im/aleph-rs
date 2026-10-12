@@ -3438,8 +3438,8 @@ measurement (from --expected-measurement, or from the message's pinned
 verification.measurements), then makes the request over a TLS session whose
 server certificate carries the guest's AMD-signed attestation report.
 
-A response is printed only if ALL of these checks pass; any failure aborts
-before the body is read:
+The request is sent only once a fresh-nonce attestation of the guest has
+fully verified, and a response is printed only if ALL of these checks pass:
   - certificate chain: AMD ARK -> ASK -> VCEK (fetched for the reporting
     chip), validity and revocation, and the report's ECDSA signature
   - TLS key binding: the signed report_data commits to the certificate's
@@ -3455,7 +3455,6 @@ before the body is read:
     lower only with --accept-outdated-gpu-driver)
   - fresh nonce: a second report bound to a nonce generated for this call
     proves the guest is live now, not a replay of an old key
-    (skip with --allow-stale-attestation)
   - platform posture, only if --require-platform is given
 
 Output: the response body is written verbatim to stdout (pipe it like curl).
@@ -3876,12 +3875,6 @@ pub struct VProgramCallArgs {
     /// may then run known-vulnerable driver code.
     #[arg(long)]
     pub accept_outdated_gpu_driver: bool,
-
-    /// Skip the fresh-nonce liveness challenge and accept the (timeless)
-    /// certificate attestation alone. The certificate checks still apply,
-    /// but a key stolen from a past instance would not be detected.
-    #[arg(long)]
-    pub allow_stale_attestation: bool,
 
     /// Require host platform posture bits from the report's AMD-signed
     /// PLATFORM_INFO field (repeatable or comma-separated). Nothing is
@@ -5852,39 +5845,6 @@ mod vprogram_call_args_tests {
             args.expected_measurement.as_deref(),
             Some("ab".repeat(48)).as_deref()
         );
-    }
-
-    #[test]
-    fn vprogram_call_freshness_defaults_on_with_an_opt_out() {
-        let hash = "a".repeat(64);
-        let cli = Cli::try_parse_from(["aleph", "vprogram", "call", &hash, "/fib/10"]).unwrap();
-        let Commands::Vprogram {
-            command: VProgramCommand::Call(args),
-        } = cli.command
-        else {
-            panic!("wrong variant");
-        };
-        assert!(
-            !args.allow_stale_attestation,
-            "the challenge must default on"
-        );
-
-        let cli = Cli::try_parse_from([
-            "aleph",
-            "vprogram",
-            "call",
-            &hash,
-            "/fib/10",
-            "--allow-stale-attestation",
-        ])
-        .unwrap();
-        let Commands::Vprogram {
-            command: VProgramCommand::Call(args),
-        } = cli.command
-        else {
-            panic!("wrong variant");
-        };
-        assert!(args.allow_stale_attestation);
     }
 
     #[test]

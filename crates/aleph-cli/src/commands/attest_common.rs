@@ -8,7 +8,7 @@
 //! `instance_snp.rs`'s `run_instance_attest` can reuse the same pinning and
 //! discovery logic rather than re-implementing it.
 
-use aleph_sdk::attest::PlatformPolicy;
+use aleph_sdk::attest::{MeasurementPin, PlatformPolicy};
 use aleph_sdk::client::{AlephAggregateClient, AlephClient};
 use aleph_sdk::crn::{ActiveVmNetworking, fetch_active_vms};
 use aleph_sdk::scheduler::SchedulerClient;
@@ -26,19 +26,26 @@ const SEV_SNP_MEASUREMENT_BYTES: usize = 48;
 /// The expected launch measurement(s) an attested call must match, resolved
 /// by [`resolve_expected_measurement`].
 ///
-/// - `Pin`: a single digest, known before the TLS handshake. Passed straight
-///   into `attested_request`'s `expected_measurement`, so a mismatch fails
-///   the handshake itself.
-/// - `MemberOf`: more than one digest is pinned on the message (a
-///   mixed-CPU-model fleet where different nodes measure differently).
-///   Nothing can be pinned at handshake time since it isn't known in advance
-///   which one the guest will present, so the handshake pins nothing and the
-///   caller must check the verified measurement against this set
-///   *after* `attested_request` returns - before trusting the response body.
+/// - `Pin`: a single digest, enforced as `MeasurementPin::Exact`.
+/// - `MemberOf`: more than one digest is pinned on the message (runtimes
+///   publish one measurement per CPU model, and it isn't known in advance
+///   which one the guest will present), enforced as `MeasurementPin::OneOf`.
+///
+/// Either way a guest whose measurement is not pinned fails attestation
+/// before any request byte is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MeasurementExpectation {
     Pin(SevSnpRegisters),
     MemberOf(Vec<SevSnpRegisters>),
+}
+
+impl MeasurementExpectation {
+    pub(crate) fn pin(&self) -> MeasurementPin<'_> {
+        match self {
+            Self::Pin(registers) => MeasurementPin::Exact(registers),
+            Self::MemberOf(set) => MeasurementPin::OneOf(set),
+        }
+    }
 }
 
 /// Resolve which measurement(s) an attested call must match, per the
@@ -352,6 +359,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expectation_maps_to_the_matching_sdk_pin() {
+        let a = SevSnpRegisters {
+            launch: "aa".repeat(48),
+        };
+        let b = SevSnpRegisters {
+            launch: "bb".repeat(48),
+        };
+        let pin = MeasurementExpectation::Pin(a.clone());
+        assert!(matches!(pin.pin(), MeasurementPin::Exact(r) if *r == a));
+        let set = MeasurementExpectation::MemberOf(vec![a.clone(), b.clone()]);
+        assert!(matches!(set.pin(), MeasurementPin::OneOf(s) if s == [a, b]));
+    }
 
     fn gpu_info() -> GpuCallInfo {
         GpuCallInfo {
