@@ -1,0 +1,22 @@
+{
+  "status": "removed",
+  "item_hash": "54a21fe8ef809dae7f24b193ed9845ab4e6c085f1132fbda60534b3221861d35",
+  "reception_time": "2026-03-12T12:36:36.560180Z",
+  "message": {
+    "sender": "0x8B3ea7e8eC53596A70019445907645838E945b7a",
+    "chain": "ETH",
+    "signature": "0xa97c2247d074ef0c39310787d4f447d1e35087cb26fecfa868b2a6c3d0ae1f3a4de57ba80f878e940b30833d4d93c1217f9f9403ccd5b13164a3ea48570b05f21b",
+    "type": "INSTANCE",
+    "item_type": "inline",
+    "item_hash": "54a21fe8ef809dae7f24b193ed9845ab4e6c085f1132fbda60534b3221861d35",
+    "time": 1773318996.223,
+    "channel": null,
+    "owner": "0x8B3ea7e8eC53596A70019445907645838E945b7a",
+    "payment_type": "credit",
+    "size": null,
+    "removed_at": null
+  },
+  "reason": "credit_insufficient",
+  "removed_at": null,
+  "size": null
+}

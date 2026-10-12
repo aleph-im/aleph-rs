@@ -248,9 +248,11 @@ async fn resolve_store_ipfs_cid(
         .map_err(|e| anyhow::anyhow!("invalid volume_id '{volume_id}': {e}"))?;
     let with_status = aleph_client.get_message(&item_hash).await?;
     let message = match with_status {
-        MessageWithStatus::Processed { message } => message,
-        MessageWithStatus::Removing { message, .. }
-        | MessageWithStatus::Removed { message, .. } => message,
+        MessageWithStatus::Processed { message } | MessageWithStatus::Removing { message, .. } => {
+            message
+        }
+        // Removed messages no longer carry their content, so the STORE
+        // reference cannot be read from them.
         other => {
             return Err(anyhow::anyhow!(
                 "STORE message '{volume_id}' is not processed (status={})",
