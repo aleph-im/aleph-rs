@@ -11,7 +11,7 @@ use crate::common::{
 use aleph_sdk::builder::MessageBuilder;
 use aleph_sdk::client::{
     AlephAccountClient, AlephClient, AlephMessageClient, CreditDirection, CreditHistoryFilters,
-    MessageWithStatus,
+    MessageWithStatus, RemovedMessage,
 };
 use aleph_sdk::credit::{self, CreditEstimate, CreditToken, EthereumConfig, format_token_amount};
 use aleph_sdk::credit_transfer::{
@@ -230,17 +230,24 @@ async fn owner_of_resource(
         .get_message(resource)
         .await
         .map_err(|e| anyhow!("failed to look up resource {resource}: {e}"))?;
-    let message = match with_status {
-        MessageWithStatus::Processed { message }
-        | MessageWithStatus::Removing { message, .. }
-        | MessageWithStatus::Removed { message, .. } => message,
+    match with_status {
+        MessageWithStatus::Processed { message } | MessageWithStatus::Removing { message, .. } => {
+            Ok(message.owner().clone())
+        }
+        // The CCN keeps the owner in the removed-message skeleton, except for
+        // removals that predate that snapshot.
+        MessageWithStatus::Removed {
+            message: RemovedMessage {
+                owner: Some(owner), ..
+            },
+            ..
+        } => Ok(owner),
         other => bail!(
             "could not determine the owner of resource {resource} (status: {}); \
              pass --address explicitly",
             other.status()
         ),
-    };
-    Ok(message.owner().clone())
+    }
 }
 
 fn total_pages(total: u64, per_page: u32) -> u64 {

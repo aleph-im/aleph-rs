@@ -7,7 +7,9 @@ use crate::common::{
     confirm_action, read_content, resolve_account, resolve_address, submit_or_preview,
 };
 use aleph_sdk::builder::MessageBuilder;
-use aleph_sdk::client::{AlephAggregateClient, AlephClient, AlephMessageClient, MessageWithStatus};
+use aleph_sdk::client::{
+    AlephAggregateClient, AlephClient, AlephMessageClient, MessageWithStatus, RemovedMessage,
+};
 use aleph_types::account::Account;
 use aleph_types::chain::Address;
 use aleph_types::channel::Channel;
@@ -424,8 +426,23 @@ async fn validate_aggregate_hashes(aleph_client: &AlephClient, hashes: &[ItemHas
         let status = aleph_client.get_message(hash).await?;
         let message_type = match &status {
             MessageWithStatus::Processed { message }
-            | MessageWithStatus::Removing { message, .. }
-            | MessageWithStatus::Removed { message, .. } => message.message_type,
+            | MessageWithStatus::Removing { message, .. } => message.message_type,
+            // Removed messages are served as a skeleton; legacy removals do
+            // not even keep the type.
+            MessageWithStatus::Removed {
+                message:
+                    RemovedMessage {
+                        message_type: Some(message_type),
+                        ..
+                    },
+                ..
+            } => *message_type,
+            MessageWithStatus::Removed { .. } => {
+                bail!(
+                    "{hash}: message was removed and its type cannot be verified. Use \
+                     `aleph message forget --aggregates {hash}` to skip validation."
+                );
+            }
             MessageWithStatus::Pending { .. } => {
                 bail!(
                     "{hash}: message is still pending and its type cannot be \

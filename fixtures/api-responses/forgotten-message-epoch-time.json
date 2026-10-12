@@ -1,0 +1,22 @@
+{
+  "status": "forgotten",
+  "item_hash": "00fda916713fae645b8cf7a30b956d38d0a031aaba568ff642446abd9563ea11",
+  "reception_time": "2026-08-19T12:34:53.294735Z",
+  "message": {
+    "sender": "0x4b8bEad5cA3084D0AcFEA8FA9B0215Ec639b0864",
+    "chain": "ETH",
+    "signature": "0xc6be00b34c05d7a550dd4407878862fa417b0c6f363cd393b9b1a4241dd2076e6079f0e38ad3c2a8b082112d83348ff76c20ce3b7b550b377a514701cbe6d4c11c",
+    "type": "INSTANCE",
+    "item_type": "inline",
+    "item_hash": "00fda916713fae645b8cf7a30b956d38d0a031aaba568ff642446abd9563ea11",
+    "time": 1787142893.236233,
+    "channel": "BAAL",
+    "owner": "0x4b8bEad5cA3084D0AcFEA8FA9B0215Ec639b0864",
+    "payment_type": "credit",
+    "size": null,
+    "forgotten_at": 1790685934.47101
+  },
+  "forgotten_by": [
+    "dd98f199f78bf8626ad8472cb98b7e626ffe93a21f8be78046695e048733aecb"
+  ]
+}

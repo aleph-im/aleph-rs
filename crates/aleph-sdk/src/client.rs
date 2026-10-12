@@ -483,7 +483,7 @@ pub enum RemovalReason {
 /// which is the outgoing message type used for submission.
 ///
 /// Time is typed as `DateTime<Utc>` (rather than `Timestamp`) because the CCN
-/// emits ISO-8601 datetime strings for pending messages, like `ForgottenMessage`.
+/// emits ISO-8601 datetime strings for pending messages.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RawPendingMessage {
     pub sender: Address,
@@ -515,6 +515,28 @@ pub struct RejectedMessage {
     pub content: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Accepts a datetime either as an epoch float (what current pyaleph emits
+/// for forgotten messages) or as an RFC 3339 string (what earlier releases
+/// emitted, and what [`DateTime`] serialises to).
+fn deserialize_epoch_or_rfc3339<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum EpochOrRfc3339 {
+        Epoch(f64),
+        Rfc3339(DateTime<Utc>),
+    }
+
+    match EpochOrRfc3339::deserialize(deserializer)? {
+        EpochOrRfc3339::Epoch(secs) => Timestamp::from(secs)
+            .to_datetime()
+            .map_err(|e| serde::de::Error::custom(format!("epoch timestamp {secs}: {e}"))),
+        EpochOrRfc3339::Rfc3339(datetime) => Ok(datetime),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ForgottenMessage {
     pub sender: Address,
@@ -523,8 +545,38 @@ pub struct ForgottenMessage {
     #[serde(rename = "type")]
     pub message_type: MessageType,
     pub item_hash: ItemHash,
+    /// Epoch float on current CCNs, RFC 3339 string on older ones.
+    #[serde(deserialize_with = "deserialize_epoch_or_rfc3339")]
     pub time: DateTime<Utc>,
     pub channel: Option<Channel>,
+}
+
+/// Skeleton of a removed message as served by the CCN's message status
+/// endpoint.
+///
+/// The CCN deletes the message row when a removal finalizes and rebuilds this
+/// object from its removed_messages snapshot, so it carries neither `content`
+/// nor `item_content`. Every metadata field is nullable: removals that predate
+/// the snapshot come back with only `item_hash` set.
+///
+/// `time` and `removed_at` are epoch floats, as the CCN emits them.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RemovedMessage {
+    pub sender: Option<Address>,
+    pub chain: Option<Chain>,
+    pub signature: Option<Signature>,
+    #[serde(rename = "type")]
+    pub message_type: Option<MessageType>,
+    pub item_type: Option<ItemType>,
+    pub item_hash: ItemHash,
+    pub time: Option<Timestamp>,
+    pub channel: Option<Channel>,
+    /// Billing metadata preserved at removal.
+    pub owner: Option<Address>,
+    pub payment_type: Option<String>,
+    pub size: Option<u64>,
+    /// Node-local removal finalization time; not deterministic across nodes.
+    pub removed_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -541,8 +593,10 @@ pub enum MessageWithStatus<M> {
         message: M,
         reason: RemovalReason,
     },
+    // The CCN drops the message content once a removal finalizes and serves
+    // only a skeleton, see [`RemovedMessage`].
     Removed {
-        message: M,
+        message: RemovedMessage,
         reason: RemovalReason,
     },
     Forgotten {
@@ -568,7 +622,7 @@ impl<M> MessageWithStatus<M> {
     }
 
     /// Applies a fallible transformation to the message in variants that carry one
-    /// (Processed, Removing, Removed). Other variants are passed through unchanged.
+    /// (Processed, Removing). Other variants are passed through unchanged.
     pub async fn try_map_message_async<N, E, F, Fut>(self, f: F) -> Result<MessageWithStatus<N>, E>
     where
         F: FnOnce(M) -> Fut,
@@ -582,10 +636,9 @@ impl<M> MessageWithStatus<M> {
                 message: f(message).await?,
                 reason,
             },
-            MessageWithStatus::Removed { message, reason } => MessageWithStatus::Removed {
-                message: f(message).await?,
-                reason,
-            },
+            MessageWithStatus::Removed { message, reason } => {
+                MessageWithStatus::Removed { message, reason }
+            }
             MessageWithStatus::Pending { messages } => MessageWithStatus::Pending { messages },
             MessageWithStatus::Forgotten {
                 message,
@@ -1201,7 +1254,7 @@ pub trait AlephMessageClient {
     /// Fetches a single message and verifies its integrity.
     ///
     /// Verification is only performed for statuses that carry a full
-    /// [`Message`] (Processed, Removing, Removed); other statuses (Pending,
+    /// [`Message`] (Processed, Removing); other statuses (Pending, Removed,
     /// Forgotten, Rejected) are passed through unchanged. See
     /// [`verify_message`](Self::verify_message) for the verification outcomes.
     fn get_message_and_verify(
@@ -3706,6 +3759,21 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/api-responses/pending-message.json"
     ));
+    /// Captured from api.aleph.im on 2026-10-12. Current pyaleph serialises a
+    /// forgotten message's `time` (and `forgotten_at`) as epoch floats; the
+    /// older fixture above has the ISO-8601 string earlier releases emitted.
+    const FORGOTTEN_MESSAGE_EPOCH_TIME: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/api-responses/forgotten-message-epoch-time.json"
+    ));
+    /// Captured from api.aleph.im on 2026-10-12. pyaleph deletes the messages
+    /// row at removal and rebuilds the `message` object from its
+    /// removed_messages snapshot, so it carries neither `content` nor
+    /// `item_content`.
+    const REMOVED_MESSAGE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/api-responses/removed-message.json"
+    ));
 
     #[test]
     fn test_deserialize_pending_message() {
@@ -3761,6 +3829,95 @@ mod tests {
                 );
             }
             _ => panic!("Expected Forgotten variant"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_forgotten_message_with_epoch_time() {
+        let message: MessageWithStatus<Message> =
+            serde_json::from_str(FORGOTTEN_MESSAGE_EPOCH_TIME).unwrap();
+
+        match message {
+            MessageWithStatus::Forgotten {
+                message,
+                forgotten_by,
+            } => {
+                assert_eq!(
+                    message.item_hash,
+                    item_hash!("00fda916713fae645b8cf7a30b956d38d0a031aaba568ff642446abd9563ea11")
+                );
+                assert_eq!(message.message_type, MessageType::Instance);
+                assert_eq!(message.channel, Some(channel!("BAAL")));
+                assert_eq!(
+                    message.time,
+                    Timestamp::from(1787142893.236233).to_datetime().unwrap()
+                );
+                assert_eq!(forgotten_by.len(), 1);
+            }
+            _ => panic!("Expected Forgotten variant"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_removed_message() {
+        let message: MessageWithStatus<Message> = serde_json::from_str(REMOVED_MESSAGE).unwrap();
+
+        match message {
+            MessageWithStatus::Removed { message, reason } => {
+                assert!(matches!(reason, RemovalReason::CreditInsufficient));
+                assert_eq!(
+                    message.item_hash,
+                    item_hash!("54a21fe8ef809dae7f24b193ed9845ab4e6c085f1132fbda60534b3221861d35")
+                );
+                assert_eq!(message.chain, Some(Chain::Ethereum));
+                assert_eq!(message.message_type, Some(MessageType::Instance));
+                assert_eq!(message.item_type, Some(ItemType::Inline));
+                assert_eq!(
+                    message.sender,
+                    Some(address!("0x8B3ea7e8eC53596A70019445907645838E945b7a"))
+                );
+                assert_eq!(
+                    message.owner,
+                    Some(address!("0x8B3ea7e8eC53596A70019445907645838E945b7a"))
+                );
+                assert_eq!(message.payment_type.as_deref(), Some("credit"));
+                assert_eq!(message.time, Some(Timestamp::from(1773318996.223)));
+                assert!(message.channel.is_none());
+                assert!(message.size.is_none());
+                assert!(message.removed_at.is_none());
+            }
+            _ => panic!("Expected Removed variant"),
+        }
+    }
+
+    /// Legacy removals (before the removed_messages snapshot existed) come
+    /// back with every metadata field null; only `item_hash` is guaranteed.
+    #[test]
+    fn test_deserialize_removed_message_legacy_nulls() {
+        let raw = r#"{
+            "status": "removed",
+            "item_hash": "54a21fe8ef809dae7f24b193ed9845ab4e6c085f1132fbda60534b3221861d35",
+            "reception_time": "2026-03-12T12:36:36.560180Z",
+            "message": {
+                "sender": null, "chain": null, "signature": null, "type": null,
+                "item_type": null,
+                "item_hash": "54a21fe8ef809dae7f24b193ed9845ab4e6c085f1132fbda60534b3221861d35",
+                "time": null, "channel": null, "owner": null, "payment_type": null,
+                "size": null, "removed_at": null
+            },
+            "reason": "balance_insufficient",
+            "removed_at": null,
+            "size": null
+        }"#;
+        let message: MessageWithStatus<Message> = serde_json::from_str(raw).unwrap();
+        match message {
+            MessageWithStatus::Removed { message, reason } => {
+                assert!(matches!(reason, RemovalReason::BalanceInsufficient));
+                assert!(message.sender.is_none());
+                assert!(message.message_type.is_none());
+                assert!(message.time.is_none());
+            }
+            _ => panic!("Expected Removed variant"),
         }
     }
 
