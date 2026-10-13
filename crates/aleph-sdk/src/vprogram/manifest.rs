@@ -1,4 +1,4 @@
-use aleph_types::message::execution::environment::MAX_MEASUREMENTS;
+use aleph_types::message::execution::environment::{MAX_MEASUREMENTS, TeePlatform};
 use aleph_types::message::is_pci_device_id;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,8 +19,22 @@ pub enum ManifestError {
         expected_format: String,
         expected_version: u32,
     },
-    #[error("manifest platform must be sev_snp, got {0:?}")]
+    #[error("manifest platform must be sev_snp or tdx, got {0:?}")]
     UnsupportedPlatform(String),
+    #[error("a tdx runtime must publish its measurements {{mrtd, rtmr1, rtmr2}}")]
+    TdxMeasurementsRequired,
+    #[error("measurements are a tdx field, not a {0} one")]
+    MeasurementsNotTdx(String),
+    #[error("measurements.{0} must be 96 lowercase hex chars")]
+    BadMeasurementRegister(&'static str),
+    #[error("a tdx runtime's boot must have kernel_hashes false and no cpu_models")]
+    TdxBootShape,
+    #[error(
+        "a tdx cmdline template must carry {TDX_DESCRIPTOR_SWITCH} and no {{workload_roothash}} slot"
+    )]
+    TdxCmdlineShape,
+    #[error("confidential GPUs are not supported on tdx runtimes")]
+    TdxGpu,
     #[error("unsupported boot method {0:?}; v1 supports qemu-direct-kernel")]
     UnsupportedBootMethod(String),
     #[error("v1 requires boot.kernel_hashes = true (measured direct boot)")]
@@ -84,6 +98,12 @@ fn reserved_cmdline_token(template: &str) -> Option<&str> {
         })
 }
 
+/// Cmdline token that switches a TDX runtime's init into descriptor mode:
+/// the per-deployment tokens (workload roothash, verified volumes) travel on
+/// a drive bound by MRCONFIGID instead of the cmdline, so RTMR2 is fixed per
+/// runtime. Every tdx template carries it; no sev_snp template may.
+pub const TDX_DESCRIPTOR_SWITCH: &str = "aleph_tdx_descriptor=1";
+
 /// Contract the runtime imposes on the workload volume's contents, e.g.
 /// "aleph.compose/1". Absent means: opaque ext4, runtime-defined.
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +132,20 @@ pub struct RuntimeManifest {
     /// Confidential GPU requirements, absent on CPU-only runtimes.
     #[serde(default)]
     pub gpu: Option<GpuRuntimeSpec>,
+    /// The register triple a tdx runtime boots to; required on tdx,
+    /// forbidden elsewhere. MRCONFIGID is per deployment and not here.
+    #[serde(default)]
+    pub measurements: Option<TdxMeasurements>,
+}
+
+/// The per-runtime TDX registers: MRTD pins TDVF, RTMR1 the kernel, RTMR2
+/// the cmdline and initrd. One triple covers every deployment.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TdxMeasurements {
+    pub mrtd: String,
+    pub rtmr1: String,
+    pub rtmr2: String,
 }
 
 /// Confidential GPU spec pinned by the runtime manifest: which driver and
@@ -203,6 +237,23 @@ pub struct AttestationDescriptor {
 
 fn is_lowercase_hex_64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_lowercase_hex_96(s: &str) -> bool {
+    s.len() == 96 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn validate_tdx_measurements(measurements: &TdxMeasurements) -> Result<(), ManifestError> {
+    for (name, value) in [
+        ("mrtd", &measurements.mrtd),
+        ("rtmr1", &measurements.rtmr1),
+        ("rtmr2", &measurements.rtmr2),
+    ] {
+        if !is_lowercase_hex_96(value) {
+            return Err(ManifestError::BadMeasurementRegister(name));
+        }
+    }
+    Ok(())
 }
 
 /// 2 or 3 dot-separated all-digit components, e.g. `580.0.0` or `595.71`.
@@ -319,6 +370,16 @@ fn validate_gpu(gpu: &GpuRuntimeSpec) -> Result<(), ManifestError> {
 }
 
 impl RuntimeManifest {
+    /// The platform as the typed enum; `parse` has already refused anything
+    /// else, so this only fails on a manifest that bypassed it.
+    pub fn tee_platform(&self) -> Result<TeePlatform, ManifestError> {
+        match self.platform.as_str() {
+            "sev_snp" => Ok(TeePlatform::SevSnp),
+            "tdx" => Ok(TeePlatform::Tdx),
+            other => Err(ManifestError::UnsupportedPlatform(other.to_string())),
+        }
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, ManifestError> {
         let manifest: RuntimeManifest = serde_json::from_slice(bytes)?;
         if manifest.format != MANIFEST_FORMAT || manifest.format_version != MANIFEST_FORMAT_VERSION
@@ -330,26 +391,56 @@ impl RuntimeManifest {
                 expected_version: MANIFEST_FORMAT_VERSION,
             });
         }
-        if manifest.platform != "sev_snp" {
-            return Err(ManifestError::UnsupportedPlatform(manifest.platform));
-        }
+        let platform = manifest.tee_platform()?;
         if manifest.boot.method != "qemu-direct-kernel" {
             return Err(ManifestError::UnsupportedBootMethod(manifest.boot.method));
         }
-        if !manifest.boot.kernel_hashes {
-            return Err(ManifestError::KernelHashesRequired);
-        }
-        if manifest.boot.cpu_models.is_empty() {
-            return Err(ManifestError::NoCpuModels);
-        }
-        // Every CPU model becomes one `LaunchMeasurement` in the message, and
-        // `TeeVerification` caps those at `MAX_MEASUREMENTS`. Reject the
-        // manifest up front instead of computing N launch digests only to
-        // fail at message-build time.
-        if manifest.boot.cpu_models.len() > MAX_MEASUREMENTS {
-            return Err(ManifestError::TooManyCpuModels(
-                manifest.boot.cpu_models.len(),
-            ));
+        match platform {
+            TeePlatform::SevSnp => {
+                if !manifest.boot.kernel_hashes {
+                    return Err(ManifestError::KernelHashesRequired);
+                }
+                if manifest.boot.cpu_models.is_empty() {
+                    return Err(ManifestError::NoCpuModels);
+                }
+                // Every CPU model becomes one `LaunchMeasurement` in the
+                // message, and `TeeVerification` caps those at
+                // `MAX_MEASUREMENTS`. Reject the manifest up front instead of
+                // computing N launch digests only to fail at message-build
+                // time.
+                if manifest.boot.cpu_models.len() > MAX_MEASUREMENTS {
+                    return Err(ManifestError::TooManyCpuModels(
+                        manifest.boot.cpu_models.len(),
+                    ));
+                }
+                if manifest.measurements.is_some() {
+                    return Err(ManifestError::MeasurementsNotTdx(manifest.platform));
+                }
+            }
+            // TDVF measures the kernel, initrd and cmdline itself and the
+            // registers do not depend on the vCPU model, so the SNP knobs may
+            // only be stated in their empty form; the triple the client pins
+            // is published instead.
+            TeePlatform::Tdx => {
+                if manifest.boot.kernel_hashes || !manifest.boot.cpu_models.is_empty() {
+                    return Err(ManifestError::TdxBootShape);
+                }
+                let template = &manifest.boot.cmdline_template;
+                if !template
+                    .split(' ')
+                    .any(|token| token == TDX_DESCRIPTOR_SWITCH)
+                    || template.contains("{workload_roothash}")
+                {
+                    return Err(ManifestError::TdxCmdlineShape);
+                }
+                match &manifest.measurements {
+                    None => return Err(ManifestError::TdxMeasurementsRequired),
+                    Some(measurements) => validate_tdx_measurements(measurements)?,
+                }
+                if manifest.gpu.is_some() {
+                    return Err(ManifestError::TdxGpu);
+                }
+            }
         }
         if !is_lowercase_hex_64(&manifest.boot.platform_roothash) {
             return Err(ManifestError::BadPlatformRoothash);
@@ -457,7 +548,11 @@ pub(crate) mod test {
                 "unsupported manifest format",
             ),
             (r#""format_version": 2"#, "unsupported manifest format"),
-            (r#""platform": "tdx""#, "platform must be sev_snp"),
+            (r#""platform": "sgx""#, "platform must be sev_snp or tdx"),
+            (
+                r#""platform": "tdx""#,
+                "kernel_hashes false and no cpu_models",
+            ),
             (r#""method": "igvm""#, "unsupported boot method"),
             (r#""kernel_hashes": false"#, "kernel_hashes"),
             (r#""cpu_models": []"#, "cpu_models"),
@@ -473,6 +568,134 @@ pub(crate) mod test {
             let err = RuntimeManifest::parse(json.as_bytes()).unwrap_err();
             assert!(err.to_string().contains(needle), "{patch}: got {err}");
         }
+    }
+
+    /// The tdx flavour of the same runtime, as aleph-vm's bundler publishes
+    /// it: TDVF in the ovmf slot, the SNP knobs in their empty form, the
+    /// descriptor switch on the fixed cmdline, the register triple a client
+    /// pins. The triple is the one a TD quoted on a Xeon 6731E.
+    pub(crate) const VALID_TDX_MANIFEST: &str = r#"{
+  "format": "aleph-vprogram-runtime",
+  "format_version": 1,
+  "name": "aleph-tdx-attest",
+  "version": "2026.09.29",
+  "platform": "tdx",
+  "bundle": {
+    "ref": "87287e4a5c8d7554a50f982cd681b64b2600c0bbb1c0b1e618465e022e01b977",
+    "sha256": "1db0d69c96dc7ed6c8a6cbb8c63f8de516ef4ed668e95c468cc216e4c44d911b",
+    "size": 57522386,
+    "members": {
+      "ovmf": "image/OVMF.fd",
+      "kernel": "image/bzImage",
+      "initrd": "image/initrd",
+      "platform_rootfs": "image/rootfs.ext4",
+      "platform_hash_tree": "image/rootfs.ext4.verity"
+    }
+  },
+  "boot": {
+    "method": "qemu-direct-kernel",
+    "kernel_hashes": false,
+    "cpu_models": [],
+    "platform_roothash": "cb121a317be7dc7969dd633ca9b6c3718ffe9ea6715b64e0e35a871d484b56b8",
+    "cmdline_template": "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash} aleph_tdx_descriptor=1"
+  },
+  "attestation": [
+    { "protocol": "aleph.ra-tls", "version": "1", "transport": { "type": "tcp", "port": 8443 } }
+  ],
+  "workload": { "contract": "aleph.builtin/1", "upstream_port": 8080 },
+  "measurements": {
+    "mrtd": "d4f5ee3d5fe9a5a3cbb1df8c40946714f55d5918b9b0e9ecd82a1d8adeea668495901baee134e3152dd5e0e2d1781262",
+    "rtmr1": "8d91abe1ea40a7dba9dbd110eea6fff8e3c79d983a7cae359a046ec8ae339cfbfbed4298c66ec2bdbbf08abb9c63e5c8",
+    "rtmr2": "c785503b238756732626c8162997f514084d10d699b602bba0691dcbb94a97901acc63c8aea322af4946141573d0766e"
+  },
+  "source": { "repo": "https://github.com/aleph-im/aleph-vm", "rev": "2296eab0", "build": "nix build" }
+}"#;
+
+    type Edit = Box<dyn FnOnce(&mut serde_json::Value)>;
+
+    fn tdx_manifest_with(edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_str(VALID_TDX_MANIFEST).unwrap();
+        edit(&mut json);
+        serde_json::to_vec(&json).unwrap()
+    }
+
+    #[test]
+    fn parse_valid_tdx_manifest() {
+        let m = RuntimeManifest::parse(VALID_TDX_MANIFEST.as_bytes()).unwrap();
+        assert_eq!(m.tee_platform().unwrap(), TeePlatform::Tdx);
+        assert!(m.boot.cpu_models.is_empty());
+        assert!(!m.boot.kernel_hashes);
+        let triple = m.measurements.expect("tdx publishes its triple");
+        assert!(triple.mrtd.starts_with("d4f5ee3d"));
+        assert!(m.gpu.is_none());
+        let snp = RuntimeManifest::parse(VALID_MANIFEST.as_bytes()).unwrap();
+        assert_eq!(snp.tee_platform().unwrap(), TeePlatform::SevSnp);
+        assert!(snp.measurements.is_none());
+    }
+
+    #[test]
+    fn parse_rejects_tdx_shape_violations() {
+        let cases: Vec<(&str, Edit)> = vec![
+            (
+                "kernel_hashes false and no cpu_models",
+                Box::new(|j| j["boot"]["kernel_hashes"] = serde_json::json!(true)),
+            ),
+            (
+                "kernel_hashes false and no cpu_models",
+                Box::new(|j| j["boot"]["cpu_models"] = serde_json::json!(["GraniteRapids"])),
+            ),
+            (
+                "must carry aleph_tdx_descriptor=1",
+                Box::new(|j| {
+                    j["boot"]["cmdline_template"] = serde_json::json!(
+                        "console=ttyS0 root=/dev/mapper/verity-root ro roothash={platform_roothash}"
+                    )
+                }),
+            ),
+            (
+                "must carry aleph_tdx_descriptor=1",
+                Box::new(|j| {
+                    j["boot"]["cmdline_template"] = serde_json::json!(
+                        "console=ttyS0 roothash={platform_roothash} workload_roothash={workload_roothash} aleph_tdx_descriptor=1"
+                    )
+                }),
+            ),
+            (
+                "must publish its measurements",
+                Box::new(|j| {
+                    j.as_object_mut().unwrap().remove("measurements");
+                }),
+            ),
+            (
+                "measurements.rtmr1 must be 96 lowercase hex",
+                Box::new(|j| j["measurements"]["rtmr1"] = serde_json::json!("ABCD")),
+            ),
+            (
+                "not supported on tdx",
+                Box::new(|j| {
+                    j["gpu"] = serde_json::json!({
+                        "vendor": "nvidia",
+                        "driver_version": "580.0.0",
+                        "library_path": "/opt/nvidia",
+                        "archs": {"hopper": {"accepted_models": ["10de:2331"], "boards": {}}}
+                    })
+                }),
+            ),
+        ];
+        for (needle, edit) in cases {
+            let err = RuntimeManifest::parse(&tdx_manifest_with(edit)).unwrap_err();
+            assert!(err.to_string().contains(needle), "got {err}");
+        }
+        // and the triple is a tdx field only
+        let mut json: serde_json::Value = serde_json::from_str(VALID_MANIFEST).unwrap();
+        json["measurements"] = serde_json::from_str::<serde_json::Value>(VALID_TDX_MANIFEST)
+            .unwrap()["measurements"]
+            .clone();
+        let err = RuntimeManifest::parse(&serde_json::to_vec(&json).unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains("tdx field, not a sev_snp"),
+            "got {err}"
+        );
     }
 
     #[test]
