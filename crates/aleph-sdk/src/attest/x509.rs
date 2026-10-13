@@ -45,10 +45,27 @@ pub enum AttestError {
     /// its DER/PEM bytes.
     #[error("failed to decode AMD SEV-SNP certificate: {0}")]
     CertDecode(#[from] std::io::Error),
-    /// The attestation DTO declares a TEE type this verifier does not
-    /// implement (only SEV-SNP is supported).
-    #[error("unsupported TEE type {0:?}: only SEV-SNP attestation is supported")]
+    /// The attestation DTO declares a TEE type the verifier it reached does
+    /// not handle (SEV-SNP and TDX each have their own).
+    #[error("unsupported TEE type {0:?}: this verifier handles SEV-SNP and TDX only")]
     UnsupportedTeeType(crate::attest::TeeType),
+    /// The raw bytes in `data` don't decode as a TDX quote.
+    #[error("failed to parse TDX quote: {0}")]
+    TdxParse(String),
+    /// The Intel PCS collateral the quote's PCK chain names could not be
+    /// obtained.
+    #[error("failed to obtain TDX collateral: {0}")]
+    TdxCollateral(String),
+    /// DCAP verification of the quote failed: PCK chain, CRLs, QE report,
+    /// quote signature, or the TCB appraisal against the policy.
+    #[error("TDX quote verification failed: {0}")]
+    TdxVerification(String),
+    #[error("fresh attestation {register} mismatch: expected {expected}, got {got}")]
+    FreshRegisterMismatch {
+        register: &'static str,
+        expected: String,
+        got: String,
+    },
     /// The report was generated at a VMPL more privileged callers must not
     /// trust (only VMPL 0-1, the firmware/kernel stack, are accepted).
     #[error("attestation report from VMPL {0} - only VMPL 0-1 are accepted")]
