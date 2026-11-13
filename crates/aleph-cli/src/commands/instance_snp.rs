@@ -16,7 +16,7 @@ use aleph_sdk::attest::{
     AttestError, AttestedResponse, FreshAttestation, InjectSecretEnvelope, MeasurementPin,
     PolicyPin, fresh_attestation, post_secrets,
 };
-use aleph_sdk::client::{AlephClient, AlephMessageClient, AlephStorageClient, MessageWithStatus};
+use aleph_sdk::client::{AlephClient, AlephStorageClient};
 use aleph_sdk::crn::fetch_active_vms;
 use aleph_sdk::instance_runtime::bundle::fetch_instance_bundle_artifacts;
 use aleph_sdk::instance_runtime::cmdline::instantiate_instance_cmdline;
@@ -425,24 +425,8 @@ pub(crate) async fn run_instance_attest(
     )
     .await?;
 
-    let with_status = aleph_client
-        .get_message(&item_hash)
-        .await
-        .with_context(|| format!("failed to fetch instance {item_hash}"))?;
-    let message = match with_status {
-        MessageWithStatus::Processed { message } => message,
-        MessageWithStatus::Removing { message, .. } => message,
-        MessageWithStatus::Removed { .. } => bail!("instance {item_hash} has been removed"),
-        MessageWithStatus::Pending { .. } => {
-            bail!("instance {item_hash} is still pending; try again in a few seconds")
-        }
-        MessageWithStatus::Forgotten { .. } => {
-            bail!("instance {item_hash} has already been forgotten")
-        }
-        MessageWithStatus::Rejected { .. } => {
-            bail!("instance {item_hash} was rejected by the network")
-        }
-    };
+    let message =
+        attest_common::fetch_verified_message(aleph_client, &item_hash, "instance").await?;
     let unlock_authority = message.sender().clone();
     let MessageContentEnum::Instance(content) = message.content().clone() else {
         bail!(
