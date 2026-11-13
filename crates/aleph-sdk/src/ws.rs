@@ -58,9 +58,9 @@ pub async fn subscribe(
     let ws_url = build_ws_url(&base_url, filter, history)?;
 
     // Try initial connection to fail fast if URL is invalid
-    let (ws_stream, _) = connect(ws_url.as_str())
+    let ws_stream = connect(ws_url.as_str())
         .await
-        .map_err(|e| MessageError::WebsocketConnect(Box::new(e)))?;
+        .map_err(MessageError::WebsocketConnect)?;
 
     let (tx, rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
 
@@ -77,11 +77,13 @@ pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>
 /// connector asks rustls for the process-level one, which panics when both the
 /// `ring` and `aws_lc_rs` rustls features are enabled (as they are with
 /// `vprogram`).
-pub(crate) async fn connect(
-    url: &str,
-) -> Result<(WsStream, tungstenite::handshake::client::Response), tungstenite::Error> {
-    let connector = Connector::Rustls(Arc::new(tls_config()?));
-    connect_async_tls_with_config(url, None, false, Some(connector)).await
+pub(crate) async fn connect(url: &str) -> Result<WsStream, Box<tungstenite::Error>> {
+    let config = tls_config().map_err(|e| Box::new(tungstenite::Error::Io(e)))?;
+    let connector = Connector::Rustls(Arc::new(config));
+    let (stream, _response) = connect_async_tls_with_config(url, None, false, Some(connector))
+        .await
+        .map_err(Box::new)?;
+    Ok(stream)
 }
 
 fn tls_config() -> std::io::Result<rustls::ClientConfig> {
@@ -155,13 +157,13 @@ async fn run_ws_loop(
             backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
 
             match connect(ws_url.as_str()).await {
-                Ok((new_stream, _)) => {
+                Ok(new_stream) => {
                     ws_stream = new_stream;
                     break;
                 }
                 Err(e) => {
                     if tx
-                        .send(Err(MessageError::WebsocketConnect(Box::new(e))))
+                        .send(Err(MessageError::WebsocketConnect(e)))
                         .await
                         .is_err()
                     {

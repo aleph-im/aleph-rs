@@ -826,7 +826,9 @@ impl CrnClient {
         });
 
         // Connect
-        let (mut ws_stream, _) = crate::ws::connect(ws_url.as_str()).await?;
+        let mut ws_stream = crate::ws::connect(ws_url.as_str())
+            .await
+            .map_err(CrnError::WebSocket)?;
 
         // Send auth
         ws_stream
