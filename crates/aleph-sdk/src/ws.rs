@@ -1,7 +1,7 @@
 use crate::client::{MessageError, MessageFilter};
 use aleph_types::message::Message;
 use futures_util::StreamExt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{self, Message as WsMessage};
@@ -78,15 +78,32 @@ pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>
 /// `ring` and `aws_lc_rs` rustls features are enabled (as they are with
 /// `vprogram`).
 pub(crate) async fn connect(url: &str) -> Result<WsStream, Box<tungstenite::Error>> {
-    let config = tls_config().map_err(|e| Box::new(tungstenite::Error::Io(e)))?;
-    let connector = Connector::Rustls(Arc::new(config));
-    let (stream, _response) = connect_async_tls_with_config(url, None, false, Some(connector))
+    // Plain `ws://` never uses the connector, so it must not require a root
+    // store. Anything else gets ours, never tokio-tungstenite's default.
+    let connector = if url.starts_with("ws:") {
+        None
+    } else {
+        let config = tls_config().map_err(|e| Box::new(tungstenite::Error::Io(e)))?;
+        Some(Connector::Rustls(config))
+    };
+    let (stream, _response) = connect_async_tls_with_config(url, None, false, connector)
         .await
         .map_err(Box::new)?;
     Ok(stream)
 }
 
-fn tls_config() -> std::io::Result<rustls::ClientConfig> {
+/// Returns the shared TLS config, building it on first use. A failed build is
+/// not cached, so the next connection attempt retries it.
+fn tls_config() -> std::io::Result<Arc<rustls::ClientConfig>> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    if let Some(config) = CONFIG.get() {
+        return Ok(config.clone());
+    }
+    let config = Arc::new(build_tls_config()?);
+    Ok(CONFIG.get_or_init(|| config).clone())
+}
+
+fn build_tls_config() -> std::io::Result<rustls::ClientConfig> {
     let native = rustls_native_certs::load_native_certs();
     let mut roots = rustls::RootCertStore::empty();
     let (added, _ignored) = roots.add_parsable_certificates(native.certs);
@@ -173,5 +190,19 @@ async fn run_ws_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Needs a system root store. Also guards the provider choice: with every
+    // feature enabled, an unqualified `ClientConfig::builder()` would panic.
+    #[test]
+    fn tls_config_builds_and_is_shared() {
+        let first = tls_config().expect("TLS config should build");
+        let second = tls_config().expect("TLS config should build");
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }
