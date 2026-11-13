@@ -97,7 +97,7 @@ dialoguer = { version = "0.11" }
 ctr = { version = "0.9" }
 ctrlc = { version = "3.4" }
 libc = { version = "0.2" }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # scrypt at keystore-grade parameters is unusably slow in unoptimized debug
 # builds (tests, `cargo run` during development). Always optimize the crypto
