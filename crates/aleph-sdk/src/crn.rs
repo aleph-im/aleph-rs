@@ -826,7 +826,7 @@ impl CrnClient {
         });
 
         // Connect
-        let (mut ws_stream, _) = tokio_tungstenite::connect_async(ws_url.as_str()).await?;
+        let (mut ws_stream, _) = crate::ws::connect(ws_url.as_str()).await?;
 
         // Send auth
         ws_stream
