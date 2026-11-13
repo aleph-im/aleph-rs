@@ -98,9 +98,15 @@ fn parse_authorizations(
     };
     match data.remove(SECURITY_AGGREGATE_KEY) {
         None | Some(serde_json::Value::Null) => Ok(vec![]),
-        Some(value) => serde_json::from_value::<SecurityAggregateContent>(value)
-            .map(|content| content.authorizations)
-            .map_err(|e| invalid(e.to_string())),
+        // serde would also accept an array here (as a positional struct).
+        Some(value @ serde_json::Value::Object(_)) => {
+            serde_json::from_value::<SecurityAggregateContent>(value)
+                .map(|content| content.authorizations)
+                .map_err(|e| invalid(e.to_string()))
+        }
+        Some(_) => Err(invalid(format!(
+            "expected `{SECURITY_AGGREGATE_KEY}` to be an object"
+        ))),
     }
 }
 
