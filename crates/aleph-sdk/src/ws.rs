@@ -1,9 +1,13 @@
 use crate::client::{MessageError, MessageFilter};
 use aleph_types::message::Message;
 use futures_util::StreamExt;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+use tokio_tungstenite::tungstenite::{self, Message as WsMessage};
+use tokio_tungstenite::{
+    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
+};
 use url::Url;
 
 const INITIAL_BACKOFF_MS: u64 = 100;
@@ -54,9 +58,9 @@ pub async fn subscribe(
     let ws_url = build_ws_url(&base_url, filter, history)?;
 
     // Try initial connection to fail fast if URL is invalid
-    let (ws_stream, _) = connect_async(ws_url.as_str())
+    let ws_stream = connect(ws_url.as_str())
         .await
-        .map_err(|e| MessageError::WebsocketConnect(Box::new(e)))?;
+        .map_err(MessageError::WebsocketConnect)?;
 
     let (tx, rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
 
@@ -65,11 +69,65 @@ pub async fn subscribe(
     Ok(rx)
 }
 
+pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Opens a websocket, trusting the system root store for `wss://`.
+///
+/// The TLS config names its crypto provider: tokio-tungstenite's default
+/// connector asks rustls for the process-level one, which panics when both the
+/// `ring` and `aws_lc_rs` rustls features are enabled (as they are with
+/// `vprogram`).
+pub(crate) async fn connect(url: &str) -> Result<WsStream, Box<tungstenite::Error>> {
+    // Plain `ws://` never uses the connector, so it must not require a root
+    // store. Anything else gets ours, never tokio-tungstenite's default.
+    let connector = if url.starts_with("ws:") {
+        None
+    } else {
+        let config = tls_config().map_err(|e| Box::new(tungstenite::Error::Io(e)))?;
+        Some(Connector::Rustls(config))
+    };
+    let (stream, _response) = connect_async_tls_with_config(url, None, false, connector)
+        .await
+        .map_err(Box::new)?;
+    Ok(stream)
+}
+
+/// Returns the shared TLS config, building it on first use. A failed build is
+/// not cached, so the next connection attempt retries it.
+fn tls_config() -> std::io::Result<Arc<rustls::ClientConfig>> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    if let Some(config) = CONFIG.get() {
+        return Ok(config.clone());
+    }
+    let config = Arc::new(build_tls_config()?);
+    Ok(CONFIG.get_or_init(|| config).clone())
+}
+
+fn build_tls_config() -> std::io::Result<rustls::ClientConfig> {
+    let native = rustls_native_certs::load_native_certs();
+    let mut roots = rustls::RootCertStore::empty();
+    let (added, _ignored) = roots.add_parsable_certificates(native.certs);
+    if added == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "no usable root CA certificates found (errors: {:?})",
+                native.errors
+            ),
+        ));
+    }
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(std::io::Error::other)?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(config)
+}
+
 async fn run_ws_loop(
     ws_url: Url,
-    initial_stream: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    initial_stream: WsStream,
     tx: mpsc::Sender<Result<Message, MessageError>>,
 ) {
     let mut ws_stream = initial_stream;
@@ -115,14 +173,14 @@ async fn run_ws_loop(
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
 
-            match connect_async(ws_url.as_str()).await {
-                Ok((new_stream, _)) => {
+            match connect(ws_url.as_str()).await {
+                Ok(new_stream) => {
                     ws_stream = new_stream;
                     break;
                 }
                 Err(e) => {
                     if tx
-                        .send(Err(MessageError::WebsocketConnect(Box::new(e))))
+                        .send(Err(MessageError::WebsocketConnect(e)))
                         .await
                         .is_err()
                     {
@@ -132,5 +190,19 @@ async fn run_ws_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Needs a system root store. Also guards the provider choice: with every
+    // feature enabled, an unqualified `ClientConfig::builder()` would panic.
+    #[test]
+    fn tls_config_builds_and_is_shared() {
+        let first = tls_config().expect("TLS config should build");
+        let second = tls_config().expect("TLS config should build");
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }

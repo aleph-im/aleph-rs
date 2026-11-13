@@ -44,6 +44,7 @@ subtle = { workspace = true }
 tar = { workspace = true }
 thiserror = { workspace = true }
 tokio-tungstenite = { workspace = true }
+rustls-native-certs = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tokio = { workspace = true }
@@ -56,7 +57,7 @@ tempfile = { workspace = true }
 sev = { version = "8", default-features = false, features = ["snp", "crypto_nossl"], optional = true }
 der = { version = "0.7", optional = true }
 x509-parser = { version = "0.16", optional = true }
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
 # CRL signature verification (AMD signs its KDS CRLs with RSASSA-PSS/SHA-384).
 ring = { version = "0.17", optional = true }
 
@@ -94,7 +95,7 @@ swap = [
 ]
 # Verifiable programs (attestable SEV-SNP VMs): launch measurement, runtime
 # bundle handling, and the VProgramBuilder message builder.
-vprogram = ["dep:sev", "dep:der", "dep:x509-parser", "dep:rustls", "dep:ring"]
+vprogram = ["dep:sev", "dep:der", "dep:x509-parser", "rustls/ring", "dep:ring"]
 # Gates network-tier integration tests (kept out of plain `cargo test`).
 test-helpers = []
 

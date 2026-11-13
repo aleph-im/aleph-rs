@@ -32,4 +32,17 @@ ignore = [
     # Revisit if sev's nossl path ever grows an RSA decrypt or private-key
     # operation, or if rsa ships a constant-time release.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0387 / crypto-bigint 0.5.5: operations meant to be
+    # constant-time can compile to secret-dependent branches. Fixed in 0.7.6,
+    # which needs elliptic-curve 0.14. We cannot get there: alloy (k256) and
+    # sev v8 (p384) still require the 0.13 curve crates.
+    #
+    # p256/p384 are used for signature verification only (public data). The
+    # one secret-key path is k256 signing through alloy, done locally by the
+    # CLI. Whether k256 0.13 runs the affected operations on secret scalars
+    # has not been checked.
+    #
+    # Remove once alloy and sev accept the 0.14 curve crates.
+    "RUSTSEC-2026-0387",
 ]
