@@ -77,15 +77,30 @@ fn install_terminal_restore_handler() {
 async fn main() {
     install_terminal_restore_handler();
     if let Err(e) = run().await {
-        // Walk the source chain to find the root cause — avoids
-        // redundant "Storage error: File not found: ..." nesting.
-        let mut cause: &dyn std::error::Error = e.as_ref();
-        while let Some(src) = cause.source() {
-            cause = src;
-        }
-        eprintln!("Error: {cause}");
+        eprintln!("Error: {}", render_error_chain(e.as_ref()));
         std::process::exit(1);
     }
+}
+
+/// Renders an error and its sources as `outer: inner: root`.
+///
+/// A source is skipped when the message above it already contains it:
+/// thiserror variants such as `"Storage error: {0}"` embed their source, and
+/// printing both would repeat it.
+fn render_error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts: Vec<String> = vec![err.to_string()];
+    let mut cause = err.source();
+    while let Some(src) = cause {
+        let message = src.to_string();
+        let already_shown = parts
+            .last()
+            .is_some_and(|previous| previous.contains(&message));
+        if !message.is_empty() && !already_shown {
+            parts.push(message);
+        }
+        cause = src.source();
+    }
+    parts.join(": ")
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -263,4 +278,62 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod error_chain_tests {
+    use super::render_error_chain;
+    use anyhow::Context;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("file not found: {0}")]
+    struct NotFound(&'static str);
+
+    /// Embeds its source in its own message, like many SDK error variants.
+    #[derive(Debug, thiserror::Error)]
+    #[error("storage error: {0}")]
+    struct Embedding(#[source] NotFound);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error(transparent)]
+    struct Transparent(#[from] NotFound);
+
+    fn render(err: anyhow::Error) -> String {
+        let boxed: Box<dyn std::error::Error> = err.into();
+        render_error_chain(boxed.as_ref())
+    }
+
+    #[test]
+    fn context_is_kept_ahead_of_the_root_cause() {
+        let err = Err::<(), _>(NotFound("abc"))
+            .context("failed to fetch instance")
+            .context("cannot attest")
+            .unwrap_err();
+        assert_eq!(
+            render(err),
+            "cannot attest: failed to fetch instance: file not found: abc"
+        );
+    }
+
+    #[test]
+    fn source_embedded_in_its_parent_is_not_repeated() {
+        let err = Err::<(), _>(Embedding(NotFound("abc")))
+            .context("upload failed")
+            .unwrap_err();
+        assert_eq!(
+            render(err),
+            "upload failed: storage error: file not found: abc"
+        );
+    }
+
+    #[test]
+    fn transparent_wrapper_is_not_repeated() {
+        let err = anyhow::Error::from(Transparent(NotFound("abc")));
+        assert_eq!(render(err), "file not found: abc");
+    }
+
+    #[test]
+    fn single_error_renders_as_is() {
+        assert_eq!(render(anyhow::anyhow!("boom")), "boom");
+    }
 }
