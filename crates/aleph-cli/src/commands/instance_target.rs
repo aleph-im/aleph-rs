@@ -100,6 +100,11 @@ pub fn pick_unique_match(
         1 => {
             let entry = matches.into_iter().next().expect("len() == 1");
             let hash = entry.vm_hash.clone();
+            // The scheduler does the matching; do not let it pick an
+            // unrelated VM for commands that go on to attest or unlock it.
+            if !hash.to_string().starts_with(&input.to_ascii_lowercase()) {
+                bail!("the scheduler returned {hash}, which does not start with `{input}`");
+            }
             Ok((hash, entry))
         }
         n => {
@@ -346,6 +351,15 @@ mod tests {
         )];
         let (hash, _) = pick_unique_match("4e7df", entries, VmKind::Instance).unwrap();
         assert!(hash.to_string().starts_with("4e7df"));
+    }
+
+    #[test]
+    fn pick_unique_match_rejects_hash_not_matching_prefix() {
+        let entries = vec![vm_entry(
+            "aaaaf823423f0000000000000000000000000000000000000000000000000001",
+        )];
+        let err = pick_unique_match("4e7df", entries, VmKind::Instance).unwrap_err();
+        assert!(err.to_string().contains("does not start with"), "{err}");
     }
 
     #[test]

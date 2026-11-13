@@ -1411,26 +1411,8 @@ async fn fetch_vprogram_message(
     aleph_client: &AlephClient,
     item_hash: &ItemHash,
 ) -> Result<Message> {
-    let with_status = aleph_client
-        .get_message(item_hash)
-        .await
-        .with_context(|| format!("failed to fetch V-Program {item_hash}"))?;
-    let message = match with_status {
-        MessageWithStatus::Processed { message } => message,
-        MessageWithStatus::Removing { message, .. } => message,
-        MessageWithStatus::Removed { .. } => {
-            bail!("V-Program {item_hash} has been removed")
-        }
-        MessageWithStatus::Pending { .. } => {
-            bail!("V-Program {item_hash} is still pending; try again in a few seconds")
-        }
-        MessageWithStatus::Forgotten { .. } => {
-            bail!("V-Program {item_hash} has already been forgotten")
-        }
-        MessageWithStatus::Rejected { .. } => {
-            bail!("V-Program {item_hash} was rejected by the network")
-        }
-    };
+    let message =
+        attest_common::fetch_verified_message(aleph_client, item_hash, "V-Program").await?;
     if message.message_type != MessageType::VProgram {
         bail!(
             "item {item_hash} is not a V-PROGRAM message (got {:?})",

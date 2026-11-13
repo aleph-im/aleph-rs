@@ -9,16 +9,74 @@
 //! discovery logic rather than re-implementing it.
 
 use aleph_sdk::attest::{MeasurementPin, PlatformPolicy};
-use aleph_sdk::client::{AlephAggregateClient, AlephClient};
+use aleph_sdk::client::{
+    AlephAggregateClient, AlephClient, AlephMessageClient, MessageVerification, MessageWithStatus,
+};
 use aleph_sdk::crn::{ActiveVmNetworking, fetch_active_vms};
 use aleph_sdk::scheduler::SchedulerClient;
 use aleph_sdk::vprogram::status::resolve_attested_endpoint;
 use aleph_types::item_hash::ItemHash;
+use aleph_types::message::Message;
 use aleph_types::message::execution::environment::{LaunchMeasurement, SevSnpRegisters};
 use anyhow::{Context, Result, anyhow, bail};
 use url::Url;
 
 use crate::cli::PlatformRequirement;
+
+/// Fetch the message an attestation is about to be pinned against.
+///
+/// The measurement, policy and unlock authority are all read from this
+/// message, so the CCN must not be able to choose them: the content hash and
+/// signature are checked locally, and the message must be the one asked for.
+/// `noun` names the VM kind in errors ("instance", "V-Program").
+pub(crate) async fn fetch_verified_message(
+    aleph_client: &AlephClient,
+    item_hash: &ItemHash,
+    noun: &str,
+) -> Result<Message> {
+    let with_status = aleph_client
+        .get_message_and_verify(item_hash)
+        .await
+        .with_context(|| format!("failed to fetch {noun} {item_hash}"))?;
+    let verification = match with_status {
+        MessageWithStatus::Processed { message } => message,
+        MessageWithStatus::Removing { message, .. } => message,
+        MessageWithStatus::Removed { .. } => bail!("{noun} {item_hash} has been removed"),
+        MessageWithStatus::Pending { .. } => {
+            bail!("{noun} {item_hash} is still pending; try again in a few seconds")
+        }
+        MessageWithStatus::Forgotten { .. } => {
+            bail!("{noun} {item_hash} has already been forgotten")
+        }
+        MessageWithStatus::Rejected { .. } => {
+            bail!("{noun} {item_hash} was rejected by the network")
+        }
+    };
+    let message: Message = match verification {
+        MessageVerification::Verified(verified) => verified.into(),
+        MessageVerification::Unsigned(_) => bail!(
+            "{noun} {item_hash} is unsigned; refusing to take attestation pins from an \
+             unauthenticated message"
+        ),
+        MessageVerification::Invalid(invalid) => {
+            bail!("the node returned an invalid message for {noun} {item_hash}: {invalid}")
+        }
+    };
+    check_is_requested_message(&message, item_hash, noun)?;
+    Ok(message)
+}
+
+/// A message can be perfectly valid and still not be the one that was asked
+/// for: verification checks it against its own `item_hash`.
+fn check_is_requested_message(message: &Message, requested: &ItemHash, noun: &str) -> Result<()> {
+    if message.item_hash != *requested {
+        bail!(
+            "the node returned message {} when asked for {noun} {requested}",
+            message.item_hash
+        );
+    }
+    Ok(())
+}
 
 /// A SEV-SNP launch measurement is a SHA-384 digest: 48 bytes, 96 hex chars.
 const SEV_SNP_MEASUREMENT_BYTES: usize = 48;
