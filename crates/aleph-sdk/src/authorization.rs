@@ -5,7 +5,6 @@ use aleph_types::chain::{Address, Chain};
 use aleph_types::message::{Authorization, MessageType, SecurityAggregateContent};
 use serde::{Deserialize, Serialize};
 
-use crate::aggregate_models::security::SecurityAggregate;
 use crate::client::{
     AlephAggregateClient, AlephMessageClient, AlephStorageClient, MessageError, PostMessageResponse,
 };
@@ -43,7 +42,11 @@ pub struct ReceivedAuthorization {
 /// Trait for reading authorization data from the Aleph network.
 pub trait AlephAuthorizationClient: AlephAggregateClient {
     /// Fetch all authorizations granted by an address.
-    /// Returns empty vec if no security aggregate exists.
+    ///
+    /// Returns an empty vec only when the node says there is no security
+    /// aggregate (a 404, or no `security` key). Transport errors, 5xx and
+    /// undecodable aggregates are errors: callers rewrite the whole list from
+    /// this result, so "could not read" must never look like "empty".
     fn get_authorizations(
         &self,
         address: &Address,
@@ -53,15 +56,15 @@ pub trait AlephAuthorizationClient: AlephAggregateClient {
     {
         async move {
             match self
-                .get_aggregate::<SecurityAggregate>(address, "security")
+                .get_aggregate::<Option<serde_json::Value>>(address, SECURITY_AGGREGATE_KEY)
                 .await
             {
-                Ok(agg) => Ok(agg.security.authorizations),
-                // A missing security aggregate causes a deserialization failure
-                // (the response body doesn't match SecurityAggregate), which
-                // surfaces as HttpError. Treat that as "no authorizations yet".
-                // Other error variants (ApiError, Io, etc.) are propagated.
-                Err(MessageError::HttpError(_)) => Ok(vec![]),
+                Ok(raw) => parse_authorizations(raw),
+                Err(MessageError::HttpError(e))
+                    if e.status() == Some(reqwest::StatusCode::NOT_FOUND) =>
+                {
+                    Ok(vec![])
+                }
                 Err(other) => Err(other),
             }
         }
@@ -75,6 +78,30 @@ pub trait AlephAuthorizationClient: AlephAggregateClient {
         &self,
         address: &Address,
     ) -> impl Future<Output = Result<Vec<ReceivedAuthorization>, MessageError>> + Send;
+}
+
+const SECURITY_AGGREGATE_KEY: &str = "security";
+
+/// Extracts the authorization list from the `data` field of an aggregate
+/// response. Absent means empty; present but malformed is an error.
+fn parse_authorizations(
+    raw: Option<serde_json::Value>,
+) -> Result<Vec<Authorization>, MessageError> {
+    let invalid = |detail: String| MessageError::ApiError {
+        status: 200,
+        body: format!("invalid {SECURITY_AGGREGATE_KEY} aggregate: {detail}"),
+    };
+    let mut data = match raw {
+        None | Some(serde_json::Value::Null) => return Ok(vec![]),
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => return Err(invalid("expected an object".to_string())),
+    };
+    match data.remove(SECURITY_AGGREGATE_KEY) {
+        None | Some(serde_json::Value::Null) => Ok(vec![]),
+        Some(value) => serde_json::from_value::<SecurityAggregateContent>(value)
+            .map(|content| content.authorizations)
+            .map_err(|e| invalid(e.to_string())),
+    }
 }
 
 /// Replace all authorizations for the account.
@@ -177,6 +204,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_authorizations_absent_is_empty() {
+        use serde_json::json;
+        assert!(parse_authorizations(None).unwrap().is_empty());
+        assert!(parse_authorizations(Some(json!({}))).unwrap().is_empty());
+        assert!(
+            parse_authorizations(Some(json!({"security": null})))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn parse_authorizations_reads_entries() {
+        let raw = serde_json::json!({
+            "security": {"authorizations": [{"address": "0xdelegate", "types": ["POST"]}]}
+        });
+        let auths = parse_authorizations(Some(raw)).unwrap();
+        assert_eq!(auths.len(), 1);
+        assert_eq!(auths[0].address, Address::from("0xdelegate".to_string()));
+    }
+
+    #[test]
+    fn parse_authorizations_rejects_undecodable_entry() {
+        // One entry this SDK cannot decode must not turn the whole list into
+        // "empty": add/revoke would then publish a list without the others.
+        let raw = serde_json::json!({
+            "security": {"authorizations": [
+                {"address": "0xgood", "types": ["POST"]},
+                {"address": "0xbad", "types": ["NOT_A_MESSAGE_TYPE"]}
+            ]}
+        });
+        assert!(matches!(
+            parse_authorizations(Some(raw)),
+            Err(MessageError::ApiError { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_authorizations_rejects_malformed_envelope() {
+        assert!(parse_authorizations(Some(serde_json::json!("oops"))).is_err());
+        assert!(parse_authorizations(Some(serde_json::json!({"security": []}))).is_err());
+    }
 
     // The tests that drive a live heph instance build `EvmAccount`, which only
     // exists with the `account-evm` feature. They live in this gated submodule
